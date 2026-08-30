@@ -303,8 +303,11 @@ fn body(value: &domain::SemanticPayload) -> model::BodyDto {
             device: id(device_id),
         }),
         Input::QuestionAsked(message) => Output::QuestionAsked(message_dto(message)),
-        Input::AsynchronousMessageSent(message) => {
-            Output::AsynchronousMessageSent(message_dto(message))
+        Input::AsynchronousMessageSent { thread_id, message } => {
+            Output::AsynchronousMessageSent(model::AsynchronousMessageSentDto {
+                thread: model::RequiredOption(thread_id.as_ref().map(id)),
+                message: message_dto(message),
+            })
         }
         Input::AnswerGiven { thread_id, message } => Output::AnswerGiven(model::AnswerGivenDto {
             thread: id(thread_id),

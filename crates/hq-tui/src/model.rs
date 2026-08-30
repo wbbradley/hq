@@ -173,6 +173,8 @@ pub enum UiFocus {
     Content,
     /// Open conversation history.
     Conversation,
+    /// Modeless message draft inside the Inbox workspace.
+    Draft,
 }
 
 /// Page shown by the persistent contextual-help overlay.
@@ -264,6 +266,20 @@ pub enum UiRowKind {
     Project,
 }
 
+/// Typed conversation destination retained with an Inbox summary row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiConversationTarget {
+    /// One independently initiated project exchange.
+    Project {
+        /// Stable project receiving new input.
+        project_id: [u8; 32],
+        /// Exact existing exchange.
+        thread_id: [u8; 32],
+        /// Stable initiating message used to recover a newly created row.
+        root_message: [u8; 32],
+    },
+}
+
 /// Passive shell-normalized summary row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiRow {
@@ -277,6 +293,8 @@ pub struct UiRow {
     pub state: UiRowState,
     /// Typed semantic row kind; never inferred from display text.
     pub kind: UiRowKind,
+    /// Exact destination for conversation-aware composition, when available.
+    pub conversation_target: Option<UiConversationTarget>,
 }
 
 /// Closed message state presented without interpreting prose.
@@ -662,10 +680,6 @@ pub enum UiProjectAction {
         branch: String,
         base: Option<String>,
     },
-    SendInput {
-        project_id: [u8; 32],
-        content: String,
-    },
     PreviewAddResource {
         project_id: [u8; 32],
         path: String,
@@ -793,9 +807,6 @@ pub enum UiProjectOutcome {
         code: String,
         warning: Option<UiProjectExternalWarning>,
     },
-    InputSent {
-        message_id: [u8; 32],
-    },
     ResourcePreview {
         display_path: String,
         canonical_path: String,
@@ -853,8 +864,6 @@ pub enum UiProjectFormField {
     Branch,
     /// Optional worktree base revision.
     Base,
-    /// Project input content.
-    Content,
     /// Provider namespace.
     Provider,
     /// Runtime launch directory.
@@ -891,7 +900,6 @@ enum UiFormKind {
     AgentRename,
     ProjectCreateExisting,
     ProjectCreateWorktree,
-    ProjectInput,
     ProjectAddResource,
     ProjectReplaceResource,
     ProjectActivate,
@@ -1035,11 +1043,6 @@ pub enum UiProjectModal {
         branch: String,
         base: String,
         field: UiProjectFormField,
-        submitting: bool,
-    },
-    SendInput {
-        project: UiProject,
-        content: String,
         submitting: bool,
     },
     AddResource {
@@ -1226,6 +1229,11 @@ pub enum UiMailboxDraftTarget {
     },
     /// Send a note to the local human mailbox.
     SelfNote,
+    /// Send to a stable project, optionally continuing an exact exchange.
+    Project {
+        project_id: [u8; 32],
+        thread_id: Option<[u8; 32]>,
+    },
 }
 
 /// Complete passive local draft returned by the ordinary client boundary.
@@ -1241,6 +1249,15 @@ pub struct UiMailboxDraft {
     pub version: u64,
 }
 
+/// Definite mailbox-command result retained for exact post-refresh navigation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiMailboxCommandResult {
+    /// Durable transaction revision.
+    pub revision: u64,
+    /// Public identity of the committed message, absent for state-only commands.
+    pub message_id: Option<[u8; 32]>,
+}
+
 /// Canonical mailbox command selected by the pure model.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1254,6 +1271,11 @@ pub enum UiMailboxAction {
     },
     /// Submit the currently loaded self-note draft.
     SelfNote,
+    /// Send to a stable project, optionally continuing an exact exchange.
+    Project {
+        project_id: [u8; 32],
+        thread_id: Option<[u8; 32]>,
+    },
     /// Archive one exact message.
     Archive { target_message: [u8; 32] },
     /// Restore one exact message.
@@ -1271,10 +1293,18 @@ pub enum UiMailboxModal {
         /// Stable selected mailbox identity.
         selected: Option<([u8; 32], [u8; 32])>,
     },
+    /// Confirm a reversible canonical state command.
+    Confirm { action: UiMailboxAction },
+}
+
+/// Modeless durable drafting pane owned by the Inbox workspace.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiMailboxDraftPane {
     /// An applicable draft is being loaded or created.
-    LoadingDraft { target: UiMailboxDraftTarget },
-    /// Edit one durable draft.
-    Compose {
+    Loading { target: UiMailboxDraftTarget },
+    /// Edit one durable draft in place.
+    Editing {
         /// Latest local draft state, including unsaved content.
         draft: UiMailboxDraft,
         /// Whether text differs from the last acknowledged version.
@@ -1284,8 +1314,6 @@ pub enum UiMailboxModal {
         /// Whether cancellation is waiting for the latest autosave.
         closing: bool,
     },
-    /// Confirm a reversible canonical state command.
-    Confirm { action: UiMailboxAction },
 }
 
 /// Passive bounded page returned by the ordinary local API client.
@@ -1384,7 +1412,6 @@ enum UiCompletionNotice {
     AgentStopped,
     ProjectCreated,
     ProjectUpdated,
-    InstructionsSent,
     ProjectWorkReady,
 }
 
@@ -1395,7 +1422,6 @@ impl UiCompletionNotice {
             Self::AgentStopped => "Agent stopped; saved conversation kept",
             Self::ProjectCreated => "Project created",
             Self::ProjectUpdated => "Project updated",
-            Self::InstructionsSent => "Instructions sent",
             Self::ProjectWorkReady => "Project work is ready",
         }
     }
@@ -1405,7 +1431,6 @@ impl UiCompletionNotice {
 enum UiProjectCompletionContinuation {
     Select,
     Details,
-    ComposeInput,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1542,6 +1567,8 @@ pub enum UiEvent {
         effect_id: EffectId,
         /// Durable transaction revision.
         revision: u64,
+        /// Public committed message identity, when this command authored one.
+        message_id: Option<[u8; 32]>,
     },
     /// One stable mailbox command was rejected or could not be completed.
     MailboxCommandFailed {
@@ -1774,6 +1801,7 @@ pub struct UiModel {
     conversation_anchor: Option<String>,
     technical_visible: bool,
     mailbox_modal: Option<UiMailboxModal>,
+    mailbox_draft: Option<UiMailboxDraftPane>,
     agent_modal: Option<UiAgentModal>,
     project_modal: Option<UiProjectModal>,
     new_modal: Option<UiNewModal>,
@@ -1790,6 +1818,7 @@ pub struct UiModel {
     pending_agent: Option<EffectId>,
     pending_managed_session: Option<EffectId>,
     pending_project: Option<PendingProject>,
+    pending_project_conversation: Option<([u8; 32], [u8; 32])>,
     section_workspaces: [Option<UiSectionWorkspace>; 5],
     periodic_timer: Option<EffectId>,
     retry_timer: Option<EffectId>,
@@ -1820,6 +1849,7 @@ impl UiModel {
             conversation_anchor: None,
             technical_visible: false,
             mailbox_modal: None,
+            mailbox_draft: None,
             agent_modal: None,
             project_modal: None,
             new_modal: None,
@@ -1841,6 +1871,7 @@ impl UiModel {
             pending_agent: None,
             pending_managed_session: None,
             pending_project: None,
+            pending_project_conversation: None,
             section_workspaces: [None, None, None, None, None],
             periodic_timer: None,
             retry_timer: None,
@@ -1943,30 +1974,34 @@ impl UiModel {
     }
 
     fn active_form_kind(&self) -> Option<UiFormKind> {
-        match (&self.project_modal, &self.agent_modal, &self.mailbox_modal) {
-            (Some(UiProjectModal::Search { .. }), _, _) => Some(UiFormKind::ProjectSearch),
-            (Some(UiProjectModal::CreateExisting { .. }), _, _) => {
+        match (
+            &self.project_modal,
+            &self.agent_modal,
+            &self.mailbox_modal,
+            &self.mailbox_draft,
+        ) {
+            (Some(UiProjectModal::Search { .. }), _, _, _) => Some(UiFormKind::ProjectSearch),
+            (Some(UiProjectModal::CreateExisting { .. }), _, _, _) => {
                 Some(UiFormKind::ProjectCreateExisting)
             }
-            (Some(UiProjectModal::CreateWorktree { .. }), _, _) => {
+            (Some(UiProjectModal::CreateWorktree { .. }), _, _, _) => {
                 Some(UiFormKind::ProjectCreateWorktree)
             }
-            (Some(UiProjectModal::SendInput { .. }), _, _) => Some(UiFormKind::ProjectInput),
-            (Some(UiProjectModal::AddResource { .. }), _, _) => {
+            (Some(UiProjectModal::AddResource { .. }), _, _, _) => {
                 Some(UiFormKind::ProjectAddResource)
             }
-            (Some(UiProjectModal::ReplaceResource { .. }), _, _) => {
+            (Some(UiProjectModal::ReplaceResource { .. }), _, _, _) => {
                 Some(UiFormKind::ProjectReplaceResource)
             }
-            (Some(UiProjectModal::Activate { .. }), _, _) => Some(UiFormKind::ProjectActivate),
-            (Some(UiProjectModal::Handoff { .. }), _, _) => Some(UiFormKind::ProjectHandoff),
-            (Some(UiProjectModal::ConfirmClose { .. }), _, _) => {
+            (Some(UiProjectModal::Activate { .. }), _, _, _) => Some(UiFormKind::ProjectActivate),
+            (Some(UiProjectModal::Handoff { .. }), _, _, _) => Some(UiFormKind::ProjectHandoff),
+            (Some(UiProjectModal::ConfirmClose { .. }), _, _, _) => {
                 Some(UiFormKind::ProjectConfirmClose)
             }
-            (_, Some(UiAgentModal::Search { .. }), _) => Some(UiFormKind::AgentSearch),
-            (_, Some(UiAgentModal::Create { .. }), _) => Some(UiFormKind::AgentCreate),
-            (_, Some(UiAgentModal::RenameSession { .. }), _) => Some(UiFormKind::AgentRename),
-            (_, _, Some(UiMailboxModal::Compose { .. })) => Some(UiFormKind::MailboxCompose),
+            (_, Some(UiAgentModal::Search { .. }), _, _) => Some(UiFormKind::AgentSearch),
+            (_, Some(UiAgentModal::Create { .. }), _, _) => Some(UiFormKind::AgentCreate),
+            (_, Some(UiAgentModal::RenameSession { .. }), _, _) => Some(UiFormKind::AgentRename),
+            (_, _, _, Some(UiMailboxDraftPane::Editing { .. })) => Some(UiFormKind::MailboxCompose),
             _ => None,
         }
     }
@@ -2067,6 +2102,11 @@ impl UiModel {
     /// Borrows the current mailbox interaction, when a modal is open.
     pub const fn mailbox_modal(&self) -> Option<&UiMailboxModal> {
         self.mailbox_modal.as_ref()
+    }
+
+    /// Borrows the modeless Inbox draft pane.
+    pub const fn mailbox_draft(&self) -> Option<&UiMailboxDraftPane> {
+        self.mailbox_draft.as_ref()
     }
 
     /// Borrows the current named-agent interaction.
@@ -2258,7 +2298,10 @@ impl UiModel {
             id,
             kind: PendingMailboxKind::OpenDraft,
         });
-        self.mailbox_modal = Some(UiMailboxModal::LoadingDraft {
+        self.change_section(UiSection::Inbox);
+        self.focus = UiFocus::Draft;
+        self.mailbox_modal = None;
+        self.mailbox_draft = Some(UiMailboxDraftPane::Loading {
             target: target.clone(),
         });
         effects.push(UiEffect::OpenDraft { id, target });
@@ -2269,9 +2312,9 @@ impl UiModel {
         if self.pending_mailbox.is_some() {
             return Ok(());
         }
-        let Some(UiMailboxModal::Compose {
+        let Some(UiMailboxDraftPane::Editing {
             draft, dirty: true, ..
-        }) = &self.mailbox_modal
+        }) = &self.mailbox_draft
         else {
             return Ok(());
         };
@@ -2512,6 +2555,26 @@ impl UiModel {
         refresh_project_modal(self, &snapshot);
         refresh_new_modal(self, &snapshot);
         self.snapshot = Some(snapshot);
+        if let Some((project_id, root_message)) = self.pending_project_conversation
+            && let Some(row_id) = self.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .inbox_rows
+                    .iter()
+                    .find_map(|row| match row.conversation_target {
+                        Some(UiConversationTarget::Project {
+                            project_id: candidate_project,
+                            root_message: candidate_root,
+                            ..
+                        }) if candidate_project == project_id && candidate_root == root_message => {
+                            Some(row.id.clone())
+                        }
+                        _ => None,
+                    })
+            })
+        {
+            self.selected_row = Some(row_id);
+            self.pending_project_conversation = None;
+        }
         self.reconcile_current_section();
         select_agent_search_match(self, false);
         select_project_search_match(self, false);
@@ -2584,7 +2647,8 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         UiEvent::MailboxCommandCommitted {
             effect_id,
             revision,
-        } => mailbox_command_committed(&mut model, effect_id, revision, &mut effects)?,
+            message_id,
+        } => mailbox_command_committed(&mut model, effect_id, revision, message_id, &mut effects)?,
         UiEvent::MailboxCommandFailed { effect_id, failure } => {
             mailbox_command_failed(&mut model, effect_id, failure, &mut effects);
         }
@@ -2686,6 +2750,7 @@ fn apply_input(
                 UiFocus::Navigation => UiFocus::Content,
                 UiFocus::Content if model.conversation.is_some() => UiFocus::Conversation,
                 UiFocus::Content | UiFocus::Conversation => UiFocus::Navigation,
+                UiFocus::Draft => UiFocus::Draft,
             };
             true
         }
@@ -2694,6 +2759,7 @@ fn apply_input(
                 UiFocus::Navigation if model.conversation.is_some() => UiFocus::Conversation,
                 UiFocus::Navigation | UiFocus::Conversation => UiFocus::Content,
                 UiFocus::Content => UiFocus::Navigation,
+                UiFocus::Draft => UiFocus::Draft,
             };
             true
         }
@@ -2720,7 +2786,7 @@ fn apply_input(
                 model.focus = UiFocus::Conversation;
                 true
             }
-            UiFocus::Content | UiFocus::Conversation => false,
+            UiFocus::Content | UiFocus::Conversation | UiFocus::Draft => false,
         },
         UiInput::PreviousSection => {
             if model.viewport.width >= WIDE_WIDTH
@@ -2751,6 +2817,7 @@ fn apply_input(
                     false
                 }
             }
+            UiFocus::Draft => false,
         },
         UiInput::NextItem => match model.focus {
             UiFocus::Conversation => model.move_conversation_anchor(true),
@@ -2759,6 +2826,7 @@ fn apply_input(
                 true
             }
             UiFocus::Navigation | UiFocus::Content => model.move_row_selection(true),
+            UiFocus::Draft => false,
         },
         UiInput::PreviousItem => match model.focus {
             UiFocus::Conversation => model.move_conversation_anchor(false),
@@ -2767,6 +2835,7 @@ fn apply_input(
                 true
             }
             UiFocus::Navigation | UiFocus::Content => model.move_row_selection(false),
+            UiFocus::Draft => false,
         },
         UiInput::Activate => activate(model, effects)?,
         UiInput::LoadMore => load_more(model, effects)?,
@@ -2813,7 +2882,6 @@ fn text_input_is_active(model: &UiModel) -> bool {
             UiProjectModal::Search { .. }
             | UiProjectModal::CreateExisting { .. }
             | UiProjectModal::CreateWorktree { .. }
-            | UiProjectModal::SendInput { .. }
             | UiProjectModal::ReplaceResource { .. } => true,
             UiProjectModal::AddResource { .. } => {
                 model.form.focused == Some(UiFormField::Project(UiProjectFormField::Path))
@@ -2840,7 +2908,10 @@ fn text_input_is_active(model: &UiModel) -> bool {
     ) {
         return true;
     }
-    matches!(model.mailbox_modal, Some(UiMailboxModal::Compose { .. }))
+    matches!(
+        model.mailbox_draft,
+        Some(UiMailboxDraftPane::Editing { .. })
+    )
 }
 
 fn apply_open_modal_input(
@@ -2858,7 +2929,10 @@ fn apply_open_modal_input(
         return apply_agent_modal_input(model, input.clone(), effects).map(Some);
     }
     if model.mailbox_modal.is_some() {
-        return apply_modal_input(model, input.clone(), effects).map(Some);
+        return apply_mailbox_modal_input(model, input.clone(), effects).map(Some);
+    }
+    if model.mailbox_draft.is_some() {
+        return apply_draft_input(model, input.clone(), effects).map(Some);
     }
     Ok(None)
 }
@@ -2961,7 +3035,7 @@ fn apply_new_modal_input(
                 }) else {
                     return Ok(false);
                 };
-                open_guided_project(model, project);
+                open_guided_project(model, project, effects)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -3072,7 +3146,7 @@ fn apply_new_modal_input(
                     effects,
                 )?;
             } else {
-                open_guided_instruction(model, project, &agent, provider);
+                open_guided_instruction(model, &project, &agent, provider, effects)?;
             }
             Ok(true)
         }
@@ -3158,7 +3232,11 @@ fn guided_project_picker(model: &UiModel) -> UiNewModal {
     }
 }
 
-fn open_guided_project(model: &mut UiModel, project: UiProject) {
+fn open_guided_project(
+    model: &mut UiModel,
+    project: UiProject,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
     if !project.claimable
         || project
             .resources
@@ -3185,27 +3263,41 @@ fn open_guided_project(model: &mut UiModel, project: UiProject) {
             competing_project,
             reason: "folder ownership needs attention".to_owned(),
         });
-        return;
+        return Ok(());
     }
     if let Some(assignment) = &project.assignment
         && assignment.runnable
     {
-        open_project_message_composer(model, project);
-        return;
+        open_project_inbox_draft(model, &project, effects)?;
+        return Ok(());
     }
     model.new_modal = Some(guided_agent_picker(model, project));
+    Ok(())
 }
 
-fn open_project_message_composer(model: &mut UiModel, project: UiProject) {
+fn open_project_inbox_draft(
+    model: &mut UiModel,
+    project: &UiProject,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    let thread_id = project
+        .assignment
+        .as_ref()
+        .filter(|assignment| assignment.runnable)
+        .and_then(|assignment| assignment.thread_id);
     model.guided_pending = None;
     model.new_modal = None;
-    model.change_section(UiSection::Projects);
-    model.selected_row = Some(agent_hex(project.project_id));
-    model.project_modal = Some(UiProjectModal::SendInput {
-        project,
-        content: String::new(),
-        submitting: false,
-    });
+    model.project_modal = None;
+    if let Some(thread_id) = thread_id {
+        select_project_conversation(model, project.project_id, thread_id);
+    }
+    model.open_draft(
+        UiMailboxDraftTarget::Project {
+            project_id: project.project_id,
+            thread_id,
+        },
+        effects,
+    )
 }
 
 fn guided_agent_picker(model: &UiModel, project: UiProject) -> UiNewModal {
@@ -3274,7 +3366,7 @@ fn open_guided_agent(
         .as_ref()
         .is_some_and(|assignment| assignment.agent_id == agent.agent_id && assignment.runnable)
     {
-        open_project_message_composer(model, project);
+        open_project_inbox_draft(model, &project, effects)?;
         return Ok(());
     }
     let historical = guided_thread(&project, agent.agent_id).cloned();
@@ -3332,30 +3424,31 @@ fn continue_guided_provider(
             effects,
         )
     } else {
-        open_guided_instruction(model, project, &agent, provider);
-        Ok(())
+        open_guided_instruction(model, &project, &agent, provider, effects)
     }
 }
 
 fn open_guided_instruction(
     model: &mut UiModel,
-    project: UiProject,
+    project: &UiProject,
     agent: &UiAgent,
     provider: String,
-) {
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
     model.guided_pending = Some(UiGuidedPending::Instruction(UiGuidedSubmission {
         project_id: project.project_id,
         agent_id: agent.agent_id,
         provider,
     }));
     model.new_modal = None;
-    model.change_section(UiSection::Projects);
-    model.selected_row = Some(agent_hex(project.project_id));
-    model.project_modal = Some(UiProjectModal::SendInput {
-        project,
-        content: String::new(),
-        submitting: false,
-    });
+    model.project_modal = None;
+    model.open_draft(
+        UiMailboxDraftTarget::Project {
+            project_id: project.project_id,
+            thread_id: None,
+        },
+        effects,
+    )
 }
 
 fn guided_provider_picker(
@@ -3497,7 +3590,7 @@ fn apply_help_input(model: &mut UiModel, input: &UiInput, effects: &mut Vec<UiEf
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-fn apply_modal_input(
+fn apply_mailbox_modal_input(
     model: &mut UiModel,
     input: UiInput,
     effects: &mut Vec<UiEffect>,
@@ -3508,24 +3601,7 @@ fn apply_modal_input(
         return Ok(false);
     }
     if matches!(input, UiInput::Escape) {
-        if let Some(UiMailboxModal::Compose { draft, dirty, .. }) = model.mailbox_modal.clone() {
-            if dirty {
-                model.mailbox_modal = Some(UiMailboxModal::Compose {
-                    draft: draft.clone(),
-                    dirty: true,
-                    submitting: false,
-                    closing: true,
-                });
-                model.autosave_timer = None;
-                if model.pending_mailbox.is_none() {
-                    model.save_draft(effects)?;
-                }
-            } else {
-                model.mailbox_modal = None;
-            }
-        } else {
-            model.mailbox_modal = None;
-        }
+        model.mailbox_modal = None;
         return Ok(true);
     }
 
@@ -3567,8 +3643,61 @@ fn apply_modal_input(
             }
             _ => Ok(false),
         },
-        Some(UiMailboxModal::LoadingDraft { .. }) | None => Ok(false),
-        Some(UiMailboxModal::Compose {
+        None => Ok(false),
+        Some(UiMailboxModal::Confirm { action }) => {
+            if matches!(input, UiInput::Activate) {
+                model.submit_mailbox(None, action, effects)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn apply_draft_input(
+    model: &mut UiModel,
+    input: UiInput,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    if matches!(input, UiInput::Quit) {
+        model.should_exit = true;
+        effects.push(UiEffect::Exit);
+        return Ok(false);
+    }
+    if matches!(input, UiInput::Escape) {
+        if matches!(
+            model.mailbox_draft,
+            Some(UiMailboxDraftPane::Loading { .. })
+        ) {
+            model.pending_mailbox = None;
+            finish_draft_close(model);
+            return Ok(true);
+        }
+        if let Some(UiMailboxDraftPane::Editing { draft, dirty, .. }) = model.mailbox_draft.clone()
+        {
+            if dirty {
+                model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
+                    draft,
+                    dirty: true,
+                    submitting: false,
+                    closing: true,
+                });
+                model.autosave_timer = None;
+                if model.pending_mailbox.is_none() {
+                    model.save_draft(effects)?;
+                }
+            } else {
+                finish_draft_close(model);
+            }
+        }
+        return Ok(true);
+    }
+
+    match model.mailbox_draft.clone() {
+        Some(UiMailboxDraftPane::Loading { .. }) | None => Ok(false),
+        Some(UiMailboxDraftPane::Editing {
             mut draft,
             dirty,
             submitting,
@@ -3606,7 +3735,7 @@ fn apply_modal_input(
                     return Ok(true);
                 }
                 if dirty {
-                    model.mailbox_modal = Some(UiMailboxModal::Compose {
+                    model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
                         draft,
                         dirty: true,
                         submitting: true,
@@ -3616,7 +3745,7 @@ fn apply_modal_input(
                     model.save_draft(effects)?;
                 } else {
                     let action = draft_action(&draft.target);
-                    model.mailbox_modal = Some(UiMailboxModal::Compose {
+                    model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
                         draft: draft.clone(),
                         dirty: false,
                         submitting: true,
@@ -3628,14 +3757,23 @@ fn apply_modal_input(
             }
             _ => Ok(false),
         },
-        Some(UiMailboxModal::Confirm { action }) => {
-            if matches!(input, UiInput::Activate) {
-                model.submit_mailbox(None, action, effects)?;
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
+    }
+}
+
+fn finish_draft_close(model: &mut UiModel) {
+    model.mailbox_draft = None;
+    model.focus = UiFocus::Conversation;
+    let Some(UiGuidedPending::Instruction(submission)) = model.guided_pending.take() else {
+        return;
+    };
+    if let Some(project) = model.snapshot.as_ref().and_then(|snapshot| {
+        snapshot
+            .projects
+            .iter()
+            .find(|project| project.project_id == submission.project_id)
+            .cloned()
+    }) {
+        model.new_modal = Some(guided_agent_picker(model, project));
     }
 }
 
@@ -3646,7 +3784,7 @@ fn update_composer(
     submitting: bool,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
-    model.mailbox_modal = Some(UiMailboxModal::Compose {
+    model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
         draft,
         dirty,
         submitting,
@@ -3672,15 +3810,6 @@ fn apply_project_modal_input(
     }
     if matches!(input, UiInput::Escape) {
         if model.pending_project.is_none() {
-            if matches!(model.guided_pending, Some(UiGuidedPending::Instruction(_)))
-                && let Some(UiProjectModal::SendInput { project, .. }) = model.project_modal.clone()
-            {
-                model.guided_pending = None;
-                model.project_modal = None;
-                open_guided_project(model, project);
-                model.last_failure = None;
-                return Ok(true);
-            }
             if let Some(UiProjectModal::Outcome {
                 result:
                     UiProjectResult {
@@ -3792,14 +3921,6 @@ fn apply_project_modal_input(
                 model.project_modal = Some(UiProjectModal::Details {
                     project,
                     selected_resource,
-                });
-                Ok(true)
-            }
-            UiInput::Character(value) if value.eq_ignore_ascii_case(&'n') => {
-                model.project_modal = Some(UiProjectModal::SendInput {
-                    project,
-                    content: String::new(),
-                    submitting: false,
                 });
                 Ok(true)
             }
@@ -3923,7 +4044,6 @@ fn apply_project_modal_input(
         Some(
             UiProjectModal::CreateExisting { submitting, .. }
             | UiProjectModal::CreateWorktree { submitting, .. }
-            | UiProjectModal::SendInput { submitting, .. }
             | UiProjectModal::AddResource { submitting, .. }
             | UiProjectModal::ReplaceResource { submitting, .. },
         ) => {
@@ -4736,7 +4856,6 @@ fn edit_project_field(model: &mut UiModel, input: &UiInput) -> bool {
             | UiProjectModal::Activate { field, .. }
             | UiProjectModal::Handoff { field, .. },
         ) => UiFormField::Project(*field),
-        Some(UiProjectModal::SendInput { .. }) => UiFormField::Project(UiProjectFormField::Content),
         Some(UiProjectModal::AddResource { .. } | UiProjectModal::ReplaceResource { .. }) => {
             UiFormField::Project(UiProjectFormField::Path)
         }
@@ -4774,7 +4893,6 @@ fn edit_project_field(model: &mut UiModel, input: &UiInput) -> bool {
             UiProjectFormField::Base => base,
             _ => return false,
         },
-        Some(UiProjectModal::SendInput { content, .. }) => content,
         Some(
             UiProjectModal::AddResource { path, .. } | UiProjectModal::ReplaceResource { path, .. },
         ) => path,
@@ -4991,22 +5109,6 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
                 base: (!base.is_empty()).then_some(base),
             }
         }
-        Some(UiProjectModal::SendInput {
-            project, content, ..
-        }) => {
-            if content.is_empty() {
-                reject(
-                    model,
-                    UiProjectFormField::Content,
-                    "Enter instructions for the agent",
-                );
-                return Ok(true);
-            }
-            UiProjectAction::SendInput {
-                project_id: project.project_id,
-                content,
-            }
-        }
         Some(UiProjectModal::AddResource {
             project,
             path,
@@ -5162,7 +5264,6 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
         Some(
             UiProjectModal::CreateExisting { submitting, .. }
             | UiProjectModal::CreateWorktree { submitting, .. }
-            | UiProjectModal::SendInput { submitting, .. }
             | UiProjectModal::AddResource { submitting, .. }
             | UiProjectModal::ReplaceResource { submitting, .. }
             | UiProjectModal::Activate { submitting, .. }
@@ -5974,7 +6075,6 @@ fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
     let identity = match &model.project_modal {
         Some(
             UiProjectModal::Details { project, .. }
-            | UiProjectModal::SendInput { project, .. }
             | UiProjectModal::AddResource { project, .. }
             | UiProjectModal::ReplaceResource { project, .. }
             | UiProjectModal::ConfirmRemoveResource { project, .. }
@@ -6082,8 +6182,7 @@ fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
         }
         (
             Some(
-                UiProjectModal::SendInput { project, .. }
-                | UiProjectModal::AddResource { project, .. }
+                UiProjectModal::AddResource { project, .. }
                 | UiProjectModal::ReplaceResource { project, .. }
                 | UiProjectModal::ConfirmRemoveResource { project, .. }
                 | UiProjectModal::ConfirmPrimaryResource { project, .. }
@@ -6121,6 +6220,21 @@ fn mailbox_shortcut(
         'r' => {
             if model.section == UiSection::Agents {
                 return Ok(false);
+            }
+            if let Some(UiConversationTarget::Project {
+                project_id,
+                thread_id,
+                ..
+            }) = selected_conversation_target(model)
+            {
+                model.open_draft(
+                    UiMailboxDraftTarget::Project {
+                        project_id,
+                        thread_id: Some(thread_id),
+                    },
+                    effects,
+                )?;
+                return Ok(true);
             }
             let Some(target) = selected_message_target(model).filter(|target| target.reply_allowed)
             else {
@@ -6171,6 +6285,21 @@ fn mailbox_shortcut(
             });
             Ok(true)
         }
+        'c' if model.section == UiSection::Inbox => {
+            let Some(UiConversationTarget::Project { project_id, .. }) =
+                selected_conversation_target(model)
+            else {
+                return Ok(false);
+            };
+            model.open_draft(
+                UiMailboxDraftTarget::Project {
+                    project_id,
+                    thread_id: None,
+                },
+                effects,
+            )?;
+            Ok(true)
+        }
         'w' if model.section == UiSection::Projects => {
             open_worktree_project_form(model);
             Ok(true)
@@ -6182,7 +6311,7 @@ fn mailbox_shortcut(
                 UiFocus::Navigation if model.viewport.width < WIDE_WIDTH => {
                     model.change_section(model.section.previous());
                 }
-                UiFocus::Navigation => return Ok(false),
+                UiFocus::Navigation | UiFocus::Draft => return Ok(false),
             }
             Ok(true)
         }
@@ -6196,7 +6325,7 @@ fn mailbox_shortcut(
                 Ok(true)
             }
             UiFocus::Content => activate(model, effects),
-            UiFocus::Conversation => Ok(false),
+            UiFocus::Conversation | UiFocus::Draft => Ok(false),
         },
         'j' => Ok(match model.focus {
             UiFocus::Conversation => model.move_conversation_anchor(true),
@@ -6205,6 +6334,7 @@ fn mailbox_shortcut(
                 true
             }
             UiFocus::Navigation | UiFocus::Content => model.move_row_selection(true),
+            UiFocus::Draft => false,
         }),
         'k' => Ok(match model.focus {
             UiFocus::Conversation => model.move_conversation_anchor(false),
@@ -6213,9 +6343,16 @@ fn mailbox_shortcut(
                 true
             }
             UiFocus::Navigation | UiFocus::Content => model.move_row_selection(false),
+            UiFocus::Draft => false,
         }),
         _ => Ok(false),
     }
+}
+
+fn selected_conversation_target(model: &UiModel) -> Option<UiConversationTarget> {
+    model
+        .selected_row_data()
+        .and_then(|row| row.conversation_target)
 }
 
 fn selected_message_target(model: &UiModel) -> Option<UiMessageTarget> {
@@ -6287,7 +6424,24 @@ fn draft_action(target: &UiMailboxDraftTarget) -> UiMailboxAction {
             recipient_mailbox: *mailbox_id,
         },
         UiMailboxDraftTarget::SelfNote => UiMailboxAction::SelfNote,
+        UiMailboxDraftTarget::Project {
+            project_id,
+            thread_id,
+        } => UiMailboxAction::Project {
+            project_id: *project_id,
+            thread_id: *thread_id,
+        },
     }
+}
+
+fn select_project_conversation(model: &mut UiModel, project_id: [u8; 32], thread_id: [u8; 32]) {
+    model.change_section(UiSection::Inbox);
+    model.selected_row = Some(format!(
+        "project:{}:{}",
+        agent_hex(project_id),
+        agent_hex(thread_id)
+    ));
+    model.focus = UiFocus::Conversation;
 }
 
 fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, UiError> {
@@ -6545,14 +6699,14 @@ fn draft_loaded(
         return;
     }
     let target_matches = matches!(
-        &model.mailbox_modal,
-        Some(UiMailboxModal::LoadingDraft { target }) if *target == draft.target
+        &model.mailbox_draft,
+        Some(UiMailboxDraftPane::Loading { target }) if *target == draft.target
     );
     model.pending_mailbox = None;
     if !target_matches {
         return;
     }
-    model.mailbox_modal = Some(UiMailboxModal::Compose {
+    model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
         draft,
         dirty: false,
         submitting: false,
@@ -6577,12 +6731,12 @@ fn draft_saved(
         return Ok(());
     }
     model.pending_mailbox = None;
-    let Some(UiMailboxModal::Compose {
+    let Some(UiMailboxDraftPane::Editing {
         draft,
         dirty: _,
         submitting,
         closing,
-    }) = model.mailbox_modal.clone()
+    }) = model.mailbox_draft.clone()
     else {
         return Ok(());
     };
@@ -6594,7 +6748,7 @@ fn draft_saved(
         version: saved.version,
         ..draft
     };
-    model.mailbox_modal = Some(UiMailboxModal::Compose {
+    model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
         draft: current.clone(),
         dirty: !content_is_saved,
         submitting,
@@ -6602,7 +6756,7 @@ fn draft_saved(
     });
     model.last_failure = None;
     if closing && content_is_saved {
-        model.mailbox_modal = None;
+        finish_draft_close(model);
         model.autosave_timer = None;
     } else if submitting && content_is_saved {
         model.submit_mailbox(
@@ -6643,14 +6797,14 @@ fn draft_failed(
     model.pending_mailbox = None;
     if let (
         PendingMailboxKind::SaveDraft,
-        Some(UiMailboxModal::Compose {
+        Some(UiMailboxDraftPane::Editing {
             draft,
             dirty,
             submitting: _,
             closing,
         }),
         Some(server),
-    ) = (pending.kind, &mut model.mailbox_modal, current)
+    ) = (pending.kind, &mut model.mailbox_draft, current)
         && draft.draft_id == server.draft_id
         && draft.target == server.target
     {
@@ -6666,6 +6820,7 @@ fn mailbox_command_committed(
     model: &mut UiModel,
     effect_id: EffectId,
     revision: u64,
+    message_id: Option<[u8; 32]>,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
     if model.pending_mailbox
@@ -6676,10 +6831,35 @@ fn mailbox_command_committed(
     {
         return Ok(());
     }
+    let project_target = model.mailbox_draft.as_ref().and_then(|pane| match pane {
+        UiMailboxDraftPane::Editing { draft, .. } => match draft.target {
+            UiMailboxDraftTarget::Project {
+                project_id,
+                thread_id,
+            } => Some((project_id, thread_id)),
+            _ => None,
+        },
+        UiMailboxDraftPane::Loading { .. } => None,
+    });
     model.pending_mailbox = None;
     model.mailbox_modal = None;
+    model.mailbox_draft = None;
     model.autosave_timer = None;
     model.last_failure = None;
+    if let (Some(UiGuidedPending::Instruction(submission)), Some(message_id)) =
+        (model.guided_pending.clone(), message_id)
+    {
+        model.guided_pending = Some(UiGuidedPending::InputSnapshot {
+            submission,
+            message_id,
+        });
+    } else if let Some((project_id, thread_id)) = project_target {
+        if let Some(thread_id) = thread_id {
+            select_project_conversation(model, project_id, thread_id);
+        } else if let Some(message_id) = message_id {
+            model.pending_project_conversation = Some((project_id, message_id));
+        }
+    }
     invalidated(model, revision, effects)?;
     effects.push(UiEffect::RequestRedraw);
     Ok(())
@@ -6700,11 +6880,11 @@ fn mailbox_command_failed(
         return;
     }
     model.pending_mailbox = None;
-    if let Some(UiMailboxModal::Compose {
+    if let Some(UiMailboxDraftPane::Editing {
         submitting,
         closing,
         ..
-    }) = &mut model.mailbox_modal
+    }) = &mut model.mailbox_draft
     {
         *submitting = false;
         *closing = false;
@@ -6918,11 +7098,6 @@ fn apply_completion_context(model: &mut UiModel) {
                     selected_resource: default_project_resource(&project),
                     project,
                 }),
-                UiProjectCompletionContinuation::ComposeInput => Some(UiProjectModal::SendInput {
-                    project,
-                    content: String::new(),
-                    submitting: false,
-                }),
             };
             model.completion_context = None;
         }
@@ -6946,7 +7121,7 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
                 return Ok(());
             };
             model.guided_pending = None;
-            open_guided_project(model, project);
+            open_guided_project(model, project, effects)?;
         }
         UiGuidedPending::AgentCreation {
             project_id,
@@ -7001,7 +7176,16 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
             if project.assignment.as_ref().is_some_and(|assignment| {
                 assignment.agent_id == submission.agent_id && assignment.runnable
             }) {
-                open_project_message_composer(model, project);
+                if let Some(thread_id) = project
+                    .assignment
+                    .as_ref()
+                    .and_then(|assignment| assignment.thread_id)
+                {
+                    model.guided_pending = None;
+                    model.new_modal = None;
+                    select_project_conversation(model, project.project_id, thread_id);
+                    model.request_inbox_preview(effects)?;
+                }
                 return Ok(());
             }
             let Some(input) = project
@@ -7038,7 +7222,16 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
             else {
                 return Ok(());
             };
-            open_project_message_composer(model, project);
+            if let Some(thread_id) = project
+                .assignment
+                .as_ref()
+                .and_then(|assignment| assignment.thread_id)
+            {
+                model.guided_pending = None;
+                model.new_modal = None;
+                select_project_conversation(model, project.project_id, thread_id);
+                model.request_inbox_preview(effects)?;
+            }
         }
         UiGuidedPending::ProjectCreation
         | UiGuidedPending::Instruction(_)
@@ -7211,7 +7404,7 @@ fn project_command_completed(
             model.last_failure = None;
             model.project_modal = Some(UiProjectModal::Outcome { result });
         }
-        UiProjectOutcome::Completed { .. } | UiProjectOutcome::InputSent { .. } => {
+        UiProjectOutcome::Completed { .. } => {
             let (notice, continuation) = project_completion_policy(&result);
             model.last_failure = None;
             model.project_modal = None;
@@ -7253,48 +7446,6 @@ fn guided_project_completed(
             });
             model.last_failure = None;
             show_completion_notice(model, UiCompletionNotice::ProjectCreated, effects)?;
-            Ok(true)
-        }
-        (
-            Some(UiGuidedPending::Instruction(submission)),
-            UiProjectAction::SendInput { project_id, .. },
-            UiProjectOutcome::InputSent { message_id },
-        ) if *project_id == submission.project_id => {
-            let project_name = model
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| {
-                    snapshot
-                        .projects
-                        .iter()
-                        .find(|project| project.project_id == submission.project_id)
-                })
-                .map_or_else(
-                    || "Selected project".to_owned(),
-                    |project| project.name.clone(),
-                );
-            let agent_name = model
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| {
-                    snapshot
-                        .agents
-                        .iter()
-                        .find(|agent| agent.agent_id == submission.agent_id)
-                })
-                .and_then(|agent| agent.names.first().cloned())
-                .unwrap_or_else(|| "Selected agent".to_owned());
-            model.guided_pending = Some(UiGuidedPending::InputSnapshot {
-                submission: submission.clone(),
-                message_id: *message_id,
-            });
-            model.project_modal = None;
-            model.new_modal = Some(UiNewModal::Working {
-                project: project_name,
-                agent: agent_name,
-                stage: "Saving the first instruction…".to_owned(),
-            });
-            model.last_failure = None;
             Ok(true)
         }
         (
@@ -7357,12 +7508,6 @@ fn guided_project_completed(
 fn project_completion_policy(
     result: &UiProjectResult,
 ) -> (UiCompletionNotice, UiProjectCompletionContinuation) {
-    if matches!(result.outcome, UiProjectOutcome::InputSent { .. }) {
-        return (
-            UiCompletionNotice::InstructionsSent,
-            UiProjectCompletionContinuation::Details,
-        );
-    }
     match result.action {
         UiProjectAction::CreateExisting { .. } | UiProjectAction::CreateWorktree { .. } => (
             UiCompletionNotice::ProjectCreated,
@@ -7370,7 +7515,7 @@ fn project_completion_policy(
         ),
         UiProjectAction::Activate { .. } | UiProjectAction::Handoff { .. } => (
             UiCompletionNotice::ProjectWorkReady,
-            UiProjectCompletionContinuation::ComposeInput,
+            UiProjectCompletionContinuation::Select,
         ),
         _ => (
             UiCompletionNotice::ProjectUpdated,
@@ -7393,7 +7538,6 @@ fn project_command_failed(
     if let Some(
         UiProjectModal::CreateExisting { submitting, .. }
         | UiProjectModal::CreateWorktree { submitting, .. }
-        | UiProjectModal::SendInput { submitting, .. }
         | UiProjectModal::AddResource { submitting, .. }
         | UiProjectModal::ReplaceResource { submitting, .. }
         | UiProjectModal::ConfirmRemoveResource { submitting, .. }

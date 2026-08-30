@@ -165,16 +165,19 @@ fn peer_action(
             AuthorityRole::MailboxGrant,
             grant.id(),
         )],
-        SemanticPayload::AsynchronousMessageSent(MessageContent {
-            message_id,
-            sender,
-            recipient: Some(target),
-            body: ContentText::new("hello")?,
-            purpose: MessagePurpose::Asynchronous,
-            presentation: PresentationKind::Message,
-            correlation: None,
-            project_id: None,
-        }),
+        SemanticPayload::AsynchronousMessageSent {
+            thread_id: None,
+            message: MessageContent {
+                message_id,
+                sender,
+                recipient: Some(target),
+                body: ContentText::new("hello")?,
+                purpose: MessagePurpose::Asynchronous,
+                presentation: PresentationKind::Message,
+                correlation: None,
+                project_id: None,
+            },
+        },
     )?)
 }
 
@@ -374,16 +377,19 @@ fn account_action(
             AuthorityRole::AccountMembership,
             authority.id(),
         )],
-        SemanticPayload::AsynchronousMessageSent(MessageContent {
-            message_id,
-            sender: mailbox(author, 90),
-            recipient: None,
-            body: ContentText::new("account message")?,
-            purpose: MessagePurpose::Asynchronous,
-            presentation: PresentationKind::Message,
-            correlation: None,
-            project_id: None,
-        }),
+        SemanticPayload::AsynchronousMessageSent {
+            thread_id: None,
+            message: MessageContent {
+                message_id,
+                sender: mailbox(author, 90),
+                recipient: None,
+                body: ContentText::new("account message")?,
+                purpose: MessagePurpose::Asynchronous,
+                presentation: PresentationKind::Message,
+                correlation: None,
+                project_id: None,
+            },
+        },
     )?)
 }
 
@@ -690,16 +696,19 @@ fn peer_routes_and_untyped_parents_never_substitute_for_directional_capability()
         FactScope::PeerAddressed(target),
         [route.id()],
         [],
-        SemanticPayload::AsynchronousMessageSent(MessageContent {
-            message_id,
-            sender: mailbox(peer, 90),
-            recipient: Some(target),
-            body: ContentText::new("untyped")?,
-            purpose: MessagePurpose::Asynchronous,
-            presentation: PresentationKind::Message,
-            correlation: None,
-            project_id: None,
-        }),
+        SemanticPayload::AsynchronousMessageSent {
+            thread_id: None,
+            message: MessageContent {
+                message_id,
+                sender: mailbox(peer, 90),
+                recipient: Some(target),
+                body: ContentText::new("untyped")?,
+                purpose: MessagePurpose::Asynchronous,
+                presentation: PresentationKind::Message,
+                correlation: None,
+                project_id: None,
+            },
+        },
     )?;
     let policy = AuthorityPolicy::new(home.installation_id(), target.mailbox_id());
     let report = reduce_complete(

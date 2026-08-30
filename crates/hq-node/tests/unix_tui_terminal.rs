@@ -376,7 +376,7 @@ fn installed_tui_automatically_uses_the_available_provider_and_renders_typed_fai
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
+fn installed_tui_creates_and_manages_an_existing_tree_project() {
     let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -415,23 +415,15 @@ fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
         listing.stderr
     );
 
-    let content = "installed project input";
-    let sent = run_in_pty(
+    let project_id = project_id(&state_root, name);
+    let sent = hq_output(
         &state_root,
-        true,
-        PtyInteraction::SendProjectInput { name, content },
-    );
-    assert!(sent.status.success(), "TUI input failed: {:?}", sent.bytes);
-    assert_eq!(
-        sent.before, sent.after,
-        "TUI did not restore terminal modes"
+        &["project", "send", &project_id, "installed project input"],
     );
     assert!(
-        sent.bytes
-            .windows(b"Instructions sent".len())
-            .any(|window| window == b"Instructions sent"),
-        "TUI did not render contextual input completion: {:?}",
-        sent.bytes
+        sent.status.success(),
+        "CLI input fixture failed: {:?}",
+        sent.stderr
     );
 
     let dispatched = run_in_pty(
@@ -472,7 +464,6 @@ fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
         added.before, added.after,
         "TUI did not restore terminal modes"
     );
-    let project_id = project_id(&state_root, name);
     let resources = hq_output(
         &state_root,
         &[
@@ -727,10 +718,6 @@ enum PtyInteraction<'content> {
         content: &'content str,
         search_path: &'content str,
     },
-    SendProjectInput {
-        name: &'content str,
-        content: &'content str,
-    },
     DispatchProjectInput {
         name: &'content str,
     },
@@ -874,8 +861,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::CreateGuidedProjectWork { .. } => {
                     vec![b"n", b"\r", b"\r", b"\r"]
                 }
-                PtyInteraction::SendProjectInput { .. }
-                | PtyInteraction::DispatchProjectInput { .. }
+                PtyInteraction::DispatchProjectInput { .. }
                 | PtyInteraction::AddProjectResource { .. }
                 | PtyInteraction::CloseProject { .. }
                 | PtyInteraction::OpenProject { .. }
@@ -1110,8 +1096,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !resource_commit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Instructions:".len())
-                    .any(|window| window == b"Instructions:")
+                    .windows(b"New project conversation".len())
+                    .any(|window| window == b"New project conversation")
             })
         {
             master
@@ -1140,18 +1126,6 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 )
                 .expect("worktree project form writes");
             master.flush().expect("worktree project form flushes");
-            content_sent = true;
-            completion_offset = Some(bytes.len());
-        }
-        if let PtyInteraction::SendProjectInput { name, .. } = interaction
-            && initial_key_sent
-            && !content_sent
-            && bytes
-                .windows(name.len())
-                .any(|window| window == name.as_bytes())
-        {
-            master.write_all(b"\r").expect("project details key writes");
-            master.flush().expect("project details key flushes");
             content_sent = true;
             completion_offset = Some(bytes.len());
         }
@@ -1349,37 +1323,6 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             resource_commit_sent = true;
             completion_offset = Some(bytes.len());
         }
-        if let PtyInteraction::SendProjectInput { content, .. } = interaction
-            && content_sent
-            && !managed_action_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"send".len())
-                    .any(|window| window == b"send")
-            })
-        {
-            master.write_all(b"n").expect("project input key writes");
-            master.flush().expect("project input key flushes");
-            managed_action_sent = true;
-            completion_offset = Some(bytes.len());
-            let _ = content;
-        }
-        if let PtyInteraction::SendProjectInput { content, .. } = interaction
-            && managed_action_sent
-            && !managed_provider_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Instructions:".len())
-                    .any(|window| window == b"Instructions:")
-            })
-        {
-            master
-                .write_all(format!("{content}\r").as_bytes())
-                .expect("project input writes");
-            master.flush().expect("project input flushes");
-            managed_provider_sent = true;
-            completion_offset = Some(bytes.len());
-        }
         if matches!(interaction, PtyInteraction::StartRejectedSession)
             && content_sent
             && !managed_action_sent
@@ -1437,8 +1380,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && Instant::now() >= next_state_probe_at
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Instructions:".len())
-                    .any(|window| window == b"Instructions:")
+                    .windows(b"New project conversation".len())
+                    .any(|window| window == b"New project conversation")
             })
         {
             next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
@@ -1468,19 +1411,6 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 bytes[offset..]
                     .windows(b"Project created".len())
                     .any(|window| window == b"Project created")
-            })
-        {
-            master.write_all(&[0x03]).expect("Ctrl-C writes");
-            master.flush().expect("Ctrl-C flushes");
-            exit_sent = true;
-        }
-        if matches!(interaction, PtyInteraction::SendProjectInput { .. })
-            && managed_provider_sent
-            && !exit_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Instructions sent".len())
-                    .any(|window| window == b"Instructions sent")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");

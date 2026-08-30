@@ -12,7 +12,7 @@ use hq_application::{
 use hq_domain::{
     AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, CommandDigest, CommandId,
     FactId, FactScope, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MailboxAddress, MailboxId,
-    MailboxKind, MessageId, OperationId, PresentationKind, SemanticPayload, Timestamp,
+    MailboxKind, MessageId, OperationId, PresentationKind, ProjectId, SemanticPayload, Timestamp,
 };
 use hq_protocol::CanonicalEventPlan;
 use hq_store::StoreGateway;
@@ -105,6 +105,49 @@ fn stale_target_rejection_preserves_recoverable_text() {
     let drafts = gateway.mailbox_drafts().expect("draft remains loadable");
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].content, "do not lose this");
+
+    let project_draft = OperationId::from_bytes([0x97; 32]);
+    let missing_project = ProjectId::from_bytes([0x98; 32]);
+    gateway
+        .save_mailbox_draft(MailboxDraftSaveRequest {
+            draft_id: project_draft,
+            target: MailboxDraftTarget::Project {
+                project_id: missing_project,
+                thread_id: None,
+            },
+            content: "keep this project message too".to_owned(),
+            expected_version: None,
+        })
+        .expect("project draft saves");
+    let attempt = gateway
+        .control_mailbox(MailboxCommandRequest {
+            command_id: CommandId::from_bytes([0x99; 32]),
+            request_digest: CommandDigest::from_bytes([0x9a; 32]),
+            draft_id: Some(project_draft),
+            action: MailboxCommandAction::Project {
+                project_id: missing_project,
+                thread_id: None,
+                message_id: MessageId::from_bytes([0x9b; 32]),
+            },
+            content: None,
+            authored_at: Timestamp::from_unix_millis(6),
+            auxiliary_randomness: [0x9c; 32],
+        })
+        .expect("stale project rejection is retained");
+    assert!(matches!(
+        attempt,
+        MutationAttempt::Completed(receipt)
+            if matches!(receipt.outcome(), MutationOutcome::Rejected(error)
+                if error.category() == hq_domain::ErrorCategory::NotFound)
+    ));
+    assert!(
+        gateway
+            .mailbox_drafts()
+            .expect("project draft remains loadable")
+            .iter()
+            .any(|draft| draft.draft_id == project_draft
+                && draft.content == "keep this project message too")
+    );
 }
 
 #[test]

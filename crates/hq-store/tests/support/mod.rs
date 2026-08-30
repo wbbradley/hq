@@ -365,16 +365,19 @@ pub fn authored_project_input(
         Timestamp::from_unix_millis(2_000 + i64::from(index)),
         FactScope::InstallationPrivate(authority_policy().local_installation()),
         causal,
-        SemanticPayload::AsynchronousMessageSent(MessageContent {
-            message_id: MessageId::from_bytes(indexed_id(0x58, index)),
-            sender: local,
-            recipient: Some(project_mailbox),
-            body: ContentText::new(body).expect("body validates"),
-            purpose: MessagePurpose::Asynchronous,
-            presentation: PresentationKind::Message,
-            correlation: None,
-            project_id: Some(project_id),
-        }),
+        SemanticPayload::AsynchronousMessageSent {
+            thread_id: None,
+            message: MessageContent {
+                message_id: MessageId::from_bytes(indexed_id(0x58, index)),
+                sender: local,
+                recipient: Some(project_mailbox),
+                body: ContentText::new(body).expect("body validates"),
+                purpose: MessagePurpose::Asynchronous,
+                presentation: PresentationKind::Message,
+                correlation: None,
+                project_id: Some(project_id),
+            },
+        },
     )
     .sign(&signer(1), auxiliary)
     .expect("project input signs")

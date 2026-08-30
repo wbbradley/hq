@@ -335,6 +335,7 @@ fn fresh_workspace_renders_one_ordered_onboarding_step_at_a_time() {
         detail: "open".to_owned(),
         state: UiRowState::Open,
         kind: UiRowKind::Project,
+        conversation_target: None,
     }];
     let project_only = render_text(&loaded_snapshot_model(size, project_only));
     assert!(project_only.contains("Project ready"), "{project_only}");
@@ -757,9 +758,12 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
         assert_eq!(model, before);
         let rendered = snapshot_text(terminal.backend().buffer());
         assert!(rendered.contains("Self-note · saved"));
-        assert!(rendered.contains("Message required"));
-        assert!(rendered.contains("bounded draft text│"));
-        assert!(rendered.contains("Enter submit · Esc save and close"));
+        assert!(
+            rendered.contains("bounded draft text"),
+            "{size:?}:\n{rendered}"
+        );
+        assert!(rendered.contains('│'));
+        assert!(rendered.contains("Enter send · Esc save and close"));
     }
 }
 
@@ -1027,54 +1031,6 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
             "worktree outcome at {size:?}:\n{rendered}"
         );
     }
-}
-
-#[test]
-fn routine_project_completion_uses_the_footer_without_an_outcome_dialog() {
-    let model = project_model(UiSize {
-        width: 104,
-        height: 20,
-    });
-    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("project details");
-    let composer = update(details.model, UiEvent::Input(UiInput::Character('n')))
-        .expect("project instructions");
-    let typed = update(
-        composer.model,
-        UiEvent::Input(UiInput::Paste("ship it".to_owned())),
-    )
-    .expect("instruction text");
-    let pending = update(typed.model, UiEvent::Input(UiInput::Activate)).expect("send");
-    let (effect_id, action) = pending
-        .effects
-        .iter()
-        .find_map(|effect| match effect {
-            UiEffect::SubmitProjectCommand { id, action } => Some((*id, action.clone())),
-            _ => None,
-        })
-        .expect("project effect");
-    let completed = update(
-        pending.model,
-        UiEvent::ProjectCommandCompleted {
-            effect_id,
-            result: UiProjectResult {
-                action,
-                command_id: [11; 32],
-                operation_id: [12; 32],
-                project_id: [1; 32],
-                runtime_state: None,
-                runtime_code: None,
-                outcome: UiProjectOutcome::InputSent {
-                    message_id: [13; 32],
-                },
-            },
-        },
-    )
-    .expect("routine completion")
-    .model;
-    let rendered = render_text(&completed);
-    assert!(rendered.contains("Done · Instructions sent"), "{rendered}");
-    assert!(!rendered.contains("Project change"), "{rendered}");
-    assert!(!rendered.contains("Technical message ID"), "{rendered}");
 }
 
 #[test]
@@ -1845,6 +1801,7 @@ fn contextual_help_model(size: UiSize, section: UiSection, selected: bool) -> Ui
                 UiSection::Projects => UiRowKind::Project,
                 UiSection::Inbox | UiSection::Sent | UiSection::Archived => UiRowKind::Conversation,
             },
+            conversation_target: None,
         }]
     });
     let rows_for = |candidate| {
@@ -2072,6 +2029,7 @@ fn row(id: &str, title: &str, detail: &str, state: UiRowState) -> UiRow {
         detail: detail.to_owned(),
         state,
         kind: UiRowKind::Conversation,
+        conversation_target: None,
     }
 }
 
@@ -2102,6 +2060,7 @@ fn agent_status_rows_model(size: UiSize) -> UiModel {
         detail: detail.to_owned(),
         state,
         kind: UiRowKind::Agent,
+        conversation_target: None,
     })
     .collect();
     let mut model = loaded_snapshot_model(
@@ -2178,6 +2137,7 @@ fn agent_details_model_with_status_and_providers(
                 detail: "active".to_owned(),
                 state: UiRowState::Open,
                 kind: UiRowKind::Agent,
+                conversation_target: None,
             }],
             project_rows: Vec::new(),
             direct_targets: Vec::new(),
@@ -2307,6 +2267,7 @@ fn project_model_with_state(
                 detail: lifecycle.to_owned(),
                 state: UiRowState::Open,
                 kind: UiRowKind::Project,
+                conversation_target: None,
             }],
             direct_targets: Vec::new(),
             providers: render_providers(),

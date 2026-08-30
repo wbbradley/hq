@@ -26,11 +26,11 @@ use hq_node::{
 use hq_tui::{
     UiAgentAction, UiConnectionState, UiConversationEntryKind, UiConversationPage, UiEffect,
     UiEvent, UiFailure, UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus,
-    UiHumanSelectionEvidence, UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft,
-    UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
-    UiMessageState, UiModel, UiProjectAction, UiProjectExternalWarning, UiProjectOutcome,
-    UiProjectResourceCheck, UiProjectResult, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
-    UiTechnicalSection, UiTimerKind, update,
+    UiHumanSelectionEvidence, UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult,
+    UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
+    UiManagedSessionResult, UiMessageState, UiModel, UiProjectAction, UiProjectExternalWarning,
+    UiProjectOutcome, UiProjectResourceCheck, UiProjectResult, UiRow, UiRowKind, UiRowState,
+    UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
@@ -211,6 +211,7 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
                     detail: "1 open message".to_owned(),
                     state: UiRowState::Open,
                     kind: UiRowKind::Conversation,
+                    conversation_target: None,
                 }],
                 ..empty_snapshot(1)
             },
@@ -609,6 +610,7 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
                         name: Some("builder".to_owned()),
                     },
                 },
+                root_message: None,
                 preview: Some("Can we ship?".to_owned()),
                 latest_fact: Some(Id32::new([4; 32])),
                 open_messages: 2,
@@ -732,6 +734,7 @@ fn authoritative_snapshot_preserves_project_thread_conversation_identity() {
                     name: Some("alice".to_owned()),
                 }),
             },
+            root_message: Some(Id32::new([0x54; 32])),
             preview: Some("Let's have a conversation.".to_owned()),
             latest_fact: Some(Id32::new([0x53; 32])),
             open_messages: 1,
@@ -1426,7 +1429,7 @@ impl TuiClientPort for ScriptedTuiClient {
         &mut self,
         _draft: Option<UiMailboxDraft>,
         _action: UiMailboxAction,
-    ) -> Result<u64, UiFailure> {
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
         Err(unsupported_failure())
     }
 
@@ -1492,7 +1495,7 @@ impl TuiClientPort for ProjectTuiClient {
         &mut self,
         _draft: Option<UiMailboxDraft>,
         _action: UiMailboxAction,
-    ) -> Result<u64, UiFailure> {
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
         Err(unsupported_failure())
     }
 
@@ -1581,7 +1584,7 @@ impl TuiClientPort for ManagedSessionTuiClient {
         &mut self,
         _draft: Option<UiMailboxDraft>,
         _action: UiMailboxAction,
-    ) -> Result<u64, UiFailure> {
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
         Err(unsupported_failure())
     }
 
@@ -1637,7 +1640,7 @@ impl TuiClientPort for AgentTuiClient {
         &mut self,
         _draft: Option<UiMailboxDraft>,
         _action: UiMailboxAction,
-    ) -> Result<u64, UiFailure> {
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
         Err(unsupported_failure())
     }
 
@@ -1680,7 +1683,7 @@ impl TuiClientPort for PanickingClient {
         &mut self,
         _draft: Option<UiMailboxDraft>,
         _action: UiMailboxAction,
-    ) -> Result<u64, UiFailure> {
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
         panic!("scripted worker failure");
     }
 
@@ -1729,7 +1732,7 @@ impl TuiClientPort for SlowSnapshotClient {
         &mut self,
         _draft: Option<UiMailboxDraft>,
         _action: UiMailboxAction,
-    ) -> Result<u64, UiFailure> {
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
         Err(unsupported_failure())
     }
 
@@ -1771,7 +1774,7 @@ impl TuiClientPort for ImmediateSnapshotClient {
         &mut self,
         _draft: Option<UiMailboxDraft>,
         _action: UiMailboxAction,
-    ) -> Result<u64, UiFailure> {
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
         Err(unsupported_failure())
     }
 
@@ -1838,7 +1841,7 @@ impl TuiClientPort for MailboxTuiClient {
         &mut self,
         draft: Option<UiMailboxDraft>,
         action: UiMailboxAction,
-    ) -> Result<u64, UiFailure> {
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
         assert!(matches!(action, UiMailboxAction::SelfNote));
         assert_eq!(
             draft.as_ref().map(|draft| draft.content.as_str()),
@@ -1848,7 +1851,10 @@ impl TuiClientPort for MailboxTuiClient {
             .lock()
             .expect("calls lock")
             .push("submit:self_note".to_owned());
-        Ok(9)
+        Ok(UiMailboxCommandResult {
+            revision: 9,
+            message_id: Some([9; 32]),
+        })
     }
 
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {

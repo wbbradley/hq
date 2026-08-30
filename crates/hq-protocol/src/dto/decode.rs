@@ -4,13 +4,13 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use super::model::{
-    AgentNameClaimedDto, AgentRetiredDto, AnswerGivenDto, AuthorityDto, BodyDto, ContentDto,
-    HarnessActivityRecordedDto, Hex32, HumanAccountCreatedDto, HumanAccountSelectedDto,
-    HumanDeviceAcceptedDto, HumanDeviceGrantedDto, HumanDeviceRevokedDto, InstallationDeclaredDto,
-    LocatorDto, MailboxAccessGrantedDto, MailboxAccessRevokedDto, MailboxActionObservedDto,
-    MailboxContextRecordedDto, MailboxCreatedDto, MailboxSessionBoundDto, MessageDto,
-    MessagePurposeDto, MessageRejectedDto, MessageTargetDto, Milliseconds, NamespaceDto, ParentDto,
-    PeerRouteBlockedDto, PeerRouteSetDto, ProjectAssignmentBlockedDto,
+    AgentNameClaimedDto, AgentRetiredDto, AnswerGivenDto, AsynchronousMessageSentDto, AuthorityDto,
+    BodyDto, ContentDto, HarnessActivityRecordedDto, Hex32, HumanAccountCreatedDto,
+    HumanAccountSelectedDto, HumanDeviceAcceptedDto, HumanDeviceGrantedDto, HumanDeviceRevokedDto,
+    InstallationDeclaredDto, LocatorDto, MailboxAccessGrantedDto, MailboxAccessRevokedDto,
+    MailboxActionObservedDto, MailboxContextRecordedDto, MailboxCreatedDto, MailboxSessionBoundDto,
+    MessageDto, MessagePurposeDto, MessageRejectedDto, MessageTargetDto, Milliseconds,
+    NamespaceDto, ParentDto, PeerRouteBlockedDto, PeerRouteSetDto, ProjectAssignmentBlockedDto,
     ProjectAssignmentConfiguringDto, ProjectAssignmentEndedDto, ProjectAssignmentRunnableDto,
     ProjectClosedDto, ProjectCreatedDto, ProjectInputAcceptedDto, ProjectInputDispatchedDto,
     ProjectMetadataUpdatedDto, ProjectOutputRecordedDto, ProjectResourceAddedDto,
@@ -136,7 +136,7 @@ fn decode_body(family: u64, raw: &RawValue) -> Result<BodyDto, ProtocolError> {
         13 => body!(HumanDeviceAcceptedDto, HumanDeviceAccepted),
         14 => body!(HumanDeviceRevokedDto, HumanDeviceRevoked),
         15 => body!(MessageDto, QuestionAsked),
-        16 => body!(MessageDto, AsynchronousMessageSent),
+        16 => body!(AsynchronousMessageSentDto, AsynchronousMessageSent),
         17 => body!(AnswerGivenDto, AnswerGiven),
         18 => body!(ThreadCancelledDto, ThreadCancelled),
         19 => body!(MessageTargetDto, MessageArchived),
@@ -341,7 +341,7 @@ fn validate_body(content: &ContentDto, verified_public_key: [u8; 32]) -> Result<
             }
         }
         BodyDto::AsynchronousMessageSent(message) => {
-            if message.purpose != MessagePurposeDto::Asynchronous {
+            if message.message.purpose != MessagePurposeDto::Asynchronous {
                 return Err(malformed());
             }
         }

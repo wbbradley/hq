@@ -5,16 +5,18 @@ use std::collections::BTreeSet;
 use hq_domain::{
     AuthorityReference, AuthorityRole, CommandDigest, CommandId, ContentText, DomainError,
     ErrorCategory, ErrorCode, FactScope, InstallationId, MailboxAddress, MailboxKind, MessageId,
-    OperationId, PresentationKind, Timestamp,
+    OperationId, PresentationKind, ProjectId, ThreadId, Timestamp,
 };
 use hq_reducer::{
     AuthorityProjection, AuthorityProjectionKey, ConversationProjection, ConversationProjectionKey,
+    MembershipState, ProjectLifecycle, ProjectProjection, ProjectProjectionKey,
 };
 
 use crate::{
-    DomainSnapshot, LocalFactInputs, MessageAuthoringAuthority, MessageStateRequest,
-    MutationDecision, NewMessageRequest, ReplyRequest, plan_asynchronous_message,
-    plan_message_archive, plan_message_restore, plan_reply,
+    ContinueProjectMessageRequest, DomainSnapshot, LocalFactInputs, MessageAuthoringAuthority,
+    MessageStateRequest, MutationDecision, NewMessageRequest, ReplyRequest,
+    plan_asynchronous_message, plan_message_archive, plan_message_restore,
+    plan_project_message_continuation, plan_reply,
 };
 
 /// Maximum installation-local drafts retained at once.
@@ -30,6 +32,11 @@ pub enum MailboxDraftTarget {
     Direct { recipient: MailboxAddress },
     /// Write an asynchronous note visible only to the local human mailbox.
     SelfNote,
+    /// Send to a project's immutable mailbox, optionally continuing one exact exchange.
+    Project {
+        project_id: ProjectId,
+        thread_id: Option<ThreadId>,
+    },
 }
 
 /// Passive installation-local draft record shared by application and persistence boundaries.
@@ -94,6 +101,11 @@ pub enum MailboxCommandAction {
         message_id: MessageId,
     },
     SelfNote {
+        message_id: MessageId,
+    },
+    Project {
+        project_id: ProjectId,
+        thread_id: Option<ThreadId>,
         message_id: MessageId,
     },
     Archive {
@@ -225,6 +237,72 @@ pub fn plan_mailbox_command(
                 .map_err(|_| invalid_command())
             })
         }
+        MailboxCommandAction::Project {
+            project_id,
+            thread_id,
+            message_id,
+        } => {
+            let target = MailboxDraftTarget::Project {
+                project_id: *project_id,
+                thread_id: *thread_id,
+            };
+            content(request, draft, &target).and_then(|body| {
+                let (project, authority) =
+                    project_authority(snapshot, local_installation, local_human, *project_id)?;
+                if let Some(thread_id) = thread_id {
+                    let thread = snapshot
+                        .conversation()
+                        .projection(ConversationProjectionKey::Thread(*thread_id))
+                        .and_then(|projection| match projection {
+                            ConversationProjection::Thread(thread) => Some(thread),
+                            _ => None,
+                        })
+                        .ok_or_else(stale_target)?;
+                    let root = snapshot
+                        .conversation()
+                        .projection(ConversationProjectionKey::Message(thread.root_message))
+                        .and_then(|projection| match projection {
+                            ConversationProjection::Message(message) => Some(message),
+                            _ => None,
+                        })
+                        .ok_or_else(stale_target)?;
+                    if root.fact_id != thread.root_fact
+                        || root.thread_id != *thread_id
+                        || root.content.project_id != Some(*project_id)
+                        || root.content.recipient != Some(project.mailbox)
+                    {
+                        return Err(stale_target());
+                    }
+                    plan_project_message_continuation(
+                        authority,
+                        inputs,
+                        ContinueProjectMessageRequest {
+                            thread_id: *thread_id,
+                            root_fact: root.fact_id,
+                            root: root.content.clone(),
+                            root_scope: FactScope::AccountAddressed(project.account_id),
+                            message_id: *message_id,
+                            body,
+                            presentation: PresentationKind::Message,
+                        },
+                    )
+                    .map_err(|_| invalid_command())
+                } else {
+                    plan_asynchronous_message(
+                        authority,
+                        inputs,
+                        NewMessageRequest {
+                            message_id: *message_id,
+                            recipient: Some(project.mailbox),
+                            body,
+                            presentation: PresentationKind::Message,
+                            project_id: Some(*project_id),
+                        },
+                    )
+                    .map_err(|_| invalid_command())
+                }
+            })
+        }
         MailboxCommandAction::Archive { target_message }
         | MailboxCommandAction::Restore { target_message } => {
             if request.draft_id.is_some() || request.content.is_some() || draft.is_some() {
@@ -313,6 +391,84 @@ fn local_human_authority(
         authority: AuthorityReference::new(AuthorityRole::LocalInstallation, root_fact),
         support: BTreeSet::from([root_fact, mailbox_fact]),
     })
+}
+
+fn project_authority(
+    snapshot: &DomainSnapshot,
+    local_installation: InstallationId,
+    local_human: MailboxAddress,
+    project_id: ProjectId,
+) -> Result<(&hq_reducer::ProjectView, MessageAuthoringAuthority), DomainError> {
+    if local_human.installation_id() != local_installation {
+        return Err(invalid_command());
+    }
+    let project = snapshot
+        .project()
+        .projection(ProjectProjectionKey::Project(project_id))
+        .and_then(|projection| match projection {
+            ProjectProjection::Project(project)
+                if project.lifecycle == ProjectLifecycle::Open
+                    && !project.archived
+                    && project.claimable =>
+            {
+                Some(project.as_ref())
+            }
+            _ => None,
+        })
+        .ok_or_else(stale_target)?;
+    let selected = snapshot
+        .authority()
+        .projection(AuthorityProjectionKey::AccountSelection(local_installation))
+        .and_then(|projection| match projection {
+            AuthorityProjection::AccountSelection { active, .. } => *active,
+            _ => None,
+        });
+    if selected != Some(project.account_id) {
+        return Err(stale_target());
+    }
+    let membership_fact = match snapshot
+        .authority()
+        .projection(AuthorityProjectionKey::Account(project.account_id))
+    {
+        Some(AuthorityProjection::Account {
+            root_fact, creator, ..
+        }) if creator.installation_id() == local_installation => *root_fact,
+        _ => snapshot
+            .authority()
+            .projection(AuthorityProjectionKey::Membership {
+                account: project.account_id,
+                device: local_installation,
+            })
+            .and_then(|projection| match projection {
+                AuthorityProjection::Membership(membership)
+                    if membership.state() == MembershipState::Active =>
+                {
+                    membership.active_acceptances.iter().next().copied()
+                }
+                _ => None,
+            })
+            .ok_or_else(stale_target)?,
+    };
+    let mailbox_fact = snapshot
+        .authority()
+        .projection(AuthorityProjectionKey::Mailbox(local_human))
+        .and_then(|projection| match projection {
+            AuthorityProjection::Mailbox(mailbox) if mailbox.kind == MailboxKind::Human => {
+                Some(mailbox.create_fact)
+            }
+            _ => None,
+        })
+        .ok_or_else(stale_target)?;
+    Ok((
+        project,
+        MessageAuthoringAuthority {
+            author: local_installation,
+            sender: local_human,
+            scope: FactScope::AccountAddressed(project.account_id),
+            authority: AuthorityReference::new(AuthorityRole::AccountMembership, membership_fact),
+            support: BTreeSet::from([membership_fact, mailbox_fact]),
+        },
+    ))
 }
 
 fn invalid_command() -> DomainError {

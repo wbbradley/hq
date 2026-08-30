@@ -93,9 +93,9 @@ remain in the global recovery presentation because they are not form validation.
 `n` opens one global intent launcher from every ordinary section. Its choices remain separate:
 `Work with an agent on a project`, `Send a direct message`, and `Write a personal note`. The direct
 path enters the typed recipient catalog, whose recipient union can grow to include reachable human
-peers without inventing provider sessions for them. The note path enters the existing durable
-self-note composer. Expert `d` and `N` shortcuts retain direct access to those independent
-capabilities.
+peers without inventing provider sessions for them. The note path opens the durable, modeless draft
+pane inside the Inbox workspace. Expert `d` and `N` shortcuts retain direct access to those
+independent capabilities. Message text is never collected in a dialog.
 
 The project path is a pure coordinator over existing domain operations. It selects an existing
 non-archived project or enters ordinary project creation, then selects an active agent whose
@@ -105,16 +105,18 @@ names the competing project and links to its explicit project handoff controls. 
 agent creation, resource ownership, direct sessions, notes, and direct messages remain usable
 without this coordinator.
 
-A runnable current assignment skips setup and opens the ordinary new-message form for that project.
+A runnable current assignment skips setup and opens the ordinary Inbox draft pane for that project.
 A compatible historical project thread resumes its exact provider, session, and thread without a
 routine provider confirmation. A target without history collects and durably accepts its first
-project instruction before activation. The model then waits for the authoritative snapshot to join
-that returned message ID to its exact thread and activates or hands off on that thread. After a
-later snapshot proves the assignment runnable, the model opens the ordinary project message form;
-the accepted instruction remains pending for the project workflow's exactly-once dispatch.
+message in the Inbox draft pane before activation. The model then waits for the authoritative
+snapshot to join that returned message ID to its exact thread and activates or hands off on that
+thread. After a later snapshot proves the assignment runnable, the Inbox selects that exact
+conversation; the accepted message remains pending for the project workflow's exactly-once
+dispatch.
 
-One available agent service is selected automatically. Several available services open `Start
-project work`; none leave that screen open with actionable setup guidance. A real assignment move
+One available agent service is selected automatically without a confirmation dialog. Several
+available services open a service chooser; none leave that screen open with actionable setup
+guidance. A real assignment move
 still requires a compact review naming the project, agent, selected service, conversation behavior,
 and handoff. Refresh failure or reconnect retains the exact project, agent, provider, accepted
 message, and thread correlation and never authors the first instruction again.
@@ -388,11 +390,11 @@ only `Esc close`; selection and composition controls remain hidden and inert unt
 ### Contextual command completion
 
 One typed presentation policy covers every project and managed-session result. Routine
-`Completed`, `InputSent`, `Ready`, and `Stopped` results close the submitting form immediately,
+`Completed`, `Ready`, and `Stopped` results close the submitting form immediately,
 request an authoritative snapshot, and show a four-second bounded confirmation in the footer.
 The refreshed snapshot selects the affected object: project creation selects the new project,
-ordinary project changes reopen its details, project activation and handoff continue in the first
-instruction composer, and manual session administration returns to the agent with the exact saved
+ordinary project changes reopen its details, project activation and handoff select the exact Inbox
+conversation, and manual session administration returns to the agent with the exact saved
 conversation selected when known.
 
 The navigation intent is retained independently of the footer timer and across connection loss. If
@@ -406,8 +408,12 @@ fresh resource checks. Creation and close previews continue to require an explic
 operation, runtime, warning, and recovery identities stay in these exceptional dialogs and
 technical help; routine success does not make the user dismiss those implementation details.
 
-An activated conversation uses a
-responsive second pane, centers rendering around the stable fact anchor, labels activity as an
+The Inbox always uses a selection-driven master/detail layout: its responsive second pane shows
+the selected conversation and a modeless draft pane occupies the lower portion of that detail pane
+while composing. Project rows expose `r continue` for the exact selected thread and `c new
+conversation` for a separate root. A newly committed root is selected by its returned message ID,
+never by display text. An activated conversation centers rendering around the stable fact anchor,
+labels activity as an
 information-only update, and expands only typed routing, semantics, evidence, or activity sections. Enter
 opens a conversation or toggles its selected entry's details; PageDown requests the opaque next
 page; Escape collapses details and then the conversation. The conversation footer spells out the
@@ -415,8 +421,8 @@ applicable `a archive` or `u restore` control for the selected exact message; co
 the wider reply, direct-message, note, navigation, and quit reference. Stable failures replace the
 ordinary footer with a plain failure statement and recovery action; their stable code remains in
 technical help. The Agents and Projects footers expose their
-primary inspect, create, search, and help controls; responsive
-modal tests cover wide and compact draft, agent-detail, and managed-switch rendering. Styling
+primary inspect, create, search, and help controls; responsive tests cover wide and compact
+modeless-draft, agent-detail, and managed-switch rendering. Styling
 supplements these text markers and is not the sole carrier of state.
 
 ### User-facing vocabulary and progressive disclosure
@@ -424,11 +430,14 @@ supplements these text markers and is not the sole carrier of state.
 Ordinary TUI copy starts from the decision a first-time user is making. It uses `folders and
 resources` for project-owned paths, `assigned agent` for who is responsible for project work,
 `saved conversation` for durable provider/session history, `agent service` for a provider choice,
-`working folder` for launch context, and `instructions` for work sent to a project. It says that HQ
+`working folder` for launch context, and `message` for conversation content. It says that HQ
 is creating, saving, checking, sending, or confirming a change instead of exposing local-API,
 reducer, reconciliation, authority, or provider-session mechanics. Boolean safety choices render
 as `Yes` or `No`, and conflict copy names the competing project, account choice, or assigned agent
 rather than reporting cardinality.
+
+Mailbox composition is deliberately different from those decision dialogs: it stays modeless in
+the Inbox and never uses a message-entry dialog.
 
 Dialogs lead with what will change and why HQ needs the input. Project details first show status,
 folder ownership, and the assigned agent; agent details first show assignment-aware status and

@@ -362,6 +362,10 @@ pub enum MailboxDraftTargetDto {
         mailbox_id: Id32,
     },
     SelfNote,
+    Project {
+        project_id: Id32,
+        thread_id: Option<Id32>,
+    },
 }
 
 /// Complete passive local mailbox draft.
@@ -429,6 +433,11 @@ pub enum MailboxCommandActionDto {
         message_id: Id32,
     },
     SelfNote {
+        message_id: Id32,
+    },
+    Project {
+        project_id: Id32,
+        thread_id: Option<Id32>,
         message_id: Id32,
     },
     Archive {
@@ -500,6 +509,7 @@ impl MailboxCommandRequestDto {
             MailboxCommandActionDto::Reply { .. }
                 | MailboxCommandActionDto::Direct { .. }
                 | MailboxCommandActionDto::SelfNote { .. }
+                | MailboxCommandActionDto::Project { .. }
         );
         if message_action != (self.draft_id.is_some() ^ self.content.is_some()) {
             return Err(ValueError::InvalidCanonicalPlan);
@@ -541,6 +551,22 @@ fn mailbox_command_digest(request: &MailboxCommandRequestDto) -> CommandDigest {
         MailboxCommandActionDto::Restore { target_message } => {
             hasher.update([5]);
             hasher.update(target_message.bytes());
+        }
+        MailboxCommandActionDto::Project {
+            project_id,
+            thread_id,
+            message_id,
+        } => {
+            hasher.update([6]);
+            hasher.update(project_id.bytes());
+            match thread_id {
+                Some(thread_id) => {
+                    hasher.update([1]);
+                    hasher.update(thread_id.bytes());
+                }
+                None => hasher.update([0]),
+            }
+            hasher.update(message_id.bytes());
         }
     }
     match request.draft_id {
@@ -1733,6 +1759,8 @@ pub enum SnapshotItem {
         key: ConversationKeyDto,
         /// Typed authoritative human-facing context.
         context: ConversationContextDto,
+        /// Stable initiating message identity for a project thread.
+        root_message: Option<Id32>,
         /// Sanitized bounded one-line message preview.
         preview: Option<String>,
         /// Canonically latest presented fact, when nonempty.
@@ -3298,9 +3326,10 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
             SnapshotItem::Conversation {
                 key,
                 context,
+                root_message,
                 preview,
                 ..
-            } => validate_conversation_summary(key, context, preview.as_deref())?,
+            } => validate_conversation_summary(key, context, *root_message, preview.as_deref())?,
             SnapshotItem::IncompleteMessage {
                 recipient_installation,
                 recipient_mailbox,
@@ -3690,6 +3719,7 @@ fn validate_conversation_key(key: &ConversationKeyDto) -> Result<(), ValueError>
 fn validate_conversation_summary(
     key: &ConversationKeyDto,
     context: &ConversationContextDto,
+    root_message: Option<Id32>,
     preview: Option<&str>,
 ) -> Result<(), ValueError> {
     validate_conversation_key(key)?;
@@ -3704,7 +3734,7 @@ fn validate_conversation_summary(
                 name,
                 participant,
             },
-        ) if project == context_project => {
+        ) if project == context_project && root_message.is_some() => {
             if let Some(name) = name {
                 validate_text(name, SHORT_TEXT_MAX_BYTES)?;
             }
@@ -3716,8 +3746,12 @@ fn validate_conversation_summary(
         (
             ConversationKeyDto::Thread { .. } | ConversationKeyDto::ProviderSession { .. },
             ConversationContextDto::Direct { participant },
-        ) => validate_conversation_participant(participant, true),
-        (ConversationKeyDto::Thread { .. }, ConversationContextDto::Personal) => Ok(()),
+        ) if root_message.is_none() => validate_conversation_participant(participant, true),
+        (ConversationKeyDto::Thread { .. }, ConversationContextDto::Personal)
+            if root_message.is_none() =>
+        {
+            Ok(())
+        }
         _ => Err(ValueError::InvalidValueCombination),
     }
 }

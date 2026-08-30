@@ -845,6 +845,7 @@ pub enum ClientProjection {
     Conversation {
         key: hq_reducer::ConversationKey,
         context: ConversationContext,
+        root_message: Option<hq_domain::MessageId>,
         preview: Option<ShortText>,
         latest_fact: Option<FactId>,
         open_messages: u32,
@@ -1039,6 +1040,7 @@ impl AuthoritativeSnapshot {
             ClientProjection::Conversation {
                 key: summary.key.clone(),
                 context: summary.context.clone(),
+                root_message: summary.root_message,
                 preview: summary.preview.clone(),
                 latest_fact: summary.latest_fact,
                 open_messages: summary.open_messages,
@@ -1081,6 +1083,8 @@ pub struct ConversationSummary {
     pub key: hq_reducer::ConversationKey,
     /// Typed human-facing context derived from authoritative project and participant evidence.
     pub context: ConversationContext,
+    /// Stable initiating message identity for a project thread.
+    pub root_message: Option<hq_domain::MessageId>,
     /// Sanitized bounded one-line conversation preview.
     pub preview: Option<ShortText>,
     /// Canonically latest presented fact, when the conversation is nonempty.

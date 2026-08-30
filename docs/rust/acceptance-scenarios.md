@@ -230,6 +230,9 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   inspection, typed project command/progress, subscription, response, error, and invalidation
   family round-trips through the one v1
   codec; decoded values reapply all constructor bounds.
+- Pre-release protocol and persistence corrections remain in v1 in place: tests assert the v1
+  project draft target, project message action, optional exact continuation thread, and project
+  conversation root-message identity without migration or compatibility branches.
 - Existing-project commands require an expected project head, while worktree provisioning forbids
   one. Both semantic frame validation and DTO conversion reject the inverse combinations before
   project workflow intake.
@@ -241,6 +244,18 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   intent only and never contain projection rows or message bodies.
 - Architecture verification allows `hq-local-api` to depend inward on domain, canonical protocol,
   and application only; no storage dependency or SQLite vocabulary is present.
+
+## Inbox composition gates
+
+- Message text is entered only in the modeless Inbox draft pane; project details and guided setup
+  contain no message-entry dialog or `send instructions` action.
+- A project conversation row retains typed project, thread, and initiating-message identities.
+  `r` continues that exact thread, while `c` creates a separate root and selects the row whose
+  initiating message matches the committed message ID after authoritative refresh.
+- A guided first message is committed through the same mailbox draft/action boundary, correlated to
+  its authoritative project thread, activated exactly once, and left selected in the Inbox.
+- One available agent service is chosen automatically without a `Start project work` confirmation;
+  multiple services still require an explicit service choice and a real handoff remains reviewed.
 - Server-session contracts require a written hello before requests, only one unconfirmed response,
   session-owned single-use write tickets, post-write subscription activation, and idempotent cleanup
   after lost responses or stale disconnects. Every typed request family routes through application

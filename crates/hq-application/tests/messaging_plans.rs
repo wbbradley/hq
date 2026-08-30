@@ -5,9 +5,9 @@
 use std::collections::BTreeSet;
 
 use hq_application::{
-    LocalFactInputs, MessageAuthoringAuthority, MessageStateRequest, NewMessageRequest,
-    ReplyRequest, ThreadCancellationRequest, plan_message_archive, plan_question, plan_reply,
-    plan_thread_cancellation,
+    ContinueProjectMessageRequest, LocalFactInputs, MessageAuthoringAuthority, MessageStateRequest,
+    NewMessageRequest, ReplyRequest, ThreadCancellationRequest, plan_message_archive,
+    plan_project_message_continuation, plan_question, plan_reply, plan_thread_cancellation,
 };
 use hq_domain::{
     AuthorityReference, AuthorityRole, ContentText, FactId, FactScope, InstallationId,
@@ -238,7 +238,7 @@ fn account_planner_allows_a_direct_recipient_only_for_typed_project_input() {
             .expect("typed project input");
     assert!(matches!(
         plan.payload(),
-        SemanticPayload::AsynchronousMessageSent(content)
+        SemanticPayload::AsynchronousMessageSent { message: content, .. }
             if content.recipient == Some(recipient) && content.project_id == Some(project_id)
     ));
 
@@ -254,5 +254,78 @@ fn account_planner_allows_a_direct_recipient_only_for_typed_project_input() {
     assert!(
         hq_application::plan_asynchronous_message(authority, inputs(), unaddressed_project)
             .is_err()
+    );
+}
+
+#[test]
+fn project_continuation_cites_and_retains_the_exact_asynchronous_root() {
+    let installation = InstallationId::from_bytes([1; 32]);
+    let sender = MailboxAddress::new(installation, MailboxId::from_bytes([3; 32]));
+    let recipient = MailboxAddress::new(
+        InstallationId::from_bytes([7; 32]),
+        MailboxId::from_bytes([8; 32]),
+    );
+    let account = hq_domain::AccountId::from_bytes([4; 32]);
+    let project_id = ProjectId::from_bytes([6; 32]);
+    let authority = MessageAuthoringAuthority {
+        author: installation,
+        sender,
+        scope: FactScope::AccountAddressed(account),
+        authority: AuthorityReference::new(AuthorityRole::AccountMembership, fact(2)),
+        support: [fact(2), fact(3)].into_iter().collect(),
+    };
+    let root_fact = fact(12);
+    let root = MessageContent {
+        message_id: message(13),
+        sender,
+        recipient: Some(recipient),
+        body: ContentText::new("first instruction").expect("body"),
+        purpose: MessagePurpose::Asynchronous,
+        presentation: PresentationKind::Message,
+        correlation: None,
+        project_id: Some(project_id),
+    };
+    let thread_id = ThreadId::from_bytes(*root_fact.as_bytes());
+    let plan = plan_project_message_continuation(
+        authority.clone(),
+        inputs(),
+        ContinueProjectMessageRequest {
+            thread_id,
+            root_fact,
+            root: root.clone(),
+            root_scope: FactScope::AccountAddressed(account),
+            message_id: message(14),
+            body: ContentText::new("follow up").expect("body"),
+            presentation: PresentationKind::Message,
+        },
+    )
+    .expect("exact project continuation");
+    assert!(plan.causal().parents().contains(&root_fact));
+    assert!(matches!(
+        plan.payload(),
+        SemanticPayload::AsynchronousMessageSent {
+            thread_id: Some(actual_thread),
+            message,
+        } if *actual_thread == thread_id
+            && message.sender == sender
+            && message.recipient == Some(recipient)
+            && message.project_id == Some(project_id)
+    ));
+
+    assert!(
+        plan_project_message_continuation(
+            authority,
+            inputs(),
+            ContinueProjectMessageRequest {
+                thread_id: ThreadId::from_bytes([99; 32]),
+                root_fact,
+                root,
+                root_scope: FactScope::AccountAddressed(account),
+                message_id: message(15),
+                body: ContentText::new("wrong thread").expect("body"),
+                presentation: PresentationKind::Message,
+            },
+        )
+        .is_err()
     );
 }

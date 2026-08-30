@@ -1101,7 +1101,7 @@ CREATE TABLE mutation_receipts (
 CREATE TABLE mailbox_drafts (
     draft_id BLOB PRIMARY KEY NOT NULL
         CHECK(typeof(draft_id) = 'blob' AND length(draft_id) = 32),
-    target_kind INTEGER NOT NULL CHECK(target_kind BETWEEN 1 AND 3),
+    target_kind INTEGER NOT NULL CHECK(target_kind BETWEEN 1 AND 4),
     target_installation BLOB
         CHECK(target_installation IS NULL OR
             (typeof(target_installation) = 'blob' AND length(target_installation) = 32)),
@@ -1111,16 +1111,28 @@ CREATE TABLE mailbox_drafts (
     target_message BLOB
         CHECK(target_message IS NULL OR
             (typeof(target_message) = 'blob' AND length(target_message) = 32)),
+    target_project BLOB
+        CHECK(target_project IS NULL OR
+            (typeof(target_project) = 'blob' AND length(target_project) = 32)),
+    target_thread BLOB
+        CHECK(target_thread IS NULL OR
+            (typeof(target_thread) = 'blob' AND length(target_thread) = 32)),
     content TEXT NOT NULL
         CHECK(typeof(content) = 'text' AND length(CAST(content AS BLOB)) <= 16384),
     version BLOB NOT NULL CHECK(typeof(version) = 'blob' AND length(version) = 8),
     CHECK(
         (target_kind = 1 AND target_message IS NOT NULL AND
-            target_installation IS NULL AND target_mailbox IS NULL) OR
+            target_installation IS NULL AND target_mailbox IS NULL AND
+            target_project IS NULL AND target_thread IS NULL) OR
         (target_kind = 2 AND target_message IS NULL AND
-            target_installation IS NOT NULL AND target_mailbox IS NOT NULL) OR
+            target_installation IS NOT NULL AND target_mailbox IS NOT NULL AND
+            target_project IS NULL AND target_thread IS NULL) OR
         (target_kind = 3 AND target_message IS NULL AND
-            target_installation IS NULL AND target_mailbox IS NULL)
+            target_installation IS NULL AND target_mailbox IS NULL AND
+            target_project IS NULL AND target_thread IS NULL) OR
+        (target_kind = 4 AND target_message IS NULL AND
+            target_installation IS NULL AND target_mailbox IS NULL AND
+            target_project IS NOT NULL)
     )
 ) STRICT, WITHOUT ROWID;
 
@@ -1890,6 +1902,16 @@ fn conversation_summaries(
             Ok(ConversationSummary {
                 key: key.clone(),
                 context: conversation_context(key, order, &presentation),
+                root_message: match key {
+                    ConversationKey::ProjectThread { thread, .. } => order
+                        .iter()
+                        .filter_map(|fact_id| messages.get(fact_id))
+                        .find(|message| message.thread_id == *thread)
+                        .map(|message| message.content.message_id),
+                    ConversationKey::Thread { .. } | ConversationKey::ProviderSession { .. } => {
+                        None
+                    }
+                },
                 preview: conversation_preview(order, &messages),
                 latest_fact: order.last().copied(),
                 open_messages: u32::try_from(open_messages)
@@ -2155,10 +2177,13 @@ fn incomplete_message_summaries(
     for fact_id in ids {
         let verified = load_verified_fact(connection, fact_id)?;
         let (thread_id, content) = match verified.fact().payload() {
-            SemanticPayload::QuestionAsked(content)
-            | SemanticPayload::AsynchronousMessageSent(content) => (
+            SemanticPayload::QuestionAsked(content) => (
                 hq_domain::ThreadId::from_bytes(*fact_id.as_bytes()),
                 content.clone(),
+            ),
+            SemanticPayload::AsynchronousMessageSent { thread_id, message } => (
+                thread_id.unwrap_or_else(|| hq_domain::ThreadId::from_bytes(*fact_id.as_bytes())),
+                message.clone(),
             ),
             SemanticPayload::AnswerGiven { thread_id, message } => (*thread_id, message.clone()),
             _ => continue,
@@ -2621,7 +2646,7 @@ fn load_mailbox_drafts(connection: &Connection) -> Result<Vec<MailboxDraft>, Sto
     let mut statement = connection
         .prepare(
             "SELECT draft_id, target_kind, target_installation, target_mailbox, \
-                    target_message, content, version \
+                    target_message, target_project, target_thread, content, version \
              FROM mailbox_drafts ORDER BY draft_id LIMIT ?1",
         )
         .map_err(sql_error)?;
@@ -2635,24 +2660,28 @@ fn load_mailbox_drafts(connection: &Connection) -> Result<Vec<MailboxDraft>, Sto
                 row.get::<_, Option<Vec<u8>>>(2)?,
                 row.get::<_, Option<Vec<u8>>>(3)?,
                 row.get::<_, Option<Vec<u8>>>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, Vec<u8>>(6)?,
+                row.get::<_, Option<Vec<u8>>>(5)?,
+                row.get::<_, Option<Vec<u8>>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Vec<u8>>(8)?,
             ))
         })
         .map_err(sql_error)?;
     let drafts = rows
         .map(|row| {
-            let (draft_id, kind, installation, mailbox, message, content, version) =
+            let (draft_id, kind, installation, mailbox, message, project, thread, content, version) =
                 row.map_err(sql_error)?;
-            decode_mailbox_draft(
+            decode_mailbox_draft(StoredMailboxDraft {
                 draft_id,
                 kind,
                 installation,
                 mailbox,
                 message,
+                project,
+                thread,
                 content,
                 version,
-            )
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     if drafts.len() > MAX_MAILBOX_DRAFTS {
@@ -2668,7 +2697,8 @@ fn load_mailbox_draft(
     connection
         .query_row(
             "SELECT target_kind, target_installation, target_mailbox, target_message, \
-                    content, version FROM mailbox_drafts WHERE draft_id = ?1",
+                    target_project, target_thread, content, version \
+             FROM mailbox_drafts WHERE draft_id = ?1",
             [draft_id.as_bytes().as_slice()],
             |row| {
                 Ok((
@@ -2676,24 +2706,30 @@ fn load_mailbox_draft(
                     row.get::<_, Option<Vec<u8>>>(1)?,
                     row.get::<_, Option<Vec<u8>>>(2)?,
                     row.get::<_, Option<Vec<u8>>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
                 ))
             },
         )
         .optional()
         .map_err(sql_error)?
-        .map(|(kind, installation, mailbox, message, content, version)| {
-            decode_mailbox_draft(
-                draft_id.as_bytes().to_vec(),
-                kind,
-                installation,
-                mailbox,
-                message,
-                content,
-                version,
-            )
-        })
+        .map(
+            |(kind, installation, mailbox, message, project, thread, content, version)| {
+                decode_mailbox_draft(StoredMailboxDraft {
+                    draft_id: draft_id.as_bytes().to_vec(),
+                    kind,
+                    installation,
+                    mailbox,
+                    message,
+                    project,
+                    thread,
+                    content,
+                    version,
+                })
+            },
+        )
         .transpose()
 }
 
@@ -2728,18 +2764,21 @@ fn save_mailbox_draft(
             }
             (None, Some(_)) => return Err(StoreError::new(StoreErrorClass::MutationConflict)),
         };
-    let (kind, installation, mailbox, message) = encode_mailbox_draft_target(&request.target);
+    let (kind, installation, mailbox, message, project, thread) =
+        encode_mailbox_draft_target(&request.target);
     transaction
         .execute(
             "INSERT INTO mailbox_drafts(\
                 draft_id, target_kind, target_installation, target_mailbox, target_message, \
-                content, version\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                target_project, target_thread, content, version\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
              ON CONFLICT(draft_id) DO UPDATE SET \
                 target_kind = excluded.target_kind, \
                 target_installation = excluded.target_installation, \
                 target_mailbox = excluded.target_mailbox, \
                 target_message = excluded.target_message, \
+                target_project = excluded.target_project, \
+                target_thread = excluded.target_thread, \
                 content = excluded.content, version = excluded.version",
             params![
                 request.draft_id.as_bytes().as_slice(),
@@ -2747,6 +2786,8 @@ fn save_mailbox_draft(
                 installation,
                 mailbox,
                 message,
+                project,
+                thread,
                 request.content,
                 version.to_be_bytes().as_slice(),
             ],
@@ -2790,46 +2831,93 @@ fn delete_mailbox_draft(
     Ok(MailboxDraftDeleteOutcome::Deleted)
 }
 
-type EncodedMailboxDraftTarget = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
+type EncodedMailboxDraftTarget = (
+    i64,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
 
 fn encode_mailbox_draft_target(target: &MailboxDraftTarget) -> EncodedMailboxDraftTarget {
     match target {
-        MailboxDraftTarget::Reply { message_id } => {
-            (1, None, None, Some(message_id.as_bytes().to_vec()))
-        }
+        MailboxDraftTarget::Reply { message_id } => (
+            1,
+            None,
+            None,
+            Some(message_id.as_bytes().to_vec()),
+            None,
+            None,
+        ),
         MailboxDraftTarget::Direct { recipient } => (
             2,
             Some(recipient.installation_id().as_bytes().to_vec()),
             Some(recipient.mailbox_id().as_bytes().to_vec()),
             None,
+            None,
+            None,
         ),
-        MailboxDraftTarget::SelfNote => (3, None, None, None),
+        MailboxDraftTarget::SelfNote => (3, None, None, None, None, None),
+        MailboxDraftTarget::Project {
+            project_id,
+            thread_id,
+        } => (
+            4,
+            None,
+            None,
+            None,
+            Some(project_id.as_bytes().to_vec()),
+            thread_id.map(|id| id.as_bytes().to_vec()),
+        ),
     }
 }
 
-fn decode_mailbox_draft(
+struct StoredMailboxDraft {
     draft_id: Vec<u8>,
     kind: i64,
     installation: Option<Vec<u8>>,
     mailbox: Option<Vec<u8>>,
     message: Option<Vec<u8>>,
+    project: Option<Vec<u8>>,
+    thread: Option<Vec<u8>>,
     content: String,
     version: Vec<u8>,
-) -> Result<MailboxDraft, StoreError> {
+}
+
+fn decode_mailbox_draft(stored: StoredMailboxDraft) -> Result<MailboxDraft, StoreError> {
+    let StoredMailboxDraft {
+        draft_id,
+        kind,
+        installation,
+        mailbox,
+        message,
+        project,
+        thread,
+        content,
+        version,
+    } = stored;
     if content.len() > hq_domain::CONTENT_MAX_BYTES {
         return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
     }
-    let target = match (kind, installation, mailbox, message) {
-        (1, None, None, Some(message)) => MailboxDraftTarget::Reply {
+    let target = match (kind, installation, mailbox, message, project, thread) {
+        (1, None, None, Some(message), None, None) => MailboxDraftTarget::Reply {
             message_id: MessageId::from_bytes(fixed_bytes(message)?),
         },
-        (2, Some(installation), Some(mailbox), None) => MailboxDraftTarget::Direct {
+        (2, Some(installation), Some(mailbox), None, None, None) => MailboxDraftTarget::Direct {
             recipient: MailboxAddress::new(
                 InstallationId::from_bytes(fixed_bytes(installation)?),
                 MailboxId::from_bytes(fixed_bytes(mailbox)?),
             ),
         },
-        (3, None, None, None) => MailboxDraftTarget::SelfNote,
+        (3, None, None, None, None, None) => MailboxDraftTarget::SelfNote,
+        (4, None, None, None, Some(project), thread) => MailboxDraftTarget::Project {
+            project_id: hq_domain::ProjectId::from_bytes(fixed_bytes(project)?),
+            thread_id: thread
+                .map(fixed_bytes)
+                .transpose()?
+                .map(hq_domain::ThreadId::from_bytes),
+        },
         _ => return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt)),
     };
     let version = u64::from_be_bytes(

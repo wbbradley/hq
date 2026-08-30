@@ -230,7 +230,7 @@ impl<R, H, P: ReconcileProjectInputs> CommitFacts for NodeApplicationPorts<'_, R
     }
 }
 
-impl<R, H, P> ControlMailbox for NodeApplicationPorts<'_, R, H, P> {
+impl<R, H, P: ReconcileProjectInputs> ControlMailbox for NodeApplicationPorts<'_, R, H, P> {
     fn mailbox_drafts(&self) -> Result<Vec<MailboxDraft>, ApplicationError> {
         self.store.mailbox_drafts()
     }
@@ -253,7 +253,27 @@ impl<R, H, P> ControlMailbox for NodeApplicationPorts<'_, R, H, P> {
         &self,
         request: MailboxCommandRequest,
     ) -> Result<MutationAttempt, ApplicationError> {
-        self.store.control_mailbox(request)
+        let project_message = matches!(
+            request.action,
+            hq_application::MailboxCommandAction::Project { .. }
+        );
+        let attempt = self.store.control_mailbox(request)?;
+        if project_message
+            && matches!(
+            &attempt,
+            MutationAttempt::Completed(receipt)
+                if matches!(receipt.outcome(), hq_application::MutationOutcome::Committed)
+            )
+        {
+            let first = self.project.reconcile_project_inputs(256)?;
+            if first.accepted == 0 {
+                // A draft-backed mutation may publish its committed receipt before the
+                // projection consumed by the project component reaches that revision. One
+                // bounded repair pass crosses that handoff without retrying the mutation.
+                self.project.reconcile_project_inputs(256)?;
+            }
+        }
+        Ok(attempt)
     }
 }
 

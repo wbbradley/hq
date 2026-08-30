@@ -41,6 +41,25 @@ pub struct NewMessageRequest {
     pub project_id: Option<ProjectId>,
 }
 
+/// Complete passive intent for one asynchronous project-thread continuation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContinueProjectMessageRequest {
+    /// Existing stable project exchange.
+    pub thread_id: ThreadId,
+    /// Exact initiating message fact.
+    pub root_fact: FactId,
+    /// Immutable initiating message used to validate project addressing.
+    pub root: MessageContent,
+    /// Immutable initiating audience.
+    pub root_scope: FactScope,
+    /// Stable public continuation identity.
+    pub message_id: MessageId,
+    /// Bounded message body.
+    pub body: ContentText,
+    /// Typed presentation behavior.
+    pub presentation: PresentationKind,
+}
+
 /// Complete passive intent for one causal answer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplyRequest {
@@ -102,6 +121,46 @@ pub fn plan_asynchronous_message(
     request: NewMessageRequest,
 ) -> Result<FactPlan, ApplicationError> {
     plan_root(authority, inputs, request, MessagePurpose::Asynchronous)
+}
+
+/// Plans one causally bound continuation of an asynchronous project exchange.
+pub fn plan_project_message_continuation(
+    authority: MessageAuthoringAuthority,
+    inputs: LocalFactInputs,
+    request: ContinueProjectMessageRequest,
+) -> Result<FactPlan, ApplicationError> {
+    if request.root_scope != authority.scope
+        || request.root.purpose != MessagePurpose::Asynchronous
+        || request.thread_id != ThreadId::from_bytes(*request.root_fact.as_bytes())
+        || request.root.sender != authority.sender
+        || request.root.recipient.is_none()
+        || request.root.project_id.is_none()
+    {
+        return Err(invalid());
+    }
+    validate_authority_with_project(&authority, request.root.recipient, true)?;
+    let content = MessageContent {
+        message_id: request.message_id,
+        sender: authority.sender,
+        recipient: request.root.recipient,
+        body: request.body,
+        purpose: MessagePurpose::Asynchronous,
+        presentation: request.presentation,
+        correlation: None,
+        project_id: request.root.project_id,
+    };
+    let causal = causal(&authority, [request.root_fact])?;
+    Ok(FactPlan::new(
+        authority.author,
+        inputs.authored_at,
+        authority.scope,
+        causal,
+        SemanticPayload::AsynchronousMessageSent {
+            thread_id: Some(request.thread_id),
+            message: content,
+        },
+        inputs.auxiliary_randomness,
+    ))
 }
 
 /// Plans one causally and directionally valid answer.
@@ -224,7 +283,10 @@ fn plan_root(
         causal,
         match purpose {
             MessagePurpose::Question => SemanticPayload::QuestionAsked(content),
-            MessagePurpose::Asynchronous => SemanticPayload::AsynchronousMessageSent(content),
+            MessagePurpose::Asynchronous => SemanticPayload::AsynchronousMessageSent {
+                thread_id: None,
+                message: content,
+            },
             MessagePurpose::ProjectOutput => return Err(invalid()),
         },
         inputs.auxiliary_randomness,

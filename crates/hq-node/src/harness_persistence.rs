@@ -931,7 +931,7 @@ mod tests {
         let payload = &retained.values().next().expect("payload").1;
         assert!(matches!(
             payload,
-            hq_domain::SemanticPayload::AsynchronousMessageSent(message)
+            hq_domain::SemanticPayload::AsynchronousMessageSent { message, .. }
                 if message.sender == fixture.source
                     && message.correlation.as_ref().is_some_and(|value| {
                         value.provider() == &fixture.provider

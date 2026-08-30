@@ -9,8 +9,8 @@ use hq_application::{
 use hq_domain::{
     AccountId, BoundedSet, BoundedText, CausalReferences, CommandDigest, CommandId,
     EncryptionPublicKey, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
-    OperationId, ProjectId, ResourceId, ResourceLocator, ResourceScheme, Revision, SemanticPayload,
-    ShortText, SigningPublicKey, ThreadId, Timestamp,
+    MessageId, OperationId, ProjectId, ResourceId, ResourceLocator, ResourceScheme, Revision,
+    SemanticPayload, ShortText, SigningPublicKey, ThreadId, Timestamp,
 };
 use hq_local_api::protocol::v1::{
     ActivityStatusDto, AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
@@ -131,6 +131,7 @@ fn project_thread_snapshot_summary_converts_to_the_same_typed_v1_key() {
                 name: Some(ShortText::new("release").expect("project name")),
                 participant: None,
             },
+            root_message: Some(MessageId::from_bytes([0x44; 32])),
             preview: Some(ShortText::new("Ship it").expect("preview")),
             latest_fact: Some(FactId::from_bytes([0x43; 32])),
             open_messages: 1,
@@ -185,6 +186,7 @@ fn conversation_summary_validation_rejects_incoherent_v1_context_without_a_versi
     let summary = |context, preview| SnapshotItem::Conversation {
         key: ConversationKeyDto::ProjectThread { project, thread },
         context,
+        root_message: Some(id(0x54)),
         preview,
         latest_fact: None,
         open_messages: 0,
@@ -409,6 +411,35 @@ fn mailbox_command_digest_binds_content_target_and_draft_source() {
         [0x23; 32],
     );
     assert_ne!(request.request_digest, draft_backed.request_digest);
+
+    let project_root = MailboxCommandRequestDto::new(
+        Id32::new([0x21; 32]),
+        None,
+        MailboxCommandActionDto::Project {
+            project_id: Id32::new([0x25; 32]),
+            thread_id: None,
+            message_id: Id32::new([0x22; 32]),
+        },
+        Some("project message".to_owned()),
+        7,
+        [0x23; 32],
+    );
+    let project_continuation = MailboxCommandRequestDto::new(
+        Id32::new([0x21; 32]),
+        None,
+        MailboxCommandActionDto::Project {
+            project_id: Id32::new([0x25; 32]),
+            thread_id: Some(Id32::new([0x26; 32])),
+            message_id: Id32::new([0x22; 32]),
+        },
+        Some("project message".to_owned()),
+        7,
+        [0x23; 32],
+    );
+    assert_ne!(
+        project_root.request_digest,
+        project_continuation.request_digest
+    );
 }
 
 #[test]
@@ -1323,6 +1354,7 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
                     name: Some("helper".to_owned()),
                 },
             },
+            root_message: None,
             preview: Some("Can we ship?".to_owned()),
             latest_fact: Some(id(11)),
             open_messages: 1,

@@ -96,6 +96,35 @@ fn project_output_and_activity_join_only_their_initiating_exchange_for_every_arr
         "Let's have another conversation.",
     )?;
     let second_thread = ThreadId::from_bytes(*second.id().as_bytes());
+    let continuation_id = values.message_id();
+    let continuation = FactBuilder::with_causal(
+        &mut values,
+        world.installation,
+        Timestamp::from_unix_millis(22),
+        FactScope::InstallationPrivate(world.installation.installation_id()),
+        [
+            world.installation_root.id(),
+            world.human_root.id(),
+            first.id(),
+        ],
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            world.installation_root.id(),
+        )],
+        SemanticPayload::AsynchronousMessageSent {
+            thread_id: Some(first_thread),
+            message: MessageContent {
+                message_id: continuation_id,
+                sender: world.human,
+                recipient: Some(project_mailbox),
+                body: ContentText::new("One more point on the same topic.")?,
+                purpose: MessagePurpose::Asynchronous,
+                presentation: PresentationKind::Message,
+                correlation: None,
+                project_id: Some(project_id),
+            },
+        },
+    )?;
     let agent_id = AgentId::from_bytes([0x43; 32]);
     let claim = FactBuilder::with_causal(
         &mut values,
@@ -211,6 +240,7 @@ fn project_output_and_activity_join_only_their_initiating_exchange_for_every_arr
     let variable = vec![
         first.clone(),
         second.clone(),
+        continuation.clone(),
         claim.clone(),
         dispatch.clone(),
         output.clone(),
@@ -226,7 +256,7 @@ fn project_output_and_activity_join_only_their_initiating_exchange_for_every_arr
                 project_id,
                 thread: first_thread,
             },
-            vec![first.id(), output.id(), activity.id()],
+            vec![first.id(), continuation.id(), output.id(), activity.id()],
         ),
         (
             ConversationKey::ProjectThread {
@@ -268,16 +298,19 @@ fn project_input_fact(
             AuthorityRole::LocalInstallation,
             world.installation_root.id(),
         )],
-        SemanticPayload::AsynchronousMessageSent(MessageContent {
-            message_id,
-            sender: world.human,
-            recipient: Some(project_mailbox),
-            body: ContentText::new(body)?,
-            purpose: MessagePurpose::Asynchronous,
-            presentation: PresentationKind::Message,
-            correlation: None,
-            project_id: Some(project_id),
-        }),
+        SemanticPayload::AsynchronousMessageSent {
+            thread_id: None,
+            message: MessageContent {
+                message_id,
+                sender: world.human,
+                recipient: Some(project_mailbox),
+                body: ContentText::new(body)?,
+                purpose: MessagePurpose::Asynchronous,
+                presentation: PresentationKind::Message,
+                correlation: None,
+                project_id: Some(project_id),
+            },
+        },
     )?)
 }
 
@@ -470,7 +503,10 @@ fn equal_time_mixed_entries_and_delayed_occurrence_use_the_single_parent_first_o
         MessagePurpose::Asynchronous,
         PresentationKind::Message,
         None,
-        SemanticPayload::AsynchronousMessageSent,
+        |message| SemanticPayload::AsynchronousMessageSent {
+            thread_id: None,
+            message,
+        },
     )?;
     let correlation = operation(4, "provider", "session")?;
     let early_occurrence = activity_fact(
@@ -733,7 +769,7 @@ where
 fn message_content_of(fact: &Fact) -> Result<&MessageContent, Box<dyn Error>> {
     match fact.payload() {
         SemanticPayload::QuestionAsked(message)
-        | SemanticPayload::AsynchronousMessageSent(message)
+        | SemanticPayload::AsynchronousMessageSent { message, .. }
         | SemanticPayload::AnswerGiven { message, .. } => Ok(message),
         _ => Err("fixture is not message content".into()),
     }
@@ -1351,16 +1387,19 @@ fn one_account_fact_has_identical_conversation_meaning_under_device_local_polici
             AuthorityRole::AccountMembership,
             account.id(),
         )],
-        SemanticPayload::AsynchronousMessageSent(MessageContent {
-            message_id,
-            sender: creator.agent,
-            recipient: None,
-            body: ContentText::new("one canonical fanout fact")?,
-            purpose: MessagePurpose::Asynchronous,
-            presentation: PresentationKind::Message,
-            correlation: None,
-            project_id: None,
-        }),
+        SemanticPayload::AsynchronousMessageSent {
+            thread_id: None,
+            message: MessageContent {
+                message_id,
+                sender: creator.agent,
+                recipient: None,
+                body: ContentText::new("one canonical fanout fact")?,
+                purpose: MessagePurpose::Asynchronous,
+                presentation: PresentationKind::Message,
+                correlation: None,
+                project_id: None,
+            },
+        },
     )?;
     let facts = creator
         .base_facts()
@@ -1449,16 +1488,19 @@ fn account_addressed_project_input_requires_both_project_and_direct_recipient()
                 AuthorityRole::AccountMembership,
                 account.id(),
             )],
-            SemanticPayload::AsynchronousMessageSent(MessageContent {
-                message_id,
-                sender: creator.human,
-                recipient,
-                body: ContentText::new("project work")?,
-                purpose: MessagePurpose::Asynchronous,
-                presentation: PresentationKind::Message,
-                correlation: None,
-                project_id,
-            }),
+            SemanticPayload::AsynchronousMessageSent {
+                thread_id: None,
+                message: MessageContent {
+                    message_id,
+                    sender: creator.human,
+                    recipient,
+                    body: ContentText::new("project work")?,
+                    purpose: MessagePurpose::Asynchronous,
+                    presentation: PresentationKind::Message,
+                    correlation: None,
+                    project_id,
+                },
+            },
         )?)
     };
     let valid_id = values.message_id();

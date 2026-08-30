@@ -327,6 +327,7 @@ pub fn snapshot_to_v1(
             ClientProjection::Conversation {
                 key,
                 context,
+                root_message,
                 preview,
                 latest_fact,
                 open_messages,
@@ -335,6 +336,7 @@ pub fn snapshot_to_v1(
             } => SnapshotItem::Conversation {
                 key: conversation_key_to_v1(&key),
                 context: conversation_context_to_v1(context),
+                root_message: root_message.map(|message| id32(message.as_bytes())),
                 preview: preview.map(hq_domain::ShortText::into_string),
                 latest_fact: latest_fact.map(|fact| id32(fact.as_bytes())),
                 open_messages,
@@ -814,6 +816,15 @@ pub fn mailbox_command_from_v1(
             MailboxCommandActionDto::SelfNote { message_id } => MailboxCommandAction::SelfNote {
                 message_id: hq_domain::MessageId::from_bytes(message_id.bytes()),
             },
+            MailboxCommandActionDto::Project {
+                project_id,
+                thread_id,
+                message_id,
+            } => MailboxCommandAction::Project {
+                project_id: hq_domain::ProjectId::from_bytes(project_id.bytes()),
+                thread_id: thread_id.map(|id| hq_domain::ThreadId::from_bytes(id.bytes())),
+                message_id: hq_domain::MessageId::from_bytes(message_id.bytes()),
+            },
             MailboxCommandActionDto::Archive { target_message } => MailboxCommandAction::Archive {
                 target_message: hq_domain::MessageId::from_bytes(target_message.bytes()),
             },
@@ -851,6 +862,15 @@ pub fn mailbox_command_request_to_v1(request: &MailboxCommandRequest) -> Mailbox
                 message_id: Id32::new(*message_id.as_bytes()),
             },
             MailboxCommandAction::SelfNote { message_id } => MailboxCommandActionDto::SelfNote {
+                message_id: Id32::new(*message_id.as_bytes()),
+            },
+            MailboxCommandAction::Project {
+                project_id,
+                thread_id,
+                message_id,
+            } => MailboxCommandActionDto::Project {
+                project_id: Id32::new(*project_id.as_bytes()),
+                thread_id: thread_id.map(|id| Id32::new(*id.as_bytes())),
                 message_id: Id32::new(*message_id.as_bytes()),
             },
             MailboxCommandAction::Archive { target_message } => MailboxCommandActionDto::Archive {
@@ -930,6 +950,13 @@ fn mailbox_draft_to_v1(draft: &MailboxDraft) -> MailboxDraftDto {
                 mailbox_id: Id32::new(*recipient.mailbox_id().as_bytes()),
             },
             MailboxDraftTarget::SelfNote => MailboxDraftTargetDto::SelfNote,
+            MailboxDraftTarget::Project {
+                project_id,
+                thread_id,
+            } => MailboxDraftTargetDto::Project {
+                project_id: id32(project_id.as_bytes()),
+                thread_id: thread_id.map(|id| id32(id.as_bytes())),
+            },
         },
         content: draft.content.clone(),
         version: draft.version,
@@ -951,6 +978,13 @@ fn mailbox_draft_target_from_v1(target: &MailboxDraftTargetDto) -> MailboxDraftT
             ),
         },
         MailboxDraftTargetDto::SelfNote => MailboxDraftTarget::SelfNote,
+        MailboxDraftTargetDto::Project {
+            project_id,
+            thread_id,
+        } => MailboxDraftTarget::Project {
+            project_id: hq_domain::ProjectId::from_bytes(project_id.bytes()),
+            thread_id: thread_id.map(|id| hq_domain::ThreadId::from_bytes(id.bytes())),
+        },
     }
 }
 

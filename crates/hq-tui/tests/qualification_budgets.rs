@@ -47,6 +47,7 @@ fn invalidation_of_a_large_ready_model_requests_redraw_within_the_declared_budge
                 detail: "ready".to_owned(),
                 state: UiRowState::Open,
                 kind: UiRowKind::Conversation,
+                conversation_target: None,
             })
             .collect(),
         sent_rows: Vec::new(),

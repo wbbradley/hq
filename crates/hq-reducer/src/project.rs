@@ -1226,7 +1226,7 @@ fn valid_dispatch_parent(
 fn message_content(payload: &SemanticPayload) -> Option<&MessageContent> {
     match payload {
         SemanticPayload::QuestionAsked(message)
-        | SemanticPayload::AsynchronousMessageSent(message)
+        | SemanticPayload::AsynchronousMessageSent { message, .. }
         | SemanticPayload::AnswerGiven { message, .. }
         | SemanticPayload::ProjectOutputRecorded { message, .. } => Some(message),
         _ => None,

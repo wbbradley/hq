@@ -8,14 +8,15 @@ use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase, UiAgentLifecycle,
     UiAgentMailbox, UiAgentModal, UiAgentProjectAssignment, UiAgentSession, UiAgentStatus,
     UiConnectionState, UiConversationEntry, UiConversationEntryKind, UiConversationPage,
-    UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput,
-    UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
-    UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
-    UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject, UiProjectAction,
-    UiProjectAssignment, UiProjectCreationChoice, UiProjectExternalWarning, UiProjectFormField,
-    UiProjectModal, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
-    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind,
-    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage,
+    UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftPane,
+    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
+    UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel, UiNewChoice, UiNewModal,
+    UiPendingProjectInput, UiProject, UiProjectAction, UiProjectAssignment,
+    UiProjectCreationChoice, UiProjectFormField, UiProjectModal, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -173,12 +174,13 @@ fn guided_project_work_resumes_ready_assignment_without_session_setup() {
         .expect("select project")
         .model;
     assert!(matches!(
-        model.project_modal(),
-        Some(UiProjectModal::SendInput {
-            project,
-            content,
-            submitting: false,
-        }) if project.project_id == [5; 32] && content.is_empty()
+        model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::Project {
+                project_id,
+                thread_id: Some(thread_id),
+            }
+        }) if *project_id == [5; 32] && *thread_id == [6; 32]
     ));
     assert!(model.new_modal().is_none());
 }
@@ -211,191 +213,6 @@ fn cancelling_a_guided_first_instruction_returns_to_agent_selection() {
         cancelled.model.new_modal(),
         Some(UiNewModal::ChooseAgent { project, .. }) if project.project_id == [5; 32]
     ));
-}
-
-#[test]
-#[allow(clippy::too_many_lines)]
-fn guided_project_work_sends_first_instruction_before_exact_thread_activation() {
-    let agent = project_agent(7, [9; 32]);
-    let project = project(5, "release", "/work/release");
-    let mut model =
-        loaded_projects_model_with_agents(1, vec![project.clone()], vec![agent.clone()]);
-    for input in [
-        UiInput::Character('n'),
-        UiInput::Activate,
-        UiInput::Activate,
-        UiInput::Activate,
-    ] {
-        model = update(model, UiEvent::Input(input))
-            .expect("guided step")
-            .model;
-    }
-    assert!(model.new_modal().is_none());
-    assert!(matches!(
-        model.project_modal(),
-        Some(UiProjectModal::SendInput {
-            project,
-            content,
-            submitting: false,
-        }) if project.project_id == [5; 32] && content.is_empty()
-    ));
-    model = update(
-        model,
-        UiEvent::Input(UiInput::Paste("Ship the first change".to_owned())),
-    )
-    .expect("first instruction")
-    .model;
-    let sending = update(model, UiEvent::Input(UiInput::Activate)).expect("send instruction");
-    let (send_id, send_action) = project_effect(&sending.effects);
-    assert!(matches!(
-        send_action,
-        UiProjectAction::SendInput { project_id, ref content }
-            if project_id == [5; 32] && content == "Ship the first change"
-    ));
-    let input_message = [13; 32];
-    let sent = update(
-        sending.model,
-        UiEvent::ProjectCommandCompleted {
-            effect_id: send_id,
-            result: UiProjectResult {
-                action: send_action,
-                command_id: input_message,
-                operation_id: input_message,
-                project_id: [5; 32],
-                runtime_state: None,
-                runtime_code: None,
-                outcome: UiProjectOutcome::InputSent {
-                    message_id: input_message,
-                },
-            },
-        },
-    )
-    .expect("instruction accepted");
-    let input_snapshot_id = snapshot_effect(&sent.effects);
-    let disconnected = update(
-        sent.model,
-        UiEvent::SnapshotFailed {
-            effect_id: input_snapshot_id,
-            failure: UiFailure {
-                code: "node_unavailable".to_owned(),
-                action: "wait for HQ to reconnect".to_owned(),
-            },
-        },
-    )
-    .expect("accepted instruction survives a lost refresh");
-    let retry_timer = timer_effect(&disconnected.effects, UiTimerKind::RetrySnapshot);
-    let retrying = update(
-        disconnected.model,
-        UiEvent::TimerElapsed {
-            effect_id: retry_timer,
-        },
-    )
-    .expect("retry accepted-input refresh");
-    let input_snapshot_id = snapshot_effect(&retrying.effects);
-    let thread_id = [6; 32];
-    let mut pending_project = project.clone();
-    pending_project.input_sequence = 2;
-    pending_project.pending_inputs = vec![UiPendingProjectInput {
-        message_id: input_message,
-        thread_id,
-        sequence: 2,
-    }];
-    let mut pending_snapshot = projects_snapshot(2, vec![pending_project]);
-    let agent_source = agents_snapshot(2, vec![agent.clone()]);
-    pending_snapshot.agents = agent_source.agents;
-    pending_snapshot.agent_rows = agent_source.agent_rows;
-    let activating = update(
-        retrying.model,
-        UiEvent::SnapshotLoaded {
-            effect_id: input_snapshot_id,
-            snapshot: pending_snapshot,
-        },
-    )
-    .expect("accepted input selects its exact thread");
-    let (activation_id, activation) = project_effect(&activating.effects);
-    assert!(matches!(
-        activation,
-        UiProjectAction::Activate {
-            project_id,
-            agent_id,
-            ref provider,
-            resume_session: None,
-            resume_thread: Some(selected_thread),
-            ref launch_directory,
-        } if project_id == [5; 32]
-            && agent_id == [7; 32]
-            && provider == "codex"
-            && selected_thread == thread_id
-            && launch_directory == "/work/release"
-    ));
-
-    let completed = update(
-        activating.model,
-        UiEvent::ProjectCommandCompleted {
-            effect_id: activation_id,
-            result: UiProjectResult {
-                action: activation,
-                command_id: [10; 32],
-                operation_id: [11; 32],
-                project_id: [5; 32],
-                runtime_state: Some("ready".to_owned()),
-                runtime_code: None,
-                outcome: UiProjectOutcome::Completed {
-                    project_head: Some([12; 32]),
-                },
-            },
-        },
-    )
-    .expect("activation complete");
-    let snapshot_id = snapshot_effect(&completed.effects);
-    let mut ready_project = project;
-    ready_project.assignment = Some(UiProjectAssignment {
-        assignment_id: [8; 32],
-        agent_id: [7; 32],
-        provider: "codex".to_owned(),
-        session: Some("guided-session".to_owned()),
-        phase: "runnable".to_owned(),
-        thread_id: Some(thread_id),
-        launch_directory: Some("/work/release".to_owned()),
-        blocked: None,
-        cardinality_conflicted: false,
-        runnable: true,
-    });
-    let mut ready_snapshot = projects_snapshot(2, vec![ready_project.clone()]);
-    let agent_source = agents_snapshot(2, vec![agent]);
-    ready_snapshot.agents = agent_source.agents;
-    ready_snapshot.agent_rows = agent_source.agent_rows;
-    let composing = update(
-        completed.model,
-        UiEvent::SnapshotLoaded {
-            effect_id: snapshot_id,
-            snapshot: ready_snapshot,
-        },
-    )
-    .expect("ready snapshot opens the ordinary project composer");
-    assert!(matches!(
-        composing.model.project_modal(),
-        Some(UiProjectModal::SendInput {
-            project,
-            content,
-            submitting: false,
-        }) if project.project_id == [5; 32] && content.is_empty()
-    ));
-    assert!(composing.model.new_modal().is_none());
-    assert!(!activating.effects.iter().any(|effect| matches!(
-        effect,
-        UiEffect::SubmitProjectCommand {
-            action: UiProjectAction::SendInput { .. },
-            ..
-        }
-    )));
-    assert!(!composing.effects.iter().any(|effect| matches!(
-        effect,
-        UiEffect::SubmitProjectCommand {
-            action: UiProjectAction::SendInput { .. },
-            ..
-        }
-    )));
 }
 
 #[test]
@@ -547,12 +364,13 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
     .expect("new agent loaded");
     assert!(resumed.model.new_modal().is_none());
     assert!(matches!(
-        resumed.model.project_modal(),
-        Some(UiProjectModal::SendInput {
-            project,
-            content,
-            submitting: false,
-        }) if project.project_id == [5; 32] && content.is_empty()
+        resumed.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::Project {
+                project_id,
+                thread_id: None,
+            }
+        }) if *project_id == [5; 32]
     ));
 }
 
@@ -567,34 +385,68 @@ fn guided_project_failure_does_not_rearm_the_submission() {
         UiInput::Character('n'),
         UiInput::Activate,
         UiInput::Activate,
-        UiInput::Activate,
     ] {
         model = update(model, UiEvent::Input(input))
             .expect("guided step")
             .model;
     }
+    let opening = update(model, UiEvent::Input(UiInput::Activate)).expect("open project draft");
+    let (open_id, target) = open_draft_effect(&opening.effects);
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                draft_id: [31; 32],
+                target: target.clone(),
+                content: String::new(),
+                version: 1,
+            },
+        },
+    )
+    .expect("project draft loaded");
     model = update(
-        model,
+        loaded.model,
         UiEvent::Input(UiInput::Paste("Retain this instruction".to_owned())),
     )
     .expect("instruction")
     .model;
     let sending = update(model, UiEvent::Input(UiInput::Activate)).expect("send instruction");
-    let (send_id, send_action) = project_effect(&sending.effects);
+    let (save_id, save_input) = save_draft_effect(&sending.effects);
+    let submitting = update(
+        sending.model,
+        UiEvent::DraftSaved {
+            effect_id: save_id,
+            draft: UiMailboxDraft {
+                version: 2,
+                ..save_input.clone()
+            },
+        },
+    )
+    .expect("saved project draft submits");
+    let send_id = submitting
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitMailboxCommand {
+                id,
+                action:
+                    UiMailboxAction::Project {
+                        project_id,
+                        thread_id: None,
+                    },
+                ..
+            } if *project_id == [5; 32] => Some(*id),
+            _ => None,
+        })
+        .expect("project mailbox command");
     let message_id = [32; 32];
     let sent = update(
-        sending.model,
-        UiEvent::ProjectCommandCompleted {
+        submitting.model,
+        UiEvent::MailboxCommandCommitted {
             effect_id: send_id,
-            result: UiProjectResult {
-                action: send_action,
-                command_id: message_id,
-                operation_id: message_id,
-                project_id: [5; 32],
-                runtime_state: None,
-                runtime_code: None,
-                outcome: UiProjectOutcome::InputSent { message_id },
-            },
+            revision: 2,
+            message_id: Some(message_id),
         },
     )
     .expect("instruction accepted");
@@ -730,8 +582,10 @@ fn guided_project_work_only_offers_available_provider_choices_when_needed() {
     ));
     let composing = update(model, UiEvent::Input(UiInput::Activate)).expect("choose provider");
     assert!(matches!(
-        composing.model.project_modal(),
-        Some(UiProjectModal::SendInput { content, .. }) if content.is_empty()
+        composing.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::Project { project_id, thread_id: None }
+        }) if *project_id == [5; 32]
     ));
     assert!(
         composing
@@ -1900,8 +1754,8 @@ fn self_note_draft_autosaves_and_survives_resize_reconnect_and_reload() {
     )
     .expect("reconnect state preserves editor");
     assert!(matches!(
-        reconnecting.model.mailbox_modal(),
-        Some(UiMailboxModal::Compose { draft, dirty: true, .. })
+        reconnecting.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Editing { draft, dirty: true, .. })
             if draft.content == "remember this"
     ));
     let saving = update(
@@ -1925,8 +1779,8 @@ fn self_note_draft_autosaves_and_survives_resize_reconnect_and_reload() {
     )
     .expect("save acknowledged");
     assert!(matches!(
-        saved.model.mailbox_modal(),
-        Some(UiMailboxModal::Compose { draft, dirty: false, submitting: false, .. })
+        saved.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Editing { draft, dirty: false, submitting: false, .. })
             if draft.version == 2 && draft.content == "remember this"
     ));
 }
@@ -2075,8 +1929,8 @@ fn dirty_reply_saves_before_submit_and_stale_rejection_preserves_text() {
     )
     .expect("stale rejection");
     assert!(matches!(
-        rejected.model.mailbox_modal(),
-        Some(UiMailboxModal::Compose { draft, submitting: false, .. })
+        rejected.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Editing { draft, submitting: false, .. })
             if draft.content == "answer text"
     ));
     assert_eq!(
@@ -2086,6 +1940,110 @@ fn dirty_reply_saves_before_submit_and_stale_rejection_preserves_text() {
             .map(|failure| failure.code.as_str()),
         Some("mailbox_target_stale")
     );
+}
+
+#[test]
+fn project_rows_continue_or_start_explicit_conversations_and_select_the_new_root() {
+    let project_id = [5; 32];
+    let mut initial = snapshot(1, &["existing"]);
+    initial.inbox_rows[0].conversation_target = Some(UiConversationTarget::Project {
+        project_id,
+        thread_id: [6; 32],
+        root_message: [7; 32],
+    });
+
+    let continued = update(
+        loaded_model(initial.clone()),
+        UiEvent::Input(UiInput::Character('r')),
+    )
+    .expect("continue selected project conversation");
+    assert!(matches!(
+        open_draft_effect(&continued.effects).1,
+        UiMailboxDraftTarget::Project {
+            project_id: selected_project,
+            thread_id: Some(thread_id),
+        } if *selected_project == project_id && *thread_id == [6; 32]
+    ));
+
+    let opening = update(
+        loaded_model(initial),
+        UiEvent::Input(UiInput::Character('c')),
+    )
+    .expect("start a new project conversation");
+    let (open_id, target) = open_draft_effect(&opening.effects);
+    assert_eq!(
+        target,
+        &UiMailboxDraftTarget::Project {
+            project_id,
+            thread_id: None,
+        }
+    );
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                draft_id: [10; 32],
+                target: target.clone(),
+                content: "A separate topic".to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("project draft loaded");
+    let submitting = update(loaded.model, UiEvent::Input(UiInput::Activate))
+        .expect("submit new project conversation");
+    let send_id = submitting
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitMailboxCommand {
+                id,
+                action:
+                    UiMailboxAction::Project {
+                        project_id: selected_project,
+                        thread_id: None,
+                    },
+                ..
+            } if *selected_project == project_id => Some(*id),
+            _ => None,
+        })
+        .expect("project mailbox command");
+    let root_message = [11; 32];
+    let committed = update(
+        submitting.model,
+        UiEvent::MailboxCommandCommitted {
+            effect_id: send_id,
+            revision: 2,
+            message_id: Some(root_message),
+        },
+    )
+    .expect("new project root committed");
+    let refresh_id = snapshot_effect(&committed.effects);
+    let mut refreshed = snapshot(2, &["existing", "new"]);
+    refreshed.inbox_rows[0].conversation_target = Some(UiConversationTarget::Project {
+        project_id,
+        thread_id: [6; 32],
+        root_message: [7; 32],
+    });
+    refreshed.inbox_rows[1].conversation_target = Some(UiConversationTarget::Project {
+        project_id,
+        thread_id: [12; 32],
+        root_message,
+    });
+    let selected = update(
+        committed.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: refresh_id,
+            snapshot: refreshed,
+        },
+    )
+    .expect("new project row selected");
+    assert_eq!(selected.model.selected_row(), Some("new"));
+    assert!(selected.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::LoadConversation { row_id, .. } if row_id == "new"
+    )));
 }
 
 #[test]
@@ -2242,8 +2200,8 @@ fn escape_during_in_flight_autosave_waits_for_latest_text_before_closing() {
     let closing =
         update(newer.model, UiEvent::Input(UiInput::Escape)).expect("close waits for latest save");
     assert!(matches!(
-        closing.model.mailbox_modal(),
-        Some(UiMailboxModal::Compose { draft, closing: true, .. }) if draft.content == "ab"
+        closing.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Editing { draft, closing: true, .. }) if draft.content == "ab"
     ));
     let follow_up = update(
         closing.model,
@@ -2314,8 +2272,8 @@ fn optimistic_draft_conflict_preserves_local_text_and_adopts_current_version() {
     )
     .expect("conflict remains actionable");
     assert!(matches!(
-        conflicted.model.mailbox_modal(),
-        Some(UiMailboxModal::Compose { draft, dirty: true, submitting: false, closing: false })
+        conflicted.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Editing { draft, dirty: true, submitting: false, closing: false })
             if draft.content == "local!" && draft.version == 7
     ));
     assert_eq!(
@@ -3272,284 +3230,6 @@ fn forms_use_tab_unicode_safe_cursor_editing_and_current_user_path_expansion() {
 }
 
 #[test]
-fn project_input_retains_text_on_failure_and_exposes_reconcilable_external_state() {
-    let target = project(7, "target", "/target");
-    let mut model = loaded_projects_model(1, vec![target.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('n')))
-        .expect("input form")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Paste("ship it".to_owned())))
-        .expect("input")
-        .model;
-    let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit input");
-    let (first_id, action) = project_effect(&submitted.effects);
-    let failed = update(
-        submitted.model,
-        UiEvent::ProjectCommandFailed {
-            effect_id: first_id,
-            failure: UiFailure {
-                code: "disconnected".to_owned(),
-                action: "retry the same input".to_owned(),
-            },
-        },
-    )
-    .expect("failure");
-    assert!(matches!(
-        failed.model.project_modal(),
-        Some(UiProjectModal::SendInput { content, submitting: false, .. }) if content == "ship it"
-    ));
-    let retried = update(failed.model, UiEvent::Input(UiInput::Activate)).expect("retry");
-    let (second_id, second_action) = project_effect(&retried.effects);
-    assert_eq!(action, second_action);
-    let result = UiProjectResult {
-        action: second_action,
-        command_id: [3; 32],
-        operation_id: [4; 32],
-        project_id: target.project_id,
-        runtime_state: Some("uncertain".to_owned()),
-        runtime_code: Some("response_lost".to_owned()),
-        outcome: UiProjectOutcome::Reconcilable {
-            stage: "worktree_created".to_owned(),
-            category: "external_state".to_owned(),
-            code: "response_lost".to_owned(),
-            warning: Some(UiProjectExternalWarning {
-                kind: "retained_worktree".to_owned(),
-                destination: "/target".to_owned(),
-                branch: "feature".to_owned(),
-            }),
-        },
-    };
-    let completed = update(
-        retried.model,
-        UiEvent::ProjectCommandCompleted {
-            effect_id: second_id,
-            result: result.clone(),
-        },
-    )
-    .expect("typed outcome");
-    assert!(matches!(
-        completed.model.project_modal(),
-        Some(UiProjectModal::Outcome { result: actual }) if actual == &result
-    ));
-}
-
-#[test]
-fn project_input_success_closes_the_form_selects_the_project_and_confirms_in_the_footer() {
-    let target = project(17, "target", "/target");
-    let mut model = loaded_projects_model(1, vec![target.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('n')))
-        .expect("input form")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Paste("ship it".to_owned())))
-        .expect("input")
-        .model;
-    let pending = update(model, UiEvent::Input(UiInput::Activate)).expect("submit input");
-    let (effect_id, action) = project_effect(&pending.effects);
-    let completed = update(
-        pending.model,
-        UiEvent::ProjectCommandCompleted {
-            effect_id,
-            result: UiProjectResult {
-                action,
-                command_id: [18; 32],
-                operation_id: [19; 32],
-                project_id: target.project_id,
-                runtime_state: None,
-                runtime_code: None,
-                outcome: UiProjectOutcome::InputSent {
-                    message_id: [20; 32],
-                },
-            },
-        },
-    )
-    .expect("routine completion");
-    assert!(completed.model.project_modal().is_none());
-    assert_eq!(
-        completed.model.completion_notice(),
-        Some("Instructions sent")
-    );
-
-    let snapshot_id = snapshot_effect(&completed.effects);
-    let notice_timer = timer_effect(&completed.effects, UiTimerKind::DismissCompletion);
-    let refreshed = update(
-        completed.model,
-        UiEvent::SnapshotLoaded {
-            effect_id: snapshot_id,
-            snapshot: projects_snapshot(2, vec![target]),
-        },
-    )
-    .expect("refreshed project context");
-    assert_eq!(
-        refreshed.model.selected_row(),
-        Some(agent_row_id(17).as_str())
-    );
-    assert!(matches!(
-        refreshed.model.project_modal(),
-        Some(UiProjectModal::Details { project, .. }) if project.project_id == [17; 32]
-    ));
-    let dismissed = update(
-        refreshed.model,
-        UiEvent::TimerElapsed {
-            effect_id: notice_timer,
-        },
-    )
-    .expect("completion notice expires");
-    assert!(dismissed.model.completion_notice().is_none());
-    assert!(matches!(
-        dismissed.model.project_modal(),
-        Some(UiProjectModal::Details { project, .. }) if project.project_id == [17; 32]
-    ));
-}
-
-#[test]
-fn stale_project_completion_cannot_replace_the_current_operation() {
-    let target = project(8, "target", "/target");
-    let mut model = loaded_projects_model(1, vec![target.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('n')))
-        .expect("input form")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Paste("running".to_owned())))
-        .expect("input")
-        .model;
-    let pending = update(model, UiEvent::Input(UiInput::Activate)).expect("submit input");
-    let (effect_id, action) = project_effect(&pending.effects);
-    let stale_id = snapshot_effect(&started_model().effects);
-    assert_ne!(stale_id, effect_id);
-    let stale = update(
-        pending.model.clone(),
-        UiEvent::ProjectCommandCompleted {
-            effect_id: stale_id,
-            result: UiProjectResult {
-                action,
-                command_id: [90; 32],
-                operation_id: [91; 32],
-                project_id: target.project_id,
-                runtime_state: None,
-                runtime_code: None,
-                outcome: UiProjectOutcome::InputSent {
-                    message_id: [92; 32],
-                },
-            },
-        },
-    )
-    .expect("stale project completion");
-    assert_eq!(stale.model, pending.model);
-}
-
-#[test]
-fn project_progress_stale_rejection_and_mismatched_responses_remain_typed() {
-    let target = project(8, "target", "/target");
-    let submit_input = |content: &str| {
-        let mut model = loaded_projects_model(1, vec![target.clone()]);
-        model = update(model, UiEvent::Input(UiInput::Activate))
-            .expect("details")
-            .model;
-        model = update(model, UiEvent::Input(UiInput::Character('n')))
-            .expect("input form")
-            .model;
-        model = update(model, UiEvent::Input(UiInput::Paste(content.to_owned())))
-            .expect("input")
-            .model;
-        update(model, UiEvent::Input(UiInput::Activate)).expect("submit input")
-    };
-
-    let running = submit_input("running");
-    let (effect_id, action) = project_effect(&running.effects);
-    let progress = update(
-        running.model,
-        UiEvent::ProjectCommandCompleted {
-            effect_id,
-            result: UiProjectResult {
-                action,
-                command_id: [1; 32],
-                operation_id: [2; 32],
-                project_id: target.project_id,
-                runtime_state: None,
-                runtime_code: None,
-                outcome: UiProjectOutcome::Running {
-                    stage: "git_identified".to_owned(),
-                },
-            },
-        },
-    )
-    .expect("progress");
-    assert!(matches!(
-        progress.model.project_modal(),
-        Some(UiProjectModal::Outcome { result })
-            if result.outcome == UiProjectOutcome::Running { stage: "git_identified".to_owned() }
-    ));
-
-    let rejected = submit_input("stale");
-    let (effect_id, action) = project_effect(&rejected.effects);
-    let rejected = update(
-        rejected.model,
-        UiEvent::ProjectCommandCompleted {
-            effect_id,
-            result: UiProjectResult {
-                action,
-                command_id: [3; 32],
-                operation_id: [4; 32],
-                project_id: target.project_id,
-                runtime_state: Some("failed".to_owned()),
-                runtime_code: Some("stale_project_head".to_owned()),
-                outcome: UiProjectOutcome::Rejected {
-                    category: "conflict".to_owned(),
-                    code: "stale_project_head".to_owned(),
-                },
-            },
-        },
-    )
-    .expect("rejected");
-    assert_eq!(
-        rejected
-            .model
-            .last_failure()
-            .map(|failure| failure.code.as_str()),
-        Some("stale_project_head")
-    );
-
-    let mismatched = submit_input("expected");
-    let (effect_id, _) = project_effect(&mismatched.effects);
-    let mismatched = update(
-        mismatched.model,
-        UiEvent::ProjectCommandCompleted {
-            effect_id,
-            result: UiProjectResult {
-                action: UiProjectAction::SendInput {
-                    project_id: target.project_id,
-                    content: "different".to_owned(),
-                },
-                command_id: [5; 32],
-                operation_id: [6; 32],
-                project_id: target.project_id,
-                runtime_state: None,
-                runtime_code: None,
-                outcome: UiProjectOutcome::InputSent {
-                    message_id: [7; 32],
-                },
-            },
-        },
-    )
-    .expect("mismatch rejected");
-    assert_eq!(
-        mismatched
-            .model
-            .last_failure()
-            .map(|failure| failure.code.as_str()),
-        Some("project_response_mismatch")
-    );
-}
-
-#[test]
 fn resource_add_previews_authoritative_conflicts_before_mutation() {
     let target = project(9, "target", "/target");
     let mut model = loaded_projects_model(1, vec![target.clone()]);
@@ -3905,7 +3585,7 @@ fn project_new_session_provider_is_a_typed_choice_and_empty_catalog_blocks_submi
 }
 
 #[test]
-fn successful_project_activation_continues_in_the_project_message_composer() {
+fn successful_project_activation_does_not_open_a_message_dialog() {
     let target = project(53, "activation", "/workspace/activation");
     let agent = project_agent(65, target.home);
     let mut model = loaded_projects_model_with_agents(1, vec![target.clone()], vec![agent.clone()]);
@@ -3960,12 +3640,9 @@ fn successful_project_activation_continues_in_the_project_message_composer() {
             snapshot: projects_snapshot(2, vec![refreshed_project]),
         },
     )
-    .expect("open the project message composer");
-    assert!(matches!(
-        refreshed.model.project_modal(),
-        Some(UiProjectModal::SendInput { project, content, submitting: false })
-            if project.project_id == [53; 32] && content.is_empty()
-    ));
+    .expect("refresh project state");
+    assert!(refreshed.model.project_modal().is_none());
+    assert!(refreshed.model.mailbox_draft().is_none());
 }
 
 #[test]
@@ -4269,6 +3946,7 @@ fn snapshot_for(section: UiSection, revision: u64, ids: &[&str]) -> UiSnapshot {
             detail: format!("{id} detail"),
             state: UiRowState::Open,
             kind: UiRowKind::Conversation,
+            conversation_target: None,
         })
         .collect::<Vec<_>>();
     UiSnapshot {
@@ -4339,6 +4017,7 @@ fn agents_snapshot(revision: u64, agents: Vec<UiAgent>) -> UiSnapshot {
             detail: "active".to_owned(),
             state: UiRowState::Open,
             kind: UiRowKind::Agent,
+            conversation_target: None,
         })
         .collect();
     UiSnapshot {
@@ -4431,6 +4110,7 @@ fn projects_snapshot(revision: u64, projects: Vec<UiProject>) -> UiSnapshot {
             detail: project.lifecycle.clone(),
             state: UiRowState::Open,
             kind: UiRowKind::Project,
+            conversation_target: None,
         })
         .collect();
     UiSnapshot {

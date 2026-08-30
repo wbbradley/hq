@@ -26,14 +26,14 @@ use hq_tui::{
     EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase,
     UiAgentAttentionReason, UiAgentLifecycle, UiAgentMailbox, UiAgentProjectAssignment,
     UiAgentSession, UiAgentStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
-    UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanIssue,
-    UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState,
-    UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction,
-    UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot,
-    UiTechnicalSection, UiTimerKind,
+    UiConversationPage, UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure,
+    UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence,
+    UiHumanState, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState,
+    UiMessageTarget, UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning,
+    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
+    UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
+    UiSnapshot, UiTechnicalSection, UiTimerKind,
 };
 
 use crate::{
@@ -125,7 +125,7 @@ pub trait TuiClientPort: Send {
         &mut self,
         draft: Option<UiMailboxDraft>,
         action: UiMailboxAction,
-    ) -> Result<u64, UiFailure>;
+    ) -> Result<UiMailboxCommandResult, UiFailure>;
 
     /// Executes or reconciles one stable named-agent administration command.
     fn submit_agent_command(&mut self, _action: UiAgentAction) -> Result<u64, UiFailure> {
@@ -352,9 +352,16 @@ impl TuiClientPort for LocalTuiClient {
         &mut self,
         draft: Option<UiMailboxDraft>,
         action: UiMailboxAction,
-    ) -> Result<u64, UiFailure> {
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
         let command_id = Id32::new(random_identity()?);
         let message_id = Id32::new(random_identity()?);
+        let authors_message = matches!(
+            action,
+            UiMailboxAction::Reply { .. }
+                | UiMailboxAction::Direct { .. }
+                | UiMailboxAction::SelfNote
+                | UiMailboxAction::Project { .. }
+        );
         let action = match action {
             UiMailboxAction::Reply { target_message } => MailboxCommandActionDto::Reply {
                 target_message: Id32::new(target_message),
@@ -369,6 +376,14 @@ impl TuiClientPort for LocalTuiClient {
                 message_id,
             },
             UiMailboxAction::SelfNote => MailboxCommandActionDto::SelfNote { message_id },
+            UiMailboxAction::Project {
+                project_id,
+                thread_id,
+            } => MailboxCommandActionDto::Project {
+                project_id: Id32::new(project_id),
+                thread_id: thread_id.map(Id32::new),
+                message_id,
+            },
             UiMailboxAction::Archive { target_message } => MailboxCommandActionDto::Archive {
                 target_message: Id32::new(target_message),
             },
@@ -405,7 +420,10 @@ impl TuiClientPort for LocalTuiClient {
                 revision,
                 outcome: MutationOutcomeDto::Committed,
                 ..
-            }) => Ok(revision),
+            }) => Ok(UiMailboxCommandResult {
+                revision,
+                message_id: authors_message.then_some(message_id.bytes()),
+            }),
             ClientEvent::Mutation(MutationAttemptDto::Completed {
                 outcome: MutationOutcomeDto::Rejected { code, .. },
                 ..
@@ -629,6 +647,13 @@ fn mailbox_draft_target(target: &UiMailboxDraftTarget) -> MailboxDraftTargetDto 
             mailbox_id: Id32::new(*mailbox_id),
         },
         UiMailboxDraftTarget::SelfNote => MailboxDraftTargetDto::SelfNote,
+        UiMailboxDraftTarget::Project {
+            project_id,
+            thread_id,
+        } => MailboxDraftTargetDto::Project {
+            project_id: Id32::new(*project_id),
+            thread_id: thread_id.map(Id32::new),
+        },
     }
 }
 
@@ -645,6 +670,13 @@ fn tui_draft_target(target: &MailboxDraftTargetDto) -> UiMailboxDraftTarget {
             mailbox_id: mailbox_id.bytes(),
         },
         MailboxDraftTargetDto::SelfNote => UiMailboxDraftTarget::SelfNote,
+        MailboxDraftTargetDto::Project {
+            project_id,
+            thread_id,
+        } => UiMailboxDraftTarget::Project {
+            project_id: project_id.bytes(),
+            thread_id: thread_id.as_ref().map(|id| id.bytes()),
+        },
     }
 }
 
@@ -1064,9 +1096,10 @@ fn client_worker<P: TuiClientPort>(
             }
             Ok(WorkerCommand::SubmitMailboxCommand { id, draft, action }) => {
                 let event = match client.submit_mailbox_command(draft, action) {
-                    Ok(revision) => UiEvent::MailboxCommandCommitted {
+                    Ok(result) => UiEvent::MailboxCommandCommitted {
                         effect_id: id,
-                        revision,
+                        revision: result.revision,
+                        message_id: result.message_id,
                     },
                     Err(failure) => UiEvent::MailboxCommandFailed {
                         effect_id: id,
@@ -1460,13 +1493,6 @@ fn local_project_command(action: &UiProjectAction) -> LocalProjectCommand {
             branch: branch.clone(),
             base: base.clone(),
         },
-        UiProjectAction::SendInput {
-            project_id,
-            content,
-        } => LocalProjectCommand::SendInput {
-            project_id: *project_id,
-            content: content.clone(),
-        },
         UiProjectAction::PreviewAddResource {
             project_id,
             path,
@@ -1605,7 +1631,7 @@ fn ui_project_outcome(outcome: LocalProjectOutcome) -> UiProjectOutcome {
                 branch: warning.branch,
             }),
         },
-        LocalProjectOutcome::InputSent { message_id } => UiProjectOutcome::InputSent { message_id },
+        LocalProjectOutcome::InputSent { .. } => UiProjectOutcome::Completed { project_head: None },
         LocalProjectOutcome::ResourcePreview {
             display_path,
             canonical_path,
@@ -1712,6 +1738,7 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
             SnapshotItem::Conversation {
                 key,
                 context,
+                root_message,
                 preview,
                 open_messages,
                 archived_messages,
@@ -1729,10 +1756,13 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
                 section,
                 key.clone(),
                 context,
+                *root_message,
                 preview.as_deref(),
-                *open_messages,
-                *sent_messages,
-                *archived_messages,
+                ConversationCounts {
+                    open: *open_messages,
+                    sent: *sent_messages,
+                    archived: *archived_messages,
+                },
             )
         }
         (
@@ -1754,6 +1784,7 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
             ),
             state: UiRowState::Attention,
             kind: UiRowKind::Diagnostic,
+            conversation_target: None,
         }),
         (UiSection::Inbox, SnapshotItem::IncompleteMessagesTruncated) => Some(UiRow {
             id: "incomplete-messages-truncated".to_owned(),
@@ -1761,6 +1792,7 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
             detail: "HQ will retry after more message history arrives".to_owned(),
             state: UiRowState::Attention,
             kind: UiRowKind::Diagnostic,
+            conversation_target: None,
         }),
         (
             UiSection::Projects,
@@ -1792,6 +1824,7 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
                 UiRowState::Open
             },
             kind: UiRowKind::Project,
+            conversation_target: None,
         }),
         _ => None,
     }
@@ -1843,6 +1876,7 @@ fn agent_row(agent: &UiAgent) -> UiRow {
         detail,
         state,
         kind: UiRowKind::Agent,
+        conversation_target: None,
     }
 }
 
@@ -1909,17 +1943,26 @@ fn conversation_row(
     section: UiSection,
     key: ConversationKeyDto,
     context: &ConversationContextDto,
+    root_message: Option<Id32>,
     preview: Option<&str>,
-    open_messages: u32,
-    sent_messages: u32,
-    archived_messages: u32,
+    counts: ConversationCounts,
 ) -> Option<UiRow> {
+    let conversation_target = match &key {
+        ConversationKeyDto::ProjectThread { project, thread } => {
+            Some(UiConversationTarget::Project {
+                project_id: project.bytes(),
+                thread_id: thread.bytes(),
+                root_message: root_message?.bytes(),
+            })
+        }
+        ConversationKeyDto::Thread { .. } | ConversationKeyDto::ProviderSession { .. } => None,
+    };
     let id = conversation_identity(key);
     let title = conversation_title(context);
     let (count, label, state) = match section {
-        UiSection::Inbox => (open_messages, "open messages", UiRowState::Open),
-        UiSection::Sent => (sent_messages, "sent messages", UiRowState::Waiting),
-        UiSection::Archived => (archived_messages, "archived messages", UiRowState::Archived),
+        UiSection::Inbox => (counts.open, "open messages", UiRowState::Open),
+        UiSection::Sent => (counts.sent, "sent messages", UiRowState::Waiting),
+        UiSection::Archived => (counts.archived, "archived messages", UiRowState::Archived),
         UiSection::Agents | UiSection::Projects => return None,
     };
     Some(UiRow {
@@ -1928,7 +1971,15 @@ fn conversation_row(
         detail: preview.map_or_else(|| format!("{count} {label}"), terminal_text),
         state,
         kind: UiRowKind::Conversation,
+        conversation_target,
     })
+}
+
+#[derive(Clone, Copy)]
+struct ConversationCounts {
+    open: u32,
+    sent: u32,
+    archived: u32,
 }
 
 /// Maps one bounded reducer-ordered local-API page into passive TUI presentation.

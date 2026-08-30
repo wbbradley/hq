@@ -299,9 +299,14 @@ fn payload(
         model::BodyDto::QuestionAsked(value) => {
             Output::QuestionAsked(message(value, author, scope, false)?)
         }
-        model::BodyDto::AsynchronousMessageSent(value) => {
-            Output::AsynchronousMessageSent(message(value, author, scope, false)?)
-        }
+        model::BodyDto::AsynchronousMessageSent(value) => Output::AsynchronousMessageSent {
+            thread_id: value
+                .thread
+                .0
+                .as_ref()
+                .map(|thread| domain::ThreadId::from_bytes(thread.0)),
+            message: message(&value.message, author, scope, false)?,
+        },
         model::BodyDto::AnswerGiven(value) => Output::AnswerGiven {
             thread_id: domain::ThreadId::from_bytes(value.thread.0),
             message: message(&value.message, author, scope, false)?,

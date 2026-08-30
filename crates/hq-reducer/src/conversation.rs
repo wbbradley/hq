@@ -467,15 +467,16 @@ fn classify_conversation(
     context: &ReductionContext<'_, ConversationReason>,
 ) -> DomainDecision<ConversationReason> {
     let result = match fact.payload() {
-        SemanticPayload::QuestionAsked(message)
-        | SemanticPayload::AsynchronousMessageSent(message) => {
-            validate_message_address(fact, message).and_then(|()| {
-                message_identity_participants(message.message_id, context)
-                    .len()
-                    .eq(&1)
-                    .then_some(())
-                    .ok_or(ConversationReason::MessageIdentityConflict)
-            })
+        SemanticPayload::QuestionAsked(message) => validate_message_address(fact, message)
+            .and_then(|()| validate_message_identity(message.message_id, context)),
+        SemanticPayload::AsynchronousMessageSent { thread_id, message } => {
+            validate_message_address(fact, message)
+                .and_then(|()| {
+                    thread_id.map_or(Ok(()), |thread_id| {
+                        validate_asynchronous_continuation(fact, thread_id, message, context)
+                    })
+                })
+                .and_then(|()| validate_message_identity(message.message_id, context))
         }
         SemanticPayload::ProjectOutputRecorded {
             project_id,
@@ -496,23 +497,11 @@ fn classify_conversation(
                     context,
                 )
             })
-            .and_then(|()| {
-                message_identity_participants(message.message_id, context)
-                    .len()
-                    .eq(&1)
-                    .then_some(())
-                    .ok_or(ConversationReason::MessageIdentityConflict)
-            }),
+            .and_then(|()| validate_message_identity(message.message_id, context)),
         SemanticPayload::AnswerGiven { thread_id, message } => {
             validate_message_address(fact, message)
                 .and_then(|()| validate_answer(fact, *thread_id, message, context))
-                .and_then(|()| {
-                    message_identity_participants(message.message_id, context)
-                        .len()
-                        .eq(&1)
-                        .then_some(())
-                        .ok_or(ConversationReason::MessageIdentityConflict)
-                })
+                .and_then(|()| validate_message_identity(message.message_id, context))
         }
         SemanticPayload::ThreadCancelled { thread_id, .. } => {
             validate_cancellation(fact, *thread_id, context)
@@ -560,6 +549,15 @@ fn classify_conversation(
         }
         Err(reason) => DomainDecision::Invalid { reason },
     }
+}
+
+fn validate_message_identity(
+    message_id: MessageId,
+    context: &ReductionContext<'_, ConversationReason>,
+) -> Result<(), ConversationReason> {
+    (message_identity_participants(message_id, context).len() == 1)
+        .then_some(())
+        .ok_or(ConversationReason::MessageIdentityConflict)
 }
 
 fn validate_activity_source(
@@ -744,6 +742,32 @@ fn validate_answer(
         .ok_or(ConversationReason::AddressMismatch)
 }
 
+fn validate_asynchronous_continuation(
+    fact: &Fact,
+    thread_id: ThreadId,
+    message: &MessageContent,
+    context: &ReductionContext<'_, ConversationReason>,
+) -> Result<(), ConversationReason> {
+    let root = asynchronous_root(thread_id, context).ok_or(ConversationReason::ThreadMismatch)?;
+    let SemanticPayload::AsynchronousMessageSent {
+        thread_id: None,
+        message: root_message,
+    } = root.payload()
+    else {
+        return Err(ConversationReason::ThreadMismatch);
+    };
+    (fact.causal().parents().contains(&root.id())
+        && same_scope(root.scope(), fact.scope())
+        && root_message.purpose == MessagePurpose::Asynchronous
+        && root_message.project_id.is_some()
+        && message.purpose == MessagePurpose::Asynchronous
+        && message.sender == root_message.sender
+        && message.recipient == root_message.recipient
+        && message.project_id == root_message.project_id)
+        .then_some(())
+        .ok_or(ConversationReason::ThreadMismatch)
+}
+
 fn validate_cancellation(
     fact: &Fact,
     thread_id: ThreadId,
@@ -798,7 +822,15 @@ fn same_scope(left: &FactScope, right: &FactScope) -> bool {
 }
 
 fn thread_id(fact: &Fact) -> ThreadId {
-    ThreadId::from_bytes(*fact.id().as_bytes())
+    match fact.payload() {
+        SemanticPayload::AsynchronousMessageSent {
+            thread_id: Some(thread_id),
+            ..
+        }
+        | SemanticPayload::AnswerGiven { thread_id, .. }
+        | SemanticPayload::ProjectOutputRecorded { thread_id, .. } => *thread_id,
+        _ => ThreadId::from_bytes(*fact.id().as_bytes()),
+    }
 }
 
 fn question_root<'a>(
@@ -812,10 +844,27 @@ fn question_root<'a>(
     })
 }
 
+fn asynchronous_root<'a>(
+    thread: ThreadId,
+    context: &ReductionContext<'a, ConversationReason>,
+) -> Option<&'a Fact> {
+    context.facts().facts().find(|fact| {
+        context.is_projected(fact.id())
+            && matches!(
+                fact.payload(),
+                SemanticPayload::AsynchronousMessageSent {
+                    thread_id: None,
+                    ..
+                }
+            )
+            && ThreadId::from_bytes(*fact.id().as_bytes()) == thread
+    })
+}
+
 fn message_content(fact: &Fact) -> Option<&MessageContent> {
     match fact.payload() {
         SemanticPayload::QuestionAsked(message)
-        | SemanticPayload::AsynchronousMessageSent(message)
+        | SemanticPayload::AsynchronousMessageSent { message, .. }
         | SemanticPayload::AnswerGiven { message, .. }
         | SemanticPayload::ProjectOutputRecorded { message, .. } => Some(message),
         _ => None,
@@ -890,7 +939,7 @@ fn aggregate_keys(fact: &Fact) -> Vec<ConversationAggregateKey> {
         ));
     }
     match fact.payload() {
-        SemanticPayload::QuestionAsked(_) | SemanticPayload::AsynchronousMessageSent(_) => {
+        SemanticPayload::QuestionAsked(_) | SemanticPayload::AsynchronousMessageSent { .. } => {
             keys.push(ConversationAggregateKey::Thread(thread_id(fact)));
         }
         SemanticPayload::AnswerGiven { thread_id, .. }
@@ -930,7 +979,10 @@ fn thread_projections(
                 && matches!(
                     fact.payload(),
                     SemanticPayload::QuestionAsked(_)
-                        | SemanticPayload::AsynchronousMessageSent(_)
+                        | SemanticPayload::AsynchronousMessageSent {
+                            thread_id: None,
+                            ..
+                        }
                 )
         })
         .filter_map(|root| {
@@ -940,7 +992,14 @@ fn thread_projections(
                 .facts()
                 .facts()
                 .filter(|fact| context.is_projected(fact.id()))
-                .filter(|fact| matches!(fact.payload(), SemanticPayload::AnswerGiven { thread_id, .. } if *thread_id == id))
+                .filter(|fact| match fact.payload() {
+                    SemanticPayload::AnswerGiven { thread_id, .. }
+                    | SemanticPayload::AsynchronousMessageSent {
+                        thread_id: Some(thread_id),
+                        ..
+                    } => *thread_id == id,
+                    _ => false,
+                })
                 .map(Fact::id)
                 .collect::<BTreeSet<_>>();
             let cancellations = context
@@ -1052,11 +1111,7 @@ fn message_projections(
                         | FactScope::PeerAddressed(_)
                         | FactScope::RemoteControl { .. } => None,
                     },
-                    thread_id: match fact.payload() {
-                        SemanticPayload::AnswerGiven { thread_id, .. }
-                        | SemanticPayload::ProjectOutputRecorded { thread_id, .. } => *thread_id,
-                        _ => thread_id(fact),
-                    },
+                    thread_id: thread_id(fact),
                     content: message.clone(),
                     open: !rejected && !archived,
                     rejected,

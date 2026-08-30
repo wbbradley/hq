@@ -151,7 +151,10 @@ impl FactBuilder {
                 device_id: installation_id,
             },
             SemanticPayload::QuestionAsked(message.clone()),
-            SemanticPayload::AsynchronousMessageSent(asynchronous),
+            SemanticPayload::AsynchronousMessageSent {
+                thread_id: None,
+                message: asynchronous,
+            },
             SemanticPayload::AnswerGiven {
                 thread_id,
                 message: message.clone(),

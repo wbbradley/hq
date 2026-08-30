@@ -119,7 +119,10 @@ pub fn plan_harness_output(
         inputs.authored_at,
         FactScope::InstallationPrivate(authority.author),
         causal,
-        SemanticPayload::AsynchronousMessageSent(content),
+        SemanticPayload::AsynchronousMessageSent {
+            thread_id: None,
+            message: content,
+        },
         inputs.auxiliary_randomness,
     ))
 }
@@ -335,7 +338,7 @@ mod tests {
             },
         )
         .expect("output plan");
-        let SemanticPayload::AsynchronousMessageSent(message) = plan.payload() else {
+        let SemanticPayload::AsynchronousMessageSent { message, .. } = plan.payload() else {
             panic!("expected output message");
         };
         assert_eq!(message.sender, authority().source);

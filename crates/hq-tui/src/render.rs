@@ -15,11 +15,11 @@ use crate::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentAttentionReason, UiAgentModal,
     UiAgentProjectAssignment, UiAgentStatus, UiConnectionState, UiConversationEntry,
     UiConversationEntryKind, UiFocus, UiHelpPage, UiHumanIssue, UiHumanMembershipEvidence,
-    UiHumanMembershipStatus, UiHumanState, UiMailboxAction, UiMailboxDraftTarget, UiMailboxModal,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel, UiNewChoice,
-    UiNewModal, UiProjectAction, UiProjectCreationChoice, UiProjectFormField, UiProjectModal,
-    UiProjectOutcome, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
-    UiTechnicalSection, UiTheme, UiThemeRole, model::WIDE_WIDTH,
+    UiHumanMembershipStatus, UiHumanState, UiMailboxAction, UiMailboxDraftPane,
+    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
+    UiMessageState, UiModel, UiNewChoice, UiNewModal, UiProjectAction, UiProjectCreationChoice,
+    UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread, UiProvider, UiRow,
+    UiRowKind, UiRowState, UiSection, UiTechnicalSection, UiTheme, UiThemeRole, model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -488,6 +488,11 @@ fn dialog_help_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'stati
             "Help for this message dialog",
             "Choose a recipient or write the message. Draft text is retained if delivery needs attention.",
         )
+    } else if model.mailbox_draft().is_some() {
+        (
+            "Help for writing a message",
+            "This draft belongs to the Inbox workspace. HQ saves it as you type and keeps it here if sending needs attention.",
+        )
     } else {
         return None;
     };
@@ -923,9 +928,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             lines.push(Line::from(
                 "↑/↓ or j/k resource · a add · e replace · x remove",
             ));
-            lines.push(Line::from(
-                "p primary · r check selected · R check all · n send instructions",
-            ));
+            lines.push(Line::from("p primary · r check selected · R check all"));
             lines.push(Line::from("v set up work · d send pending · h move agent"));
             lines.push(Line::from(if project.lifecycle == "closed" {
                 "o reopen · z archive/unarchive"
@@ -1096,36 +1099,6 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                 "Tab/Shift-Tab field · Enter create · Esc cancel"
             }));
             (" Create an isolated Git worktree ", lines)
-        }
-        UiProjectModal::SendInput {
-            project,
-            content,
-            submitting,
-        } => {
-            let mut lines = vec![Line::from(format!("Project: {}", project.name))];
-            push_project_text_field(
-                theme,
-                inner_width,
-                &mut lines,
-                model,
-                "Instructions",
-                content,
-                UiProjectFormField::Content,
-                true,
-                true,
-                "Describe the outcome you want the assigned agent to achieve",
-                false,
-            );
-            lines.push(Line::from(
-                "The assigned agent will receive these instructions once.",
-            ));
-            lines.push(Line::default());
-            lines.push(Line::from(if *submitting {
-                "Sending instructions…"
-            } else {
-                "Enter send · Esc cancel"
-            }));
-            (" Send instructions to this project ", lines)
         }
         UiProjectModal::AddResource {
             project,
@@ -1440,9 +1413,6 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                     lines.push(Line::from(
                         "HQ retained this request for recovery; do not repeat it manually.",
                     ));
-                }
-                UiProjectOutcome::InputSent { .. } => {
-                    lines.push(Line::from("Instructions sent."));
                 }
                 UiProjectOutcome::ResourcePreview {
                     display_path,
@@ -2060,7 +2030,6 @@ fn project_action_label(action: &UiProjectAction) -> String {
         UiProjectAction::CreateWorktree { name, .. } => {
             format!("Create an isolated worktree for {name}")
         }
-        UiProjectAction::SendInput { .. } => "Send project instructions".to_owned(),
         UiProjectAction::PreviewAddResource { .. } => {
             "Check a folder or resource before adding it".to_owned()
         }
@@ -2579,68 +2548,6 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                 area,
             );
         }
-        UiMailboxModal::LoadingDraft { target } => {
-            frame.render_widget(
-                Paragraph::new(format!("Loading {} draft…", draft_target_label(target)))
-                    .block(Block::bordered().title(" Preparing message ")),
-                area,
-            );
-        }
-        UiMailboxModal::Compose {
-            draft,
-            dirty,
-            submitting,
-            closing,
-        } => {
-            let status = if *closing {
-                "saving and closing"
-            } else if *submitting {
-                "sending"
-            } else if *dirty {
-                "saving"
-            } else {
-                "saved"
-            };
-            let text_area = area.inner(ratatui::layout::Margin {
-                horizontal: 2,
-                vertical: 2,
-            });
-            frame.render_widget(
-                Block::bordered()
-                    .border_style(theme.style(UiThemeRole::Accent))
-                    .title(format!(
-                        " {} · {status} · Message required · {}/{} bytes ",
-                        draft_target_label(&draft.target),
-                        draft.content.len(),
-                        MAX_DRAFT_BYTES
-                    )),
-                area,
-            );
-            let cursor = model.message_field_cursor(&draft.content);
-            let mut content = draft.content.clone();
-            content.insert(cursor, '│');
-            frame.render_widget(
-                Paragraph::new(content).wrap(Wrap { trim: false }),
-                text_area,
-            );
-            let hint = Rect {
-                y: area.y + area.height.saturating_sub(2),
-                height: 1,
-                x: area.x + 2,
-                width: area.width.saturating_sub(4),
-            };
-            let hint_text = model
-                .message_field_error()
-                .unwrap_or("Enter submit · Esc save and close");
-            frame.render_widget(
-                Paragraph::new(hint_text).style(if model.message_field_error().is_some() {
-                    theme.style(UiThemeRole::Error)
-                } else {
-                    theme.style(UiThemeRole::Footer)
-                }),
-                hint,
-            );
-        }
         UiMailboxModal::Confirm { action } => {
             let (label, explanation) = match action {
                 UiMailboxAction::Archive { .. } => (
@@ -2653,7 +2560,9 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                         "Only this message returns to open views; the rest of the conversation is unchanged.",
                     ),
                 ),
-                UiMailboxAction::Reply { .. } | UiMailboxAction::Direct { .. } => (
+                UiMailboxAction::Reply { .. }
+                | UiMailboxAction::Direct { .. }
+                | UiMailboxAction::Project { .. } => (
                     "Send this message?",
                     Some("The recipient will see it in their HQ conversation."),
                 ),
@@ -2685,6 +2594,12 @@ const fn draft_target_label(target: &UiMailboxDraftTarget) -> &'static str {
         UiMailboxDraftTarget::Reply { .. } => "Reply",
         UiMailboxDraftTarget::Direct { .. } => "Direct message",
         UiMailboxDraftTarget::SelfNote => "Self-note",
+        UiMailboxDraftTarget::Project {
+            thread_id: Some(_), ..
+        } => "Continue project conversation",
+        UiMailboxDraftTarget::Project {
+            thread_id: None, ..
+        } => "New project conversation",
     }
 }
 
@@ -2809,7 +2724,7 @@ fn render_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Re
                 Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
                     .areas(area);
             render_summary_rows(frame, model, theme, summaries);
-            render_conversation(frame, model, theme, conversation, Borders::LEFT);
+            render_inbox_detail(frame, model, theme, conversation, Borders::LEFT);
         } else {
             let constraints = if model.focus() == UiFocus::Conversation {
                 [Constraint::Percentage(35), Constraint::Percentage(65)]
@@ -2818,10 +2733,106 @@ fn render_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Re
             };
             let [summaries, conversation] = Layout::vertical(constraints).areas(area);
             render_summary_rows(frame, model, theme, summaries);
-            render_conversation(frame, model, theme, conversation, Borders::TOP);
+            render_inbox_detail(frame, model, theme, conversation, Borders::TOP);
         }
     } else {
         render_summary_rows(frame, model, theme, area);
+    }
+}
+
+fn render_inbox_detail(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+    outer_border: Borders,
+) {
+    if model.mailbox_draft().is_some() {
+        let draft_height = (area.height / 3).max(6).min(area.height.saturating_sub(2));
+        let [conversation, draft] =
+            Layout::vertical([Constraint::Min(2), Constraint::Length(draft_height)]).areas(area);
+        render_conversation(frame, model, theme, conversation, outer_border);
+        render_draft_pane(frame, model, theme, draft, Borders::TOP | outer_border);
+    } else {
+        render_conversation(frame, model, theme, area, outer_border);
+    }
+}
+
+fn render_draft_pane(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+    borders: Borders,
+) {
+    let Some(draft_pane) = model.mailbox_draft() else {
+        return;
+    };
+    match draft_pane {
+        UiMailboxDraftPane::Loading { target } => frame.render_widget(
+            Paragraph::new(format!("Loading {} draft…", draft_target_label(target))).block(
+                Block::new()
+                    .borders(borders)
+                    .border_style(theme.style(UiThemeRole::BorderFocused))
+                    .title(" Draft "),
+            ),
+            area,
+        ),
+        UiMailboxDraftPane::Editing {
+            draft,
+            dirty,
+            submitting,
+            closing,
+        } => {
+            let status = if *closing {
+                "saving and closing"
+            } else if *submitting {
+                "sending"
+            } else if *dirty {
+                "saving"
+            } else {
+                "saved"
+            };
+            let block = Block::new()
+                .borders(borders)
+                .border_style(theme.style(if model.focus() == UiFocus::Draft {
+                    UiThemeRole::BorderFocused
+                } else {
+                    UiThemeRole::BorderUnfocused
+                }))
+                .title(format!(
+                    " {} · {status} · {}/{} bytes ",
+                    draft_target_label(&draft.target),
+                    draft.content.len(),
+                    MAX_DRAFT_BYTES
+                ));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            let [text_area, hint] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+            let cursor = model.message_field_cursor(&draft.content);
+            let mut content = draft.content.clone();
+            if model.focus() == UiFocus::Draft {
+                content.insert(cursor, '│');
+            }
+            frame.render_widget(
+                Paragraph::new(content)
+                    .style(theme.style(UiThemeRole::Input))
+                    .wrap(Wrap { trim: false }),
+                text_area,
+            );
+            let hint_text = model
+                .message_field_error()
+                .unwrap_or("Enter send · Esc save and close");
+            frame.render_widget(
+                Paragraph::new(hint_text).style(if model.message_field_error().is_some() {
+                    theme.style(UiThemeRole::Error)
+                } else {
+                    theme.style(UiThemeRole::Footer)
+                }),
+                hint,
+            );
+        }
     }
 }
 
@@ -3272,6 +3283,8 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         format!(" Done · {notice}")
     } else if let Some(hint) = model.transient_help() {
         format!(" Hint · {hint}")
+    } else if model.focus() == UiFocus::Draft {
+        " Enter send · Esc save and close · ? help · q quit".to_owned()
     } else if model.focus() == UiFocus::Navigation && model.viewport().width >= WIDE_WIDTH {
         " ↑/↓ or j/k section · Enter content · ? help · q quit".to_owned()
     } else if model.focus() == UiFocus::Navigation {
@@ -3318,7 +3331,15 @@ fn conversation_footer(model: &UiModel) -> String {
     } else {
         "j/k msg"
     }];
-    if selected
+    if matches!(
+        model
+            .selected_row_data()
+            .and_then(|row| row.conversation_target),
+        Some(crate::model::UiConversationTarget::Project { .. })
+    ) {
+        controls.push("r continue");
+        controls.push("c new conversation");
+    } else if selected
         .and_then(|entry| entry.message_target)
         .is_some_and(|target| target.reply_allowed)
     {

@@ -86,7 +86,7 @@ semantic catalog and reducer; the protocol accepts only role names applicable to
 | FCT-013 | 13 | HumanDeviceAccepted | hq/canonical | `{"account":hex,"grant":hex,"device":installation-address}` | exact grant/device/account; verified author equals invited device address; account scope agrees |
 | FCT-014 | 14 | HumanDeviceRevoked | hq/canonical | `{"account":hex,"grant":hex,"device":hex}` | account, target grant, and device installation ID; account scope agrees |
 | FCT-015 | 15 | QuestionAsked | hq/canonical | `message` | maps all message fields; purpose must be `question`; root has no thread body field; scope agrees with sender/recipient/audience |
-| FCT-016 | 16 | AsynchronousMessageSent | hq/canonical | `message` | maps all message fields; purpose must be `asynchronous`; scope agrees with sender/recipient/audience |
+| FCT-016 | 16 | AsynchronousMessageSent | hq/canonical | `{"thread":hex-or-null,"message":message}` | maps all message fields; purpose must be `asynchronous`; null thread initiates a root, while a non-null thread cites and exactly matches an existing project root; scope agrees with sender/recipient/audience |
 | FCT-017 | 17 | AnswerGiven | hq/canonical | `{"thread":hex,"message":message}` | thread ID and all message fields; message route reverses the cited question's authorized route |
 | FCT-018 | 18 | ThreadCancelled | hq/canonical | `{"thread":hex,"reason":optional-content}` | question thread ID and inert optional reason |
 | FCT-019 | 19 | MessageArchived | hq/canonical | `{"message":hex}` | target message ID |

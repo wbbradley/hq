@@ -340,8 +340,11 @@ pub enum SemanticPayload {
     },
     /// FCT-015.
     QuestionAsked(MessageContent),
-    /// FCT-016.
-    AsynchronousMessageSent(MessageContent),
+    /// FCT-016. An absent thread starts an exchange; a present thread continues it.
+    AsynchronousMessageSent {
+        thread_id: Option<ThreadId>,
+        message: MessageContent,
+    },
     /// FCT-017.
     AnswerGiven {
         thread_id: ThreadId,
@@ -564,7 +567,7 @@ impl SemanticPayload {
             Self::HumanDeviceAccepted { .. } => FactKind::HumanDeviceAccepted,
             Self::HumanDeviceRevoked { .. } => FactKind::HumanDeviceRevoked,
             Self::QuestionAsked(_) => FactKind::QuestionAsked,
-            Self::AsynchronousMessageSent(_) => FactKind::AsynchronousMessageSent,
+            Self::AsynchronousMessageSent { .. } => FactKind::AsynchronousMessageSent,
             Self::AnswerGiven { .. } => FactKind::AnswerGiven,
             Self::ThreadCancelled { .. } => FactKind::ThreadCancelled,
             Self::MessageArchived { .. } => FactKind::MessageArchived,
@@ -678,7 +681,7 @@ impl SemanticFact {
             {
                 return Err(SemanticFactError::PayloadInvariant);
             }
-            SemanticPayload::AsynchronousMessageSent(message)
+            SemanticPayload::AsynchronousMessageSent { message, .. }
                 if message.purpose != MessagePurpose::Asynchronous =>
             {
                 return Err(SemanticFactError::PayloadInvariant);

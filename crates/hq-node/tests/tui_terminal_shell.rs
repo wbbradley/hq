@@ -17,8 +17,8 @@ use hq_node::{
     TuiTerminalEvent, TuiTerminalPort, normalize_crossterm_event, run_tui_shell,
 };
 use hq_tui::{
-    UiFailure, UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget,
-    UiModel, UiSize, UiSnapshot,
+    UiFailure, UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft,
+    UiMailboxDraftTarget, UiModel, UiSize, UiSnapshot,
 };
 
 #[test]
@@ -314,7 +314,7 @@ impl TuiClientPort for EmptyClient {
         &mut self,
         _draft: Option<UiMailboxDraft>,
         _action: UiMailboxAction,
-    ) -> Result<u64, UiFailure> {
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
         Err(test_failure())
     }
 
@@ -354,7 +354,7 @@ impl TuiClientPort for PanickingClient {
         &mut self,
         _draft: Option<UiMailboxDraft>,
         _action: UiMailboxAction,
-    ) -> Result<u64, UiFailure> {
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
         panic!("scripted client failure")
     }
 

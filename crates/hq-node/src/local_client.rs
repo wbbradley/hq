@@ -325,10 +325,6 @@ pub(crate) enum LocalProjectCommand {
         branch: String,
         base: Option<String>,
     },
-    SendInput {
-        project_id: [u8; 32],
-        content: String,
-    },
     PreviewAddResource {
         project_id: [u8; 32],
         path: String,
@@ -512,13 +508,6 @@ pub(crate) fn execute_project_command(
                 .map_err(|_| CliError::Arguments)?,
             home: None,
         }),
-        LocalProjectCommand::SendInput {
-            project_id,
-            content,
-        } => ProjectCliCommand::Send {
-            project_id: ProjectId::from_bytes(*project_id),
-            body: Some(ContentText::new(content.clone()).map_err(|_| CliError::Arguments)?),
-        },
         LocalProjectCommand::AddResource {
             project_id,
             path,

@@ -566,6 +566,11 @@ object!(AnswerGivenDto {
     thread: Hex32,
     message: MessageDto,
 });
+object!(AsynchronousMessageSentDto {
+    #[serde(deserialize_with = "deserialize_required_option")]
+    thread: RequiredOption<Hex32>,
+    message: MessageDto,
+});
 object!(ThreadCancelledDto {
     thread: Hex32,
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -763,7 +768,7 @@ pub(super) enum BodyDto {
     HumanDeviceAccepted(HumanDeviceAcceptedDto),
     HumanDeviceRevoked(HumanDeviceRevokedDto),
     QuestionAsked(MessageDto),
-    AsynchronousMessageSent(MessageDto),
+    AsynchronousMessageSent(AsynchronousMessageSentDto),
     AnswerGiven(AnswerGivenDto),
     ThreadCancelled(ThreadCancelledDto),
     MessageArchived(MessageTargetDto),

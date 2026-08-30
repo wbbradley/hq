@@ -76,7 +76,13 @@ pub fn valid_bodies() -> [(u64, String); 48] {
             format!(r#"{{"account":"{C}","grant":"{D}","device":"{A}"}}"#),
         ),
         (15, message("question", "null", B)),
-        (16, message("asynchronous", "null", B)),
+        (
+            16,
+            format!(
+                r#"{{"thread":null,"message":{}}}"#,
+                message("asynchronous", "null", B)
+            ),
+        ),
         (
             17,
             format!(
