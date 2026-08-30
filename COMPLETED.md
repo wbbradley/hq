@@ -1,5 +1,46 @@
 # Completed
 
+## 2026-08-29 — Typed provider choices
+
+Added a bounded, passive provider catalog from the harness registry through the application and
+local-API boundaries into the TUI presentation snapshot. Catalog entries carry stable provider
+identity, a user-facing name, current availability, and configured-default status without exposing
+provider handles or coupling the TUI to Codex. A stale configured default remains visible as an
+unavailable entry so configuration drift can be explained instead of silently hidden.
+
+Removed free-text provider namespace editing from ordinary managed-agent and project activation or
+handoff workflows. One available agent service is used automatically; several render a typed
+chooser that prefers the available configured default and skips unavailable entries; none render
+actionable setup guidance and cannot submit. Catalog refresh replaces a vanished choice with a
+current valid one and reports the change, while exact saved-conversation resumes retain their
+historical provider/session identity and technical views retain raw evidence.
+
+Protocol, routing, registry, node mapper, pure model, responsive render, and installed terminal
+tests cover empty, single, multiple, unavailable, defaulted, and stale catalogs. Documentation now
+defines the catalog as node-local passive metadata and records the shared selection policy.
+Formatting, architecture verification, qualification-evidence validation, strict workspace Clippy,
+locked workspace check/test/build, all HQ TUI targets, and all nine installed TUI pseudoterminal
+workflows pass.
+
+### Original plan entry
+
+### Expose providers as typed available choices
+
+Remove every free-text provider namespace field from ordinary TUI workflows.
+
+- Add a passive provider catalog to the node/TUI boundary, sourced from the providers actually
+  registered and available to the running installation. Include stable identity, user-facing name,
+  availability, and the configured default without coupling the pure TUI model to a concrete
+  provider implementation.
+- Render a choice control when several providers are available, select the configured default when
+  possible, automatically use the only available provider, and show an explanatory empty state when
+  none are available. Never ask the user to guess that `codex` is valid.
+- Keep raw provider namespaces and exact session identities in technical details and advanced session
+  administration. Design the catalog protocol so adding providers extends the list rather than the
+  form grammar.
+- Cover zero, one, several, unavailable, defaulted, and stale-provider cases with protocol,
+  mapper, model, and render tests.
+
 ## 2026-08-29 — Project creation centered on resource ownership
 
 Replaced the two competing project-creation entry points with one `Create project` chooser. Its

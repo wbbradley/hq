@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, fmt};
 use hq_domain::{
     AgentId, CommandDigest, ContentText, FactId, OperationId, Page, PageCursor, ProjectId,
     ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator, Revision,
-    Timestamp,
+    ShortText, Timestamp,
 };
 
 /// Passive exact canonical evidence crossing an adapter boundary.
@@ -36,6 +36,59 @@ use crate::{
 
 /// Maximum relay policies in one bounded application observation.
 pub const MAX_RELAY_STATUS_POLICIES: usize = 256;
+/// Maximum provider registrations in one passive application observation.
+pub const MAX_PROVIDER_CATALOG_ITEMS: usize = 32;
+
+/// One neutral provider registration suitable for user choice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderAvailability {
+    /// Stable neutral provider identity.
+    pub provider: ProviderId,
+    /// User-facing provider name.
+    pub name: ShortText,
+    /// Whether new sessions can currently be started.
+    pub available: bool,
+}
+
+/// Complete bounded provider catalog for one running installation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderCatalog {
+    /// Provider registrations in stable identity order.
+    pub providers: Vec<ProviderAvailability>,
+    /// Installation-local configured preference, including stale identities.
+    pub default_provider: Option<ProviderId>,
+}
+
+impl ProviderCatalog {
+    /// Constructs a bounded, uniquely ordered passive catalog.
+    pub fn new(
+        providers: Vec<ProviderAvailability>,
+        default_provider: Option<ProviderId>,
+    ) -> Result<Self, ApplicationValueError> {
+        if providers.len() > MAX_PROVIDER_CATALOG_ITEMS {
+            return Err(ApplicationValueError::TooManyItems {
+                maximum: MAX_PROVIDER_CATALOG_ITEMS,
+                actual: providers.len(),
+            });
+        }
+        if providers
+            .windows(2)
+            .any(|pair| pair[0].provider >= pair[1].provider)
+        {
+            return Err(ApplicationValueError::InvalidEncoding);
+        }
+        Ok(Self {
+            providers,
+            default_provider,
+        })
+    }
+}
+
+/// Read-only runtime-provider discovery capability.
+pub trait QueryProviders {
+    /// Loads providers registered with the running installation and its configured preference.
+    fn provider_catalog(&self) -> Result<ProviderCatalog, ApplicationError>;
+}
 
 /// Query capability expressed in normalized semantic values rather than storage operations.
 pub trait QueryDomain {
@@ -657,6 +710,7 @@ pub trait ApplicationPorts:
     + ControlMailbox
     + PublishWake
     + ConfigureRelays
+    + QueryProviders
     + ControlHarness
     + crate::ControlProjects
     + crate::RetireAgents

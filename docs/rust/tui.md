@@ -112,8 +112,12 @@ takeover, and Escape cancels without mutation. In-flight create, rename, and ret
 not discarded during reconnect. Rejected, stale, conflicted, retired, or uncertain outcomes retain
 the exact modal inputs and expose a stable failure code plus a corrective action.
 
-Agent details also use `s` to start on an explicit provider, `e` to resume exactly the highlighted
-provider/session, and `t` to stop that provider's local runtime without erasing durable history.
+Agent details also use `s` to start through a typed agent-service choice, `e` to resume exactly the
+highlighted provider/session, and `t` to stop that provider's local runtime without erasing durable
+history. One available service is selected automatically; several open a chooser with the
+configured default selected when available; none open an explanatory setup state. Unavailable
+entries are visible context but cannot be selected, and ordinary input never accepts a raw provider
+namespace.
 Starting while a durable selection exists, or resuming a different durable session, requires an
 explicit switch confirmation. This is deliberately conservative: the presentation never treats a
 durable selection or `runnable` catalog flag as evidence that a process is currently live.
@@ -134,8 +138,9 @@ incremental frame decoder so a read timeout cannot discard a partial frame. Reco
 queued against monotonic deadlines across short shell polls. Every negotiated generation registers
 the broad invalidation subscription before its acknowledged authoritative snapshot is exposed.
 
-`LocalTuiClient` maps each complete authoritative local API snapshot into one presentation bundle
-containing Inbox, Sent, Archived, Agents, and Projects. Section navigation selects an already
+`LocalTuiClient` joins each complete authoritative local API snapshot with the passive node-local
+provider catalog and maps them into one presentation bundle containing Inbox, Sent, Archived,
+Agents, Projects, and typed provider choices. Section navigation selects an already
 mapped slice and performs no client request, so it never replaces visible content with a loading
 state. Invalidation and periodic repair load a replacement bundle in the background while the
 previous complete bundle remains visible. Conversation summaries carry store-derived open,
@@ -149,6 +154,13 @@ named, uniquely bound, non-retired agent mailboxes as passive direct-target cand
 is canonical local-API data, while the other is a small complete navigation cache containing only
 safe rendering fields. Neither is a storage compatibility shape, and both passive records expose
 their fields directly.
+
+Provider choices follow one policy in both managed-agent and project-work forms: choose the
+available configured default, otherwise the first available stable catalog entry; use it without a
+dialog when it is the only choice; and block submission with setup guidance when no choice is
+available. Refresh replaces a vanished or newly unavailable choice and reports that change, while
+an exact saved-conversation resume retains its historical provider identity. Raw namespaces remain
+visible only in technical details and advanced session administration.
 
 For the Agents section, the mapper reuses the installed named-agent catalog projection rather than
 reimplementing binding, selection, or display-name reduction. Exact provider/session identities

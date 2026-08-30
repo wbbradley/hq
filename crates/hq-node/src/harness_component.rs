@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 
 use hq_application::{
     AgentSessionResult, ApplicationError, ApplicationErrorCode, ControlHarness, EffectOutcome,
-    EffectRequest, SessionControl,
+    EffectRequest, ProviderAvailability, ProviderCatalog, QueryProviders, SessionControl,
 };
 use hq_harness::{
     HarnessActivity, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEnvironment,
@@ -35,6 +35,7 @@ pub struct HarnessNodeComponent {
 struct HarnessNodeInner {
     config: HarnessSupervisorConfig,
     dependencies: HarnessSupervisorDependencies,
+    default_provider: Option<hq_domain::ProviderId>,
     canonical: Arc<dyn AgentSessionCanonicalPort>,
     supervisor: Mutex<Option<HarnessSupervisor>>,
     event_task: Mutex<Option<JoinHandle<Result<(), HarnessError>>>>,
@@ -58,6 +59,30 @@ impl HarnessNodeComponent {
         tokens: Arc<dyn HarnessTokenSource>,
         canonical: Arc<dyn AgentSessionCanonicalPort>,
     ) -> Self {
+        Self::new_with_default(
+            config,
+            store,
+            registry,
+            persistence,
+            clock,
+            tokens,
+            canonical,
+            None,
+        )
+    }
+
+    /// Composes the supervisor with one installation-local configured provider preference.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_default(
+        config: HarnessSupervisorConfig,
+        store: &Store,
+        registry: Arc<HarnessRegistry>,
+        persistence: Arc<dyn HarnessPersistencePort>,
+        clock: Arc<dyn HarnessClock>,
+        tokens: Arc<dyn HarnessTokenSource>,
+        canonical: Arc<dyn AgentSessionCanonicalPort>,
+        default_provider: Option<hq_domain::ProviderId>,
+    ) -> Self {
         Self {
             inner: Arc::new(HarnessNodeInner {
                 config,
@@ -68,6 +93,7 @@ impl HarnessNodeComponent {
                     clock,
                     tokens,
                 },
+                default_provider,
                 canonical,
                 supervisor: Mutex::new(None),
                 event_task: Mutex::new(None),
@@ -111,7 +137,24 @@ impl HarnessNodeComponent {
         persistence: Arc<dyn HarnessPersistencePort>,
         canonical: Arc<dyn AgentSessionCanonicalPort>,
     ) -> Self {
-        Self::new(
+        Self::with_registry_persistence_canonical_and_default(
+            store,
+            registry,
+            persistence,
+            canonical,
+            None,
+        )
+    }
+
+    /// Composes the foreground supervisor with its configured provider preference.
+    pub fn with_registry_persistence_canonical_and_default(
+        store: &Store,
+        registry: Arc<HarnessRegistry>,
+        persistence: Arc<dyn HarnessPersistencePort>,
+        canonical: Arc<dyn AgentSessionCanonicalPort>,
+        default_provider: Option<hq_domain::ProviderId>,
+    ) -> Self {
+        Self::new_with_default(
             HarnessSupervisorConfig::default(),
             store,
             registry,
@@ -119,6 +162,7 @@ impl HarnessNodeComponent {
             Arc::new(SystemHarnessClock),
             Arc::new(RandomHarnessTokens),
             canonical,
+            default_provider,
         )
     }
 
@@ -519,6 +563,39 @@ impl ControlHarness for HarnessNodeComponent {
     }
 }
 
+impl QueryProviders for HarnessNodeComponent {
+    fn provider_catalog(&self) -> Result<ProviderCatalog, ApplicationError> {
+        let mut providers = self
+            .inner
+            .dependencies
+            .registry
+            .provider_catalog()
+            .into_iter()
+            .map(|provider| ProviderAvailability {
+                provider: provider.provider,
+                name: provider.name,
+                available: true,
+            })
+            .collect::<Vec<_>>();
+        if let Some(default_provider) = &self.inner.default_provider
+            && !providers
+                .iter()
+                .any(|candidate| candidate.provider == *default_provider)
+        {
+            let name = hq_domain::ShortText::new(default_provider.as_str())
+                .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvariantViolation))?;
+            providers.push(ProviderAvailability {
+                provider: default_provider.clone(),
+                name,
+                available: false,
+            });
+            providers.sort_by(|left, right| left.provider.cmp(&right.provider));
+        }
+        ProviderCatalog::new(providers, self.inner.default_provider.clone())
+            .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvariantViolation))
+    }
+}
+
 fn copy_launch_environment(
     source: &hq_application::LaunchEnvironment,
 ) -> Result<HarnessEnvironment, ApplicationError> {
@@ -736,6 +813,38 @@ mod tests {
         retained.submission.digest = request.request_digest;
         retained.submission.body = ContentText::new("changed").expect("body");
         assert!(!same_project_delivery(&request, &retained));
+    }
+
+    #[test]
+    fn provider_catalog_exposes_empty_and_stale_configured_states_without_adapter_details() {
+        let database = TestDatabase::new();
+        let store = Store::open(&database.path, NonZeroUsize::MIN).expect("store opens");
+        let empty = HarnessNodeComponent::without_providers(&store);
+        assert!(
+            empty
+                .provider_catalog()
+                .expect("empty catalog")
+                .providers
+                .is_empty()
+        );
+
+        let stale_id = ProviderId::new("removed").expect("provider");
+        let stale = HarnessNodeComponent::new_with_default(
+            HarnessSupervisorConfig::default(),
+            &store,
+            Arc::new(HarnessRegistry::new()),
+            Arc::new(UnavailableHarnessPersistence),
+            Arc::new(SystemHarnessClock),
+            Arc::new(RandomHarnessTokens),
+            Arc::new(UnavailableAgentSessionCanonical),
+            Some(stale_id.clone()),
+        );
+        let catalog = stale.provider_catalog().expect("stale default catalog");
+        assert_eq!(catalog.default_provider, Some(stale_id.clone()));
+        assert!(matches!(
+            catalog.providers.as_slice(),
+            [ProviderAvailability { provider, available: false, .. }] if provider == &stale_id
+        ));
     }
 
     #[test]

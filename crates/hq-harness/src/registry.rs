@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use hq_domain::ProviderId;
+use hq_domain::{ProviderId, ShortText};
 
 use crate::{
     HarnessCapabilities, HarnessCapability, HarnessError, HarnessErrorClass, HarnessFactory,
@@ -10,8 +10,18 @@ use crate::{
 };
 
 struct RegisteredProvider {
+    name: ShortText,
     capabilities: HarnessCapabilities,
     factory: Arc<dyn HarnessFactory>,
+}
+
+/// Passive metadata for one registered provider adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisteredProviderView {
+    /// Stable provider namespace.
+    pub provider: ProviderId,
+    /// User-facing provider name.
+    pub name: ShortText,
 }
 
 /// Provider-neutral factory registry owned by the node composition root.
@@ -35,6 +45,19 @@ impl HarnessRegistry {
         capabilities: HarnessCapabilities,
         factory: Arc<dyn HarnessFactory>,
     ) -> Result<(), HarnessError> {
+        let name = ShortText::new(provider_id.as_str())
+            .map_err(|_| HarnessError::new(HarnessErrorClass::InvalidInput))?;
+        self.register_named(provider_id, name, capabilities, factory)
+    }
+
+    /// Registers one named provider for passive presentation and session control.
+    pub fn register_named(
+        &mut self,
+        provider_id: ProviderId,
+        name: ShortText,
+        capabilities: HarnessCapabilities,
+        factory: Arc<dyn HarnessFactory>,
+    ) -> Result<(), HarnessError> {
         if !has_safe_submission_recovery(&capabilities) {
             return Err(HarnessError::new(HarnessErrorClass::UnsafeRecovery));
         }
@@ -44,11 +67,23 @@ impl HarnessRegistry {
         self.providers.insert(
             provider_id,
             RegisteredProvider {
+                name,
                 capabilities,
                 factory,
             },
         );
         Ok(())
+    }
+
+    /// Returns stable passive metadata for every registered provider.
+    pub fn provider_catalog(&self) -> Vec<RegisteredProviderView> {
+        self.providers
+            .iter()
+            .map(|(provider, registration)| RegisteredProviderView {
+                provider: provider.clone(),
+                name: registration.name.clone(),
+            })
+            .collect()
     }
 
     /// Returns the declared capabilities for one registered provider.

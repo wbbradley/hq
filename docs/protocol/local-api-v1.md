@@ -52,6 +52,7 @@ All limits are inclusive. A larger value is rejected before it can become applic
 | invalidation topics | 6, nonempty, sorted, unique |
 | authoritative snapshot | 16,384 projection items |
 | canonical evidence transfer | 64 exact events and 524,288 aggregate event bytes |
+| provider catalog | 32 entries, sorted and unique by provider namespace |
 | provider namespace | 64 bytes, nonempty |
 | provider session | 256 bytes, nonempty |
 | launch environment | 512 entries and 1,048,576 aggregate name/value bytes |
@@ -100,6 +101,7 @@ Request methods are closed and typed:
 - bounded exact canonical-evidence closure query and reverified idempotent import;
 - relay configuration and explicit synchronization effects, bounded relay/delivery status, domain
   health, and explicit repair;
+- passive provider catalog;
 - provider-neutral named-agent session control;
 - exact node-owned named-agent retirement;
 - read-only resource inspection;
@@ -109,10 +111,16 @@ Request methods are closed and typed:
 
 Successful response families are lifecycle status, authoritative snapshot, conversation page,
 mutation attempt, canonical evidence, evidence-ingest outcomes, empty external effect,
-relay status, four-domain state health, explicit repair report, agent-session effect,
+relay status, four-domain state health, explicit repair report, provider catalog, agent-session effect,
 resource-inspection effect, typed project-command progress, named-agent-retirement progress,
 subscription acknowledgement, and empty acknowledgement. Errors carry a closed class, stable code,
 and optional bounded inert detail. Machine behavior depends on class/code, never detail text.
+
+The provider catalog is node-local, passive presentation metadata rather than canonical domain
+state. Each sorted entry contains a stable provider namespace, a user-facing name, and current
+availability. An optional configured default may name a catalog entry or a no-longer-registered
+provider; retaining that stale identity lets clients explain the configuration problem instead of
+silently choosing a different namespace. Catalog observation grants no session-control authority.
 
 External effects retain their stable operation ID, exact request digest, issue time, and typed body.
 Their result is `accepted`, `rejected`, or `uncertain`. An uncertain effect must be reconciled under

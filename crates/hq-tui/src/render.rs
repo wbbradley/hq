@@ -17,7 +17,7 @@ use crate::{
     UiHumanMembershipStatus, UiHumanState, UiMailboxAction, UiMailboxDraftTarget, UiMailboxModal,
     UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel, UiProjectAction,
     UiProjectCreationChoice, UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread,
-    UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, model::WIDE_WIDTH,
+    UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -806,6 +806,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         UiProjectModal::Activate {
             project,
             agents,
+            providers,
             agent_id,
             thread,
             new_session,
@@ -818,6 +819,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             project_activation_lines(
                 project,
                 agents,
+                providers,
                 *agent_id,
                 thread.as_ref(),
                 *new_session,
@@ -833,6 +835,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         UiProjectModal::Handoff {
             project,
             agents,
+            providers,
             agent_id,
             thread,
             new_session,
@@ -847,6 +850,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             project_activation_lines(
                 project,
                 agents,
+                providers,
                 *agent_id,
                 thread.as_ref(),
                 *new_session,
@@ -1215,10 +1219,27 @@ fn push_project_text_field(
     }
 }
 
+fn provider_choice_label(providers: &[UiProvider], selected: &str) -> String {
+    providers
+        .iter()
+        .find(|provider| provider.provider == selected)
+        .map_or_else(
+            || "none available".to_owned(),
+            |provider| {
+                if provider.configured_default {
+                    format!("{} · default", provider.name)
+                } else {
+                    provider.name.clone()
+                }
+            },
+        )
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn project_activation_lines<'value>(
     project: &'value crate::UiProject,
     agents: &'value [UiAgent],
+    providers: &'value [UiProvider],
     agent_id: Option<[u8; 32]>,
     thread: Option<&'value UiProjectThread>,
     new_session: bool,
@@ -1292,18 +1313,29 @@ fn project_activation_lines<'value>(
             ));
         }
     }
-    lines.push(project_text_field_line(
-        model,
+    let provider_label = if new_session {
+        provider_choice_label(providers, provider)
+    } else {
+        "from the saved conversation".to_owned()
+    };
+    lines.push(project_choice_line(
         "Agent service",
-        provider,
-        UiProjectFormField::Provider,
-        field == UiProjectFormField::Provider,
-        true,
+        &provider_label,
+        new_session && field == UiProjectFormField::Provider,
     ));
     if let Some(error) = model.project_field_error(UiProjectFormField::Provider) {
         lines.push(Line::styled(
             format!("  {error}"),
             Style::new().fg(Color::Red),
+        ));
+    }
+    if new_session && !providers.iter().any(|provider| provider.available) {
+        lines.push(Line::styled(
+            "  No agent services are available on this device.",
+            Style::new().fg(Color::Yellow),
+        ));
+        lines.push(Line::from(
+            "  Configure or install a provider, then reload HQ.",
         ));
     }
     lines.push(project_text_field_line(
@@ -1645,26 +1677,57 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 ],
             )
         }
-        UiAgentModal::ManagedProvider { provider, .. } => (
-            " Start an agent conversation ",
-            vec![
-                text_field_line(
-                    "Agent service",
-                    provider,
-                    model.provider_field_cursor(provider),
-                    true,
-                    "(required)",
-                ),
-                Line::from("This service will run the agent's conversation."),
-                Line::from(
-                    model
-                        .provider_field_error()
-                        .unwrap_or("Choose one of the services available on this device."),
-                ),
-                Line::default(),
-                Line::from("Enter continue · Esc cancel"),
-            ],
-        ),
+        UiAgentModal::ManagedProvider {
+            providers,
+            selected,
+            ..
+        } => {
+            let mut lines = vec![Line::from(
+                "Choose the service that will run this agent's new conversation.",
+            )];
+            lines.push(Line::default());
+            for provider in providers {
+                let mut status = String::new();
+                if provider.configured_default {
+                    status.push_str(" · configured default");
+                }
+                if !provider.available {
+                    status.push_str(" · unavailable");
+                }
+                let is_selected = selected.as_deref() == Some(provider.provider.as_str());
+                lines.push(Line::styled(
+                    format!(
+                        " {} {}{}",
+                        if is_selected { '›' } else { ' ' },
+                        provider.name,
+                        status
+                    ),
+                    if is_selected {
+                        selected_style(true)
+                    } else if provider.available {
+                        Style::new()
+                    } else {
+                        Style::new().fg(Color::DarkGray)
+                    },
+                ));
+            }
+            if !providers.iter().any(|provider| provider.available) {
+                lines.push(Line::styled(
+                    "No agent services are available on this device.",
+                    Style::new().fg(Color::Yellow).bold(),
+                ));
+                lines.push(Line::from(
+                    "Configure or install a provider, then reload HQ.",
+                ));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from(if selected.is_some() {
+                "↑/↓ choose · Enter continue · Esc cancel"
+            } else {
+                "Esc cancel"
+            }));
+            (" Start an agent conversation ", lines)
+        }
         UiAgentModal::ConfirmManagedSession { action, .. } => (
             " Switch the agent's conversation? ",
             vec![

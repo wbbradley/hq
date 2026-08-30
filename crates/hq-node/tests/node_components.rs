@@ -171,6 +171,15 @@ impl ControlHarness for FakeComponent {
     }
 }
 
+impl hq_application::QueryProviders for FakeComponent {
+    fn provider_catalog(&self) -> Result<hq_application::ProviderCatalog, ApplicationError> {
+        self.record("provider-catalog");
+        Err(ApplicationError::new(
+            ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
+
 impl InspectResource for FakeComponent {
     fn inspect_resource(
         &self,

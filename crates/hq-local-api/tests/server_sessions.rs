@@ -202,6 +202,16 @@ impl hq_application::ControlHarness for Ports {
     }
 }
 
+impl hq_application::QueryProviders for Ports {
+    fn provider_catalog(&self) -> Result<hq_application::ProviderCatalog, ApplicationError> {
+        self.trace.borrow_mut().push("provider_catalog");
+        Ok(hq_application::ProviderCatalog {
+            providers: Vec::new(),
+            default_provider: None,
+        })
+    }
+}
+
 impl InspectResource for Ports {
     fn inspect_resource(
         &self,
@@ -645,6 +655,22 @@ fn every_typed_request_family_routes_without_storage_types() {
             .confirm_written(outbound.ticket())
             .expect("response written");
     }
+}
+
+#[test]
+fn provider_catalog_request_routes_without_storage_types() {
+    let hub = RevisionHub::new(4).expect("capacity");
+    let (mut server, application) = session(hub);
+    negotiate(&mut server, &application);
+
+    let outbound = server
+        .receive(
+            request(1, Request::ProviderCatalog),
+            &application,
+            &Lifecycle,
+        )
+        .expect("route succeeds");
+    assert_success(&outbound);
 }
 
 #[test]

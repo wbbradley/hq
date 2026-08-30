@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use hq_domain::{AgentId, ProviderId, ProviderSessionId};
+use hq_domain::{AgentId, ProviderId, ProviderSessionId, ShortText};
 use hq_harness::{
     HarnessCapabilities, HarnessCapability, HarnessDrainOutcome, HarnessError, HarnessErrorClass,
     HarnessEventPoll, HarnessFactory, HarnessInstance, HarnessInstanceRequest, HarnessRegistry,
@@ -56,6 +56,26 @@ fn registration_rejects_unsafe_recovery_and_duplicate_provider_identity() {
         )
         .expect_err("duplicate provider rejects");
     assert_eq!(error.class, HarnessErrorClass::RegistrationConflict);
+}
+
+#[test]
+fn named_provider_catalog_is_stable_and_keeps_user_facing_names() {
+    let mut registry = HarnessRegistry::new();
+    for (provider_id, name) in [("zeta", "Zeta service"), ("alpha", "Alpha service")] {
+        registry
+            .register_named(
+                provider(provider_id),
+                ShortText::new(name).expect("provider name"),
+                safe_capabilities(),
+                Arc::new(StubFactory::new(session("session"))),
+            )
+            .expect("named provider registers");
+    }
+    let catalog = registry.provider_catalog();
+    assert_eq!(catalog[0].provider, provider("alpha"));
+    assert_eq!(catalog[0].name.as_str(), "Alpha service");
+    assert_eq!(catalog[1].provider, provider("zeta"));
+    assert_eq!(catalog[1].name.as_str(), "Zeta service");
 }
 
 #[test]

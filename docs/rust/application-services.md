@@ -135,6 +135,12 @@ details, typed health, an optional newly observed canonical locator, and an expl
 time. These passive request/result values expose fields directly. Observation alone grants no
 project authority; workflow owners turn accepted observations into canonical decisions.
 
+`QueryProviders` exposes a separate bounded, read-only catalog of provider registrations available
+to the running node. Its neutral records contain stable namespaces, user-facing names,
+availability, and the configured default; they contain no provider handles or launch authority.
+The harness registry supplies the registrations and the node joins configuration metadata, so the
+application and TUI remain decoupled from Codex or any future concrete provider implementation.
+
 ## Project lifecycle workflows
 
 `hq-projects` composes five narrow capabilities: durable saga checkpoints, transaction-consistent

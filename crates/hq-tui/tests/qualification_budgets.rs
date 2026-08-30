@@ -54,6 +54,7 @@ fn invalidation_of_a_large_ready_model_requests_redraw_within_the_declared_budge
         agent_rows: Vec::new(),
         project_rows: Vec::new(),
         direct_targets: Vec::new(),
+        providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
     };

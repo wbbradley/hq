@@ -114,8 +114,9 @@ where
         frame_capacity: config.frame_capacity,
     })?);
     let mut registry = HarnessRegistry::new();
-    registry.register(
+    registry.register_named(
         ProviderId::new(CODEX_PROVIDER_ID).map_err(|_| invalid_input())?,
+        hq_domain::ShortText::new("Codex").map_err(|_| invalid_input())?,
         CodexFactory::capabilities(),
         factory,
     )?;
@@ -264,6 +265,10 @@ mod tests {
                 .supported
                 .contains(&HarnessCapability::ResumeSessions)
         );
+        let catalog = registry.provider_catalog();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].provider.as_str(), CODEX_PROVIDER_ID);
+        assert_eq!(catalog[0].name.as_str(), "Codex");
 
         let resolver = ForegroundCodexLaunchResolver {
             query: query(agent_id, AgentLifecycle::Retired),

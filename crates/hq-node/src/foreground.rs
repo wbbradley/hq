@@ -178,11 +178,12 @@ fn open_generation(
         reserved_human_mailbox(),
         Arc::new(crate::harness_component::SystemHarnessClock),
     ));
-    let harness = HarnessNodeComponent::with_registry_persistence_and_canonical(
+    let harness = HarnessNodeComponent::with_registry_persistence_canonical_and_default(
         store,
         Arc::new(registry),
         persistence,
         canonical,
+        foundation.configuration().default_provider.clone(),
     );
     let project = compose_standard_project_component(
         ProjectNodeConfig {
@@ -306,6 +307,12 @@ impl ControlHarness for DormantNodeComponent {
         &self,
         _request: &EffectRequest<AgentSessionRequest>,
     ) -> Result<EffectOutcome<AgentSessionResult>, ApplicationError> {
+        unavailable()
+    }
+}
+
+impl hq_application::QueryProviders for DormantNodeComponent {
+    fn provider_catalog(&self) -> Result<hq_application::ProviderCatalog, ApplicationError> {
         unavailable()
     }
 }

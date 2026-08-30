@@ -34,6 +34,8 @@ pub const MAX_CANONICAL_EVIDENCE_ITEMS: usize = 64;
 pub const MAX_CANONICAL_EVIDENCE_BYTES: usize = 512 * 1024;
 /// Maximum relay policies returned in one health observation.
 pub const MAX_RELAY_STATUS_POLICIES: usize = hq_application::MAX_RELAY_STATUS_POLICIES;
+/// Maximum provider registrations returned by one passive catalog query.
+pub const MAX_PROVIDER_CATALOG_ITEMS: usize = 32;
 
 const MUTATION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-mutation\0";
 const MAILBOX_COMMAND_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-mailbox-command\0";
@@ -1456,6 +1458,8 @@ pub enum Request {
     Lifecycle(LifecycleRequest),
     /// Load one complete authoritative client snapshot.
     AuthoritativeSnapshot,
+    /// Load providers registered with this running installation.
+    ProviderCatalog,
     /// Load one bounded reducer-ordered conversation page.
     ConversationPage(ConversationPageRequest),
     /// Load every bounded installation-local mailbox draft.
@@ -2078,6 +2082,60 @@ pub struct PeerRouteBlockDto {
     pub frontier_member: bool,
 }
 
+/// One provider registration exposed without concrete adapter details.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAvailabilityDto {
+    /// Stable neutral provider namespace.
+    pub provider: String,
+    /// User-facing provider name.
+    pub name: String,
+    /// Whether the running node can start new sessions with this provider.
+    pub available: bool,
+}
+
+impl ProviderAvailabilityDto {
+    /// Constructs one bounded provider presentation.
+    pub fn new(
+        provider: impl Into<String>,
+        name: impl Into<String>,
+        available: bool,
+    ) -> Result<Self, ValueError> {
+        let value = Self {
+            provider: provider.into(),
+            name: name.into(),
+            available,
+        };
+        validate_provider_availability(&value)?;
+        Ok(value)
+    }
+}
+
+/// Complete installation-local provider catalog and configured preference.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCatalogDto {
+    /// Provider registrations in stable namespace order.
+    pub providers: Vec<ProviderAvailabilityDto>,
+    /// Configured preference, including a stale value no longer registered.
+    pub default_provider: Option<String>,
+}
+
+impl ProviderCatalogDto {
+    /// Constructs one bounded, uniquely ordered provider catalog.
+    pub fn new(
+        providers: Vec<ProviderAvailabilityDto>,
+        default_provider: Option<String>,
+    ) -> Result<Self, ValueError> {
+        let value = Self {
+            providers,
+            default_provider,
+        };
+        validate_provider_catalog(&value)?;
+        Ok(value)
+    }
+}
+
 /// Complete revisioned client-facing authoritative snapshot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2408,6 +2466,8 @@ pub enum ResponseResult {
     Lifecycle(LifecycleStatus),
     /// Complete authoritative snapshot.
     AuthoritativeSnapshot(AuthoritativeSnapshotDto),
+    /// Passive provider registrations and configured preference.
+    ProviderCatalog(ProviderCatalogDto),
     /// Bounded conversation page.
     ConversationPage(ConversationPageDto),
     /// Every bounded installation-local mailbox draft.
@@ -2703,6 +2763,7 @@ impl WireMessage {
                 | Request::RetireAgent(_)
                 | Request::Lifecycle(_)
                 | Request::AuthoritativeSnapshot
+                | Request::ProviderCatalog
                 | Request::RelayStatus
                 | Request::StateHealth
                 | Request::RepairState { .. }
@@ -2717,6 +2778,29 @@ impl WireMessage {
             Self::Response(response) => validate_response(response),
         }
     }
+}
+
+fn validate_provider_availability(provider: &ProviderAvailabilityDto) -> Result<(), ValueError> {
+    validate_text(&provider.provider, PROVIDER_ID_MAX_BYTES)?;
+    validate_text(&provider.name, SHORT_TEXT_MAX_BYTES)
+}
+
+fn validate_provider_catalog(catalog: &ProviderCatalogDto) -> Result<(), ValueError> {
+    if catalog.providers.len() > MAX_PROVIDER_CATALOG_ITEMS
+        || catalog
+            .providers
+            .windows(2)
+            .any(|pair| pair[0].provider >= pair[1].provider)
+    {
+        return Err(ValueError::InvalidValueCombination);
+    }
+    for provider in &catalog.providers {
+        validate_provider_availability(provider)?;
+    }
+    if let Some(provider) = &catalog.default_provider {
+        validate_text(provider, PROVIDER_ID_MAX_BYTES)?;
+    }
+    Ok(())
 }
 
 fn validate_locator(locator: &ResourceLocatorDto) -> Result<(), ValueError> {
@@ -2742,6 +2826,9 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
         }
         Response::Success(ResponseResult::AuthoritativeSnapshot(snapshot)) => {
             validate_snapshot(snapshot)
+        }
+        Response::Success(ResponseResult::ProviderCatalog(catalog)) => {
+            validate_provider_catalog(catalog)
         }
         Response::Success(ResponseResult::ConversationPage(page)) => validate_page(page),
         Response::Success(ResponseResult::MailboxDrafts(drafts)) => {

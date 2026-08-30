@@ -292,6 +292,14 @@ impl<R, H: ControlHarness, P> ControlHarness for NodeApplicationPorts<'_, R, H, 
     }
 }
 
+impl<R, H: hq_application::QueryProviders, P> hq_application::QueryProviders
+    for NodeApplicationPorts<'_, R, H, P>
+{
+    fn provider_catalog(&self) -> Result<hq_application::ProviderCatalog, ApplicationError> {
+        self.harness.provider_catalog()
+    }
+}
+
 impl<R, H, P: InspectResource> InspectResource for NodeApplicationPorts<'_, R, H, P> {
     fn inspect_resource(
         &self,
@@ -342,7 +350,7 @@ impl<R, H, P> ObserveRevisions for NodeApplicationPorts<'_, R, H, P> {
 impl<R, H, P> ApplicationPorts for NodeApplicationPorts<'_, R, H, P>
 where
     R: PublishWake + ConfigureRelays,
-    H: ControlHarness,
+    H: ControlHarness + hq_application::QueryProviders,
     P: InspectResource + ControlProjects + RetireAgents + ReconcileProjectInputs,
 {
 }

@@ -166,7 +166,7 @@ fn installed_tui_agent_create_matches_cli_and_survives_restart() {
 }
 
 #[test]
-fn installed_tui_starts_explicit_provider_and_renders_typed_rejection() {
+fn installed_tui_automatically_uses_the_available_provider_and_renders_typed_failure() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     initialize_identity(&state_root);
@@ -192,9 +192,9 @@ fn installed_tui_starts_explicit_provider_and_renders_typed_rejection() {
     assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
     assert!(
         run.bytes
-            .windows(b"reason:".len())
-            .any(|window| window == b"reason:"),
-        "TUI did not render the typed rejected outcome: {:?}",
+            .windows(b"HQ could not confirm whether the change finished.".len())
+            .any(|window| window == b"HQ could not confirm whether the change finished."),
+        "TUI did not render the typed provider failure: {:?}",
         run.bytes
     );
     assert!(agent_exists(&state_root, "runtime-agent"));
@@ -553,6 +553,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         .stdin(stdin)
         .stdout(stdout)
         .stderr(stderr);
+    if matches!(interaction, PtyInteraction::StartRejectedSession) {
+        command.env("PATH", "/nonexistent");
+    }
     if explicit {
         command.arg("tui");
     }
@@ -937,21 +940,6 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             master.write_all(b"s").expect("managed start key writes");
             master.flush().expect("managed start key flushes");
             managed_action_sent = true;
-            completion_offset = Some(bytes.len());
-        }
-        if matches!(interaction, PtyInteraction::StartRejectedSession)
-            && managed_action_sent
-            && !managed_provider_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Agent service:".len())
-                    .any(|window| window == b"Agent service:")
-            })
-        {
-            master
-                .write_all(b"unregistered\r")
-                .expect("managed provider writes");
-            master.flush().expect("managed provider flushes");
             managed_provider_sent = true;
             completion_offset = Some(bytes.len());
         }

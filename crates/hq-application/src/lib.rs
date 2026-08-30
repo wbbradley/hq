@@ -62,11 +62,12 @@ pub use ports::{
     EffectOutcome, EffectRequest, EvidenceIngestOutcome, HealthDomain, InspectResource,
     LaunchEnvironment, MAX_LAUNCH_ENVIRONMENT_BYTES, MAX_LAUNCH_ENVIRONMENT_ENTRIES,
     MAX_LAUNCH_ENVIRONMENT_NAME_BYTES, MAX_LAUNCH_ENVIRONMENT_VALUE_BYTES,
-    MAX_RELAY_STATUS_POLICIES, MAX_SUBSCRIPTION_TOPICS, ObserveRevisions, PublishWake, QueryDomain,
-    RelayAccess, RelayAuthentication, RelayConfiguration, RelayPolicyStatus, RelayStatus,
-    ResourceInspectionRequest, ResourceInspectionResult, ResourceReleaseState, SessionControl,
-    StateHealth, StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
-    WakeDisposition,
+    MAX_PROVIDER_CATALOG_ITEMS, MAX_RELAY_STATUS_POLICIES, MAX_SUBSCRIPTION_TOPICS,
+    ObserveRevisions, ProviderAvailability, ProviderCatalog, PublishWake, QueryDomain,
+    QueryProviders, RelayAccess, RelayAuthentication, RelayConfiguration, RelayPolicyStatus,
+    RelayStatus, ResourceInspectionRequest, ResourceInspectionResult, ResourceReleaseState,
+    SessionControl, StateHealth, StateRepairReport, SubscriptionRequest, SubscriptionTopic,
+    SynchronizationRequest, WakeDisposition,
 };
 pub use project::{
     AgentRetirementOutcome, AgentRetirementRequest, ControlProjects, ProjectCommandAction,

@@ -20,7 +20,7 @@ pub use environment::{
     HarnessEnvironment, MAX_HARNESS_ENVIRONMENT_BYTES, MAX_HARNESS_ENVIRONMENT_ENTRIES,
     MAX_HARNESS_ENVIRONMENT_NAME_BYTES, MAX_HARNESS_ENVIRONMENT_VALUE_BYTES,
 };
-pub use registry::HarnessRegistry;
+pub use registry::{HarnessRegistry, RegisteredProviderView};
 pub use supervisor::{
     HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEventCheckpoint,
     HarnessEventPumpReport, HarnessLaunchRequest, HarnessLeaseOutcome, HarnessOwnerToken,

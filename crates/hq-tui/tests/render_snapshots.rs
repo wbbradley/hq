@@ -9,7 +9,7 @@ use hq_tui::{
     UiInput, UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiProject,
     UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
     UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
     UiTechnicalSection, render, update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
@@ -870,6 +870,8 @@ fn project_activation_form_is_responsive_and_discloses_exact_resume() {
             assert!(rendered.contains("Conversation: new"));
         }
         assert!(rendered.contains("agent-5"));
+        assert!(rendered.contains("Agent service: Codex · default"));
+        assert!(!rendered.contains("Provider namespace"));
         assert!(rendered.contains("/workspace/release"));
     }
 }
@@ -1119,7 +1121,9 @@ fn ordinary_surfaces_use_user_intentions_and_label_technical_evidence() {
             .model;
         let provider = render_text(&provider);
         assert!(provider.contains("Start an agent conversation"));
-        assert!(provider.contains("Agent service:"));
+        assert!(provider.contains("Choose the service"));
+        assert!(provider.contains("Codex · configured default"));
+        assert!(provider.contains("Offline service · unavailable"));
         assert!(!provider.contains("Provider namespace"));
 
         let conversation = update(conversation_model(size), UiEvent::Input(UiInput::NextItem))
@@ -1148,6 +1152,42 @@ fn ordinary_surfaces_use_user_intentions_and_label_technical_evidence() {
         assert!(human.contains("This device is not allowed to use the selected account"));
         assert!(!human.contains("authority"));
     }
+}
+
+#[test]
+fn empty_and_stale_provider_catalogs_explain_why_a_conversation_cannot_start() {
+    let size = UiSize {
+        width: 88,
+        height: 20,
+    };
+    let empty =
+        agent_details_model_with_status_and_providers(size, UiAgentStatus::Unassigned, Vec::new());
+    let empty = update(empty, UiEvent::Input(UiInput::Character('s')))
+        .expect("open empty provider guidance")
+        .model;
+    let empty = render_text(&empty);
+    assert!(empty.contains("No agent services are available on this device."));
+    assert!(empty.contains("Configure or install a provider, then reload HQ."));
+    assert!(empty.contains("Esc cancel"));
+    assert!(!empty.contains("required"));
+
+    let stale = agent_details_model_with_status_and_providers(
+        size,
+        UiAgentStatus::Unassigned,
+        vec![UiProvider {
+            provider: "removed".to_owned(),
+            name: "Removed service".to_owned(),
+            available: false,
+            configured_default: true,
+        }],
+    );
+    let stale = update(stale, UiEvent::Input(UiInput::Character('s')))
+        .expect("open stale provider guidance")
+        .model;
+    let stale = render_text(&stale);
+    assert!(stale.contains("Removed service · configured default · unavailable"));
+    assert!(stale.contains("No agent services are available"));
+    assert!(!stale.contains("removed"));
 }
 
 #[test]
@@ -1277,6 +1317,7 @@ fn contextual_help_model(size: UiSize, section: UiSection, selected: bool) -> Ui
             agent_rows: rows_for(UiSection::Agents),
             project_rows: rows_for(UiSection::Projects),
             direct_targets: Vec::new(),
+            providers: Vec::new(),
             agents: Vec::new(),
             projects: Vec::new(),
         },
@@ -1363,6 +1404,7 @@ fn ready_model(size: UiSize) -> UiModel {
             agent_rows: Vec::new(),
             project_rows: Vec::new(),
             direct_targets: Vec::new(),
+            providers: Vec::new(),
             agents: Vec::new(),
             projects: Vec::new(),
         },
@@ -1404,9 +1446,33 @@ fn empty_render_snapshot(revision: u64) -> UiSnapshot {
         agent_rows: Vec::new(),
         project_rows: Vec::new(),
         direct_targets: Vec::new(),
+        providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
     }
+}
+
+fn render_providers() -> Vec<UiProvider> {
+    vec![
+        UiProvider {
+            provider: "alpha".to_owned(),
+            name: "Alpha".to_owned(),
+            available: true,
+            configured_default: false,
+        },
+        UiProvider {
+            provider: "codex".to_owned(),
+            name: "Codex".to_owned(),
+            available: true,
+            configured_default: true,
+        },
+        UiProvider {
+            provider: "offline".to_owned(),
+            name: "Offline service".to_owned(),
+            available: false,
+            configured_default: false,
+        },
+    ]
 }
 
 fn row(id: &str, title: &str, detail: &str, state: UiRowState) -> UiRow {
@@ -1459,6 +1525,7 @@ fn agent_status_rows_model(size: UiSize) -> UiModel {
             agent_rows: rows,
             project_rows: Vec::new(),
             direct_targets: Vec::new(),
+            providers: Vec::new(),
             agents: Vec::new(),
             projects: Vec::new(),
         },
@@ -1479,6 +1546,14 @@ fn agent_status_rows_model(size: UiSize) -> UiModel {
 }
 
 fn agent_details_model_with_status(size: UiSize, status: UiAgentStatus) -> UiModel {
+    agent_details_model_with_status_and_providers(size, status, render_providers())
+}
+
+fn agent_details_model_with_status_and_providers(
+    size: UiSize,
+    status: UiAgentStatus,
+    providers: Vec<UiProvider>,
+) -> UiModel {
     let agent = UiAgent {
         agent_id: [1; 32],
         names: vec!["builder".to_owned()],
@@ -1516,6 +1591,7 @@ fn agent_details_model_with_status(size: UiSize, status: UiAgentStatus) -> UiMod
             }],
             project_rows: Vec::new(),
             direct_targets: Vec::new(),
+            providers,
             agents: vec![agent],
             projects: Vec::new(),
         },
@@ -1642,6 +1718,7 @@ fn project_model_with_state(
                 kind: UiRowKind::Project,
             }],
             direct_targets: Vec::new(),
+            providers: render_providers(),
             agents,
             projects,
         },

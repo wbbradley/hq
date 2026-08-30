@@ -406,6 +406,19 @@ pub struct UiDirectTarget {
     pub label: String,
 }
 
+/// Passive neutral provider choice supplied by the running node.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiProvider {
+    /// Stable provider namespace retained for typed commands and technical details.
+    pub provider: String,
+    /// User-facing provider name.
+    pub name: String,
+    /// Whether the running node can start a new session with this provider.
+    pub available: bool,
+    /// Whether installation configuration names this provider as the preferred default.
+    pub configured_default: bool,
+}
+
 /// Closed named-agent lifecycle supplied by the authoritative mapper.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiAgentLifecycle {
@@ -849,7 +862,6 @@ enum UiFormField {
     ProjectSearch,
     AgentName,
     SessionName,
-    Provider,
     Message,
 }
 
@@ -859,7 +871,6 @@ enum UiFormKind {
     ProjectSearch,
     AgentCreate,
     AgentRename,
-    ManagedProvider,
     ProjectCreateExisting,
     ProjectCreateWorktree,
     ProjectInput,
@@ -961,6 +972,7 @@ pub enum UiProjectModal {
     Activate {
         project: UiProject,
         agents: Vec<UiAgent>,
+        providers: Vec<UiProvider>,
         agent_id: Option<[u8; 32]>,
         thread: Option<UiProjectThread>,
         new_session: bool,
@@ -972,6 +984,7 @@ pub enum UiProjectModal {
     Handoff {
         project: UiProject,
         agents: Vec<UiAgent>,
+        providers: Vec<UiProvider>,
         agent_id: Option<[u8; 32]>,
         thread: Option<UiProjectThread>,
         new_session: bool,
@@ -1087,7 +1100,8 @@ pub enum UiAgentModal {
     },
     ManagedProvider {
         agent: UiAgent,
-        provider: String,
+        providers: Vec<UiProvider>,
+        selected: Option<String>,
     },
     ConfirmManagedSession {
         agent: UiAgent,
@@ -1219,6 +1233,8 @@ pub struct UiSnapshot {
     pub project_rows: Vec<UiRow>,
     /// Resolved named-agent mailboxes available for direct composition.
     pub direct_targets: Vec<UiDirectTarget>,
+    /// Providers registered with the running installation in stable order.
+    pub providers: Vec<UiProvider>,
     /// Complete named-agent records for cached navigation and detail views.
     pub agents: Vec<UiAgent>,
     /// Complete passive project catalog for cached navigation and detail views.
@@ -1689,10 +1705,6 @@ impl UiModel {
         self.form_cursor(UiFormField::SessionName, value)
     }
 
-    pub(crate) fn provider_field_cursor(&self, value: &str) -> usize {
-        self.form_cursor(UiFormField::Provider, value)
-    }
-
     pub(crate) fn message_field_cursor(&self, value: &str) -> usize {
         self.form_cursor(UiFormField::Message, value)
     }
@@ -1710,10 +1722,6 @@ impl UiModel {
 
     pub(crate) fn agent_field_error(&self) -> Option<&str> {
         self.form_error(UiFormField::AgentName)
-    }
-
-    pub(crate) fn provider_field_error(&self) -> Option<&str> {
-        self.form_error(UiFormField::Provider)
     }
 
     pub(crate) fn message_field_error(&self) -> Option<&str> {
@@ -1767,7 +1775,6 @@ impl UiModel {
             (_, Some(UiAgentModal::Search { .. }), _) => Some(UiFormKind::AgentSearch),
             (_, Some(UiAgentModal::Create { .. }), _) => Some(UiFormKind::AgentCreate),
             (_, Some(UiAgentModal::RenameSession { .. }), _) => Some(UiFormKind::AgentRename),
-            (_, Some(UiAgentModal::ManagedProvider { .. }), _) => Some(UiFormKind::ManagedProvider),
             (_, _, Some(UiMailboxModal::Compose { .. })) => Some(UiFormKind::MailboxCompose),
             _ => None,
         }
@@ -3181,7 +3188,7 @@ fn apply_project_modal_input(
                     Ok(true)
                 }
                 UiInput::NextItem | UiInput::PreviousItem => {
-                    adjust_activation_selection(model);
+                    adjust_activation_selection(model, matches!(input, UiInput::NextItem));
                     Ok(true)
                 }
                 UiInput::Activate => submit_project_modal(model, effects),
@@ -3198,7 +3205,50 @@ fn apply_project_modal_input(
     }
 }
 
+fn default_provider_choice(providers: &[UiProvider]) -> Option<String> {
+    providers
+        .iter()
+        .find(|provider| provider.available && provider.configured_default)
+        .or_else(|| providers.iter().find(|provider| provider.available))
+        .map(|provider| provider.provider.clone())
+}
+
+fn provider_is_available(providers: &[UiProvider], selected: &str) -> bool {
+    providers
+        .iter()
+        .any(|provider| provider.available && provider.provider == selected)
+}
+
+fn cycle_provider_choice(
+    providers: &[UiProvider],
+    selected: Option<&str>,
+    forward: bool,
+) -> Option<String> {
+    let available = providers
+        .iter()
+        .filter(|provider| provider.available)
+        .collect::<Vec<_>>();
+    if available.is_empty() {
+        return None;
+    }
+    let current = selected.and_then(|selected| {
+        available
+            .iter()
+            .position(|provider| provider.provider == selected)
+    });
+    let next = match (current, forward) {
+        (Some(index), true) => (index + 1) % available.len(),
+        (Some(index), false) => index.checked_sub(1).unwrap_or(available.len() - 1),
+        (None, _) => 0,
+    };
+    Some(available[next].provider.clone())
+}
+
 fn open_project_activation(model: &mut UiModel, project: UiProject, handoff: bool) {
+    let providers = model
+        .snapshot
+        .as_ref()
+        .map_or_else(Vec::new, |snapshot| snapshot.providers.clone());
     let agents = model
         .snapshot
         .as_ref()
@@ -3230,19 +3280,7 @@ fn open_project_activation(model: &mut UiModel, project: UiProject, handoff: boo
             .find(|thread| thread.agent_id == agent_id)
             .cloned()
     });
-    let provider = thread
-        .as_ref()
-        .map(|thread| thread.provider.clone())
-        .or_else(|| {
-            agent_id.and_then(|agent_id| {
-                agents
-                    .iter()
-                    .find(|agent| agent.agent_id == agent_id)
-                    .and_then(|agent| agent.sessions.first())
-                    .map(|session| session.provider.clone())
-            })
-        })
-        .unwrap_or_default();
+    let provider = default_provider_choice(&providers).unwrap_or_default();
     let directory = project
         .resources
         .iter()
@@ -3254,6 +3292,7 @@ fn open_project_activation(model: &mut UiModel, project: UiProject, handoff: boo
         UiProjectModal::Handoff {
             project,
             agents,
+            providers,
             agent_id,
             thread,
             new_session: true,
@@ -3268,6 +3307,7 @@ fn open_project_activation(model: &mut UiModel, project: UiProject, handoff: boo
         UiProjectModal::Activate {
             project,
             agents,
+            providers,
             agent_id,
             thread,
             new_session: true,
@@ -3342,7 +3382,7 @@ fn cycle_activation_field(model: &mut UiModel, forward: bool) {
     *field = fields[next];
 }
 
-fn adjust_activation_selection(model: &mut UiModel) {
+fn adjust_activation_selection(model: &mut UiModel, forward: bool) {
     let field = match &model.project_modal {
         Some(UiProjectModal::Activate { field, .. } | UiProjectModal::Handoff { field, .. }) => {
             *field
@@ -3353,6 +3393,7 @@ fn adjust_activation_selection(model: &mut UiModel) {
         UiProjectFormField::Agent => cycle_activation_agent(model),
         UiProjectFormField::Thread => cycle_activation_thread(model),
         UiProjectFormField::SessionMode => toggle_activation_mode(model),
+        UiProjectFormField::Provider => cycle_activation_provider(model, forward),
         UiProjectFormField::Confirmation => {
             if let Some(UiProjectModal::Handoff { confirmed, .. }) = &mut model.project_modal {
                 *confirmed = !*confirmed;
@@ -3369,21 +3410,48 @@ fn adjust_activation_selection(model: &mut UiModel) {
     model.last_failure = None;
 }
 
+fn cycle_activation_provider(model: &mut UiModel, forward: bool) {
+    let Some(
+        UiProjectModal::Activate {
+            providers,
+            provider,
+            new_session: true,
+            ..
+        }
+        | UiProjectModal::Handoff {
+            providers,
+            provider,
+            new_session: true,
+            ..
+        },
+    ) = &mut model.project_modal
+    else {
+        return;
+    };
+    if let Some(selected) = cycle_provider_choice(providers, Some(provider), forward) {
+        *provider = selected;
+    }
+}
+
 fn cycle_activation_agent(model: &mut UiModel) {
     let Some(
         UiProjectModal::Activate {
             project,
             agents,
+            providers,
             agent_id,
             thread,
+            new_session,
             provider,
             ..
         }
         | UiProjectModal::Handoff {
             project,
             agents,
+            providers,
             agent_id,
             thread,
+            new_session,
             provider,
             ..
         },
@@ -3404,7 +3472,11 @@ fn cycle_activation_agent(model: &mut UiModel) {
         .iter()
         .find(|candidate| candidate.agent_id == selected)
         .cloned();
-    if let Some(selected_thread) = thread {
+    if *new_session {
+        if let Some(selected) = default_provider_choice(providers) {
+            *provider = selected;
+        }
+    } else if let Some(selected_thread) = thread {
         provider.clone_from(&selected_thread.provider);
     }
     model.last_failure = None;
@@ -3459,6 +3531,7 @@ fn toggle_activation_mode(model: &mut UiModel) {
         UiProjectModal::Activate {
             new_session,
             project,
+            providers,
             agent_id,
             thread,
             provider,
@@ -3467,6 +3540,7 @@ fn toggle_activation_mode(model: &mut UiModel) {
         | UiProjectModal::Handoff {
             new_session,
             project,
+            providers,
             agent_id,
             thread,
             provider,
@@ -3475,7 +3549,9 @@ fn toggle_activation_mode(model: &mut UiModel) {
     ) = &mut model.project_modal
     {
         *new_session = !*new_session;
-        if !*new_session && thread.is_none() {
+        if *new_session {
+            *provider = default_provider_choice(providers).unwrap_or_default();
+        } else if thread.is_none() {
             *thread = agent_id.and_then(|id| {
                 project
                     .threads
@@ -3484,7 +3560,7 @@ fn toggle_activation_mode(model: &mut UiModel) {
                     .cloned()
             });
         }
-        if let Some(selected) = thread {
+        if !*new_session && let Some(selected) = thread {
             provider.clone_from(&selected.provider);
         }
         model.last_failure = None;
@@ -3693,19 +3769,12 @@ fn edit_project_field(model: &mut UiModel, input: &UiInput) -> bool {
         ) => path,
         Some(
             UiProjectModal::Activate {
-                provider,
-                directory,
-                field,
-                ..
+                directory, field, ..
             }
             | UiProjectModal::Handoff {
-                provider,
-                directory,
-                field,
-                ..
+                directory, field, ..
             },
         ) => match field {
-            UiProjectFormField::Provider => provider,
             UiProjectFormField::Directory => directory,
             _ => return false,
         },
@@ -3959,6 +4028,7 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
         }
         Some(UiProjectModal::Activate {
             project,
+            providers,
             agent_id,
             thread,
             new_session,
@@ -3974,8 +4044,12 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
                 );
                 return Ok(true);
             };
-            if provider.is_empty() {
-                reject(model, UiProjectFormField::Provider, "Choose a provider");
+            if new_session && !provider_is_available(&providers, &provider) {
+                reject(
+                    model,
+                    UiProjectFormField::Provider,
+                    "No available agent service is selected",
+                );
                 return Ok(true);
             }
             if !new_session
@@ -4007,6 +4081,7 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
         }
         Some(UiProjectModal::Handoff {
             project,
+            providers,
             agent_id,
             thread,
             new_session,
@@ -4032,8 +4107,12 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
                 );
                 return Ok(true);
             };
-            if provider.is_empty() {
-                reject(model, UiProjectFormField::Provider, "Choose a provider");
+            if new_session && !provider_is_available(&providers, &provider) {
+                reject(
+                    model,
+                    UiProjectFormField::Provider,
+                    "No available agent service is selected",
+                );
                 return Ok(true);
             }
             if !new_session && thread.provider != provider {
@@ -4245,11 +4324,31 @@ fn apply_agent_modal_input(
                 Ok(true)
             }
             UiInput::Character(value) if value.eq_ignore_ascii_case(&'s') => {
-                let provider = selected_session
+                let providers = model
+                    .snapshot
                     .as_ref()
-                    .map(|(provider, _)| provider.clone())
-                    .unwrap_or_default();
-                model.agent_modal = Some(UiAgentModal::ManagedProvider { agent, provider });
+                    .map_or_else(Vec::new, |snapshot| snapshot.providers.clone());
+                let selected = default_provider_choice(&providers);
+                if providers
+                    .iter()
+                    .filter(|provider| provider.available)
+                    .count()
+                    == 1
+                {
+                    let provider = selected.unwrap_or_default();
+                    let switching = agent.sessions.iter().any(|session| session.selected);
+                    let action = UiManagedSessionAction::Start {
+                        agent_id: agent.agent_id,
+                        provider,
+                    };
+                    begin_managed_session(model, agent, action, switching, effects)?;
+                } else {
+                    model.agent_modal = Some(UiAgentModal::ManagedProvider {
+                        agent,
+                        providers,
+                        selected,
+                    });
+                }
                 Ok(true)
             }
             UiInput::Character(value) if value.eq_ignore_ascii_case(&'e') => {
@@ -4477,37 +4576,29 @@ fn apply_agent_modal_input(
         },
         Some(UiAgentModal::ManagedProvider {
             agent,
-            mut provider,
+            providers,
+            mut selected,
         }) => match input {
-            UiInput::Character(_)
-            | UiInput::Paste(_)
-            | UiInput::Backspace
-            | UiInput::Delete
-            | UiInput::MoveCursorLeft
-            | UiInput::MoveCursorRight
-            | UiInput::MoveCursorHome
-            | UiInput::MoveCursorEnd => {
-                if !edit_text_input(
-                    &mut model.form,
-                    UiFormField::Provider,
-                    &mut provider,
-                    &input,
-                    MAX_AGENT_TEXT_BYTES,
-                ) {
-                    return Ok(false);
-                }
-                model.agent_modal = Some(UiAgentModal::ManagedProvider { agent, provider });
+            UiInput::NextItem | UiInput::PreviousItem => {
+                selected = cycle_provider_choice(
+                    &providers,
+                    selected.as_deref(),
+                    matches!(input, UiInput::NextItem),
+                );
+                model.agent_modal = Some(UiAgentModal::ManagedProvider {
+                    agent,
+                    providers,
+                    selected,
+                });
+                model.last_failure = None;
                 Ok(true)
             }
             UiInput::Activate => {
-                if provider.is_empty() {
-                    model.form.errors.insert(
-                        UiFormField::Provider,
-                        "Choose an available provider".to_owned(),
-                    );
-                    model.last_failure = None;
+                let Some(provider) =
+                    selected.filter(|selected| provider_is_available(&providers, selected))
+                else {
                     return Ok(true);
-                }
+                };
                 let switching = agent.sessions.iter().any(|session| session.selected);
                 let action = UiManagedSessionAction::Start {
                     agent_id: agent.agent_id,
@@ -4796,9 +4887,32 @@ fn refresh_agent_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
         }
         (Some(UiAgentModal::ConfirmRetire { agent, .. }), Some(current)) => *agent = current,
         (
+            Some(UiAgentModal::ManagedProvider {
+                agent,
+                providers,
+                selected,
+            }),
+            Some(current),
+        ) => {
+            let stale = selected
+                .as_deref()
+                .is_some_and(|selected| !provider_is_available(&snapshot.providers, selected));
+            if stale {
+                model.last_failure = Some(UiFailure {
+                    code: "provider_choice_stale".to_owned(),
+                    action: "choose one of the agent services currently available".to_owned(),
+                });
+            }
+            *selected = selected
+                .clone()
+                .filter(|selected| provider_is_available(&snapshot.providers, selected))
+                .or_else(|| default_provider_choice(&snapshot.providers));
+            providers.clone_from(&snapshot.providers);
+            *agent = current;
+        }
+        (
             Some(
-                UiAgentModal::ManagedProvider { agent, .. }
-                | UiAgentModal::ConfirmManagedSession { agent, .. }
+                UiAgentModal::ConfirmManagedSession { agent, .. }
                 | UiAgentModal::ManagingSession { agent, .. }
                 | UiAgentModal::ManagedSessionOutcome { agent, .. },
             ),
@@ -4877,20 +4991,38 @@ fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
                 UiProjectModal::Activate {
                     project,
                     agents,
+                    providers,
                     agent_id,
                     thread,
+                    new_session,
+                    provider,
                     ..
                 }
                 | UiProjectModal::Handoff {
                     project,
                     agents,
+                    providers,
                     agent_id,
                     thread,
+                    new_session,
+                    provider,
                     ..
                 },
             ),
             Some(current),
         ) => {
+            let provider_stale =
+                *new_session && !provider_is_available(&snapshot.providers, provider);
+            if provider_stale && !provider.is_empty() {
+                model.last_failure = Some(UiFailure {
+                    code: "provider_choice_stale".to_owned(),
+                    action: "choose one of the agent services currently available".to_owned(),
+                });
+            }
+            providers.clone_from(&snapshot.providers);
+            if provider_stale {
+                *provider = default_provider_choice(providers).unwrap_or_default();
+            }
             *agents = snapshot
                 .agents
                 .iter()
@@ -5880,6 +6012,7 @@ mod tests {
                 agent_rows: Vec::new(),
                 project_rows: Vec::new(),
                 direct_targets: Vec::new(),
+                providers: Vec::new(),
                 agents: Vec::new(),
                 projects: vec![project("new name")],
             },

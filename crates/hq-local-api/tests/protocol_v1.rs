@@ -18,21 +18,22 @@ use hq_local_api::protocol::v1::{
     DecodeError, DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto,
     EffectRequestDto, EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto,
     FrameDecoder, HealthDomainDto, Id32, InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest,
-    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MailboxAddressDto, MailboxCommandActionDto,
-    MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto,
-    MailboxDraftDto, MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MAX_PROVIDER_CATALOG_ITEMS,
+    MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto,
+    MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto, MailboxDraftDto,
+    MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
     MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCreationRequestDto, ProjectExternalStateWarningDto,
-    RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto,
-    RelayStatusDto, RemoteCommandProgressDto, Request, RequestEnvelope, RequestId,
-    ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
-    ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto, ResponseEnvelope,
-    ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto, SnapshotItem,
-    StateHealthDto, StateRepairReportDto, SubscriptionAcknowledgement, SubscriptionRequestDto,
-    SynchronizationRequestDto, V1, ValueError, VersionRange, VersionRejected, WireMessage,
-    WorktreeProvisioningRequestDto, agent_session_request_digest, negotiate,
-    resource_inspection_request_digest,
+    ProviderAvailabilityDto, ProviderCatalogDto, RelayAccessDto, RelayAuthenticationDto,
+    RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto, Request,
+    RequestEnvelope, RequestId, ResourceHealthDto, ResourceInspectionRequestDto,
+    ResourceInspectionResultDto, ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto,
+    ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto,
+    SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionAcknowledgement,
+    SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError, VersionRange,
+    VersionRejected, WireMessage, WorktreeProvisioningRequestDto, agent_session_request_digest,
+    negotiate, resource_inspection_request_digest,
 };
 use hq_local_api::{project_command_from_v1, project_command_request_to_v1};
 
@@ -84,6 +85,40 @@ fn canonical_frame_round_trips_incrementally() {
         Some(hello())
     );
     assert_eq!(decoder.buffered_len(), 0);
+}
+
+#[test]
+fn provider_catalog_bounds_zero_one_many_unavailable_and_stale_defaults() {
+    assert!(ProviderCatalogDto::new(Vec::new(), None).is_ok());
+    assert!(
+        ProviderCatalogDto::new(
+            vec![ProviderAvailabilityDto::new("codex", "Codex", true).expect("provider")],
+            Some("codex".to_owned()),
+        )
+        .is_ok()
+    );
+    assert!(
+        ProviderCatalogDto::new(
+            vec![ProviderAvailabilityDto::new("removed", "Removed", false).expect("provider")],
+            Some("missing".to_owned()),
+        )
+        .is_ok()
+    );
+    let duplicate = ProviderAvailabilityDto::new("same", "Same", true).expect("provider");
+    assert_eq!(
+        ProviderCatalogDto::new(vec![duplicate.clone(), duplicate], None),
+        Err(ValueError::InvalidValueCombination)
+    );
+    let too_many = (0..=MAX_PROVIDER_CATALOG_ITEMS)
+        .map(|index| {
+            ProviderAvailabilityDto::new(format!("p{index:02}"), "Provider", true)
+                .expect("provider")
+        })
+        .collect();
+    assert_eq!(
+        ProviderCatalogDto::new(too_many, None),
+        Err(ValueError::InvalidValueCombination)
+    );
 }
 
 #[test]
@@ -554,6 +589,7 @@ fn every_request_notification_and_negotiation_family_interoperates() {
             )
             .expect("page request"),
         ),
+        Request::ProviderCatalog,
         Request::MailboxDrafts,
         Request::SaveMailboxDraft(MailboxDraftSaveRequestDto {
             draft_id: Id32::new([0x11; 32]),
@@ -682,6 +718,18 @@ fn every_success_and_error_response_family_interoperates() {
     let results = vec![
         ResponseResult::Lifecycle(lifecycle),
         ResponseResult::AuthoritativeSnapshot(snapshot.clone()),
+        ResponseResult::ProviderCatalog(
+            ProviderCatalogDto::new(
+                vec![
+                    ProviderAvailabilityDto::new("codex", "Codex", true)
+                        .expect("available provider"),
+                    ProviderAvailabilityDto::new("retired", "Retired service", false)
+                        .expect("unavailable provider"),
+                ],
+                Some("missing".to_owned()),
+            )
+            .expect("stale defaults remain typed evidence"),
+        ),
         ResponseResult::ConversationPage(
             ConversationPageDto::new(Vec::new(), None).expect("empty page"),
         ),

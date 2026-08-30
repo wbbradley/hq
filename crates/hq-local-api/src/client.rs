@@ -1113,6 +1113,7 @@ impl ReconnectingClient {
                     Ok(transition)
                 }
                 ResponseResult::Lifecycle(_)
+                | ResponseResult::ProviderCatalog(_)
                 | ResponseResult::ConversationPage(_)
                 | ResponseResult::MailboxDrafts(_)
                 | ResponseResult::MailboxDraftSave(_)

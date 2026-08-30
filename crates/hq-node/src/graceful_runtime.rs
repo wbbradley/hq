@@ -99,7 +99,7 @@ impl<L, R, H, P> LocalNodeRuntime<L, R, H, P>
 where
     L: NodeComponent,
     R: NodeComponent + PublishWake + ConfigureRelays,
-    H: NodeComponent + ControlHarness,
+    H: NodeComponent + ControlHarness + hq_application::QueryProviders,
     P: NodeComponent + InspectResource + ControlProjects + RetireAgents + ReconcileProjectInputs,
 {
     /// Opens runtime artifacts for one already-ready node owner.

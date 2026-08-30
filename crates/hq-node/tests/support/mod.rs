@@ -146,6 +146,12 @@ impl hq_application::ControlHarness for UnavailableNodeComponent {
     }
 }
 
+impl hq_application::QueryProviders for UnavailableNodeComponent {
+    fn provider_catalog(&self) -> Result<hq_application::ProviderCatalog, ApplicationError> {
+        unavailable()
+    }
+}
+
 impl InspectResource for UnavailableNodeComponent {
     fn inspect_resource(
         &self,
@@ -249,6 +255,12 @@ impl hq_application::ControlHarness for UnavailableApplicationPorts {
         &self,
         _request: &EffectRequest<AgentSessionRequest>,
     ) -> Result<EffectOutcome<AgentSessionResult>, ApplicationError> {
+        unavailable()
+    }
+}
+
+impl hq_application::QueryProviders for UnavailableApplicationPorts {
+    fn provider_catalog(&self) -> Result<hq_application::ProviderCatalog, ApplicationError> {
         unavailable()
     }
 }

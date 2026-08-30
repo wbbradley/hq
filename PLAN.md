@@ -27,23 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Expose providers as typed available choices
-
-Remove every free-text provider namespace field from ordinary TUI workflows.
-
-- Add a passive provider catalog to the node/TUI boundary, sourced from the providers actually
-  registered and available to the running installation. Include stable identity, user-facing name,
-  availability, and the configured default without coupling the pure TUI model to a concrete
-  provider implementation.
-- Render a choice control when several providers are available, select the configured default when
-  possible, automatically use the only available provider, and show an explanatory empty state when
-  none are available. Never ask the user to guess that `codex` is valid.
-- Keep raw provider namespaces and exact session identities in technical details and advanced session
-  administration. Design the catalog protocol so adding providers extends the list rather than the
-  form grammar.
-- Cover zero, one, several, unavailable, defaulted, and stale-provider cases with protocol,
-  mapper, model, and render tests.
-
 ### Replace routine outcome dialogs with contextual completion
 
 Create one typed presentation policy for command completion instead of opening an outcome modal for

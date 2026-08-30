@@ -18,7 +18,8 @@ use hq_local_api::{
         ConversationMessageDto, ConversationPageRequest, Id32, MailboxCommandActionDto,
         MailboxCommandRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
         MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto,
-        MutationOutcomeDto, PresentationKindDto, Request, ResponseResult, SnapshotItem,
+        MutationOutcomeDto, PresentationKindDto, ProviderCatalogDto, Request, ResponseResult,
+        SnapshotItem,
     },
 };
 use hq_tui::{
@@ -31,8 +32,8 @@ use hq_tui::{
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiProject,
     UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
     UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection,
-    UiTimerKind,
+    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot,
+    UiTechnicalSection, UiTimerKind,
 };
 
 use crate::{
@@ -208,10 +209,24 @@ impl TuiClientPort for LocalTuiClient {
             })
             .collect();
         let projects = tui_project_catalog(&snapshot).map_err(|error| project_failure(&error))?;
+        let ClientEvent::Response {
+            result: ResponseResult::ProviderCatalog(providers),
+            ..
+        } = self
+            .client
+            .request(Request::ProviderCatalog)
+            .map_err(|error| client_failure(&error))?
+        else {
+            return Err(UiFailure {
+                code: "provider_catalog_protocol".to_owned(),
+                action: "restart HQ and reload the available agent services".to_owned(),
+            });
+        };
         Ok(tui_snapshot_with_projects(
             local_installation,
             &snapshot,
             projects,
+            &providers,
         ))
     }
 
@@ -1143,13 +1158,28 @@ pub fn tui_snapshot(
     snapshot: &AuthoritativeSnapshotDto,
 ) -> UiSnapshot {
     let projects = tui_project_catalog(snapshot).unwrap_or_default();
-    tui_snapshot_with_projects(local_installation, snapshot, projects)
+    let providers = ProviderCatalogDto {
+        providers: Vec::new(),
+        default_provider: None,
+    };
+    tui_snapshot_with_projects(local_installation, snapshot, projects, &providers)
+}
+
+/// Maps one authoritative snapshot together with the node's passive provider catalog.
+pub fn tui_snapshot_with_provider_catalog(
+    local_installation: [u8; 32],
+    snapshot: &AuthoritativeSnapshotDto,
+    providers: &ProviderCatalogDto,
+) -> UiSnapshot {
+    let projects = tui_project_catalog(snapshot).unwrap_or_default();
+    tui_snapshot_with_projects(local_installation, snapshot, projects, providers)
 }
 
 fn tui_snapshot_with_projects(
     local_installation: [u8; 32],
     snapshot: &AuthoritativeSnapshotDto,
     projects: Vec<LocalProject>,
+    provider_catalog: &ProviderCatalogDto,
 ) -> UiSnapshot {
     let human_state = tui_human_state(local_installation, snapshot);
     let projects = tui_projects(projects);
@@ -1233,6 +1263,7 @@ fn tui_snapshot_with_projects(
             .filter_map(|item| snapshot_row(section, item))
             .collect()
     };
+    let providers = tui_providers(provider_catalog);
     UiSnapshot {
         revision: snapshot.revision,
         human_state,
@@ -1242,9 +1273,38 @@ fn tui_snapshot_with_projects(
         agent_rows: agents.iter().map(agent_row).collect(),
         project_rows: rows(UiSection::Projects),
         direct_targets,
+        providers,
         agents,
         projects,
     }
+}
+
+fn tui_providers(provider_catalog: &ProviderCatalogDto) -> Vec<UiProvider> {
+    let mut providers = provider_catalog
+        .providers
+        .iter()
+        .map(|provider| UiProvider {
+            provider: provider.provider.clone(),
+            name: terminal_text(&provider.name),
+            available: provider.available,
+            configured_default: provider_catalog.default_provider.as_deref()
+                == Some(provider.provider.as_str()),
+        })
+        .collect::<Vec<_>>();
+    if let Some(default_provider) = &provider_catalog.default_provider
+        && !providers
+            .iter()
+            .any(|provider| provider.provider == *default_provider)
+    {
+        providers.push(UiProvider {
+            provider: default_provider.clone(),
+            name: terminal_text(default_provider),
+            available: false,
+            configured_default: true,
+        });
+        providers.sort_by(|left, right| left.provider.cmp(&right.provider));
+    }
+    providers
 }
 
 fn tui_human_state(

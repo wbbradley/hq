@@ -184,6 +184,15 @@ impl hq_application::ControlHarness for ScriptedPorts {
     }
 }
 
+impl hq_application::QueryProviders for ScriptedPorts {
+    fn provider_catalog(&self) -> Result<hq_application::ProviderCatalog, ApplicationError> {
+        Ok(hq_application::ProviderCatalog {
+            providers: Vec::new(),
+            default_provider: None,
+        })
+    }
+}
+
 impl InspectResource for ScriptedPorts {
     fn inspect_resource(
         &self,

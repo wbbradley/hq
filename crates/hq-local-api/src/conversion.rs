@@ -14,12 +14,12 @@ use crate::protocol::v1::{
     MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
     PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCommandStageDto, ProjectExternalStateWarningDto,
-    RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto,
-    RelayStatusDto, RemoteCommandProgressDto, RemoteCommandResultDto, RepositoryContextDto,
-    ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
-    ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto, RuntimeObservationDto,
-    SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionRequestDto,
-    SynchronizationRequestDto, ValueError,
+    ProviderAvailabilityDto, ProviderCatalogDto, RelayAccessDto, RelayAuthenticationDto,
+    RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto,
+    RemoteCommandResultDto, RepositoryContextDto, ResourceHealthDto, ResourceInspectionRequestDto,
+    ResourceInspectionResultDto, ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto,
+    RuntimeObservationDto, SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
+    SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
     AgentLaunchContext, AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest,
@@ -32,11 +32,32 @@ use hq_application::{
     MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
     MailboxDraftSaveRequest, MailboxDraftTarget, MutationAttempt, MutationDecision,
     MutationOutcome, MutationReceipt, ProjectCommandAction, ProjectCommandOutcome,
-    ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest, RelayAccess,
-    RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
+    ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest, ProviderCatalog,
+    RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
     ResourceInspectionResult, SessionControl, StateHealth, StateRepairReport, SubscriptionRequest,
     SubscriptionTopic, SynchronizationRequest, WorktreeProvisioningRequest,
 };
+
+/// Converts one bounded neutral provider catalog into its local wire representation.
+pub fn provider_catalog_to_v1(catalog: &ProviderCatalog) -> Result<ProviderCatalogDto, ValueError> {
+    ProviderCatalogDto::new(
+        catalog
+            .providers
+            .iter()
+            .map(|provider| {
+                ProviderAvailabilityDto::new(
+                    provider.provider.as_str(),
+                    provider.name.as_str(),
+                    provider.available,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        catalog
+            .default_provider
+            .as_ref()
+            .map(|provider| provider.as_str().to_owned()),
+    )
+}
 use hq_domain::{
     ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, FactId,
     InstallationId, MailboxAddress, MailboxId, MessagePurpose, OperationId, Page, PageCursor,

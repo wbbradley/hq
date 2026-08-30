@@ -19,7 +19,7 @@ pub use model::{
     UiProject, UiProjectAction, UiProjectAssignment, UiProjectCreationChoice,
     UiProjectExternalWarning, UiProjectFormField, UiProjectModal, UiProjectOutcome,
     UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
     UiTechnicalSection, UiTimerKind, UiTransition, update,
 };
 pub use render::render;

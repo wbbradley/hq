@@ -232,6 +232,11 @@ where
         self.ports.control_harness(request)
     }
 
+    /// Loads the running installation's passive provider choices.
+    pub fn provider_catalog(&self) -> Result<crate::ProviderCatalog, ApplicationError> {
+        self.ports.provider_catalog()
+    }
+
     /// Inspects an external project resource without treating database intent as observation.
     pub fn inspect_resource(
         &self,

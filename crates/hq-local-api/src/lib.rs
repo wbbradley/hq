@@ -18,7 +18,8 @@ pub use conversion::{
     mailbox_draft_delete_from_v1, mailbox_draft_delete_to_v1, mailbox_draft_save_from_v1,
     mailbox_draft_save_to_v1, mailbox_drafts_to_v1, mutation_from_v1, mutation_to_v1,
     page_request_from_v1, page_to_v1, project_command_from_v1, project_command_request_to_v1,
-    project_command_to_v1, snapshot_to_v1, subscription_from_v1, topic_from_v1, topic_to_v1,
+    project_command_to_v1, provider_catalog_to_v1, snapshot_to_v1, subscription_from_v1,
+    topic_from_v1, topic_to_v1,
 };
 pub use hub::{
     DEFAULT_MAX_SUBSCRIPTIONS, FanoutDisposition, HubConfigError, RevisionHub, RevisionNotice,

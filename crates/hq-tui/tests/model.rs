@@ -14,7 +14,7 @@ use hq_tui::{
     UiProject, UiProjectAction, UiProjectAssignment, UiProjectCreationChoice,
     UiProjectExternalWarning, UiProjectFormField, UiProjectModal, UiProjectOutcome,
     UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
     UiTechnicalSection, UiTimerKind, update,
 };
 
@@ -1391,13 +1391,8 @@ fn retirement_is_explicit_cancelable_and_force_is_part_of_the_typed_command() {
 fn managed_session_start_confirms_switch_and_exact_resume_and_stop_emit_typed_commands() {
     let model = loaded_agents_model(1, &[agent(5, "runtime")]);
     let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
-    let provider =
-        update(details.model, UiEvent::Input(UiInput::Character('s'))).expect("start provider");
-    assert!(matches!(
-        provider.model.agent_modal(),
-        Some(UiAgentModal::ManagedProvider { provider, .. }) if provider == "codex"
-    ));
-    let confirm = update(provider.model, UiEvent::Input(UiInput::Activate)).expect("switch gate");
+    let confirm = update(details.model, UiEvent::Input(UiInput::Character('s')))
+        .expect("the only provider is selected automatically");
     assert!(matches!(
         confirm.model.agent_modal(),
         Some(UiAgentModal::ConfirmManagedSession {
@@ -1429,6 +1424,130 @@ fn managed_session_start_confirms_switch_and_exact_resume_and_stop_emit_typed_co
         UiManagedSessionAction::Stop { agent_id, provider }
             if *agent_id == [5; 32] && provider == "codex"
     ));
+}
+
+#[test]
+fn managed_session_provider_choices_select_defaults_and_skip_unavailable_entries() {
+    let target = agent(15, "chooser");
+    let providers = vec![
+        available_provider("alpha", "Alpha", false),
+        available_provider("codex", "Codex", true),
+        UiProvider {
+            provider: "offline".to_owned(),
+            name: "Offline service".to_owned(),
+            available: false,
+            configured_default: false,
+        },
+    ];
+    let model = loaded_agents_model_with_providers(1, vec![target.clone()], providers);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let choosing = update(details.model, UiEvent::Input(UiInput::Character('s')))
+        .expect("several providers require a choice");
+    assert!(matches!(
+        choosing.model.agent_modal(),
+        Some(UiAgentModal::ManagedProvider { selected: Some(provider), .. })
+            if provider == "codex"
+    ));
+    let choosing = update(choosing.model, UiEvent::Input(UiInput::NextItem))
+        .expect("cycle to the next available provider");
+    assert!(matches!(
+        choosing.model.agent_modal(),
+        Some(UiAgentModal::ManagedProvider { selected: Some(provider), .. })
+            if provider == "alpha"
+    ));
+    let ignored = update(
+        choosing.model.clone(),
+        UiEvent::Input(UiInput::Paste("offline".to_owned())),
+    )
+    .expect("provider names are not editable");
+    assert_eq!(ignored.model, choosing.model);
+    assert!(ignored.effects.is_empty());
+    let confirm = update(choosing.model, UiEvent::Input(UiInput::Activate)).expect("choose alpha");
+    assert!(matches!(
+        confirm.model.agent_modal(),
+        Some(UiAgentModal::ConfirmManagedSession {
+            action: UiManagedSessionAction::Start { provider, .. }, ..
+        }) if provider == "alpha"
+    ));
+}
+
+#[test]
+fn managed_session_provider_choices_explain_empty_and_ignore_unavailable_defaults() {
+    let target = agent(15, "chooser");
+    let model = loaded_agents_model_with_providers(1, vec![target.clone()], Vec::new());
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let empty = update(details.model, UiEvent::Input(UiInput::Character('s')))
+        .expect("empty provider catalog opens guidance");
+    assert!(matches!(
+        empty.model.agent_modal(),
+        Some(UiAgentModal::ManagedProvider { providers, selected: None, .. })
+            if providers.is_empty()
+    ));
+    let inert = update(empty.model.clone(), UiEvent::Input(UiInput::Activate))
+        .expect("no provider cannot submit");
+    assert_eq!(inert.model, empty.model);
+    assert!(
+        inert
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitManagedSession { .. }))
+    );
+
+    let providers = vec![
+        available_provider("alpha", "Alpha", false),
+        UiProvider {
+            provider: "removed".to_owned(),
+            name: "Removed service".to_owned(),
+            available: false,
+            configured_default: true,
+        },
+    ];
+    let model = loaded_agents_model_with_providers(1, vec![target.clone()], providers);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let automatic = update(details.model, UiEvent::Input(UiInput::Character('s')))
+        .expect("one available provider ignores an unavailable default");
+    assert!(matches!(
+        automatic.model.agent_modal(),
+        Some(UiAgentModal::ConfirmManagedSession {
+            action: UiManagedSessionAction::Start { provider, .. }, ..
+        }) if provider == "alpha"
+    ));
+}
+
+#[test]
+fn managed_session_provider_choice_recovers_when_the_catalog_changes() {
+    let target = agent(15, "chooser");
+    let providers = vec![
+        available_provider("alpha", "Alpha", true),
+        available_provider("codex", "Codex", false),
+    ];
+    let model = loaded_agents_model_with_providers(1, vec![target.clone()], providers);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let choosing =
+        update(details.model, UiEvent::Input(UiInput::Character('s'))).expect("choose default");
+    let invalidated = update(choosing.model, UiEvent::Invalidated { revision: 2 })
+        .expect("provider catalog refresh");
+    let effect_id = snapshot_effect(&invalidated.effects);
+    let refreshed = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id,
+            snapshot: agents_snapshot(2, vec![target]),
+        },
+    )
+    .expect("stale provider selection is replaced");
+    assert!(matches!(
+        refreshed.model.agent_modal(),
+        Some(UiAgentModal::ManagedProvider { selected: Some(provider), .. })
+            if provider == "codex"
+    ));
+    assert_eq!(
+        refreshed
+            .model
+            .last_failure()
+            .map(|failure| failure.code.as_str()),
+        Some("provider_choice_stale")
+    );
 }
 
 #[test]
@@ -2358,7 +2477,16 @@ fn activation_target_and_edited_fields_survive_authoritative_reload() {
         thread_id: [63; 32],
     });
     let agent = project_agent(62, target.home);
-    let mut model = loaded_projects_model_with_agents(1, vec![target.clone()], vec![agent.clone()]);
+    let providers = vec![
+        available_provider("alpha", "Alpha", false),
+        available_provider("codex", "Codex", true),
+    ];
+    let mut model = loaded_projects_model_with_agents_and_providers(
+        1,
+        vec![target.clone()],
+        vec![agent.clone()],
+        providers.clone(),
+    );
     model = update(model, UiEvent::Input(UiInput::Activate))
         .expect("details")
         .model;
@@ -2370,8 +2498,8 @@ fn activation_target_and_edited_fields_survive_authoritative_reload() {
             .expect("provider field")
             .model;
     }
-    model = update(model, UiEvent::Input(UiInput::Paste("-edited".to_owned())))
-        .expect("provider edit")
+    model = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("provider choice")
         .model;
     model = update(model, UiEvent::Input(UiInput::NextFocus))
         .expect("directory field")
@@ -2383,6 +2511,7 @@ fn activation_target_and_edited_fields_survive_authoritative_reload() {
     let effect_id = snapshot_effect(&invalidated.effects);
     let mut snapshot = projects_snapshot(2, vec![target]);
     snapshot.agents = vec![agent];
+    snapshot.providers = providers;
     let reloaded = update(
         invalidated.model,
         UiEvent::SnapshotLoaded {
@@ -2404,8 +2533,70 @@ fn activation_target_and_edited_fields_survive_authoritative_reload() {
     };
     assert_eq!(*agent_id, Some([62; 32]));
     assert_eq!(thread.as_ref().map(|value| value.thread_id), Some([63; 32]));
-    assert_eq!(provider, "codex-edited");
+    assert_eq!(provider, "alpha");
     assert_eq!(directory, "/workspace/retained/child");
+}
+
+#[test]
+fn project_new_session_provider_is_a_typed_choice_and_empty_catalog_blocks_submission() {
+    let target = project(52, "provider choice", "/workspace/provider-choice");
+    let agent = project_agent(64, target.home);
+    let providers = vec![
+        available_provider("alpha", "Alpha", false),
+        available_provider("codex", "Codex", true),
+    ];
+    let mut model = loaded_projects_model_with_agents_and_providers(
+        1,
+        vec![target.clone()],
+        vec![agent.clone()],
+        providers,
+    );
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('v')))
+        .expect("activation")
+        .model;
+    for _ in 0..2 {
+        model = update(model, UiEvent::Input(UiInput::NextFocus))
+            .expect("provider field")
+            .model;
+    }
+    let ignored = update(
+        model.clone(),
+        UiEvent::Input(UiInput::Paste("invented".to_owned())),
+    )
+    .expect("provider field does not accept text");
+    assert_eq!(ignored.model, model);
+    assert!(ignored.effects.is_empty());
+    let selected = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("choose alpha")
+        .model;
+    assert!(matches!(
+        selected.project_modal(),
+        Some(UiProjectModal::Activate { provider, .. }) if provider == "alpha"
+    ));
+
+    let mut model =
+        loaded_projects_model_with_agents_and_providers(1, vec![target], vec![agent], Vec::new());
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('v')))
+        .expect("activation")
+        .model;
+    let blocked = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("missing provider is explained before submission");
+    assert!(
+        blocked
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+    assert!(matches!(
+        blocked.model.project_modal(),
+        Some(UiProjectModal::Activate { provider, submitting: false, .. }) if provider.is_empty()
+    ));
 }
 
 #[test]
@@ -2740,13 +2931,28 @@ fn snapshot_for(section: UiSection, revision: u64, ids: &[&str]) -> UiSnapshot {
             Vec::new()
         },
         direct_targets: Vec::new(),
+        providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
     }
 }
 
 fn loaded_agents_model(revision: u64, agents: &[UiAgent]) -> UiModel {
-    let mut model = loaded_model(agents_snapshot(revision, agents.to_owned()));
+    loaded_agents_model_with_providers(
+        revision,
+        agents.to_owned(),
+        vec![available_provider("codex", "Codex", true)],
+    )
+}
+
+fn loaded_agents_model_with_providers(
+    revision: u64,
+    agents: Vec<UiAgent>,
+    providers: Vec<UiProvider>,
+) -> UiModel {
+    let mut snapshot = agents_snapshot(revision, agents);
+    snapshot.providers = providers;
+    let mut model = loaded_model(snapshot);
     for _ in 0..3 {
         model = update(model, UiEvent::Input(UiInput::Character('l')))
             .expect("next cached section")
@@ -2775,6 +2981,7 @@ fn agents_snapshot(revision: u64, agents: Vec<UiAgent>) -> UiSnapshot {
         agent_rows: rows,
         project_rows: Vec::new(),
         direct_targets: Vec::new(),
+        providers: vec![available_provider("codex", "Codex", true)],
         agents,
         projects: Vec::new(),
     }
@@ -2795,10 +3002,25 @@ fn loaded_projects_model_with_agents(
     projects: Vec<UiProject>,
     agents: Vec<UiAgent>,
 ) -> UiModel {
+    loaded_projects_model_with_agents_and_providers(
+        revision,
+        projects,
+        agents,
+        vec![available_provider("codex", "Codex", true)],
+    )
+}
+
+fn loaded_projects_model_with_agents_and_providers(
+    revision: u64,
+    projects: Vec<UiProject>,
+    agents: Vec<UiAgent>,
+    providers: Vec<UiProvider>,
+) -> UiModel {
     let mut snapshot = projects_snapshot(revision, projects);
     let agent_source = agents_snapshot(revision, agents);
     snapshot.agent_rows = agent_source.agent_rows;
     snapshot.agents = agent_source.agents;
+    snapshot.providers = providers;
     let mut model = loaded_model(snapshot);
     for _ in 0..4 {
         model = update(model, UiEvent::Input(UiInput::Character('l')))
@@ -2851,8 +3073,18 @@ fn projects_snapshot(revision: u64, projects: Vec<UiProject>) -> UiSnapshot {
         agent_rows: Vec::new(),
         project_rows: rows,
         direct_targets: Vec::new(),
+        providers: vec![available_provider("codex", "Codex", true)],
         agents: Vec::new(),
         projects,
+    }
+}
+
+fn available_provider(provider: &str, name: &str, configured_default: bool) -> UiProvider {
+    UiProvider {
+        provider: provider.to_owned(),
+        name: name.to_owned(),
+        available: true,
+        configured_default,
     }
 }
 

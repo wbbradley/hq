@@ -15,11 +15,12 @@ use std::{
 use hq_local_api::protocol::v1::{
     ActivityStatusDto, AuthoritativeSnapshotDto, ConversationEntryDto, ConversationKeyDto,
     ConversationMessageDto, ConversationPageDto, DeviceGrantDto, Id32, MailboxAddressDto,
-    MessagePurposeDto, PresentationKindDto, ResourceLocatorDto, ResourceSchemeDto, SnapshotItem,
+    MessagePurposeDto, PresentationKindDto, ProviderAvailabilityDto, ProviderCatalogDto,
+    ResourceLocatorDto, ResourceSchemeDto, SnapshotItem,
 };
 use hq_node::{
     TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiEffectExecutor,
-    TuiExecutorError, tui_conversation_page, tui_snapshot,
+    TuiExecutorError, tui_conversation_page, tui_snapshot, tui_snapshot_with_provider_catalog,
 };
 use hq_tui::{
     UiAgentAction, UiConnectionState, UiConversationEntryKind, UiConversationPage, UiEffect,
@@ -675,6 +676,34 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
     assert_eq!(snapshot.sent_rows.len(), 1);
     assert_eq!(snapshot.archived_rows.len(), 1);
     assert_eq!(snapshot.archived_rows[0].detail, "3 archived messages");
+}
+
+#[test]
+fn provider_catalog_mapping_preserves_choices_defaults_unavailability_and_stale_defaults() {
+    let snapshot = AuthoritativeSnapshotDto::new(1, Vec::new()).expect("empty snapshot");
+    let catalog = ProviderCatalogDto::new(
+        vec![
+            ProviderAvailabilityDto::new("alpha", "Alpha", true).expect("alpha"),
+            ProviderAvailabilityDto::new("codex", "Codex", true).expect("codex"),
+            ProviderAvailabilityDto::new("offline", "Offline service", false).expect("offline"),
+        ],
+        Some("codex".to_owned()),
+    )
+    .expect("provider catalog");
+    let mapped = tui_snapshot_with_provider_catalog([1; 32], &snapshot, &catalog);
+    assert_eq!(mapped.providers.len(), 3);
+    assert!(mapped.providers[0].available);
+    assert!(mapped.providers[1].configured_default);
+    assert!(!mapped.providers[2].available);
+    assert_eq!(mapped.providers[2].name, "Offline service");
+
+    let stale = ProviderCatalogDto::new(Vec::new(), Some("removed".to_owned()))
+        .expect("stale configured provider remains valid");
+    let mapped = tui_snapshot_with_provider_catalog([1; 32], &snapshot, &stale);
+    assert_eq!(mapped.providers.len(), 1);
+    assert_eq!(mapped.providers[0].provider, "removed");
+    assert!(mapped.providers[0].configured_default);
+    assert!(!mapped.providers[0].available);
 }
 
 #[test]
@@ -1805,6 +1834,7 @@ fn empty_snapshot(revision: u64) -> UiSnapshot {
         agent_rows: Vec::new(),
         project_rows: Vec::new(),
         direct_targets: Vec::new(),
+        providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
     }
