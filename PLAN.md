@@ -27,18 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Reconcile legacy project runtime attribution without rewriting history
-
-For migrated delivery rows with no retained project fields, use the stable submission ID to find one
-exact non-conflicted canonical project dispatch and require the agent/provider/session/thread/input
-tuple to agree before attaching provenance. Then locate already-authored asynchronous output and
-activity only by exact operation correlation, author the missing project output/activity facts
-idempotently, and retain the old immutable facts as audit evidence. Teach later conversation
-grouping to suppress the superseded presentation entries without deleting them. Ambiguous,
-incomplete, changed, or multiply matching evidence must remain an actionable reconciliation
-failure. Cover startup scans, bounded work, response loss, duplicate repair, partial repair,
-handoff, and old databases containing the reported corpus.
-
 ### Group project exchanges by their initiating conversation
 
 - Add a cross-layer regression first for the exact reported corpus: two project inputs (`Let's have
