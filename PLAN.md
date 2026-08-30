@@ -39,30 +39,39 @@ incomplete, changed, or multiply matching evidence must remain an actionable rec
 failure. Cover startup scans, bounded work, response loss, duplicate repair, partial repair,
 handoff, and old databases containing the reported corpus.
 
-### Group all project history under one typed conversation
+### Group project exchanges by their initiating conversation
 
 - Add a cross-layer regression first for the exact reported corpus: two project inputs (`Let's have
   a conversation.` and `Let's have another conversation.`), the Codex response `Absolutely. What’s
   on your mind?`, and its completed activity currently render as two `Thread <hex>` rows plus one
-  `codex · <provider-session>` row. Require one project conversation containing every input, output,
-  and activity exactly once in canonical order, with no residual project-associated Thread or
-  provider-session row. Prove the same grouping under shuffled arrival, rebuild, duplicate
-  persistence, response loss, reconnect, handoff, and ambiguous concurrent bindings.
-- Add a typed project conversation identity, such as `ConversationKey::Project { project_id }`,
-  throughout the reducer/application query boundary, rebuildable store index and page query, local
-  API DTOs/conversion, node client, and TUI model. Project-addressed human input must join that key
-  immediately. Direct-agent and non-project conversations retain their own typed identities; never
-  merge by content, display name, current assignment, provider/session coincidence, or row position.
+  `codex · <provider-session>` row. Require two project conversations: the first input, its Codex
+  response, and the response's activity together in one conversation; the independently initiated
+  second input in another conversation. Every entry must appear exactly once in canonical order,
+  with no residual project-associated raw-Thread or provider-session row. Prove the same grouping
+  under shuffled arrival, rebuild, duplicate persistence, response loss, reconnect, handoff, and
+  ambiguous concurrent bindings.
+- Add a typed project-exchange identity, such as
+  `ConversationKey::ProjectThread { project_id, thread_id }`, throughout the reducer/application
+  query boundary, rebuildable store index and page query, local API DTOs/conversion, node client,
+  and TUI model. A newly initiated project message must create or retain that stable exchange key;
+  replies and correlated agent output/activity must join it. Starting another conversation for the
+  same project must create another key. Direct-agent and non-project conversations retain their own
+  typed identities; never merge merely by project ID, content, display name, current assignment,
+  provider/session coincidence, or row position. Thread IDs remain technical evidence, not ordinary
+  Inbox labels.
 
 ### Make Inbox a human-readable, selection-driven master/detail workspace
 
 - Separate stable conversation identity from row presentation. Extend the bounded conversation
   summary/read model with typed project and participant context plus a sanitized, clipped preview of
-  the latest meaningful message's first nonblank line. Render human titles such as
-  `Project name · Alice` for project work and `Me and Alice` for direct conversations, with the
-  preview as secondary text. Do not use `Thread <hex>`, raw mailbox IDs, provider namespaces, or
-  provider-session UUIDs as ordinary titles; retain exact values in technical details and use a
-  plain unnamed-participant fallback when authoritative naming is unresolved.
+  the conversation's first meaningful line (falling back to the latest meaningful line when the
+  opener is unavailable). Render human titles such as `Project name · Alice` for project work and
+  `Me and Alice` for direct conversations, with the preview as secondary text. The two conversations
+  from the reported corpus must therefore be distinguishable by `Let's have a conversation.` and
+  `Let's have another conversation.` without exposing IDs. Do not use `Thread <hex>`, raw mailbox
+  IDs, provider namespaces, or provider-session UUIDs as ordinary titles; retain exact values in
+  technical details and use a plain unnamed-participant fallback when authoritative naming is
+  unresolved.
 - Make Inbox selection drive conversation loading. Reconciliation of the first nonempty Inbox
   snapshot must select a stable conversation and request its first page automatically; `j`/`k` or
   Up/Down in the Inbox list must immediately request the newly selected row. A newer selection may
@@ -101,9 +110,10 @@ master/detail workspace rather than a list that conditionally opens a modal-like
   behavior for replies, direct messages, notes, and project drafts. Recipient selection or a
   destructive confirmation may remain a bounded dialog, but message writing itself must not be.
   Preserve autosave, restart recovery, optimistic conflicts, bounded Unicode editing,
-  save-on-Escape, and atomic draft consumption. A follow-up authored from an open project
-  conversation must return to that same durable project conversation rather than creating a new
-  user-facing thread row.
+  save-on-Escape, and atomic draft consumption. A reply or follow-up authored from an open project
+  conversation must retain that exact project-exchange key and return to the same Inbox row. A
+  separately invoked `New conversation` action may create another exchange for the same project;
+  the distinction must be explicit rather than inferred from provider session or current selection.
 - In the guided `n New…` flow, submitting the first project message must continue to establish the
   exact activation thread and dispatch the retained input once, but completion must select and load
   the typed project conversation in `UiSection::Inbox`. It must not open a fresh
