@@ -1393,44 +1393,13 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
         ),
         UiProjectModal::Outcome { result } => {
             let mut lines = vec![Line::from(project_action_label(&result.action))];
-            lines.push(Line::from(if model.viewport().width >= WIDE_WIDTH {
-                format!(
-                    "Technical details: project {} · request {}",
-                    short_identity(result.project_id),
-                    short_identity(result.operation_id)
-                )
-            } else {
-                format!(
-                    "Technical IDs: {} / {}",
-                    short_identity(result.project_id),
-                    short_identity(result.operation_id)
-                )
-            }));
-            if model.viewport().width >= WIDE_WIDTH {
-                lines.push(Line::default());
-            }
-            if let Some(runtime_state) = &result.runtime_state {
-                lines.push(Line::from(format!(
-                    "Technical runtime: {runtime_state}{}",
-                    result
-                        .runtime_code
-                        .as_ref()
-                        .map_or_else(String::new, |code| format!("/{code}"))
-                )));
-            }
             match &result.outcome {
-                UiProjectOutcome::Completed { project_head } => lines.push(Line::from(format!(
-                    "Done{}",
-                    project_head.map_or_else(String::new, |head| format!(
-                        " · technical version {}",
-                        short_identity(head)
-                    ))
-                ))),
+                UiProjectOutcome::Completed { .. } => lines.push(Line::from("Done")),
                 UiProjectOutcome::Running { stage } => {
                     lines.push(Line::from("HQ is still finishing this change."));
-                    lines.push(Line::from(format!("Technical stage: {stage}")));
+                    lines.push(Line::from(format!("Current stage: {stage}")));
                 }
-                UiProjectOutcome::Rejected { category, code } => {
+                UiProjectOutcome::Rejected { .. } => {
                     lines.push(Line::styled(
                         "HQ could not make this change.",
                         theme.style(UiThemeRole::Error),
@@ -1438,14 +1407,8 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                     lines.push(Line::from(
                         "Review the technical reason, correct the problem, and try again.",
                     ));
-                    lines.push(Line::from(format!("Technical reason: {category}/{code}")));
                 }
-                UiProjectOutcome::Reconcilable {
-                    stage,
-                    category,
-                    code,
-                    warning,
-                } => {
+                UiProjectOutcome::Reconcilable { warning, .. } => {
                     lines.push(Line::styled(
                         "HQ could not confirm whether the change finished.",
                         theme.style(UiThemeRole::Warning),
@@ -1458,18 +1421,11 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                         )));
                     }
                     lines.push(Line::from(
-                        "HQ will retry the same request; do not repeat it manually.",
+                        "HQ retained this request for recovery; do not repeat it manually.",
                     ));
-                    lines.push(Line::from(format!(
-                        "Technical stage and reason: {stage} · {category}/{code}"
-                    )));
                 }
-                UiProjectOutcome::InputSent { message_id } => {
+                UiProjectOutcome::InputSent { .. } => {
                     lines.push(Line::from("Instructions sent."));
-                    lines.push(Line::from(format!(
-                        "Technical message ID: {}",
-                        short_identity(*message_id)
-                    )));
                 }
                 UiProjectOutcome::ResourcePreview {
                     display_path,
@@ -1556,9 +1512,69 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                     }
                 }
             }
+            if matches!(
+                result.outcome,
+                UiProjectOutcome::Rejected { .. } | UiProjectOutcome::Reconcilable { .. }
+            ) {
+                lines.push(Line::default());
+                lines.push(Line::styled(
+                    if model.viewport().width >= WIDE_WIDTH {
+                        format!(
+                            "Technical details: project {} · request {}",
+                            short_identity(result.project_id),
+                            short_identity(result.operation_id)
+                        )
+                    } else {
+                        format!(
+                            "Technical IDs: {} / {}",
+                            short_identity(result.project_id),
+                            short_identity(result.operation_id)
+                        )
+                    },
+                    Style::new().fg(Color::DarkGray),
+                ));
+                if let Some(runtime_state) = &result.runtime_state {
+                    lines.push(Line::styled(
+                        format!(
+                            "Technical runtime: {runtime_state}{}",
+                            result
+                                .runtime_code
+                                .as_ref()
+                                .map_or_else(String::new, |code| format!("/{code}"))
+                        ),
+                        Style::new().fg(Color::DarkGray),
+                    ));
+                }
+                match &result.outcome {
+                    UiProjectOutcome::Rejected { category, code } => lines.push(Line::styled(
+                        format!("Technical reason: {category}/{code}"),
+                        Style::new().fg(Color::DarkGray),
+                    )),
+                    UiProjectOutcome::Reconcilable {
+                        stage,
+                        category,
+                        code,
+                        ..
+                    } => lines.push(Line::styled(
+                        format!("Technical stage and reason: {stage} · {category}/{code}"),
+                        Style::new().fg(Color::DarkGray),
+                    )),
+                    _ => {}
+                }
+            }
             lines.push(Line::default());
             lines.push(Line::from("Esc close"));
-            (" Project change ", lines)
+            (
+                if matches!(
+                    result.action,
+                    UiProjectAction::Activate { .. } | UiProjectAction::Handoff { .. }
+                ) {
+                    " Project work "
+                } else {
+                    " Project change "
+                },
+                lines,
+            )
         }
     };
     frame.render_widget(

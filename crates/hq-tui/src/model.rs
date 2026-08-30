@@ -1437,7 +1437,6 @@ enum UiGuidedPending {
         expected_name: Option<String>,
     },
     Activation(UiGuidedSubmission),
-    Review(UiGuidedSubmission),
 }
 
 /// Closed timer purpose owned by the shell effect executor.
@@ -2957,14 +2956,18 @@ fn apply_new_modal_input(
                     .assignment
                     .as_ref()
                     .is_some_and(|assignment| assignment.agent_id != agent.agent_id);
-                model.new_modal = Some(UiNewModal::ReviewProject {
-                    project,
-                    agent,
-                    provider,
-                    resumes_existing,
-                    moves_project,
-                    submitting: false,
-                });
+                if moves_project {
+                    model.new_modal = Some(UiNewModal::ReviewProject {
+                        project,
+                        agent,
+                        provider,
+                        resumes_existing,
+                        moves_project,
+                        submitting: false,
+                    });
+                } else {
+                    submit_guided_project(model, project, &agent, provider, effects)?;
+                }
                 Ok(true)
             }
             _ => Ok(false),
@@ -3514,13 +3517,6 @@ fn apply_project_modal_input(
                 model.last_failure = None;
                 return Ok(true);
             }
-            if matches!(model.project_modal, Some(UiProjectModal::Outcome { .. }))
-                && restore_guided_review(model)
-            {
-                model.project_modal = None;
-                model.last_failure = None;
-                return Ok(true);
-            }
             if let Some(UiProjectModal::Search { query }) = &model.project_modal {
                 model.project_search.clone_from(query);
             }
@@ -4009,54 +4005,31 @@ fn apply_project_modal_input(
     }
 }
 
-fn pause_guided_submission(model: &mut UiModel) {
-    let submission = match &model.guided_pending {
-        Some(UiGuidedPending::Activation(submission)) => Some(submission.clone()),
+fn stop_guided_activation(model: &mut UiModel) -> bool {
+    let Some(project_id) = (match &model.guided_pending {
+        Some(UiGuidedPending::Activation(submission)) => Some(submission.project_id),
         _ => None,
+    }) else {
+        return false;
     };
-    if let Some(submission) = submission {
-        model.guided_pending = Some(UiGuidedPending::Review(submission));
+    model.guided_pending = None;
+    model.new_modal = None;
+    if model.project_modal.is_none()
+        && let Some(project) = model.snapshot.as_ref().and_then(|snapshot| {
+            snapshot
+                .projects
+                .iter()
+                .find(|project| project.project_id == project_id)
+                .cloned()
+        })
+    {
+        model.change_section(UiSection::Projects);
+        model.selected_row = Some(agent_hex(project_id));
+        model.project_modal = Some(UiProjectModal::Details {
+            selected_resource: default_project_resource(&project),
+            project,
+        });
     }
-}
-
-fn restore_guided_review(model: &mut UiModel) -> bool {
-    let Some(submission) = (match &model.guided_pending {
-        Some(UiGuidedPending::Activation(submission) | UiGuidedPending::Review(submission)) => {
-            Some(submission.clone())
-        }
-        _ => None,
-    }) else {
-        return false;
-    };
-    let Some((project, agent)) = model.snapshot.as_ref().and_then(|snapshot| {
-        let project = snapshot
-            .projects
-            .iter()
-            .find(|project| project.project_id == submission.project_id)?
-            .clone();
-        let agent = snapshot
-            .agents
-            .iter()
-            .find(|agent| agent.agent_id == submission.agent_id)?
-            .clone();
-        Some((project, agent))
-    }) else {
-        return false;
-    };
-    model.new_modal = Some(UiNewModal::ReviewProject {
-        resumes_existing: guided_thread(&project, agent.agent_id).is_some()
-            || project.assignment.as_ref().is_some_and(|assignment| {
-                assignment.agent_id == agent.agent_id && assignment.runnable
-            }),
-        moves_project: project
-            .assignment
-            .as_ref()
-            .is_some_and(|assignment| assignment.agent_id != agent.agent_id),
-        project,
-        agent,
-        provider: submission.provider,
-        submitting: false,
-    });
     true
 }
 
@@ -4791,7 +4764,7 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
                 reject(model, UiProjectFormField::Name, "Enter a project name");
                 return Ok(true);
             }
-            UiProjectAction::PreviewCreateExisting {
+            UiProjectAction::CreateExisting {
                 name,
                 brief: (!brief.is_empty()).then_some(brief),
                 path,
@@ -6834,8 +6807,7 @@ fn apply_guided_snapshot(model: &mut UiModel) {
         | UiGuidedPending::AgentCreation {
             expected_name: None,
             ..
-        }
-        | UiGuidedPending::Review(_) => {}
+        } => {}
     }
 }
 
@@ -6962,8 +6934,7 @@ fn project_command_completed(
     };
     if pending.action != result.action {
         model.pending_project = None;
-        pause_guided_submission(model);
-        restore_guided_review(model);
+        stop_guided_activation(model);
         model.last_failure = Some(UiFailure {
             code: "project_response_mismatch".to_owned(),
             action: "reload and reselect the exact project operation target".to_owned(),
@@ -7055,16 +7026,15 @@ fn guided_project_completed(
             Ok(true)
         }
         (
-            Some(UiGuidedPending::Activation(submission)),
+            Some(UiGuidedPending::Activation(_)),
             UiProjectAction::Activate { .. } | UiProjectAction::Handoff { .. },
             UiProjectOutcome::Rejected { code, .. },
         ) => {
-            let submission = submission.clone();
-            model.guided_pending = Some(UiGuidedPending::Review(submission));
+            model.guided_pending = None;
             model.new_modal = None;
             model.last_failure = Some(UiFailure {
                 code: code.clone(),
-                action: "review the retained project and agent before retrying".to_owned(),
+                action: "reload the project state before choosing another action".to_owned(),
             });
             model.project_modal = Some(UiProjectModal::Outcome {
                 result: result.clone(),
@@ -7072,17 +7042,15 @@ fn guided_project_completed(
             Ok(true)
         }
         (
-            Some(UiGuidedPending::Activation(submission)),
+            Some(UiGuidedPending::Activation(_)),
             UiProjectAction::Activate { .. } | UiProjectAction::Handoff { .. },
             UiProjectOutcome::Reconcilable { code, .. },
         ) => {
-            let submission = submission.clone();
-            model.guided_pending = Some(UiGuidedPending::Review(submission));
+            model.guided_pending = None;
             model.new_modal = None;
             model.last_failure = Some(UiFailure {
                 code: code.clone(),
-                action: "inspect recovery evidence; your guided-work choices are retained"
-                    .to_owned(),
+                action: "inspect recovery evidence before choosing another action".to_owned(),
             });
             model.project_modal = Some(UiProjectModal::Outcome {
                 result: result.clone(),
@@ -7140,8 +7108,7 @@ fn project_command_failed(
         return;
     }
     model.pending_project = None;
-    pause_guided_submission(model);
-    restore_guided_review(model);
+    stop_guided_activation(model);
     if let Some(
         UiProjectModal::CreateExisting { submitting, .. }
         | UiProjectModal::CreateWorktree { submitting, .. }

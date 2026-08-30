@@ -195,7 +195,6 @@ fn guided_project_work_activates_then_opens_the_project_message_composer() {
         UiInput::Activate,
         UiInput::Activate,
         UiInput::Activate,
-        UiInput::Activate,
     ] {
         model = update(model, UiEvent::Input(input))
             .expect("guided step")
@@ -340,39 +339,12 @@ fn guided_project_work_can_create_its_missing_project_and_continue() {
             .expect("creation step")
             .model;
     }
-    let previewing = update(model, UiEvent::Input(UiInput::Activate)).expect("preview");
-    let (preview_id, preview_action) = project_effect(&previewing.effects);
-    let preview = update(
-        previewing.model,
-        UiEvent::ProjectCommandCompleted {
-            effect_id: preview_id,
-            result: UiProjectResult {
-                action: preview_action,
-                command_id: [20; 32],
-                operation_id: [21; 32],
-                project_id: [5; 32],
-                runtime_state: None,
-                runtime_code: None,
-                outcome: UiProjectOutcome::ResourcePreview {
-                    display_path: "/work/new-project".to_owned(),
-                    canonical_path: "/work/new-project".to_owned(),
-                    conflicts: Vec::new(),
-                },
-            },
-        },
-    )
-    .expect("safe preview");
-    let precommit_snapshot_id = snapshot_effect(&preview.effects);
-    let preview = update(
-        preview.model,
-        UiEvent::SnapshotLoaded {
-            effect_id: precommit_snapshot_id,
-            snapshot: projects_snapshot(1, Vec::new()),
-        },
-    )
-    .expect("pre-commit snapshot");
-    let creating = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("create");
+    let creating = update(model, UiEvent::Input(UiInput::Activate)).expect("create");
     let (create_id, create_action) = project_effect(&creating.effects);
+    assert!(matches!(
+        create_action,
+        UiProjectAction::CreateExisting { ref path, .. } if path == "/work/new-project"
+    ));
     let completed = update(
         creating.model,
         UiEvent::ProjectCommandCompleted {
@@ -462,13 +434,12 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
 }
 
 #[test]
-fn guided_project_rejection_and_uncertainty_retain_every_setup_choice() {
+fn guided_project_failure_does_not_rearm_the_submission() {
     let agent = project_agent(7, [9; 32]);
     let project = project(5, "release", "/work/release");
     let mut model = loaded_projects_model_with_agents(1, vec![project], vec![agent]);
     for input in [
         UiInput::Character('n'),
-        UiInput::Activate,
         UiInput::Activate,
         UiInput::Activate,
         UiInput::Activate,
@@ -512,21 +483,42 @@ fn guided_project_rejection_and_uncertainty_retain_every_setup_choice() {
             Some(UiProjectModal::Outcome { .. })
         ));
         let recovered = update(result.model, UiEvent::Input(UiInput::Escape))
-            .expect("return to retained review")
+            .expect("close the outcome")
             .model;
-        assert!(matches!(
-            recovered.new_modal(),
-            Some(UiNewModal::ReviewProject {
-                project,
-                agent,
-                provider,
-                submitting: false,
-                ..
-            }) if project.name == "release"
-                && agent.names == ["agent-7"]
-                && provider == "codex"
-        ));
+        assert!(recovered.new_modal().is_none());
+        assert!(recovered.project_modal().is_none());
+        let next = update(recovered, UiEvent::Input(UiInput::Activate))
+            .expect("ordinary project navigation resumes");
+        assert!(
+            next.effects
+                .iter()
+                .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+        );
     }
+
+    let failed = update(
+        submitting.model,
+        UiEvent::ProjectCommandFailed {
+            effect_id,
+            failure: UiFailure {
+                code: "node_unavailable".to_owned(),
+                action: "reload project state".to_owned(),
+            },
+        },
+    )
+    .expect("transport failure exits guided submission");
+    assert!(failed.model.new_modal().is_none());
+    assert!(matches!(
+        failed.model.project_modal(),
+        Some(UiProjectModal::Details { project, .. }) if project.project_id == [5; 32]
+    ));
+    assert!(
+        update(failed.model, UiEvent::Input(UiInput::Activate))
+            .expect("details remain ordinary navigation")
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
 }
 
 #[test]
@@ -568,9 +560,6 @@ fn guided_project_work_only_offers_available_provider_choices_when_needed() {
         model.new_modal(),
         Some(UiNewModal::ChooseProvider { provider, .. }) if provider == "alpha"
     ));
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("review")
-        .model;
     let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit");
     assert!(matches!(
         project_effect(&submitted.effects).1,
@@ -2578,7 +2567,7 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
     let (existing_id, existing_action) = project_effect(&submitted.effects);
     assert_eq!(
         existing_action,
-        UiProjectAction::PreviewCreateExisting {
+        UiProjectAction::CreateExisting {
             name: "existing".to_owned(),
             brief: Some("brief".to_owned()),
             path: "/repo/existing".to_owned(),
@@ -2609,73 +2598,7 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
             .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
     );
 
-    let previewing = update(retry_model, UiEvent::Input(UiInput::Activate)).expect("retry preview");
-    let (preview_id, preview_action) = project_effect(&previewing.effects);
-    let preview = update(
-        previewing.model,
-        UiEvent::ProjectCommandCompleted {
-            effect_id: preview_id,
-            result: UiProjectResult {
-                action: preview_action,
-                command_id: [31; 32],
-                operation_id: [32; 32],
-                project_id: [33; 32],
-                runtime_state: None,
-                runtime_code: None,
-                outcome: UiProjectOutcome::ResourcePreview {
-                    display_path: "/repo/existing".to_owned(),
-                    canonical_path: "/repo/existing".to_owned(),
-                    conflicts: vec![UiProjectResourceConflict {
-                        project_id: [44; 32],
-                        resource_id: [45; 32],
-                        display_path: "/repo".to_owned(),
-                        canonical_path: "/repo".to_owned(),
-                        relationship: "ancestor".to_owned(),
-                    }],
-                },
-            },
-        },
-    )
-    .expect("conflicting ownership preview");
-    let creation_snapshot_id = snapshot_effect(&preview.effects);
-    assert!(
-        preview
-            .effects
-            .iter()
-            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
-    );
-    let editing = update(preview.model, UiEvent::Input(UiInput::Escape))
-        .expect("return to the retained form")
-        .model;
-    assert!(matches!(
-        editing.project_modal(),
-        Some(UiProjectModal::CreateExisting { name, path, .. })
-            if name == "existing" && path == "/repo/existing"
-    ));
-    let previewing = update(editing, UiEvent::Input(UiInput::Activate)).expect("retry preview");
-    let (preview_id, preview_action) = project_effect(&previewing.effects);
-    let preview = update(
-        previewing.model,
-        UiEvent::ProjectCommandCompleted {
-            effect_id: preview_id,
-            result: UiProjectResult {
-                action: preview_action,
-                command_id: [34; 32],
-                operation_id: [35; 32],
-                project_id: [36; 32],
-                runtime_state: None,
-                runtime_code: None,
-                outcome: UiProjectOutcome::ResourcePreview {
-                    display_path: "/repo/existing".to_owned(),
-                    canonical_path: "/repo/existing".to_owned(),
-                    conflicts: Vec::new(),
-                },
-            },
-        },
-    )
-    .expect("clear ownership preview");
-    let committed =
-        update(preview.model, UiEvent::Input(UiInput::Activate)).expect("commit creation");
+    let committed = update(retry_model, UiEvent::Input(UiInput::Activate)).expect("retry create");
     let (create_id, create_action) = project_effect(&committed.effects);
     assert_eq!(
         create_action,
@@ -2703,6 +2626,7 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
         },
     )
     .expect("creation completion");
+    let creation_snapshot_id = snapshot_effect(&created.effects);
     assert!(created.model.project_modal().is_none());
     assert_eq!(created.model.completion_notice(), Some("Project created"));
     let stale_refresh = update(
@@ -2793,7 +2717,7 @@ fn existing_folder_creation_defaults_the_name_when_submitted_from_the_path_field
         update(model, UiEvent::Input(UiInput::Activate)).expect("submit from path field");
     assert_eq!(
         project_effect(&submitted.effects).1,
-        UiProjectAction::PreviewCreateExisting {
+        UiProjectAction::CreateExisting {
             name: "direct-submit".to_owned(),
             brief: None,
             path: "/repo/direct-submit".to_owned(),
@@ -2884,7 +2808,7 @@ fn forms_use_tab_unicode_safe_cursor_editing_and_current_user_path_expansion() {
     let (_, action) = project_effect(&submitted.effects);
     assert_eq!(
         action,
-        UiProjectAction::PreviewCreateExisting {
+        UiProjectAction::CreateExisting {
             name: "xé".to_owned(),
             brief: None,
             path: "/Users/example/repo".to_owned(),

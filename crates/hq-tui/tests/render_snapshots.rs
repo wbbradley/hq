@@ -985,6 +985,17 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
         assert!(rendered.contains("Project change"));
         assert!(rendered.contains("Technical runtime: uncertain/response_lost"));
         assert!(rendered.contains("could not confirm whether the change finished"));
+        assert!(rendered.contains("retained this request for recovery"));
+        assert!(
+            rendered
+                .find("could not confirm whether the change finished")
+                .expect("human explanation")
+                < rendered
+                    .find("Technical details:")
+                    .or_else(|| rendered.find("Technical IDs:"))
+                    .expect("technical details at the bottom"),
+            "technical details should follow the human explanation:\n{rendered}"
+        );
         assert!(rendered.contains("response_lost"));
         assert!(
             rendered.contains("retained_worktree"),

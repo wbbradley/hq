@@ -9,9 +9,9 @@ use std::{
 };
 
 use hq_application::{
-    AgentRetirementOutcome, AgentRetirementRequest, ApplicationError, EffectOutcome, EffectRequest,
-    MutationAttempt, MutationOutcome, MutationReceipt, ProjectCommandAction, ProjectCommandOutcome,
-    ProjectCommandRequest,
+    AgentRetirementOutcome, AgentRetirementRequest, ApplicationError, ApplicationErrorCode,
+    EffectOutcome, EffectRequest, MutationAttempt, MutationOutcome, MutationReceipt,
+    ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,
 };
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, BoundedText, CommandDigest, CommandId, DomainError,
@@ -597,6 +597,7 @@ struct ScriptedRuntime(Arc<Mutex<RuntimeState>>);
 )]
 struct RuntimeState {
     reject_start: bool,
+    unavailable_start_once: bool,
     uncertain_start_once: bool,
     uncertain_delivery_once: bool,
     reject_stop: bool,
@@ -632,6 +633,16 @@ impl ScriptedRuntime {
         runtime
     }
 
+    fn unavailable_start_once() -> Self {
+        let runtime = Self::default();
+        runtime
+            .0
+            .lock()
+            .expect("runtime lock")
+            .unavailable_start_once = true;
+        runtime
+    }
+
     fn rejecting_stop() -> Self {
         let runtime = Self::default();
         runtime.0.lock().expect("runtime lock").reject_stop = true;
@@ -658,6 +669,11 @@ impl ProjectRuntimePort for ScriptedRuntime {
                 ErrorCategory::Unresolved,
                 "start-rejected",
             )))
+        } else if state.unavailable_start_once {
+            state.unavailable_start_once = false;
+            Err(ApplicationError::new(
+                ApplicationErrorCode::AdapterUnavailable,
+            ))
         } else if state.uncertain_start_once {
             state.uncertain_start_once = false;
             Ok(EffectOutcome::Uncertain(request.operation_id))
@@ -968,6 +984,28 @@ fn unknown_runtime_start_and_launch_observation_resume_from_durable_boundaries()
     let replay = manager.control(request).expect("launch reconciliation");
     assert!(matches!(replay, ProjectCommandOutcome::Completed { .. }));
     assert_eq!(runtime.0.lock().expect("runtime lock").starts, 1);
+}
+
+#[test]
+fn runtime_adapter_failure_becomes_reconcilable_instead_of_wedging_the_project() {
+    let canonical = ScriptedCanonical::new(snapshot(CanonicalProjectLifecycle::Closed));
+    let runtime = ScriptedRuntime::unavailable_start_once();
+    let manager = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical,
+        runtime.clone(),
+        HealthyResources,
+    );
+    let request = activation_request();
+
+    let first = manager
+        .control(request.clone())
+        .expect("adapter failure has a durable outcome");
+    assert!(matches!(first, ProjectCommandOutcome::Reconcilable { .. }));
+
+    let replay = manager.control(request).expect("same request can recover");
+    assert!(matches!(replay, ProjectCommandOutcome::Completed { .. }));
+    assert_eq!(runtime.0.lock().expect("runtime lock").starts, 2);
 }
 
 #[test]

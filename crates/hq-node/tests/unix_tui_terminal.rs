@@ -1205,22 +1205,6 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         }
         if matches!(interaction, PtyInteraction::CreateExistingProject { .. })
             && content_sent
-            && !resource_commit_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Enter create".len())
-                    .any(|window| window == b"Enter create")
-            })
-        {
-            master
-                .write_all(b"\r")
-                .expect("project create commit writes");
-            master.flush().expect("project create commit flushes");
-            resource_commit_sent = true;
-            completion_offset = Some(bytes.len());
-        }
-        if matches!(interaction, PtyInteraction::CreateExistingProject { .. })
-            && resource_commit_sent
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]

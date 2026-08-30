@@ -609,11 +609,29 @@ fn copy_launch_environment(
     .map_err(map_harness_error)
 }
 
+fn project_launch_environment() -> Result<HarnessEnvironment, ApplicationError> {
+    let entries = std::env::vars_os()
+        .map(|(name, value)| {
+            let name = name
+                .into_string()
+                .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvalidRequest))?;
+            Ok((name, value.as_encoded_bytes().to_vec()))
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
+    HarnessEnvironment::copy_from(
+        entries
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_slice())),
+    )
+    .map_err(map_harness_error)
+}
+
 impl ProjectRuntimePort for HarnessNodeComponent {
     fn start_or_resume(
         &self,
         request: &EffectRequest<ProjectRuntimeRequest>,
     ) -> Result<EffectOutcome<hq_domain::ProviderSessionId>, ApplicationError> {
+        let environment = project_launch_environment()?;
         let outcome = self.with_supervisor(|supervisor| {
             let launch = HarnessLaunchRequest {
                 agent_id: request.body.agent_id,
@@ -626,7 +644,11 @@ impl ProjectRuntimePort for HarnessNodeComponent {
                         session_id: session.clone(),
                     },
                 ),
-                environment: HarnessEnvironment::default(),
+                // Guided project work is launched by the long-running node rather than by a
+                // one-shot CLI request. Preserve the node's copied launch environment so a
+                // relative provider executable, its interpreter, and its user configuration
+                // remain resolvable after the process starter clears ambient inheritance.
+                environment,
             };
             if request.body.resume_session.is_some() {
                 supervisor.recover(launch)
@@ -789,6 +811,19 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn project_launch_environment_preserves_the_nodes_executable_search_path() {
+        let expected = std::env::var_os("PATH").expect("test process has PATH");
+        let environment = project_launch_environment().expect("node environment copies");
+        let mut actual = None;
+        environment.visit(|name, value| {
+            if name == "PATH" {
+                actual = Some(value.to_vec());
+            }
+        });
+        assert_eq!(actual.as_deref(), Some(expected.as_encoded_bytes()));
+    }
 
     #[test]
     fn retained_project_delivery_must_match_the_exact_current_request() {

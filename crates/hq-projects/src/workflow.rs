@@ -2506,7 +2506,16 @@ where
                     launch_directory: Some(launch_directory.clone()),
                 },
             };
-            match self.runtime.start_or_resume(&request)? {
+            let Ok(runtime_outcome) = self.runtime.start_or_resume(&request) else {
+                return reconcile(
+                    &self.store,
+                    record,
+                    ProjectCommandStage::StartingRuntime,
+                    effect_error("project_runtime_start_unknown"),
+                    EffectKind::Runtime,
+                );
+            };
+            match runtime_outcome {
                 EffectOutcome::Accepted(session)
                     if resume_session
                         .as_ref()
