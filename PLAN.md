@@ -27,24 +27,17 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Author and reconcile canonical project runtime events
+### Reconcile legacy project runtime attribution without rewriting history
 
-Use the retained runtime-delivery evidence to make project output and activity canonically
-project-bound without changing direct-agent runtime behavior.
-
-- Preserve exact project provenance when a runtime turn is delivered. Carry the delivery operation's
-  project, accepted input, dispatch, assignment binding, and selected project thread through the
-  harness persistence boundary; author the existing canonical `ProjectOutputRecorded` fact for
-  project-bound output instead of persisting it only as a project-less asynchronous message. Give
-  project-bound activity the same typed project/dispatch association so it joins the project
-  conversation rather than leaving an activity-only provider-session row. Make reconciliation
-  idempotently repair existing attributable output without rewriting immutable history; conflicting
-  or incomplete attribution must remain explicit instead of guessing.
-
-Cover output/activity duplication, partial checkpoints, response loss, restart, late output after
-handoff, and ambiguous bindings across application, harness, reducer, protocol, store, node, and
-testkit layers. Update semantic-fact, payload-mapping, project-model, and storage documentation for
-any appended canonical fact family or durable association.
+For migrated delivery rows with no retained project fields, use the stable submission ID to find one
+exact non-conflicted canonical project dispatch and require the agent/provider/session/thread/input
+tuple to agree before attaching provenance. Then locate already-authored asynchronous output and
+activity only by exact operation correlation, author the missing project output/activity facts
+idempotently, and retain the old immutable facts as audit evidence. Teach later conversation
+grouping to suppress the superseded presentation entries without deleting them. Ambiguous,
+incomplete, changed, or multiply matching evidence must remain an actionable reconciliation
+failure. Cover startup scans, bounded work, response loss, duplicate repair, partial repair,
+handoff, and old databases containing the reported corpus.
 
 ### Group all project history under one typed conversation
 

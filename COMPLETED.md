@@ -1820,7 +1820,6 @@ Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the complete
 
 If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
 
-
 ## 2026-08-24 — Mandatory project runtime contracts
 
 Added a daemon-only composite project runtime store contract spanning core operations, project mutations, delivery, output, commands, workflows, and durable pending work. The supervisor now requires that contract and no longer discovers mandatory capabilities at runtime. Codex bridge project delivery and output dependencies are explicit and narrowly scoped, while direct-mode and RPC client interfaces remain small. Added compile-time assertions for SQLite, the RPC client, and supervisor runtime roles, and removed mandatory-capability fallback branches and type assertions.
@@ -9747,6 +9746,128 @@ that evidence to author canonical project output and activity.
   canonical dispatch evidence proves one exact match.
 - Provider output can arrive after assignment handoff. Provenance is therefore immutable delivery
   evidence and must never be recomputed from the project's current assignment.
+
+## Post-Plan Execution Steps
+
+Execute these steps in order:
+
+### Implement
+Execute the plan above.
+
+**Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+`Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+### Verify
+
+1. Run the project's build/lint command. Fix all warnings.
+2. Run the project's test suite.
+3. If tests fail, fix them before proceeding.
+4. If test coverage for the new work is insufficient, add tests.
+
+### Commit
+
+Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+### Update the plan file
+
+Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+1. A brief summary, written now, of what was actually implemented.
+2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+
+### Canonically attribute new project runtime output and activity
+
+HQ now resolves normalized runtime events through the exact retained agent/operation delivery before
+authoring. Complete project deliveries produce home-linear `ProjectOutputRecorded` facts and FCT-022
+activity with typed project, dispatch, captured assignment, and thread provenance; direct events keep
+their historical shapes, while ambiguity, runtime mismatches, and unattributed legacy rows fail
+closed. The protocol extension omits absent attribution so historical signed activity re-encodes
+byte-for-byte. Conversation reduction now validates the cited dispatch and agent source and projects
+project output with its immutable thread. Storage, restart recovery, reducer, migration, protocol,
+and node tests cover exact replay and conflicts.
+
+### Original plan entry
+
+### Author canonical project output and activity for attributed deliveries
+
+Use retained delivery provenance for all new runtime events. A project-bound output must author the
+existing `ProjectOutputRecorded` fact, and project-bound activity must carry immutable project and
+dispatch provenance in a new append-only canonical family. Direct-agent events retain their current
+asynchronous-message and provider-session activity facts. Missing or conflicting delivery
+attribution must fail closed rather than silently creating direct conversation history.
+
+#### Implementation plan
+
+1. Start with failing end-to-end persistence and reducer tests.
+   - Extend `crates/hq-node/src/harness_persistence.rs` tests with a complete project fixture and
+     assert that an attributed output authors `ProjectOutputRecorded` with the exact project,
+     dispatch, captured assignment binding, selected thread, provider correlation, project mailbox,
+     and `ProjectOutput` purpose. Assert attributed activity authors the new project-activity family
+     with the same provenance; direct events must remain byte-for-byte in their existing families.
+   - Extend `crates/hq-testkit/tests/conversation_reduction.rs` and
+     `crates/hq-testkit/tests/project_reduction.rs` so valid project output/activity survive shuffled
+     arrival and late output after handoff, while mismatched dispatch, assignment, thread, source,
+     operation, and duplicate stable identities fail closed.
+   - Extend `crates/hq-testkit/tests/supervisor_recovery.rs` to prove combined output/activity,
+     partial checkpoint retry, response loss, and restart all pass the same retained attribution
+     exactly once to persistence.
+2. Add an append-only semantic contract for project activity.
+   - In `crates/hq-domain/src/fact_catalog.rs` and `crates/hq-domain/src/semantic_fact.rs`, append
+     `FCT-049 ProjectActivityRecorded`. Carry `project_id`, `dispatch_id`, captured
+     `AssignmentBinding`, `thread_id`, and all existing normalized activity fields. Keep FCT-022
+     unchanged so historical signatures and direct activity remain valid; make FCT-049
+     canonical-compacted-view with installation-private scope and intrinsic nonzero/bounded values.
+   - Add the exact closed DTO and family code in `crates/hq-protocol/src/dto/model.rs`, plus complete
+     author/decode/semantic conversions in `author.rs`, `decode.rs`, and `semantic.rs`. Update
+     `crates/hq-protocol/tests/semantic_conversion.rs`, catalog tests, DTO vectors, and
+     `crates/hq-testkit/src/payloads.rs` so every family remains exhaustively executable.
+   - In `crates/hq-reducer/src/conversation.rs`, normalize FCT-022 and FCT-049 through shared activity
+     accessors. Require the project activity's exact projected `ProjectInputDispatched` parent and
+     captured provenance, reuse source/sequence collision checks, and project/render it through the
+     existing bounded activity model without discarding its canonical fact identity. Include
+     `ProjectOutputRecorded` in message projection with its payload thread ID.
+3. Resolve event attribution at the neutral supervisor boundary.
+   - Add `delivery_for_operation(agent_id, operation_id)` to `HarnessStatePort` in
+     `crates/hq-harness/src/supervisor.rs`; implement a bounded exact query in
+     `crates/hq-store/src/database/harness.rs`, expose it through `database.rs` and `actor.rs`, and
+     map it in `crates/hq-node/src/harness_store.rs`. More than one retained delivery for the same
+     agent/operation is an explicit identity conflict.
+   - Change `HarnessPersistencePort::persist_output` and `persist_activity` to receive an optional
+     borrowed `HarnessProjectDelivery`. Before persistence, `persist_one` resolves the event's exact
+     operation, verifies agent/provider/session against the retained delivery, passes `Some` only
+     for complete provenance, returns an error for a matching unattributed legacy row, and passes
+     `None` only when no delivery exists. Update neutral fake ports and fixtures exhaustively.
+4. Plan the two canonical fact shapes from transaction-consistent state.
+   - In `crates/hq-application/src/harness.rs` and `lib.rs`, add a project authoring authority/request
+     that binds the current project head, project-home installation root, active account membership,
+     exact dispatch fact, agent mailbox, project mailbox, and captured assignment. Branch
+     `plan_harness_output` to build `ProjectOutputRecorded` with account scope, project mailbox,
+     `ProjectOutput` purpose, and exact correlation; add `plan_project_harness_activity` for FCT-049
+     without changing the direct planners.
+   - In `crates/hq-node/src/harness_persistence.rs`, resolve that authority only by
+     `ProjectProjectionKey::{Project,Dispatch}` and exact retained fields. Include the current head
+     and dispatch fact as causal evidence so output remains valid after handoff; reject missing,
+     conflicted, stale, or mismatched evidence. Keep stable command/digest derivation idempotent and
+     preserve direct authoring unchanged.
+5. Update `docs/protocol/payload-mapping-v1.md`, `docs/rust/semantic-facts.md`,
+   `docs/rust/semantic-fact-catalog.md`, `docs/rust/project-model.md`, `docs/rust/storage.md`, and
+   `docs/harnesses.md`. Raise the canonical-family storage bound to 49. Verify with
+   `cargo fmt --all --check`, strict locked workspace Clippy, the locked all-target/all-feature
+   workspace suite, and the repository's protocol/spec consistency tests.
+
+#### Risks and decisions
+
+- FCT-022 cannot safely gain a field: historical signed payloads must decode and re-encode exactly.
+  An appended FCT-049 preserves compatibility and makes project attribution explicit.
+- Project output is a project-home-linear transition. Author against the transaction's current head
+  while also citing the immutable originating dispatch, so late output is retained without looking
+  up the current assignment. Retry must re-plan after concurrent project progress rather than reuse
+  a stale head.
+- A provider operation with a retained but unattributed legacy delivery is not a direct message.
+  This task fails it closed; the following task repairs legacy rows and already-authored output.
 
 ## Post-Plan Execution Steps
 
