@@ -3,8 +3,8 @@
 #![allow(clippy::expect_used)]
 
 use hq_application::{
-    AuthoritativeSnapshot, ConversationKey, ConversationSummary, DomainSnapshot,
-    ProjectCommandAction, ProjectCommandRequest,
+    AuthoritativeSnapshot, ConversationContext, ConversationKey, ConversationSummary,
+    DomainSnapshot, ProjectCommandAction, ProjectCommandRequest,
 };
 use hq_domain::{
     AccountId, BoundedSet, BoundedText, CausalReferences, CommandDigest, CommandId,
@@ -16,15 +16,15 @@ use hq_local_api::protocol::v1::{
     ActivityStatusDto, AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
     AgentSelectionCandidateDto, AgentSessionBindingDto, AgentSessionNameCandidateDto,
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
-    CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationEntryDto,
-    ConversationKeyDto, ConversationMessageDto, ConversationPageDto, ConversationPageRequest,
-    DecodeError, DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto,
-    EffectRequestDto, EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto,
-    FrameDecoder, HealthDomainDto, Id32, InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest,
-    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MAX_PROVIDER_CATALOG_ITEMS,
-    MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto,
-    MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto, MailboxDraftDto,
-    MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+    CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationContextDto,
+    ConversationEntryDto, ConversationKeyDto, ConversationMessageDto, ConversationPageDto,
+    ConversationPageRequest, ConversationParticipantDto, DecodeError, DeviceGrantDto,
+    DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto, EncodeError, ErrorClass,
+    ErrorResponse, EvidenceIngestOutcomeDto, FrameDecoder, HealthDomainDto, Id32,
+    InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest, LifecycleState, LifecycleStatus,
+    MAX_FRAME_BYTES, MAX_PROVIDER_CATALOG_ITEMS, MailboxAddressDto, MailboxCommandActionDto,
+    MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto,
+    MailboxDraftDto, MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
     MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCreationRequestDto, ProjectExternalStateWarningDto,
@@ -126,6 +126,12 @@ fn project_thread_snapshot_summary_converts_to_the_same_typed_v1_key() {
         DomainSnapshot::empty(),
         vec![ConversationSummary {
             key: ConversationKey::ProjectThread { project_id, thread },
+            context: ConversationContext::Project {
+                project_id,
+                name: Some(ShortText::new("release").expect("project name")),
+                participant: None,
+            },
+            preview: Some(ShortText::new("Ship it").expect("preview")),
             latest_fact: Some(FactId::from_bytes([0x43; 32])),
             open_messages: 1,
             archived_messages: 0,
@@ -133,14 +139,105 @@ fn project_thread_snapshot_summary_converts_to_the_same_typed_v1_key() {
         }],
     );
     let converted = snapshot_to_v1(&snapshot).expect("snapshot converts");
-    assert!(matches!(
-        converted.items.as_slice(),
-        [SnapshotItem::Conversation {
-            key: ConversationKeyDto::ProjectThread { project, thread: converted_thread },
-            ..
-        }] if project.bytes() == *project_id.as_bytes()
-            && converted_thread.bytes() == *thread.as_bytes()
-    ));
+    assert_eq!(converted.items.len(), 1);
+    let (project, converted_thread, context_project, name, participant, preview) = converted
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SnapshotItem::Conversation {
+                key:
+                    ConversationKeyDto::ProjectThread {
+                        project,
+                        thread: converted_thread,
+                    },
+                context:
+                    ConversationContextDto::Project {
+                        project: context_project,
+                        name,
+                        participant,
+                    },
+                preview,
+                ..
+            } => Some((
+                project,
+                converted_thread,
+                context_project,
+                name,
+                participant,
+                preview,
+            )),
+            _ => None,
+        })
+        .expect("one project conversation summary converts");
+    assert_eq!(project.bytes(), *project_id.as_bytes());
+    assert_eq!(converted_thread.bytes(), *thread.as_bytes());
+    assert_eq!(context_project, project);
+    assert_eq!(name.as_deref(), Some("release"));
+    assert_eq!(participant, &None);
+    assert_eq!(preview.as_deref(), Some("Ship it"));
+}
+
+#[test]
+fn conversation_summary_validation_rejects_incoherent_v1_context_without_a_version_bump() {
+    let id = |byte| Id32::new([byte; 32]);
+    let project = id(0x51);
+    let thread = id(0x52);
+    let summary = |context, preview| SnapshotItem::Conversation {
+        key: ConversationKeyDto::ProjectThread { project, thread },
+        context,
+        preview,
+        latest_fact: None,
+        open_messages: 0,
+        archived_messages: 0,
+        sent_messages: 0,
+    };
+
+    assert_eq!(V1, 1);
+    assert_eq!(
+        AuthoritativeSnapshotDto::new(
+            1,
+            vec![summary(
+                ConversationContextDto::Project {
+                    project: id(0x53),
+                    name: Some("release".to_owned()),
+                    participant: None,
+                },
+                None,
+            )],
+        ),
+        Err(ValueError::InvalidValueCombination)
+    );
+    assert_eq!(
+        AuthoritativeSnapshotDto::new(
+            1,
+            vec![summary(
+                ConversationContextDto::Direct {
+                    participant: ConversationParticipantDto {
+                        agent: None,
+                        installation: Some(id(0x54)),
+                        mailbox: Some(id(0x55)),
+                        name: Some("unverified name".to_owned()),
+                    },
+                },
+                None,
+            )],
+        ),
+        Err(ValueError::InvalidValueCombination)
+    );
+    assert!(
+        AuthoritativeSnapshotDto::new(
+            1,
+            vec![summary(
+                ConversationContextDto::Project {
+                    project,
+                    name: None,
+                    participant: None,
+                },
+                Some("x".repeat(hq_domain::SHORT_TEXT_MAX_BYTES + 1)),
+            )],
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1218,6 +1315,15 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
         },
         SnapshotItem::Conversation {
             key: conversation,
+            context: ConversationContextDto::Direct {
+                participant: ConversationParticipantDto {
+                    agent: Some(id(12)),
+                    installation: Some(id(1)),
+                    mailbox: Some(id(2)),
+                    name: Some("helper".to_owned()),
+                },
+            },
+            preview: Some("Can we ship?".to_owned()),
             latest_fact: Some(id(11)),
             open_messages: 1,
             archived_messages: 0,

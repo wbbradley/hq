@@ -45,8 +45,9 @@ edited text, direct target identity, or pending submission.
 
 ## Mailbox composition and actions
 
-The pure model owns reply, direct-message, self-note, archive, and restore interaction state. Enter
-opens a selected conversation summary so the operator can select an exact message. `r` opens an
+The pure model owns reply, direct-message, self-note, archive, and restore interaction state. Inbox
+selection eagerly loads the selected conversation while retaining list focus; Enter or `l`/Right
+moves focus into that already visible conversation so the operator can select an exact message. `r` opens an
 applicable reply draft only for a typed message target whose purpose permits replies; `d` selects
 one unconflicted named-agent mailbox by stable installation/mailbox identity; `N` opens a self-note;
 `a` opens archive confirmation for an open message; and `u` opens restore confirmation for an
@@ -185,8 +186,12 @@ Agents, Projects, and typed provider choices. Section navigation selects an alre
 mapped slice and performs no client request, so it never replaces visible content with a loading
 state. Invalidation and periodic repair load a replacement bundle in the background while the
 previous complete bundle remains visible. Conversation summaries carry store-derived open,
-archived, and local-human-authored counts, so mailbox filters do not scan or reorder message
-bodies. Activating a summary issues the ordinary `ConversationPage` request with an opaque cursor. Returned
+archived, and local-human-authored counts plus a typed project/participant presentation context and
+one sanitized bounded message preview. The node uses the typed context for human titles such as
+`Release · Alice`, `Me and Alice`, and `Personal notes`; unresolved names use `unnamed participant`
+rather than an internal identifier. Mailbox filters do not scan or reorder message bodies.
+Selecting a summary issues the ordinary `ConversationPage` request with an opaque cursor, and a
+newer selection supersedes the pending preview without allowing a stale completion to replace it. Returned
 message/activity unions remain in reducer order; selected/coalesced activity is presented as
 an `update` marked `information only` on ordinary screens and is never converted into a message
 target. Its typed activity identity and status remain in technical details. The mapper also exposes only uniquely
@@ -259,13 +264,18 @@ role and file-format reference is in [TUI themes](../tui-themes.md).
 
 The first responsive layouts are semantic Rust-era layouts, not Bubble Tea compatibility:
 
-- at least 96 columns: persistent left section navigation and a content pane;
-- 40 through 95 columns: compact horizontal section navigation above content;
+- at least 96 columns: persistent left section navigation plus adjacent Inbox-list and conversation
+  panes separated by single vertical dividers;
+- 40 through 95 columns: compact horizontal section navigation above a persistent stacked
+  Inbox-list/conversation workspace with one separator;
 - below 40 columns or 10 rows: a bounded resize message that retains the quit hint.
 
-In the wide layout, Up/Down and `j`/`k` move through the vertical section list, while Left/Right
-and `h`/`l` move focus between navigation and content. In compact layouts, Left/Right and `h`/`l`
-continue to move through the horizontal section navigation.
+In the wide layout, Up/Down and `j`/`k` move through the vertical section list while it owns focus.
+Left/Right and `h`/`l` move one visible level at a time: top-level navigation, Inbox list, then the
+selected conversation. In compact layouts, horizontal keys move through top-level sections only
+while navigation owns focus; once inside Inbox, `h`/Left returns from conversation to its list
+before returning to top-level navigation. The conversation region is always present and renders
+its loading, empty, unavailable, or selected-diagnostic state without a surrounding box.
 
 The header reports the selected section and plain device state (`Connected`, `Connecting…`,
 `Reconnecting…`, `Offline`, `Update required`, or `Updating…`) without hiding retained rows.

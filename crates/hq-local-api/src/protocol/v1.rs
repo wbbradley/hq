@@ -600,6 +600,42 @@ pub enum ConversationKeyDto {
     },
 }
 
+/// Exact participant evidence paired with an optional human-facing name.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationParticipantDto {
+    /// Singular named-agent identity when resolved.
+    pub agent: Option<Id32>,
+    /// Participant installation when an exact mailbox is available.
+    pub installation: Option<Id32>,
+    /// Participant mailbox when an exact mailbox is available.
+    pub mailbox: Option<Id32>,
+    /// Singular bounded authoritative name when resolved.
+    pub name: Option<String>,
+}
+
+/// Closed human-facing context for one conversation summary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConversationContextDto {
+    /// A local human message to their own mailbox.
+    Personal,
+    /// A direct exchange with one exact or unresolved counterparty.
+    Direct {
+        /// Counterparty identity evidence.
+        participant: ConversationParticipantDto,
+    },
+    /// One independently initiated exchange belonging to a project.
+    Project {
+        /// Stable project identity.
+        project: Id32,
+        /// Singular bounded project name when resolved.
+        name: Option<String>,
+        /// Historical or current worker evidence when resolved.
+        participant: Option<ConversationParticipantDto>,
+    },
+}
+
 /// One bounded reducer-ordered conversation page request.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1695,6 +1731,10 @@ pub enum SnapshotItem {
     Conversation {
         /// Stable conversation identity.
         key: ConversationKeyDto,
+        /// Typed authoritative human-facing context.
+        context: ConversationContextDto,
+        /// Sanitized bounded one-line message preview.
+        preview: Option<String>,
         /// Canonically latest presented fact, when nonempty.
         latest_fact: Option<Id32>,
         /// Number of currently open actionable messages.
@@ -3255,7 +3295,12 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                 validate_id_set(candidates, 64)?;
                 validate_id_set(frontier, 64)?;
             }
-            SnapshotItem::Conversation { key, .. } => validate_conversation_key(key)?,
+            SnapshotItem::Conversation {
+                key,
+                context,
+                preview,
+                ..
+            } => validate_conversation_summary(key, context, preview.as_deref())?,
             SnapshotItem::IncompleteMessage {
                 recipient_installation,
                 recipient_mailbox,
@@ -3638,6 +3683,58 @@ fn validate_conversation_key(key: &ConversationKeyDto) -> Result<(), ValueError>
     {
         validate_text(provider, PROVIDER_ID_MAX_BYTES)?;
         validate_text(session, PROVIDER_SESSION_ID_MAX_BYTES)?;
+    }
+    Ok(())
+}
+
+fn validate_conversation_summary(
+    key: &ConversationKeyDto,
+    context: &ConversationContextDto,
+    preview: Option<&str>,
+) -> Result<(), ValueError> {
+    validate_conversation_key(key)?;
+    if let Some(preview) = preview {
+        validate_text(preview, SHORT_TEXT_MAX_BYTES)?;
+    }
+    match (key, context) {
+        (
+            ConversationKeyDto::ProjectThread { project, .. },
+            ConversationContextDto::Project {
+                project: context_project,
+                name,
+                participant,
+            },
+        ) if project == context_project => {
+            if let Some(name) = name {
+                validate_text(name, SHORT_TEXT_MAX_BYTES)?;
+            }
+            if let Some(participant) = participant {
+                validate_conversation_participant(participant, false)?;
+            }
+            Ok(())
+        }
+        (
+            ConversationKeyDto::Thread { .. } | ConversationKeyDto::ProviderSession { .. },
+            ConversationContextDto::Direct { participant },
+        ) => validate_conversation_participant(participant, true),
+        (ConversationKeyDto::Thread { .. }, ConversationContextDto::Personal) => Ok(()),
+        _ => Err(ValueError::InvalidValueCombination),
+    }
+}
+
+fn validate_conversation_participant(
+    participant: &ConversationParticipantDto,
+    mailbox_required: bool,
+) -> Result<(), ValueError> {
+    if participant.installation.is_some() != participant.mailbox.is_some()
+        || (mailbox_required && participant.mailbox.is_none())
+        || (participant.agent.is_none() && participant.mailbox.is_none())
+        || (participant.name.is_some() && participant.agent.is_none())
+    {
+        return Err(ValueError::InvalidValueCombination);
+    }
+    if let Some(name) = &participant.name {
+        validate_text(name, SHORT_TEXT_MAX_BYTES)?;
     }
     Ok(())
 }

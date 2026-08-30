@@ -8,9 +8,9 @@ Inbox · Sent · Archived · Agents · Projects
    Build release
      open · agent-1
  › Deploy production
-     waiting · waiting for approval
-   Investigate timeout
-     needs attention · relay needs attention
+────────────────────────────────────────────────────────────────────────
+ Conversation · complete
 
+ Loading the selected conversation…
 ────────────────────────────────────────────────────────────────────────
  Enter open · ? help · q quit

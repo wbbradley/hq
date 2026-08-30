@@ -2803,19 +2803,22 @@ fn render_compact_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiThem
 }
 
 fn render_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
-    if model.conversation().is_some() {
-        if area.width >= 72 {
+    if model.section() == UiSection::Inbox || model.conversation().is_some() {
+        if model.viewport().width >= WIDE_WIDTH {
             let [summaries, conversation] =
-                Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
+                Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
                     .areas(area);
             render_summary_rows(frame, model, theme, summaries);
-            render_conversation(frame, model, theme, conversation);
+            render_conversation(frame, model, theme, conversation, Borders::LEFT);
         } else {
-            let [summaries, conversation] =
-                Layout::vertical([Constraint::Percentage(35), Constraint::Percentage(65)])
-                    .areas(area);
+            let constraints = if model.focus() == UiFocus::Conversation {
+                [Constraint::Percentage(35), Constraint::Percentage(65)]
+            } else {
+                [Constraint::Min(1), Constraint::Length(4)]
+            };
+            let [summaries, conversation] = Layout::vertical(constraints).areas(area);
             render_summary_rows(frame, model, theme, summaries);
-            render_conversation(frame, model, theme, conversation);
+            render_conversation(frame, model, theme, conversation, Borders::TOP);
         }
     } else {
         render_summary_rows(frame, model, theme, area);
@@ -3013,19 +3016,23 @@ fn empty_section_lines(section: UiSection, theme: &UiTheme) -> Vec<Line<'static>
     }
 }
 
-fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
-    let Some(conversation) = model.conversation() else {
-        return;
-    };
+fn render_conversation(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+    divider: Borders,
+) {
+    let conversation = model.conversation();
     let selected = model.conversation_anchor();
     let entry_height = if model.technical_visible() { 6 } else { 3 };
-    let capacity = usize::from(area.height.saturating_sub(2))
+    let capacity = usize::from(area.height.saturating_sub(3))
         .checked_div(entry_height)
         .unwrap_or(0)
         .max(1);
     let selected_index = selected
         .and_then(|anchor| {
-            conversation
+            conversation?
                 .entries
                 .iter()
                 .position(|entry| entry.id == anchor)
@@ -3033,32 +3040,67 @@ fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
         .unwrap_or(0);
     let start = selected_index
         .saturating_sub(capacity / 2)
-        .min(conversation.entries.len().saturating_sub(capacity));
-    let mut lines = Vec::new();
-    for entry in conversation.entries.iter().skip(start).take(capacity) {
-        lines.extend(render_conversation_entry(model, entry, theme));
-    }
-    if conversation.entries.is_empty() {
+        .min(conversation.map_or(0, |value| value.entries.len().saturating_sub(capacity)));
+    let paging = conversation
+        .and_then(|value| value.next_cursor.as_ref())
+        .map_or("complete", |_| "PageDown loads more");
+    let mut lines = vec![
+        Line::styled(
+            format!(" Conversation · {paging}"),
+            theme.style(UiThemeRole::Heading),
+        ),
+        Line::default(),
+    ];
+    if let Some(conversation) = conversation {
+        for entry in conversation.entries.iter().skip(start).take(capacity) {
+            lines.extend(render_conversation_entry(model, entry, theme));
+        }
+        if conversation.entries.is_empty() {
+            lines.push(Line::styled(
+                " No conversation entries",
+                theme.style(UiThemeRole::TextMuted),
+            ));
+        }
+    } else if model.conversation_loading() {
         lines.push(Line::styled(
-            " No conversation entries",
+            " Loading the selected conversation…",
+            theme.style(UiThemeRole::Warning),
+        ));
+    } else if let Some(failure) = model.conversation_failure() {
+        lines.push(Line::styled(
+            " The selected conversation is unavailable.",
+            theme.style(UiThemeRole::Attention),
+        ));
+        lines.push(Line::from(format!(" {}", failure.action)));
+    } else if let Some(row) = model
+        .selected_row_data()
+        .filter(|row| row.kind != UiRowKind::Conversation)
+    {
+        lines.push(Line::styled(
+            format!(" {}", row.title),
+            theme.style(UiThemeRole::Heading),
+        ));
+        lines.push(Line::from(format!(" {}", row.detail)));
+    } else if model.selected_row_data().is_some() {
+        lines.push(Line::styled(
+            " The selected conversation has not loaded yet.",
+            theme.style(UiThemeRole::TextMuted),
+        ));
+    } else {
+        lines.push(Line::styled(
+            " No conversation is selected.",
             theme.style(UiThemeRole::TextMuted),
         ));
     }
-    let paging = conversation
-        .next_cursor
-        .as_ref()
-        .map_or("complete", |_| "PageDown loads more");
     frame.render_widget(
         Paragraph::new(lines)
-            .block(
-                Block::bordered()
-                    .title(format!(" Conversation · {paging} "))
-                    .border_style(if model.focus() == UiFocus::Conversation {
-                        theme.style(UiThemeRole::BorderFocused)
-                    } else {
-                        theme.style(UiThemeRole::BorderUnfocused)
-                    }),
-            )
+            .block(Block::new().borders(divider).border_style(
+                if model.focus() == UiFocus::Conversation {
+                    theme.style(UiThemeRole::BorderFocused)
+                } else {
+                    theme.style(UiThemeRole::BorderUnfocused)
+                },
+            ))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -3292,11 +3334,7 @@ fn conversation_footer(model: &UiModel) -> String {
     } else {
         "Enter info"
     });
-    controls.push(if model.viewport().width >= WIDE_WIDTH {
-        "Esc close"
-    } else {
-        "Esc back"
-    });
+    controls.push("h/← Inbox");
     controls.push("? help");
     format!(" {}", controls.join(" · "))
 }

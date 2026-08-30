@@ -220,6 +220,55 @@ fn installed_tui_self_note_matches_cli_and_survives_restart() {
 }
 
 #[test]
+fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+    assert!(
+        hq_output(&state_root, &["human", "create"])
+            .status
+            .success()
+    );
+
+    let content = "installed inbox preview";
+    let seeded = run_in_pty(&state_root, true, PtyInteraction::SubmitSelfNote(content));
+    assert!(
+        seeded.status.success(),
+        "note setup failed: {:?}",
+        seeded.bytes
+    );
+
+    let run = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::NavigateInboxConversation(content),
+    );
+    assert!(
+        run.status.success(),
+        "Inbox navigation failed: {:?}",
+        run.bytes
+    );
+    for phrase in [
+        "Personal notes",
+        content,
+        "Conversation",
+        "h/← Inbox",
+        "Enter open",
+    ] {
+        assert!(
+            run.bytes
+                .windows(phrase.len())
+                .any(|window| window == phrase.as_bytes()),
+            "Inbox navigation omitted {phrase:?}: {:?}",
+            run.bytes
+        );
+    }
+    assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+}
+
+#[test]
 fn installed_tui_new_launcher_explains_all_three_intents() {
     let _scenario = serial_scenario();
     let directory = TestDirectory::new();
@@ -664,6 +713,7 @@ enum PtyInteraction<'content> {
     OpenNewLauncher,
     CompleteFreshSetupAndReconnect,
     SubmitSelfNote(&'content str),
+    NavigateInboxConversation(&'content str),
     CreateAgent(&'content str),
     StartRejectedSession,
     CreateExistingProject {
@@ -815,6 +865,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::OpenNewLauncher => vec![b"n"],
                 PtyInteraction::CompleteFreshSetupAndReconnect => unreachable!(),
                 PtyInteraction::SubmitSelfNote(_) => vec![b"N"],
+                PtyInteraction::NavigateInboxConversation(_) => Vec::new(),
                 PtyInteraction::CreateAgent(_) => vec![b"l", b"l", b"l", b"c"],
                 PtyInteraction::StartRejectedSession => vec![b"l", b"l", b"l", b"\t"],
                 PtyInteraction::CreateExistingProject { .. } => {
@@ -925,6 +976,50 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .expect("self-note text writes");
             master.flush().expect("self-note text flushes");
             content_sent = true;
+        }
+        if let PtyInteraction::NavigateInboxConversation(content) = interaction
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(content.len())
+                .any(|window| window == content.as_bytes())
+            && bytes
+                .windows(b"Conversation".len())
+                .any(|window| window == b"Conversation")
+        {
+            master
+                .write_all(b"\t\r")
+                .expect("Inbox conversation entry keys write");
+            master.flush().expect("Inbox conversation entry keys flush");
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::NavigateInboxConversation(_))
+            && content_sent
+            && !managed_action_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows("h/← Inbox".len())
+                    .any(|window| window == "h/← Inbox".as_bytes())
+            })
+        {
+            master.write_all(b"h").expect("Inbox back key writes");
+            master.flush().expect("Inbox back key flushes");
+            managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::NavigateInboxConversation(_))
+            && managed_action_sent
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Enter open".len())
+                    .any(|window| window == b"Enter open")
+            })
+        {
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
         }
         if let PtyInteraction::CreateAgent(name) = interaction
             && initial_key_sent
@@ -1303,14 +1398,14 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         if let PtyInteraction::SubmitSelfNote(content) = interaction
             && content_sent
             && !exit_sent
-            && bytes
-                .windows(b"open messages".len())
-                .any(|window| window == b"open messages")
+            && Instant::now() >= next_state_probe_at
         {
-            let _ = content;
-            master.write_all(&[0x03]).expect("Ctrl-C writes");
-            master.flush().expect("Ctrl-C flushes");
-            exit_sent = true;
+            next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
+            if mailbox_contains(state_root, content) {
+                master.write_all(&[0x03]).expect("Ctrl-C writes");
+                master.flush().expect("Ctrl-C flushes");
+                exit_sent = true;
+            }
         }
         let lifecycle_action_sent = resource_commit_sent
             && !matches!(interaction, PtyInteraction::CreateGuidedProjectWork { .. })

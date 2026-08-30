@@ -844,6 +844,8 @@ pub enum ClientProjection {
     },
     Conversation {
         key: hq_reducer::ConversationKey,
+        context: ConversationContext,
+        preview: Option<ShortText>,
         latest_fact: Option<FactId>,
         open_messages: u32,
         archived_messages: u32,
@@ -1036,6 +1038,8 @@ impl AuthoritativeSnapshot {
         projections.extend(self.conversations.iter().map(|summary| {
             ClientProjection::Conversation {
                 key: summary.key.clone(),
+                context: summary.context.clone(),
+                preview: summary.preview.clone(),
                 latest_fact: summary.latest_fact,
                 open_messages: summary.open_messages,
                 archived_messages: summary.archived_messages,
@@ -1075,6 +1079,10 @@ pub struct IncompleteMessageSummary {
 pub struct ConversationSummary {
     /// Stable typed conversation identity.
     pub key: hq_reducer::ConversationKey,
+    /// Typed human-facing context derived from authoritative project and participant evidence.
+    pub context: ConversationContext,
+    /// Sanitized bounded one-line conversation preview.
+    pub preview: Option<ShortText>,
     /// Canonically latest presented fact, when the conversation is nonempty.
     pub latest_fact: Option<FactId>,
     /// Number of currently open actionable messages.
@@ -1083,6 +1091,38 @@ pub struct ConversationSummary {
     pub archived_messages: u32,
     /// Number of messages authored by the reserved local human mailbox.
     pub sent_messages: u32,
+}
+
+/// One counterparty resolved from exact authoritative identity evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationParticipant {
+    /// Exact named-agent identity when singularly resolved.
+    pub agent_id: Option<AgentId>,
+    /// Exact installation-qualified mailbox when available.
+    pub mailbox: Option<MailboxAddress>,
+    /// Singular authoritative display name when available.
+    pub name: Option<ShortText>,
+}
+
+/// Closed human-facing context for one stable conversation identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConversationContext {
+    /// A message from the local human to their own mailbox.
+    Personal,
+    /// A direct exchange with one exact or unresolved counterparty.
+    Direct {
+        /// Counterparty evidence; its display name may remain unresolved.
+        participant: ConversationParticipant,
+    },
+    /// One independently initiated exchange belonging to a project.
+    Project {
+        /// Stable project identity.
+        project_id: ProjectId,
+        /// Singular current project name when the project projection is available.
+        name: Option<ShortText>,
+        /// Historical or current worker evidence when singularly resolved.
+        participant: Option<ConversationParticipant>,
+    },
 }
 
 /// One actionable message or non-actionable activity in canonical conversation order.

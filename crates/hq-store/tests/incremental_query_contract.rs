@@ -2,7 +2,7 @@
 
 #![allow(clippy::expect_used)]
 
-use hq_application::ClientProjection;
+use hq_application::{ClientProjection, ConversationContext};
 use hq_domain::{MailboxAddress, PageCursor, ProjectId, ProviderId, ProviderSessionId, ThreadId};
 use hq_store::{ConversationEntry, ConversationKey, IngestOutcome, StoreErrorClass};
 use rusqlite::{Connection, params};
@@ -48,6 +48,34 @@ fn project_thread_keys_persist_rebuild_reopen_and_page_independently() {
             .map(|summary| summary.key.clone())
             .collect::<Vec<_>>(),
         vec![first_key.clone(), second_key.clone()]
+    );
+    assert_eq!(
+        snapshot
+            .conversations()
+            .iter()
+            .map(|summary| (
+                &summary.context,
+                summary.preview.as_ref().map(hq_domain::ShortText::as_str)
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                &ConversationContext::Project {
+                    project_id,
+                    name: None,
+                    participant: None,
+                },
+                Some("Let's have a conversation."),
+            ),
+            (
+                &ConversationContext::Project {
+                    project_id,
+                    name: None,
+                    participant: None,
+                },
+                Some("Let's have another conversation."),
+            ),
+        ]
     );
     let index = store.load_reduction_index().expect("index loads");
     assert_eq!(index.conversation_orders().len(), 2);

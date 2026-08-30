@@ -14,12 +14,12 @@ use std::{
 use hq_local_api::{
     BlockingClientError, ClientConnectionState, ClientEvent,
     protocol::v1::{
-        ActivityStatusDto, AuthoritativeSnapshotDto, ConversationEntryDto, ConversationKeyDto,
-        ConversationMessageDto, ConversationPageRequest, Id32, MailboxCommandActionDto,
-        MailboxCommandRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
-        MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto,
-        MutationOutcomeDto, PresentationKindDto, ProviderCatalogDto, Request, ResponseResult,
-        SnapshotItem,
+        ActivityStatusDto, AuthoritativeSnapshotDto, ConversationContextDto, ConversationEntryDto,
+        ConversationKeyDto, ConversationMessageDto, ConversationPageRequest, Id32,
+        MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDto,
+        MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+        MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, PresentationKindDto,
+        ProviderCatalogDto, Request, ResponseResult, SnapshotItem,
     },
 };
 use hq_tui::{
@@ -202,7 +202,7 @@ impl TuiClientPort for LocalTuiClient {
             .iter()
             .filter_map(|item| match item {
                 SnapshotItem::Conversation { key, .. } => {
-                    let (row_id, _) = conversation_identity(key.clone());
+                    let row_id = conversation_identity(key.clone());
                     Some((row_id, key.clone()))
                 }
                 _ => None,
@@ -1711,6 +1711,8 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
             section @ (UiSection::Inbox | UiSection::Sent | UiSection::Archived),
             SnapshotItem::Conversation {
                 key,
+                context,
+                preview,
                 open_messages,
                 archived_messages,
                 sent_messages,
@@ -1726,6 +1728,8 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
             conversation_row(
                 section,
                 key.clone(),
+                context,
+                preview.as_deref(),
                 *open_messages,
                 *sent_messages,
                 *archived_messages,
@@ -1904,11 +1908,14 @@ fn agent_status(
 fn conversation_row(
     section: UiSection,
     key: ConversationKeyDto,
+    context: &ConversationContextDto,
+    preview: Option<&str>,
     open_messages: u32,
     sent_messages: u32,
     archived_messages: u32,
 ) -> Option<UiRow> {
-    let (id, title) = conversation_identity(key);
+    let id = conversation_identity(key);
+    let title = conversation_title(context);
     let (count, label, state) = match section {
         UiSection::Inbox => (open_messages, "open messages", UiRowState::Open),
         UiSection::Sent => (sent_messages, "sent messages", UiRowState::Waiting),
@@ -1918,7 +1925,7 @@ fn conversation_row(
     Some(UiRow {
         id,
         title,
-        detail: format!("{count} {label}"),
+        detail: preview.map_or_else(|| format!("{count} {label}"), terminal_text),
         state,
         kind: UiRowKind::Conversation,
     })
@@ -2059,27 +2066,45 @@ const fn presentation_label(presentation: PresentationKindDto) -> &'static str {
     }
 }
 
-fn conversation_identity(key: ConversationKeyDto) -> (String, String) {
+fn conversation_identity(key: ConversationKeyDto) -> String {
     match key {
-        ConversationKeyDto::ProjectThread { project, thread } => (
-            format!("project:{}:{}", full_id(project), full_id(thread)),
-            "Project conversation".to_owned(),
-        ),
-        ConversationKeyDto::Thread { thread, .. } => (
-            format!("thread:{}", full_id(thread)),
-            format!("Thread {}", short_id(thread)),
-        ),
+        ConversationKeyDto::ProjectThread { project, thread } => {
+            format!("project:{}:{}", full_id(project), full_id(thread))
+        }
+        ConversationKeyDto::Thread { thread, .. } => format!("thread:{}", full_id(thread)),
         ConversationKeyDto::ProviderSession {
+            counterparty_installation,
             counterparty_mailbox,
             provider,
             session,
-            ..
-        } => (
-            format!(
-                "session:{}:{provider}:{session}",
-                full_id(counterparty_mailbox)
-            ),
-            format!("{} · {}", terminal_text(&provider), terminal_text(&session)),
+        } => format!(
+            "session:{}:{}:{provider}:{session}",
+            full_id(counterparty_installation),
+            full_id(counterparty_mailbox)
+        ),
+    }
+}
+
+fn conversation_title(context: &ConversationContextDto) -> String {
+    match context {
+        ConversationContextDto::Personal => "Personal notes".to_owned(),
+        ConversationContextDto::Direct { participant } => format!(
+            "Me and {}",
+            participant
+                .name
+                .as_deref()
+                .map_or_else(|| "unnamed participant".to_owned(), terminal_text)
+        ),
+        ConversationContextDto::Project {
+            name, participant, ..
+        } => format!(
+            "{} · {}",
+            name.as_deref()
+                .map_or_else(|| "Unnamed project".to_owned(), terminal_text),
+            participant
+                .as_ref()
+                .and_then(|participant| participant.name.as_deref())
+                .map_or_else(|| "unnamed participant".to_owned(), terminal_text)
         ),
     }
 }
@@ -2195,17 +2220,21 @@ const fn timer_kind_order(kind: UiTimerKind) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{conversation_identity, local_project_command, ui_project_outcome};
+    use super::{
+        conversation_identity, conversation_title, local_project_command, ui_project_outcome,
+    };
     use crate::local_client::{
         LocalProjectCommand, LocalProjectOutcome, LocalProjectResourceCheck,
         LocalProjectResourceConflict,
     };
-    use hq_local_api::protocol::v1::{ConversationKeyDto, Id32};
+    use hq_local_api::protocol::v1::{
+        ConversationContextDto, ConversationKeyDto, ConversationParticipantDto, Id32,
+    };
     use hq_tui::{UiProjectAction, UiProjectOutcome};
 
     #[test]
-    fn project_conversation_identity_retains_both_full_ids_without_exposing_them_as_the_title() {
-        let (identity, title) = conversation_identity(ConversationKeyDto::ProjectThread {
+    fn project_conversation_identity_retains_both_full_ids() {
+        let identity = conversation_identity(ConversationKeyDto::ProjectThread {
             project: Id32::new([0x11; 32]),
             thread: Id32::new([0x22; 32]),
         });
@@ -2213,7 +2242,42 @@ mod tests {
             identity,
             format!("project:{}:{}", "11".repeat(32), "22".repeat(32))
         );
-        assert_eq!(title, "Project conversation");
+    }
+
+    #[test]
+    fn conversation_titles_use_names_or_plain_unnamed_fallbacks_without_ids() {
+        let participant = ConversationParticipantDto {
+            agent: Some(Id32::new([0xaa; 32])),
+            installation: Some(Id32::new([0xbb; 32])),
+            mailbox: Some(Id32::new([0xcc; 32])),
+            name: Some("Alice".to_owned()),
+        };
+        assert_eq!(
+            conversation_title(&ConversationContextDto::Direct {
+                participant: participant.clone(),
+            }),
+            "Me and Alice"
+        );
+        assert_eq!(
+            conversation_title(&ConversationContextDto::Project {
+                project: Id32::new([0xdd; 32]),
+                name: Some("Release".to_owned()),
+                participant: Some(participant),
+            }),
+            "Release · Alice"
+        );
+
+        let unnamed = conversation_title(&ConversationContextDto::Direct {
+            participant: ConversationParticipantDto {
+                agent: None,
+                installation: Some(Id32::new([0xee; 32])),
+                mailbox: Some(Id32::new([0xff; 32])),
+                name: None,
+            },
+        });
+        assert_eq!(unnamed, "Me and unnamed participant");
+        assert!(!unnamed.contains(&"ee".repeat(32)));
+        assert!(!unnamed.contains(&"ff".repeat(32)));
     }
 
     #[test]

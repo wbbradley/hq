@@ -68,7 +68,7 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
     ));
     assert!(archived.contains("u restore"));
     assert!(!archived.contains("a archive"));
-    assert!(archived.contains("u restore · Enter info · Esc back · ? help"));
+    assert!(archived.contains("u restore · Enter info · h/← Inbox · ? help"));
 
     let confirmation = update(
         conversation_model(UiSize {
@@ -318,7 +318,10 @@ fn fresh_workspace_renders_one_ordered_onboarding_step_at_a_time() {
     assert!(empty.contains("Get started with HQ"), "{empty}");
     assert!(empty.contains("Account ready"), "{empty}");
     assert!(
-        empty.contains("Current: add a project and choose the folder or resource it owns"),
+        contains_visible_words_in_order(
+            &empty,
+            "Current: add a project and choose the folder or resource it owns",
+        ),
         "{empty}"
     );
     assert!(empty.contains("Press n New…"), "{empty}");
@@ -366,10 +369,12 @@ fn fresh_workspace_renders_one_ordered_onboarding_step_at_a_time() {
         "{ready}"
     );
     assert!(
-        ready.contains("HQ will ask you to choose only if more than one"),
+        contains_visible_words_in_order(
+            &ready,
+            "HQ will ask you to choose only if more than one service is available",
+        ),
         "{ready}"
     );
-    assert!(ready.contains("service is"), "{ready}");
 }
 
 #[test]
@@ -483,7 +488,10 @@ fn human_account_issues_have_specific_recovery_and_technical_evidence() {
                 },
             );
             let rendered = render_text(&model);
-            assert!(rendered.contains(explanation), "{code} at {size:?}");
+            assert!(
+                contains_visible_words_in_order(&rendered, explanation),
+                "{code} at {size:?}:\n{rendered}"
+            );
             assert!(!rendered.contains("selection or authority is ambiguous"));
 
             let help = update(model, UiEvent::Input(UiInput::Character('?')))
@@ -563,8 +571,22 @@ fn empty_sections_and_recipient_chooser_explain_exact_next_actions() {
         ] {
             let model = empty_section_model(size, section);
             let rendered = render_text(&model);
-            assert!(rendered.contains(explanation), "{section:?} at {size:?}");
-            assert!(rendered.contains(action), "{section:?} at {size:?}");
+            if section == UiSection::Inbox && size.width < 96 {
+                assert!(rendered.contains("Get started with HQ"), "{rendered}");
+                assert!(
+                    contains_visible_words_in_order(&rendered, "Press n New"),
+                    "{rendered}"
+                );
+            } else {
+                assert!(
+                    contains_visible_words_in_order(&rendered, explanation),
+                    "{section:?} at {size:?}:\n{rendered}"
+                );
+                assert!(
+                    contains_visible_words_in_order(&rendered, action),
+                    "{section:?} at {size:?}:\n{rendered}"
+                );
+            }
             assert!(!rendered.contains(" No items"));
             if section == UiSection::Projects {
                 assert!(rendered.contains("ownership of its folders"));
@@ -683,7 +705,10 @@ fn conversation_layout_preserves_reducer_order_and_typed_activity_state() {
         .find("activity · running")
         .expect("activity rendered");
     assert!(message < activity, "reducer page order is retained");
-    assert!(rendered.contains("update · information only · compiling"));
+    assert!(contains_visible_words_in_order(
+        &rendered,
+        "update information only compiling"
+    ));
     assert!(rendered.contains("Conversation · complete"));
 }
 
@@ -1739,6 +1764,37 @@ fn render_text(model: &UiModel) -> String {
     snapshot_text(terminal.backend().buffer())
 }
 
+fn visible_words(rendered: &str) -> String {
+    rendered
+        .chars()
+        .map(|character| match character {
+            '│' | '─' | '┌' | '┐' | '└' | '┘' => ' ',
+            other => other,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn contains_visible_words_in_order(rendered: &str, expected: &str) -> bool {
+    let visible = visible_words(rendered);
+    let visible_words = visible
+        .split_whitespace()
+        .map(canonical_visible_word)
+        .collect::<Vec<_>>();
+    let mut visible_words = visible_words.iter();
+    expected
+        .split_whitespace()
+        .map(canonical_visible_word)
+        .all(|expected_word| visible_words.any(|visible_word| visible_word == &expected_word))
+}
+
+fn canonical_visible_word(word: &str) -> String {
+    word.trim_matches(|character: char| !character.is_alphanumeric())
+        .to_owned()
+}
+
 fn render_buffer_with_theme(model: &UiModel, theme: &UiTheme) -> Buffer {
     let viewport = model.viewport();
     let backend = TestBackend::new(viewport.width, viewport.height);
@@ -1870,7 +1926,7 @@ const fn section_help_phrase(section: UiSection) -> &'static str {
     }
 }
 
-fn ready_model(size: UiSize) -> UiModel {
+fn ready_transition(size: UiSize) -> hq_tui::UiTransition {
     let model = loaded_snapshot_model(
         size,
         UiSnapshot {
@@ -1902,9 +1958,11 @@ fn ready_model(size: UiSize) -> UiModel {
         },
     );
     let focused = update(model, UiEvent::Input(UiInput::NextFocus)).expect("focus content");
-    update(focused.model, UiEvent::Input(UiInput::NextItem))
-        .expect("select second row")
-        .model
+    update(focused.model, UiEvent::Input(UiInput::NextItem)).expect("select second row")
+}
+
+fn ready_model(size: UiSize) -> UiModel {
+    ready_transition(size).model
 }
 
 fn loaded_snapshot_model(size: UiSize, snapshot: UiSnapshot) -> UiModel {
@@ -2276,9 +2334,8 @@ fn conversation_model(size: UiSize) -> UiModel {
 }
 
 fn conversation_model_with_state(size: UiSize, state: UiMessageState) -> UiModel {
-    let ready = ready_model(size);
-    let opening = update(ready, UiEvent::Input(UiInput::Activate)).expect("open conversation");
-    let effect_id = opening
+    let ready = ready_transition(size);
+    let effect_id = ready
         .effects
         .iter()
         .find_map(|effect| match effect {
@@ -2286,6 +2343,8 @@ fn conversation_model_with_state(size: UiSize, state: UiMessageState) -> UiModel
             _ => None,
         })
         .expect("conversation request");
+    let opening =
+        update(ready.model, UiEvent::Input(UiInput::Activate)).expect("open conversation");
     update(
         opening.model,
         UiEvent::ConversationLoaded {

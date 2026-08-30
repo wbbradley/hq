@@ -81,9 +81,10 @@ pub use snapshot::{
     ClientAgentLifecycle, ClientDeviceGrant, ClientMembershipState, ClientPeerRouteBlock,
     ClientPeerRouteCandidate, ClientPeerRouteState, ClientProjectAssignment,
     ClientProjectAssignmentPhase, ClientProjectLifecycle, ClientProjectOutputStatus,
-    ClientProjectThread, ClientProjection, ClientRemoteCommandStage, ConversationEntry,
-    ConversationMessageEntry, ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot,
-    IncompleteMessageSummary, ProjectProjectionSnapshot, ProjectionSnapshot,
+    ClientProjectThread, ClientProjection, ClientRemoteCommandStage, ConversationContext,
+    ConversationEntry, ConversationMessageEntry, ConversationParticipant,
+    ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot, IncompleteMessageSummary,
+    ProjectProjectionSnapshot, ProjectionSnapshot,
 };
 
 /// Minimal in-memory use-case host for the workspace walking skeleton.

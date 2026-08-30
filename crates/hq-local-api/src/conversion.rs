@@ -3,16 +3,16 @@
 use crate::protocol::v1::{
     AgentRetirementOutcomeDto, AgentRetirementRequestDto, AgentSelectionCandidateDto,
     AgentSessionBindingDto, AgentSessionNameCandidateDto, AgentSessionRequestDto,
-    AgentSessionResultDto, AuthoritativeSnapshotDto, CanonicalEvidenceDto, ConversationEntryDto,
-    ConversationKeyDto, ConversationPageDto, ConversationPageRequest, DeviceGrantDto,
-    DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse,
-    EvidenceIngestOutcomeDto, HealthDomainDto, Id32, InvalidationTopic,
-    MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MailboxAddressDto,
-    MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto,
-    MailboxDraftDeleteRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
-    MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto,
-    MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
-    PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
+    AgentSessionResultDto, AuthoritativeSnapshotDto, CanonicalEvidenceDto, ConversationContextDto,
+    ConversationEntryDto, ConversationKeyDto, ConversationPageDto, ConversationPageRequest,
+    ConversationParticipantDto, DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto,
+    EffectRequestDto, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, HealthDomainDto, Id32,
+    InvalidationTopic, MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS,
+    MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto,
+    MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto, MailboxDraftDto,
+    MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+    MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
+    PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCommandStageDto, ProjectExternalStateWarningDto,
     ProviderAvailabilityDto, ProviderCatalogDto, RelayAccessDto, RelayAuthenticationDto,
     RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto,
@@ -26,16 +26,17 @@ use hq_application::{
     AgentSessionResult, ApplicationError, ApplicationErrorClass, AuthoritativeSnapshot,
     CanonicalEvidence, ClientAgentLifecycle, ClientMembershipState, ClientPeerRouteState,
     ClientProjectAssignmentPhase, ClientProjectLifecycle, ClientProjectOutputStatus,
-    ClientProjection, ClientRemoteCommandStage, ConversationEntry, ConversationKey, DomainHealth,
-    EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation, HealthDomain,
-    LaunchEnvironment, MailboxCommandAction, MailboxCommandRequest, MailboxDraft,
-    MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
-    MailboxDraftSaveRequest, MailboxDraftTarget, MutationAttempt, MutationDecision,
-    MutationOutcome, MutationReceipt, ProjectCommandAction, ProjectCommandOutcome,
-    ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest, ProviderCatalog,
-    RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
-    ResourceInspectionResult, SessionControl, StateHealth, StateRepairReport, SubscriptionRequest,
-    SubscriptionTopic, SynchronizationRequest, WorktreeProvisioningRequest,
+    ClientProjection, ClientRemoteCommandStage, ConversationContext, ConversationEntry,
+    ConversationKey, ConversationParticipant, DomainHealth, EffectOutcome, EffectRequest,
+    EvidenceIngestOutcome, FactMutation, HealthDomain, LaunchEnvironment, MailboxCommandAction,
+    MailboxCommandRequest, MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest,
+    MailboxDraftSaveOutcome, MailboxDraftSaveRequest, MailboxDraftTarget, MutationAttempt,
+    MutationDecision, MutationOutcome, MutationReceipt, ProjectCommandAction,
+    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest,
+    ProviderCatalog, RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus,
+    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, StateHealth,
+    StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
+    WorktreeProvisioningRequest,
 };
 
 /// Converts one bounded neutral provider catalog into its local wire representation.
@@ -325,12 +326,16 @@ pub fn snapshot_to_v1(
             },
             ClientProjection::Conversation {
                 key,
+                context,
+                preview,
                 latest_fact,
                 open_messages,
                 archived_messages,
                 sent_messages,
             } => SnapshotItem::Conversation {
                 key: conversation_key_to_v1(&key),
+                context: conversation_context_to_v1(context),
+                preview: preview.map(hq_domain::ShortText::into_string),
                 latest_fact: latest_fact.map(|fact| id32(fact.as_bytes())),
                 open_messages,
                 archived_messages,
@@ -695,6 +700,39 @@ pub fn snapshot_to_v1(
         })
         .collect();
     AuthoritativeSnapshotDto::new(snapshot.revision().value(), items)
+}
+
+fn conversation_context_to_v1(context: ConversationContext) -> ConversationContextDto {
+    match context {
+        ConversationContext::Personal => ConversationContextDto::Personal,
+        ConversationContext::Direct { participant } => ConversationContextDto::Direct {
+            participant: conversation_participant_to_v1(participant),
+        },
+        ConversationContext::Project {
+            project_id,
+            name,
+            participant,
+        } => ConversationContextDto::Project {
+            project: id32(project_id.as_bytes()),
+            name: name.map(hq_domain::ShortText::into_string),
+            participant: participant.map(conversation_participant_to_v1),
+        },
+    }
+}
+
+fn conversation_participant_to_v1(
+    participant: ConversationParticipant,
+) -> ConversationParticipantDto {
+    ConversationParticipantDto {
+        agent: participant.agent_id.map(|agent| id32(agent.as_bytes())),
+        installation: participant
+            .mailbox
+            .map(|mailbox| id32(mailbox.installation_id().as_bytes())),
+        mailbox: participant
+            .mailbox
+            .map(|mailbox| id32(mailbox.mailbox_id().as_bytes())),
+        name: participant.name.map(hq_domain::ShortText::into_string),
+    }
 }
 
 /// Converts one bounded local page request into application query values.

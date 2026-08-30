@@ -17,20 +17,22 @@ use std::{
 };
 
 use hq_application::{
-    ConversationSummary, IncompleteMessageSummary, MAX_MAILBOX_DRAFTS, MailboxDraft,
-    MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
-    MailboxDraftSaveRequest, MailboxDraftTarget,
+    ConversationContext, ConversationParticipant, ConversationSummary, IncompleteMessageSummary,
+    MAX_MAILBOX_DRAFTS, MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest,
+    MailboxDraftSaveOutcome, MailboxDraftSaveRequest, MailboxDraftTarget,
 };
 use hq_domain::{
-    AuthorityRole, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
-    MailboxAddress, MailboxId, MessageId, OperationId, Page, PageCursor, SemanticPayload,
+    AgentId, AuthorityRole, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES,
+    MAX_FACT_PARENTS, MailboxAddress, MailboxId, MessageId, OperationId, Page, PageCursor,
+    ProjectId, SHORT_TEXT_MAX_BYTES, SemanticPayload, ShortText,
 };
 use hq_protocol::{
     DispatchOutcome, MAX_EVENT_BYTES, ProtocolNamespace, RawEventBytes, VerifiedSemanticFact,
 };
 use hq_reducer::{
-    AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey, ConversationKey,
-    ConversationProjection, DecisionStatus, MembershipState,
+    AgentLifecycle, AgentProjection, AgentProjectionKey, AuthorityPolicy, AuthorityProjection,
+    AuthorityProjectionKey, ConversationKey, ConversationProjection, DecisionStatus,
+    MembershipState, MessageView, ProjectProjection, ProjectProjectionKey,
 };
 use rusqlite::{
     Connection, Error as SqlError, ErrorCode, OpenFlags, OptionalExtension, Transaction,
@@ -1697,7 +1699,7 @@ impl Database {
         let agent = agent::load(&self.connection)?;
         let project = project::load(&self.connection)?;
         let revision = operational::current_revision(&self.connection)?;
-        let conversations = conversation_summaries(&index, &conversation)?;
+        let conversations = conversation_summaries(&index, &conversation, &agent, &project)?;
         let (incomplete_messages, incomplete_messages_truncated) =
             incomplete_message_summaries(&self.connection)?;
         Ok(AuthoritativeSnapshot::with_conversations(
@@ -1839,28 +1841,31 @@ impl Database {
 
 fn conversation_summaries(
     index: &ReductionIndexSnapshot,
-    snapshot: &ConversationProjectionSnapshot,
+    conversation: &ConversationProjectionSnapshot,
+    agents: &AgentProjectionSnapshot,
+    projects: &ProjectProjectionSnapshot,
 ) -> Result<Vec<ConversationSummary>, StoreError> {
     let local_human = hq_domain::MailboxAddress::new(
         index.policy().local_installation(),
         index.policy().local_human_mailbox(),
     );
-    let messages = snapshot
+    let messages = conversation
         .projections()
         .values()
         .filter_map(|projection| match projection {
-            ConversationProjection::Message(message) => Some((
-                message.fact_id,
-                message.open,
-                message.content.sender == local_human,
-            )),
+            ConversationProjection::Message(message) => Some((message.fact_id, message.as_ref())),
             ConversationProjection::Thread(_)
             | ConversationProjection::ActionGroup(_)
             | ConversationProjection::Activity(_)
             | ConversationProjection::ActivityRetention(_) => None,
         })
-        .map(|(fact_id, open, sent)| (fact_id, (open, sent)))
         .collect::<BTreeMap<_, _>>();
+    let presentation = ConversationPresentationSources {
+        messages: &messages,
+        agents,
+        projects,
+        local_human,
+    };
 
     index
         .conversation_orders()
@@ -1868,18 +1873,24 @@ fn conversation_summaries(
         .map(|(key, order)| {
             let open_messages = order
                 .iter()
-                .filter(|fact_id| messages.get(fact_id).is_some_and(|(open, _)| *open))
+                .filter(|fact_id| messages.get(fact_id).is_some_and(|message| message.open))
                 .count();
             let archived_messages = order
                 .iter()
-                .filter(|fact_id| messages.get(fact_id).is_some_and(|(open, _)| !open))
+                .filter(|fact_id| messages.get(fact_id).is_some_and(|message| !message.open))
                 .count();
             let sent_messages = order
                 .iter()
-                .filter(|fact_id| messages.get(fact_id).is_some_and(|(_, sent)| *sent))
+                .filter(|fact_id| {
+                    messages
+                        .get(fact_id)
+                        .is_some_and(|message| message.content.sender == local_human)
+                })
                 .count();
             Ok(ConversationSummary {
                 key: key.clone(),
+                context: conversation_context(key, order, &presentation),
+                preview: conversation_preview(order, &messages),
                 latest_fact: order.last().copied(),
                 open_messages: u32::try_from(open_messages)
                     .map_err(|_| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))?,
@@ -1890,6 +1901,221 @@ fn conversation_summaries(
             })
         })
         .collect()
+}
+
+struct ConversationPresentationSources<'borrow, 'snapshot> {
+    messages: &'borrow BTreeMap<FactId, &'snapshot MessageView>,
+    agents: &'borrow AgentProjectionSnapshot,
+    projects: &'borrow ProjectProjectionSnapshot,
+    local_human: MailboxAddress,
+}
+
+fn conversation_context(
+    key: &ConversationKey,
+    order: &[FactId],
+    sources: &ConversationPresentationSources<'_, '_>,
+) -> ConversationContext {
+    match key {
+        ConversationKey::ProjectThread { project_id, thread } => {
+            let project = project_view(sources.projects, *project_id);
+            ConversationContext::Project {
+                project_id: *project_id,
+                name: project.map(|view| view.name.clone()),
+                participant: project_participant(*project_id, *thread, order, project, sources),
+            }
+        }
+        ConversationKey::Thread { counterparty, .. }
+        | ConversationKey::ProviderSession { counterparty, .. } => {
+            if *counterparty == sources.local_human {
+                ConversationContext::Personal
+            } else {
+                ConversationContext::Direct {
+                    participant: participant_for_mailbox(sources.agents, *counterparty),
+                }
+            }
+        }
+    }
+}
+
+fn project_view(
+    projects: &ProjectProjectionSnapshot,
+    project_id: ProjectId,
+) -> Option<&hq_reducer::ProjectView> {
+    match projects.projection(ProjectProjectionKey::Project(project_id)) {
+        Some(ProjectProjection::Project(view)) => Some(view),
+        _ => None,
+    }
+}
+
+fn project_participant(
+    project_id: ProjectId,
+    thread: hq_domain::ThreadId,
+    order: &[FactId],
+    project: Option<&hq_reducer::ProjectView>,
+    sources: &ConversationPresentationSources<'_, '_>,
+) -> Option<ConversationParticipant> {
+    let project_mailbox = project.map(|view| view.mailbox);
+    let historical_mailboxes = order
+        .iter()
+        .filter_map(|fact_id| sources.messages.get(fact_id))
+        .map(|message| message.content.sender)
+        .filter(|sender| *sender != sources.local_human && Some(*sender) != project_mailbox)
+        .collect::<BTreeSet<_>>();
+    if historical_mailboxes.len() == 1 {
+        return historical_mailboxes
+            .iter()
+            .next()
+            .copied()
+            .map(|mailbox| participant_for_mailbox(sources.agents, mailbox));
+    }
+    if historical_mailboxes.len() > 1 {
+        return None;
+    }
+    let dispatched_agents = sources
+        .projects
+        .projections()
+        .values()
+        .filter_map(|projection| {
+            let ProjectProjection::Dispatch(dispatch) = projection else {
+                return None;
+            };
+            let matches_thread = sources.messages.values().any(|message| {
+                message.content.message_id == dispatch.message_id
+                    && message.content.project_id == Some(project_id)
+                    && message.thread_id == thread
+            });
+            (matches_thread && !dispatch.conflicted).then_some(dispatch.binding.agent_id)
+        })
+        .collect::<BTreeSet<_>>();
+    match dispatched_agents.len() {
+        1 => dispatched_agents
+            .iter()
+            .next()
+            .copied()
+            .map(|agent_id| participant_for_agent(sources.agents, agent_id, None)),
+        0 => project
+            .and_then(|view| view.assignment.as_ref())
+            .filter(|assignment| !assignment.cardinality_conflicted)
+            .map(|assignment| {
+                participant_for_agent(sources.agents, assignment.intent.agent_id, None)
+            }),
+        _ => None,
+    }
+}
+
+fn participant_for_mailbox(
+    agents: &AgentProjectionSnapshot,
+    mailbox: MailboxAddress,
+) -> ConversationParticipant {
+    let candidates = agents
+        .projections()
+        .iter()
+        .filter_map(|(key, projection)| match (key, projection) {
+            (AgentProjectionKey::Agent(agent_id), AgentProjection::Agent(view))
+                if view.mailboxes.contains(&mailbox) =>
+            {
+                Some((*agent_id, view.as_ref()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if let [(agent_id, view)] = candidates.as_slice() {
+        participant_from_agent_view(Some(*agent_id), Some(mailbox), view)
+    } else {
+        ConversationParticipant {
+            agent_id: None,
+            mailbox: Some(mailbox),
+            name: None,
+        }
+    }
+}
+
+fn participant_for_agent(
+    agents: &AgentProjectionSnapshot,
+    agent_id: AgentId,
+    mailbox: Option<MailboxAddress>,
+) -> ConversationParticipant {
+    match agents.projection(AgentProjectionKey::Agent(agent_id)) {
+        Some(AgentProjection::Agent(view)) => {
+            let mailbox = mailbox.or_else(|| {
+                let mut values = view.mailboxes.iter();
+                let first = values.next().copied();
+                first.filter(|_| values.next().is_none())
+            });
+            participant_from_agent_view(Some(agent_id), mailbox, view)
+        }
+        _ => ConversationParticipant {
+            agent_id: Some(agent_id),
+            mailbox,
+            name: None,
+        },
+    }
+}
+
+fn participant_from_agent_view(
+    agent_id: Option<AgentId>,
+    mailbox: Option<MailboxAddress>,
+    view: &hq_reducer::AgentView,
+) -> ConversationParticipant {
+    let mut names = view.names.iter();
+    let name = (view.lifecycle != AgentLifecycle::Conflicted)
+        .then(|| names.next().cloned().filter(|_| names.next().is_none()))
+        .flatten();
+    ConversationParticipant {
+        agent_id,
+        mailbox,
+        name,
+    }
+}
+
+fn conversation_preview(
+    order: &[FactId],
+    messages: &BTreeMap<FactId, &MessageView>,
+) -> Option<ShortText> {
+    order
+        .iter()
+        .find_map(|fact_id| messages.get(fact_id))
+        .and_then(|message| preview_line(message.content.body.as_str()))
+        .or_else(|| {
+            order.iter().rev().find_map(|fact_id| {
+                messages
+                    .get(fact_id)
+                    .and_then(|message| preview_line(message.content.body.as_str()))
+            })
+        })
+}
+
+fn preview_line(value: &str) -> Option<ShortText> {
+    let line = value.lines().find(|line| !line.trim().is_empty())?;
+    let mut normalized = String::new();
+    let mut space_pending = false;
+    for character in line.trim().chars() {
+        if character.is_control() || character.is_whitespace() {
+            space_pending = !normalized.is_empty();
+        } else {
+            if space_pending {
+                normalized.push(' ');
+                space_pending = false;
+            }
+            normalized.push(character);
+        }
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.len() > SHORT_TEXT_MAX_BYTES {
+        const ELLIPSIS: &str = "…";
+        let limit = SHORT_TEXT_MAX_BYTES - ELLIPSIS.len();
+        let boundary = normalized
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= limit)
+            .last()
+            .unwrap_or(0);
+        normalized.truncate(boundary);
+        normalized.push_str(ELLIPSIS);
+    }
+    ShortText::new(normalized).ok()
 }
 
 fn incomplete_message_summaries(
@@ -3390,6 +3616,23 @@ pub(crate) mod tests {
     use hq_protocol::{Bip340Signer, CanonicalEventPlan};
 
     const CONTENT: &str = r#"{"p":"hq/canonical","v":1,"f":2,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":1000,"scope":["local","1111111111111111111111111111111111111111111111111111111111111111"],"parents":[["c","3333333333333333333333333333333333333333333333333333333333333333"]],"auth":[["local-installation","c","3333333333333333333333333333333333333333333333333333333333333333"]],"body":{"mailbox":"4444444444444444444444444444444444444444444444444444444444444444","kind":"agent","label":"helper"}}"#;
+
+    #[test]
+    fn conversation_preview_uses_one_sanitized_meaningful_line() {
+        let preview = preview_line("\n\tLet's\u{0007}   ship\t now  \nnot this line")
+            .expect("meaningful line produces a preview");
+        assert_eq!(preview.as_str(), "Let's ship now");
+        assert_eq!(preview_line("\n\t\r"), None);
+    }
+
+    #[test]
+    fn conversation_preview_clips_unicode_on_a_short_text_boundary() {
+        let preview = preview_line(&"🦀".repeat(SHORT_TEXT_MAX_BYTES))
+            .expect("long Unicode content produces a preview");
+        assert!(preview.as_str().ends_with('…'));
+        assert!(preview.as_str().len() <= SHORT_TEXT_MAX_BYTES);
+        assert!(std::str::from_utf8(preview.as_str().as_bytes()).is_ok());
+    }
 
     #[test]
     fn uncommitted_transactions_roll_back_on_drop() {

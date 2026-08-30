@@ -1728,6 +1728,7 @@ struct PendingConversation {
     id: EffectId,
     row_id: String,
     cursor: Option<String>,
+    enter_on_load: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1750,6 +1751,7 @@ struct UiSectionWorkspace {
     conversation_anchor: Option<String>,
     technical_visible: bool,
     focus: UiFocus,
+    conversation_failure: Option<(String, UiFailure)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1783,6 +1785,7 @@ pub struct UiModel {
     required_revision: Option<u64>,
     pending_snapshot: Option<PendingSnapshot>,
     pending_conversation: Option<PendingConversation>,
+    conversation_failure: Option<(String, UiFailure)>,
     pending_mailbox: Option<PendingMailbox>,
     pending_agent: Option<EffectId>,
     pending_managed_session: Option<EffectId>,
@@ -1833,6 +1836,7 @@ impl UiModel {
             required_revision: None,
             pending_snapshot: None,
             pending_conversation: None,
+            conversation_failure: None,
             pending_mailbox: None,
             pending_agent: None,
             pending_managed_session: None,
@@ -2142,6 +2146,21 @@ impl UiModel {
         self.last_failure.as_ref()
     }
 
+    /// Returns whether the selected Inbox conversation is loading its first page.
+    pub fn conversation_loading(&self) -> bool {
+        self.pending_conversation.as_ref().is_some_and(|pending| {
+            pending.cursor.is_none() && self.selected_row.as_ref() == Some(&pending.row_id)
+        })
+    }
+
+    /// Borrows a failure scoped to the currently selected conversation row.
+    pub fn conversation_failure(&self) -> Option<&UiFailure> {
+        self.conversation_failure
+            .as_ref()
+            .filter(|(row_id, _)| self.selected_row.as_ref() == Some(row_id))
+            .map(|(_, failure)| failure)
+    }
+
     /// Returns transient prerequisite guidance produced by the latest input.
     pub fn transient_help(&self) -> Option<&'static str> {
         self.transient_help.map(UiTransientHelp::text)
@@ -2187,9 +2206,14 @@ impl UiModel {
         &mut self,
         row_id: String,
         cursor: Option<String>,
+        enter_on_load: bool,
         effects: &mut Vec<UiEffect>,
     ) -> Result<(), UiError> {
-        if self.pending_conversation.is_some() {
+        if let Some(pending) = &mut self.pending_conversation
+            && pending.row_id == row_id
+            && pending.cursor == cursor
+        {
+            pending.enter_on_load |= enter_on_load;
             return Ok(());
         }
         let id = self.allocate_effect()?;
@@ -2197,9 +2221,28 @@ impl UiModel {
             id,
             row_id: row_id.clone(),
             cursor: cursor.clone(),
+            enter_on_load,
         });
+        self.conversation_failure = None;
         effects.push(UiEffect::LoadConversation { id, row_id, cursor });
         Ok(())
+    }
+
+    fn request_inbox_preview(&mut self, effects: &mut Vec<UiEffect>) -> Result<(), UiError> {
+        if self.section != UiSection::Inbox || !self.selected_row_is_conversation() {
+            return Ok(());
+        }
+        let Some(row_id) = self.selected_row.clone() else {
+            return Ok(());
+        };
+        if self
+            .conversation
+            .as_ref()
+            .is_some_and(|conversation| conversation.row_id == row_id)
+        {
+            return Ok(());
+        }
+        self.request_conversation(row_id, None, false, effects)
     }
 
     fn open_draft(
@@ -2319,6 +2362,7 @@ impl UiModel {
             conversation_anchor: self.conversation_anchor.clone(),
             technical_visible: self.technical_visible,
             focus: self.focus,
+            conversation_failure: self.conversation_failure.clone(),
         });
     }
 
@@ -2330,14 +2374,17 @@ impl UiModel {
             self.conversation_anchor = workspace.conversation_anchor;
             self.technical_visible = workspace.technical_visible;
             self.focus = workspace.focus;
+            self.conversation_failure = workspace.conversation_failure;
         } else {
             self.selected_row = None;
             self.conversation = None;
             self.conversation_anchor = None;
             self.technical_visible = false;
             self.focus = UiFocus::Navigation;
+            self.conversation_failure = None;
         }
         self.pending_conversation = None;
+        self.conversation_failure = None;
     }
 
     fn change_section(&mut self, next: UiSection) {
@@ -2650,32 +2697,61 @@ fn apply_input(
             };
             true
         }
-        UiInput::NextSection | UiInput::MoveCursorRight => {
-            match (model.viewport.width >= WIDE_WIDTH, model.focus) {
-                (true, UiFocus::Navigation) => {
-                    model.focus = UiFocus::Content;
-                    true
-                }
-                (false, _) => {
-                    model.change_section(model.section.next());
-                    true
-                }
-                _ => false,
+        UiInput::NextSection => {
+            if model.viewport.width >= WIDE_WIDTH && model.focus == UiFocus::Navigation {
+                model.focus = UiFocus::Content;
+            } else if model.viewport.width < WIDE_WIDTH {
+                model.change_section(model.section.next());
+            } else {
+                return Ok(());
             }
+            true
         }
-        UiInput::PreviousSection | UiInput::MoveCursorLeft => {
-            match (model.viewport.width >= WIDE_WIDTH, model.focus) {
-                (true, UiFocus::Content | UiFocus::Conversation) => {
-                    model.focus = UiFocus::Navigation;
-                    true
+        UiInput::MoveCursorRight => match model.focus {
+            UiFocus::Navigation => {
+                if model.viewport.width >= WIDE_WIDTH {
+                    model.focus = UiFocus::Content;
+                } else {
+                    model.change_section(model.section.next());
                 }
-                (false, _) => {
+                true
+            }
+            UiFocus::Content if model.conversation.is_some() => {
+                model.focus = UiFocus::Conversation;
+                true
+            }
+            UiFocus::Content | UiFocus::Conversation => false,
+        },
+        UiInput::PreviousSection => {
+            if model.viewport.width >= WIDE_WIDTH
+                && matches!(model.focus, UiFocus::Content | UiFocus::Conversation)
+            {
+                model.focus = UiFocus::Navigation;
+            } else if model.viewport.width < WIDE_WIDTH {
+                model.change_section(model.section.previous());
+            } else {
+                return Ok(());
+            }
+            true
+        }
+        UiInput::MoveCursorLeft => match model.focus {
+            UiFocus::Conversation => {
+                model.focus = UiFocus::Content;
+                true
+            }
+            UiFocus::Content => {
+                model.focus = UiFocus::Navigation;
+                true
+            }
+            UiFocus::Navigation => {
+                if model.viewport.width < WIDE_WIDTH {
                     model.change_section(model.section.previous());
                     true
+                } else {
+                    false
                 }
-                _ => false,
             }
-        }
+        },
         UiInput::NextItem => match model.focus {
             UiFocus::Conversation => model.move_conversation_anchor(true),
             UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
@@ -2708,6 +2784,9 @@ fn apply_input(
         | UiInput::MoveCursorEnd
         | UiInput::Delete => false,
     };
+    if changed {
+        model.request_inbox_preview(effects)?;
+    }
     if changed || dismissed_transient_help || dismissed_completion {
         effects.push(UiEffect::RequestRedraw);
     }
@@ -6097,29 +6176,28 @@ fn mailbox_shortcut(
             Ok(true)
         }
         'h' => {
-            if model.viewport.width < WIDE_WIDTH {
-                model.change_section(model.section.previous());
-                Ok(true)
-            } else if model.viewport.width >= WIDE_WIDTH
-                && matches!(model.focus, UiFocus::Content | UiFocus::Conversation)
-            {
-                model.focus = UiFocus::Navigation;
-                Ok(true)
-            } else {
-                Ok(false)
+            match model.focus {
+                UiFocus::Conversation => model.focus = UiFocus::Content,
+                UiFocus::Content => model.focus = UiFocus::Navigation,
+                UiFocus::Navigation if model.viewport.width < WIDE_WIDTH => {
+                    model.change_section(model.section.previous());
+                }
+                UiFocus::Navigation => return Ok(false),
             }
+            Ok(true)
         }
-        'l' => {
-            if model.viewport.width < WIDE_WIDTH {
+        'l' => match model.focus {
+            UiFocus::Navigation if model.viewport.width < WIDE_WIDTH => {
                 model.change_section(model.section.next());
                 Ok(true)
-            } else if model.viewport.width >= WIDE_WIDTH && model.focus == UiFocus::Navigation {
+            }
+            UiFocus::Navigation => {
                 model.focus = UiFocus::Content;
                 Ok(true)
-            } else {
-                Ok(false)
             }
-        }
+            UiFocus::Content => activate(model, effects),
+            UiFocus::Conversation => Ok(false),
+        },
         'j' => Ok(match model.focus {
             UiFocus::Conversation => model.move_conversation_anchor(true),
             UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
@@ -6254,7 +6332,7 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
     {
         model.focus = UiFocus::Conversation;
     } else {
-        model.request_conversation(row_id, None, effects)?;
+        model.request_conversation(row_id, None, true, effects)?;
     }
     Ok(true)
 }
@@ -6269,7 +6347,7 @@ fn load_more(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, U
     let Some((row_id, cursor)) = request else {
         return Ok(false);
     };
-    model.request_conversation(row_id, Some(cursor), effects)?;
+    model.request_conversation(row_id, Some(cursor), true, effects)?;
     Ok(true)
 }
 
@@ -6368,7 +6446,9 @@ fn snapshot_loaded(
             .as_ref()
             .map(|conversation| conversation.row_id.clone())
     {
-        model.request_conversation(row_id, None, effects)?;
+        model.request_conversation(row_id, None, model.focus == UiFocus::Conversation, effects)?;
+    } else if model.required_revision.is_none() {
+        model.request_inbox_preview(effects)?;
     }
     effects.push(UiEffect::RequestRedraw);
     Ok(())
@@ -6416,7 +6496,10 @@ fn conversation_loaded(
             .filter(|anchor| conversation.entries.iter().any(|entry| &entry.id == anchor))
             .or_else(|| conversation.entries.first().map(|entry| entry.id.clone()))
     });
-    model.focus = UiFocus::Conversation;
+    if pending.enter_on_load {
+        model.focus = UiFocus::Conversation;
+    }
+    model.conversation_failure = None;
     model.last_failure = None;
     effects.push(UiEffect::RequestRedraw);
     Ok(())
@@ -6436,7 +6519,13 @@ fn conversation_failed(
     {
         return;
     }
+    let row_id = model
+        .pending_conversation
+        .as_ref()
+        .map(|pending| pending.row_id.clone())
+        .unwrap_or_default();
     model.pending_conversation = None;
+    model.conversation_failure = Some((row_id, failure.clone()));
     model.last_failure = Some(failure);
     effects.push(UiEffect::RequestRedraw);
 }

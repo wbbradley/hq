@@ -13,10 +13,11 @@ use std::{
 };
 
 use hq_local_api::protocol::v1::{
-    ActivityStatusDto, AuthoritativeSnapshotDto, ConversationEntryDto, ConversationKeyDto,
-    ConversationMessageDto, ConversationPageDto, DeviceGrantDto, Id32, MailboxAddressDto,
-    MessagePurposeDto, PresentationKindDto, ProviderAvailabilityDto, ProviderCatalogDto,
-    ResourceLocatorDto, ResourceSchemeDto, SnapshotItem,
+    ActivityStatusDto, AuthoritativeSnapshotDto, ConversationContextDto, ConversationEntryDto,
+    ConversationKeyDto, ConversationMessageDto, ConversationPageDto, ConversationParticipantDto,
+    DeviceGrantDto, Id32, MailboxAddressDto, MessagePurposeDto, PresentationKindDto,
+    ProviderAvailabilityDto, ProviderCatalogDto, ResourceLocatorDto, ResourceSchemeDto,
+    SnapshotItem,
 };
 use hq_node::{
     TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiEffectExecutor,
@@ -216,8 +217,7 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
         },
     )
     .expect("snapshot applies");
-    let opening = update(loaded.model, UiEvent::Input(UiInput::Activate)).expect("activate");
-    let (expected_id, effect) = opening
+    let (expected_id, effect) = loaded
         .effects
         .into_iter()
         .find_map(|effect| match effect {
@@ -601,6 +601,15 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
                     counterparty_mailbox: Id32::new([2; 32]),
                     thread: Id32::new([3; 32]),
                 },
+                context: ConversationContextDto::Direct {
+                    participant: ConversationParticipantDto {
+                        agent: Some(Id32::new([5; 32])),
+                        installation: Some(Id32::new([1; 32])),
+                        mailbox: Some(Id32::new([2; 32])),
+                        name: Some("builder".to_owned()),
+                    },
+                },
+                preview: Some("Can we ship?".to_owned()),
                 latest_fact: Some(Id32::new([4; 32])),
                 open_messages: 2,
                 archived_messages: 3,
@@ -663,8 +672,8 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
         UiHumanState::NeedsAttention(UiHumanIssue::NoAccountSelected)
     );
     assert_eq!(snapshot.inbox_rows.len(), 2);
-    assert_eq!(snapshot.inbox_rows[0].title, "Thread 030303030303");
-    assert_eq!(snapshot.inbox_rows[0].detail, "2 open messages");
+    assert_eq!(snapshot.inbox_rows[0].title, "Me and builder");
+    assert_eq!(snapshot.inbox_rows[0].detail, "Can we ship?");
     assert_eq!(snapshot.inbox_rows[1].state, hq_tui::UiRowState::Attention);
     assert_eq!(snapshot.direct_targets.len(), 1);
     assert_eq!(snapshot.direct_targets[0].label, "builder");
@@ -701,7 +710,7 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
     assert_eq!(snapshot.projects[0].pending_inputs[0].sequence, 2);
     assert_eq!(snapshot.sent_rows.len(), 1);
     assert_eq!(snapshot.archived_rows.len(), 1);
-    assert_eq!(snapshot.archived_rows[0].detail, "3 archived messages");
+    assert_eq!(snapshot.archived_rows[0].detail, "Can we ship?");
 }
 
 #[test]
@@ -713,6 +722,17 @@ fn authoritative_snapshot_preserves_project_thread_conversation_identity() {
                 project: Id32::new([0x31; 32]),
                 thread: Id32::new([0x42; 32]),
             },
+            context: ConversationContextDto::Project {
+                project: Id32::new([0x31; 32]),
+                name: Some("release".to_owned()),
+                participant: Some(ConversationParticipantDto {
+                    agent: Some(Id32::new([0x21; 32])),
+                    installation: Some(Id32::new([0x22; 32])),
+                    mailbox: Some(Id32::new([0x23; 32])),
+                    name: Some("alice".to_owned()),
+                }),
+            },
+            preview: Some("Let's have a conversation.".to_owned()),
             latest_fact: Some(Id32::new([0x53; 32])),
             open_messages: 1,
             archived_messages: 0,
@@ -727,7 +747,8 @@ fn authoritative_snapshot_preserves_project_thread_conversation_identity() {
         snapshot.inbox_rows[0].id,
         format!("project:{}:{}", "31".repeat(32), "42".repeat(32))
     );
-    assert_eq!(snapshot.inbox_rows[0].title, "Project conversation");
+    assert_eq!(snapshot.inbox_rows[0].title, "release · alice");
+    assert_eq!(snapshot.inbox_rows[0].detail, "Let's have a conversation.");
 }
 
 #[test]
