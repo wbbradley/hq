@@ -27,24 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Add first-run guidance and fresh-user acceptance coverage
-
-Make bare `hq` useful without prior knowledge of commands or domain terminology.
-
-- Detect missing identity, missing human account, missing providers, no projects, and no agents as
-  distinct setup states. Present an ordered setup path in the TUI or, where the node cannot yet run,
-  in a focused pre-TUI screen with one exact action and an explanation of its result. Do not present
-  authority jargon as onboarding copy.
-- After account setup, lead to the ordinary empty TUI and the `New...` workflow rather than a dead
-  end. Never require users to remember a command printed on a previous screen.
-- Add scenario tests beginning with a fresh state root and covering account setup, folder-backed
-  project creation, agent creation, provider selection, first project instruction, return to the
-  resulting conversation, direct-message discovery, contextual help, restart, and reconnect.
-- Conduct a copy and interaction audit from the perspective of a user seeing every screen for the
-  first time. Remove unexplained nouns, raw state codes, silent keys, success acknowledgements that
-  require dismissal, and dead ends. Record the final walkthrough and screenshots in
-  `docs/rust/tui.md`.
-
 ### Replace the handwritten CLI grammar with Clap
 
 Inventory the current accepted and rejected invocation matrix, decide the intended grammar, then replace the handwritten command grammar with a minimally featured, workspace-pinned Clap dependency. Backwards compatibility is explicitly a non-goal because HQ has not shipped: preserve the valuable architectural and safety boundaries, but freely simplify command spelling, option relationships, help, diagnostics, and structured output where the new grammar exposes a better design. Update tests, documentation, and internal consumers atomically for every intentional change.

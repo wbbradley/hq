@@ -8953,7 +8953,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             Ok(format_observation(label, observation))
         }
         (CliOutputFormat::Human, CliResult::Identity(identity)) => Ok(format!(
-            "installation={} public_key={} fingerprint={}\n",
+            "installation={} public_key={} fingerprint={}\nNext: run hq\n",
             crate::identity::encode_hex(identity.installation_id.as_bytes()),
             crate::identity::encode_hex(&identity.signing_public_key),
             identity.fingerprint,
@@ -10143,6 +10143,9 @@ fn render_human_view(view: &HumanView) -> Result<String, CliError> {
             label,
         )
         .map_err(|_| CliError::Runtime)?;
+    }
+    if view.active_account.is_some() {
+        output.push_str("Next: run hq\n");
     }
     Ok(output)
 }

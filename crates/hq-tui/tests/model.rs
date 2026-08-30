@@ -903,6 +903,31 @@ fn contextual_help_freezes_background_actions_and_survives_resize() {
 }
 
 #[test]
+fn explicit_help_and_refresh_work_without_discarding_an_open_dialog() {
+    let loaded = loaded_model(snapshot(1, &[]));
+    let launcher = update(loaded, UiEvent::Input(UiInput::Character('n')))
+        .expect("open launcher")
+        .model;
+    let retained = launcher.new_modal().cloned();
+
+    let helped = update(launcher, UiEvent::Input(UiInput::Help)).expect("F1 help");
+    assert_eq!(helped.model.help_page(), Some(UiHelpPage::Context));
+    assert_eq!(helped.model.new_modal(), retained.as_ref());
+    let closed = update(helped.model, UiEvent::Input(UiInput::Help)).expect("close F1 help");
+    assert_eq!(closed.model.help_page(), None);
+    assert_eq!(closed.model.new_modal(), retained.as_ref());
+
+    let refreshed = update(closed.model, UiEvent::Input(UiInput::Refresh)).expect("F5 refresh");
+    assert_eq!(refreshed.model.new_modal(), retained.as_ref());
+    assert!(
+        refreshed
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::LoadSnapshot { .. }))
+    );
+}
+
+#[test]
 fn wide_sidebar_uses_vertical_keys_and_horizontal_keys_only_change_focus() {
     let started = update(
         UiModel::new(UiSize {

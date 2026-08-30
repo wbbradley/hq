@@ -92,7 +92,7 @@ impl TuiShellError {
             {
                 (
                     "setup.identity_required",
-                    "run `hq identity init`, or import an existing installation identity",
+                    "HQ needs a device identity before it can protect your account and messages.\nRun `hq identity init` to create it, or import an existing identity.\nThen run `hq` again; the next screen will guide account setup.",
                 )
             }
             Self::Identity(_) => (
@@ -265,6 +265,8 @@ fn normalize_key(key: KeyEvent) -> Option<TuiTerminalEvent> {
         KeyCode::Down if plain => UiInput::NextItem,
         KeyCode::Up if plain => UiInput::PreviousItem,
         KeyCode::Enter if plain => UiInput::Activate,
+        KeyCode::F(1) if plain => UiInput::Help,
+        KeyCode::F(5) if plain => UiInput::Refresh,
         KeyCode::PageDown if plain => UiInput::LoadMore,
         KeyCode::Backspace if plain => UiInput::Backspace,
         KeyCode::Delete if plain => UiInput::Delete,

@@ -66,6 +66,8 @@ fn crossterm_events_normalize_to_the_closed_ui_vocabulary() {
         (KeyCode::Delete, KeyModifiers::NONE, UiInput::Delete),
         (KeyCode::Home, KeyModifiers::NONE, UiInput::MoveCursorHome),
         (KeyCode::End, KeyModifiers::NONE, UiInput::MoveCursorEnd),
+        (KeyCode::F(1), KeyModifiers::NONE, UiInput::Help),
+        (KeyCode::F(5), KeyModifiers::NONE, UiInput::Refresh),
     ];
     for (code, modifiers, expected) in cases {
         assert_eq!(

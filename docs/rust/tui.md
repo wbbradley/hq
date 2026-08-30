@@ -250,13 +250,15 @@ continue to move through the horizontal section navigation.
 The header reports the selected section and plain device state (`Connected`, `Connecting…`,
 `Reconnecting…`, `Offline`, `Update required`, or `Updating…`) without hiding retained rows.
 The authoritative revision and raw connection state appear only in technical help. Rows expose
-selection, plain presentation state, and bounded detail. `?` opens contextual help from every ordinary section screen, whether or not that
-section contains or selects an item. The first help page explains the section's purpose, the
-selected item's plain-language state, and every action available in that context. `t` switches to a
-separate technical page containing stable identity, authoritative revision, connection state, and
-current recovery evidence; `?` or Escape closes help. Help freezes background user actions while it
-is open but survives resize and authoritative refresh. Text-entry dialogs continue to accept a
-literal `?` as content.
+selection, plain presentation state, and bounded detail. `?` opens contextual help from every
+ordinary section screen, whether or not that section contains or selects an item. F1 opens help
+from ordinary screens and every dialog, so text fields can continue to accept a literal `?`. The
+first help page explains the current screen or dialog, the selected item's plain-language state,
+and the available actions. `t` switches to a separate technical page containing stable identity,
+authoritative revision, connection state, and current recovery evidence; F1, `?`, or Escape closes
+help. Help freezes background user actions while it is open but survives resize and authoritative
+refresh. F5 requests a complete authoritative reload without closing the current dialog or losing
+its inputs.
 
 Ordinary footers stay focused on immediate actions such as `Enter open`, `c create`, and `? help`;
 the contextual overlay owns the complete shortcut reference. Guidance from an inapplicable
@@ -270,6 +272,73 @@ that screen. Empty Agents offers creation of a named worker. Empty Projects expl
 records work and ownership of folders and resources, then offers creation from a folder without
 making Git worktree management the primary concept. Empty-state footers and contextual help omit
 `Enter` actions when there is no selected item.
+
+### First-run walkthrough
+
+Bare interactive `hq` now treats setup as one ordered journey rather than a collection of domain
+commands. Before the terminal is activated, missing device identity renders one focused setup
+screen with the reason, exact action, and continuation:
+
+```text
+HQ needs a device identity before it can protect your account and messages.
+Run `hq identity init` to create it, or import an existing identity.
+Then run `hq` again; the next screen will guide account setup.
+```
+
+Both `hq identity init` and successful human-account output leave `Next: run hq` on screen. With an
+identity but no account, HQ opens the ordinary TUI and keeps this action visible:
+
+```text
+No human account is selected on this device.
+Your account holds your conversations and collaboration identity.
+Create one now: hq human create
+Keep this screen open; when setup finishes, press F5 to continue.
+```
+
+An invitation remains an alternative account-recovery path in contextual help; it does not compete
+with the one primary first-device action. F5 replaces the account setup view with the ordinary
+Inbox and this first-run checklist:
+
+```text
+Get started with HQ
+✓ Account ready
+› Current: add a project and choose the folder or resource it owns
+Press n New… and choose “Work with an agent on a project.”
+```
+
+The checklist advances from project/resource ownership to agent creation, agent-service readiness,
+and the first project instruction. It shows only the current action plus completed prerequisites.
+When more than one service is available, the guided workflow presents typed choices; one service is
+automatic, and no service becomes a distinct setup step. Users never type a provider namespace.
+The project step recommends recording an existing folder and keeps Git worktree creation behind the
+advanced project option.
+
+The following capture is the first dialog reached from that checklist. Its wording assumes the user
+has never seen HQ, and its three intentions remain independent:
+
+```text
+┌ New… ──────────────────────────────────────────────────────────────┐
+│ What would you like to do?                                        │
+│ HQ will guide you through only the choices that intent needs.     │
+│                                                                   │
+│ › Work with an agent on a project                                 │
+│   Send a direct message                                           │
+│   Write a personal note                                           │
+│                                                                   │
+│ ↑/↓ choose · Enter continue · Esc back                            │
+└───────────────────────────────────────────────────────────────────┘
+F1 help · Esc back/cancel · q quit
+```
+
+F1 replaces any dialog with plain-language help while retaining that dialog and every input. The
+fresh-state installed acceptance scenario creates the account while the TUI remains open, reloads
+the resulting ordinary workspace, restarts and reconnects the node, opens `New…`, and opens F1 help.
+The wider acceptance ledger is deliberately split at stable boundaries: installed pseudoterminal
+tests cover identity/account setup, folder-backed project creation, agent creation, first project
+input, direct-message discovery, restart, reconnect, and terminal restoration; pure transition and
+render tests cover multi-provider selection, exact-once setup and input dispatch, exact conversation
+return, every onboarding stage, and help retention. These tests all begin from empty state or an
+explicit empty authoritative snapshot, so seeded demo data cannot conceal a first-run dead end.
 
 `c create` in Projects opens one intent-first chooser. Its recommended path records an existing
 folder as the project's first owned resource; the optional advanced path creates an isolated Git
@@ -375,10 +444,12 @@ failure into a process exit, so it never exits while terminal modes are still ow
 
 Before activating the terminal or attempting daemon ownership, the installed shell performs a
 read-only validation of the installation identity. A missing identity fails immediately with the
-stable `setup.identity_required` diagnostic and the `hq identity init` action. Identity-only nodes
-remain supported: after the first authoritative snapshot the TUI presents explicit `human create`,
-`human join`, selection, and relay-recovery guidance instead of treating the absent human account
-as a shell failure.
+stable `setup.identity_required` diagnostic, a plain-language reason, the `hq identity init`
+action, and the command that returns to onboarding. Identity-only nodes remain supported: after the
+first authoritative snapshot the TUI presents one primary `human create` action and an in-place F5
+continuation instead of treating the absent human account as a shell failure. Join, selection, and
+relay-recovery alternatives remain available when their typed state or contextual help makes them
+relevant.
 
 Human-account recovery is a closed typed presentation, not one aggregate ambiguous flag. The node
 mapper distinguishes no local selection, unresolved selection candidates, multiple local selection

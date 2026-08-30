@@ -189,6 +189,10 @@ pub enum UiHelpPage {
 pub enum UiInput {
     /// Exit the UI.
     Quit,
+    /// Open contextual help from any screen or dialog.
+    Help,
+    /// Reload the complete authoritative workspace.
+    Refresh,
     /// Move focus forward.
     NextFocus,
     /// Move focus backward.
@@ -2627,6 +2631,19 @@ fn apply_input(
     if dismissed_completion {
         model.completion_timer = None;
     }
+    if matches!(input, UiInput::Help) {
+        model.help_page = match model.help_page {
+            Some(_) => None,
+            None => Some(UiHelpPage::Context),
+        };
+        effects.push(UiEffect::RequestRedraw);
+        return Ok(());
+    }
+    if matches!(input, UiInput::Refresh) {
+        model.request_snapshot(effects)?;
+        effects.push(UiEffect::RequestRedraw);
+        return Ok(());
+    }
     if let Some(changed) = apply_open_modal_input(model, input, effects)? {
         if changed || dismissed_completion {
             effects.push(UiEffect::RequestRedraw);
@@ -2718,6 +2735,8 @@ fn apply_input(
         }
         UiInput::Character(character) => mailbox_shortcut(model, *character, effects)?,
         UiInput::Paste(_)
+        | UiInput::Help
+        | UiInput::Refresh
         | UiInput::Backspace
         | UiInput::MoveCursorHome
         | UiInput::MoveCursorEnd
@@ -3358,7 +3377,7 @@ fn apply_help_input(model: &mut UiModel, input: &UiInput, effects: &mut Vec<UiEf
             }
             false
         }
-        UiInput::Escape | UiInput::Character('?') => {
+        UiInput::Escape | UiInput::Help | UiInput::Character('?') => {
             model.help_page = None;
             true
         }

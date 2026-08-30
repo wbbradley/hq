@@ -383,6 +383,9 @@ fn render_help(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
 }
 
 fn contextual_help_lines(model: &UiModel) -> Vec<Line<'static>> {
+    if let Some(lines) = dialog_help_lines(model) {
+        return lines;
+    }
     let mut lines = vec![
         Line::styled("What this is", Style::new().fg(Color::Cyan).bold()),
         Line::from(section_help_text(model.section())),
@@ -397,15 +400,92 @@ fn contextual_help_lines(model: &UiModel) -> Vec<Line<'static>> {
     } else {
         lines.push(Line::from("No item is selected."));
     }
+    if matches!(
+        model.human_state(),
+        Some(UiHumanState::NeedsAttention(
+            UiHumanIssue::NoAccountSelected
+        ))
+    ) {
+        lines.push(Line::styled(
+            "Already have an HQ account?",
+            Style::new().fg(Color::Cyan).bold(),
+        ));
+        lines.push(Line::from(
+            "Join it with: hq human join ABSOLUTE_INVITATION_PATH",
+        ));
+    }
     lines.push(Line::styled(
         "Available actions",
         Style::new().fg(Color::Cyan).bold(),
     ));
     lines.extend(section_help_actions(model));
     lines.push(Line::from(
-        "q — quit · t — technical details · ? / Esc — close help",
+        "q quit · t technical details · F1/?/Esc close help",
     ));
     lines
+}
+
+fn dialog_help_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
+    let (title, purpose) = if let Some(dialog) = model.new_modal() {
+        match dialog {
+            UiNewModal::Launcher { .. } => (
+                "Help for New…",
+                "Choose the kind of thing you want to do. HQ will then ask only for information that choice needs.",
+            ),
+            UiNewModal::ChooseProject { .. } => (
+                "Help for choosing a project",
+                "A project describes a piece of work and records which folders or other resources it owns.",
+            ),
+            UiNewModal::ChooseAgent { .. } => (
+                "Help for choosing an agent",
+                "An agent is a named worker. Unassigned agents can begin this project without moving other work.",
+            ),
+            UiNewModal::ComposeProject { .. } => (
+                "Help for the first instruction",
+                "Tell the agent the outcome you want. HQ chooses an available service automatically when it can.",
+            ),
+            UiNewModal::ReviewProject { .. } => (
+                "Help for reviewing project work",
+                "Check the project, agent, service, and instruction before HQ changes an assignment or sends anything.",
+            ),
+            UiNewModal::AgentUnavailable { .. } => (
+                "Help for an assigned agent",
+                "HQ will not move an agent away from other work without an explicit handoff decision.",
+            ),
+            UiNewModal::ProjectUnavailable { .. } => (
+                "Help for a project conflict",
+                "A folder or assignment is already claimed. Inspect the named project before deciding what should own it.",
+            ),
+            UiNewModal::Working { .. } => (
+                "Help while HQ prepares work",
+                "HQ is waiting for authoritative confirmation before it sends your retained instruction.",
+            ),
+        }
+    } else if model.project_modal().is_some() {
+        (
+            "Help for this project dialog",
+            "The dialog explains the pending project or resource change. Nothing material changes until its confirmation step.",
+        )
+    } else if model.agent_modal().is_some() {
+        (
+            "Help for this agent dialog",
+            "The dialog changes a named worker or one of its saved conversations. Technical identities stay in details.",
+        )
+    } else if model.mailbox_modal().is_some() {
+        (
+            "Help for this message dialog",
+            "Choose a recipient or write the message. Draft text is retained if delivery needs attention.",
+        )
+    } else {
+        return None;
+    };
+    Some(vec![
+        Line::styled(title, Style::new().fg(Color::Cyan).bold()),
+        Line::from(purpose),
+        Line::default(),
+        Line::from("Follow the labels and the action guide at the bottom of the dialog."),
+        Line::from("t — technical details · F1 / Esc — close help"),
+    ])
 }
 
 fn technical_help_lines(model: &UiModel) -> Vec<Line<'static>> {
@@ -2527,6 +2607,10 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         }
         Some(UiHumanState::Ready) | None => {}
     }
+    if let Some(onboarding) = onboarding_lines(model) {
+        lines.extend(onboarding);
+        lines.push(Line::default());
+    }
     match model.rows() {
         Some([]) => lines.extend(empty_section_lines(model.section())),
         Some(rows) => {
@@ -2542,13 +2626,78 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
+fn onboarding_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
+    let snapshot = model.snapshot()?;
+    if model.section() != UiSection::Inbox
+        || !matches!(snapshot.human_state, UiHumanState::Ready)
+        || !snapshot.inbox_rows.is_empty()
+        || !snapshot.sent_rows.is_empty()
+        || !snapshot.archived_rows.is_empty()
+    {
+        return None;
+    }
+    let has_project = snapshot.projects.iter().any(|project| !project.archived);
+    let has_agent = snapshot
+        .agents
+        .iter()
+        .any(|agent| matches!(agent.lifecycle, crate::UiAgentLifecycle::Active));
+    let has_provider = snapshot.providers.iter().any(|provider| provider.available);
+    let mut lines = vec![Line::styled(
+        " Get started with HQ",
+        Style::new().fg(Color::Cyan).bold(),
+    )];
+    lines.push(Line::from(" ✓ Account ready"));
+    if !has_project {
+        lines.push(Line::styled(
+            " › Current: add a project and choose the folder or resource it owns",
+            Style::new().fg(Color::Yellow).bold(),
+        ));
+        lines.push(Line::from(
+            " Press n New… and choose “Work with an agent on a project.”",
+        ));
+        return Some(lines);
+    }
+    lines.push(Line::from(" ✓ Project ready"));
+    if !has_agent {
+        lines.push(Line::styled(
+            " › Current: create an agent to do the work",
+            Style::new().fg(Color::Yellow).bold(),
+        ));
+        lines.push(Line::from(
+            " Press n New…; the project path can create one in place.",
+        ));
+        return Some(lines);
+    }
+    lines.push(Line::from(" ✓ Agent ready"));
+    if !has_provider {
+        lines.push(Line::styled(
+            " › Current: connect an agent service",
+            Style::new().fg(Color::Yellow).bold(),
+        ));
+        lines.push(Line::from(
+            " Install or enable an agent service, then restart HQ to detect it.",
+        ));
+        return Some(lines);
+    }
+    lines.push(Line::from(" ✓ Agent service ready"));
+    lines.push(Line::styled(
+        " › Current: send the first project instruction",
+        Style::new().fg(Color::Yellow).bold(),
+    ));
+    lines.push(Line::from(
+        " Press n New…. HQ will ask you to choose only if more than one service is available.",
+    ));
+    Some(lines)
+}
+
 fn human_issue_lines(issue: &UiHumanIssue) -> Vec<Line<'static>> {
     let heading = Style::new().fg(Color::Yellow).bold();
     match issue {
         UiHumanIssue::NoAccountSelected => vec![
             Line::styled(" No human account is selected on this device.", heading),
-            Line::from(" Create one: hq human create"),
-            Line::from(" Join one: hq human join ABSOLUTE_INVITATION_PATH"),
+            Line::from(" Your account holds your conversations and collaboration identity."),
+            Line::from(" Create one now: hq human create"),
+            Line::from(" Keep this screen open; when setup finishes, press F5 to continue."),
         ],
         UiHumanIssue::SelectionCandidates { .. } => vec![
             Line::styled(
@@ -2837,9 +2986,15 @@ fn render_row<'row>(model: &UiModel, row: &'row UiRow) -> [Line<'row>; 2] {
 fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     let content = if let Some(page) = model.help_page() {
         match page {
-            UiHelpPage::Context => " t technical details · ?/Esc close help".to_owned(),
-            UiHelpPage::Technical => " t contextual help · ?/Esc close help".to_owned(),
+            UiHelpPage::Context => " t technical details · F1/?/Esc close help".to_owned(),
+            UiHelpPage::Technical => " t contextual help · F1/?/Esc close help".to_owned(),
         }
+    } else if model.new_modal().is_some()
+        || model.mailbox_modal().is_some()
+        || model.agent_modal().is_some()
+        || model.project_modal().is_some()
+    {
+        " F1 help · Esc back/cancel · q quit".to_owned()
     } else if let Some(failure) = model.last_failure() {
         format!(
             " Could not complete that action · {} · ? details",

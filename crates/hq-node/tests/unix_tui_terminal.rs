@@ -11,6 +11,7 @@ use std::{
     os::fd::OwnedFd,
     path::Path,
     process::{Command, ExitStatus, Stdio},
+    sync::{Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
@@ -27,9 +28,11 @@ const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
 const AUTHORITATIVE_STATE_PROBE_INTERVAL: Duration = Duration::from_millis(50);
 // This is an inactivity watchdog for installed process tests, not a product latency budget.
 const PROCESS_INACTIVITY_WATCHDOG: Duration = Duration::from_secs(30);
+static PSEUDOTERMINAL_SCENARIO: Mutex<()> = Mutex::new(());
 
 #[test]
 fn installed_tui_without_an_identity_fails_fast_before_terminal_activation() {
+    let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
 
@@ -56,6 +59,18 @@ fn installed_tui_without_an_identity_fails_fast_before_terminal_activation() {
             "missing identity setup action: {:?}",
             run.bytes
         );
+        for explanation in [
+            "HQ needs a device identity before it can protect your account and messages.",
+            "Then run `hq` again; the next screen will guide account setup.",
+        ] {
+            assert!(
+                run.bytes
+                    .windows(explanation.len())
+                    .any(|window| window == explanation.as_bytes()),
+                "missing first-run explanation {explanation:?}: {:?}",
+                run.bytes
+            );
+        }
         assert!(
             !run.bytes
                 .windows(ENTER_ALTERNATE_SCREEN.len())
@@ -67,7 +82,72 @@ fn installed_tui_without_an_identity_fails_fast_before_terminal_activation() {
 }
 
 #[test]
+fn setup_commands_leave_the_next_action_on_screen() {
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let identity = hq_output(&state_root, &["identity", "init"]);
+    assert!(
+        identity.status.success(),
+        "identity init failed: {identity:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&identity.stdout).contains("Next: run hq"),
+        "identity setup omitted its next action: {:?}",
+        identity.stdout
+    );
+    let _daemon = DaemonStopGuard(&state_root);
+    let human = hq_output(&state_root, &["human", "create"]);
+    assert!(human.status.success(), "human create failed: {human:?}");
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("Next: run hq"),
+        "account setup omitted its next action: {:?}",
+        human.stdout
+    );
+}
+
+#[test]
+fn fresh_account_setup_continues_into_guided_work_across_restart() {
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+
+    let run = run_in_pty(
+        &state_root,
+        false,
+        PtyInteraction::CompleteFreshSetupAndReconnect,
+    );
+    assert!(
+        run.status.success(),
+        "fresh walkthrough failed: {:?}",
+        run.bytes
+    );
+    for phrase in [
+        "No human account is selected",
+        "Get started with HQ",
+        "add a project",
+        "Work with an agent on a project",
+        "Help for New",
+    ] {
+        assert!(
+            run.bytes
+                .windows(phrase.len())
+                .any(|window| window == phrase.as_bytes()),
+            "fresh walkthrough omitted {phrase:?}: {:?}",
+            run.bytes
+        );
+    }
+    assert_eq!(
+        run.before, run.after,
+        "fresh walkthrough changed terminal modes"
+    );
+}
+
+#[test]
 fn explicit_and_bare_tui_render_and_restore_the_pseudoterminal() {
+    let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     initialize_identity(&state_root);
@@ -104,6 +184,7 @@ fn explicit_and_bare_tui_render_and_restore_the_pseudoterminal() {
 
 #[test]
 fn installed_tui_self_note_matches_cli_and_survives_restart() {
+    let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     initialize_identity(&state_root);
@@ -139,6 +220,7 @@ fn installed_tui_self_note_matches_cli_and_survives_restart() {
 
 #[test]
 fn installed_tui_new_launcher_explains_all_three_intents() {
+    let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     initialize_identity(&state_root);
@@ -171,6 +253,7 @@ fn installed_tui_new_launcher_explains_all_three_intents() {
 
 #[test]
 fn installed_tui_agent_create_matches_cli_and_survives_restart() {
+    let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     initialize_identity(&state_root);
@@ -199,6 +282,7 @@ fn installed_tui_agent_create_matches_cli_and_survives_restart() {
 
 #[test]
 fn installed_tui_automatically_uses_the_available_provider_and_renders_typed_failure() {
+    let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     initialize_identity(&state_root);
@@ -243,6 +327,7 @@ fn installed_tui_automatically_uses_the_available_provider_and_renders_typed_fai
 #[test]
 #[allow(clippy::too_many_lines)]
 fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
+    let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     let worktree = directory.path().join("existing-worktree");
@@ -362,6 +447,7 @@ fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn installed_tui_project_lifecycle_matches_the_cli() {
+    let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     let worktree = directory.path().join("lifecycle-worktree");
@@ -424,6 +510,7 @@ fn installed_tui_project_lifecycle_matches_the_cli() {
 
 #[test]
 fn installed_tui_provisions_a_recoverable_git_worktree_project() {
+    let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     let repository = directory.path().join("repository");
@@ -487,6 +574,7 @@ fn installed_tui_provisions_a_recoverable_git_worktree_project() {
 
 #[test]
 fn explicit_tui_without_terminal_fails_without_escape_sequences() {
+    let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     let output = Command::new(env!("CARGO_BIN_EXE_hq"))
@@ -510,11 +598,12 @@ struct PtyRun {
     after: Termios,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum PtyInteraction<'content> {
     QuitOnStart,
     QuitAfterSetup,
     OpenNewLauncher,
+    CompleteFreshSetupAndReconnect,
     SubmitSelfNote(&'content str),
     CreateAgent(&'content str),
     StartRejectedSession,
@@ -569,7 +658,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
     .map(|(name, lifecycle, archived)| (project_id(state_root, name), lifecycle, archived));
     let dimensions = Winsize {
         ws_row: 30,
-        ws_col: 100,
+        ws_col: 80,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -622,33 +711,125 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         let alternate_screen_entered = bytes
             .windows(ENTER_ALTERNATE_SCREEN.len())
             .any(|window| window == ENTER_ALTERNATE_SCREEN);
-        let interaction_ready = !matches!(interaction, PtyInteraction::QuitAfterSetup)
-            || bytes
+        if matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
+            && !initial_key_sent
+            && bytes
                 .windows(b"No human account is selected".len())
-                .any(|window| window == b"No human account is selected");
-        if !initial_key_sent && alternate_screen_entered && interaction_ready {
-            let key = match interaction {
-                PtyInteraction::QuitOnStart | PtyInteraction::QuitAfterSetup => b"q".as_slice(),
-                PtyInteraction::OpenNewLauncher => b"n".as_slice(),
-                PtyInteraction::SubmitSelfNote(_) => b"N".as_slice(),
-                PtyInteraction::CreateAgent(_) => b"jjjc".as_slice(),
-                PtyInteraction::StartRejectedSession => b"jjjl".as_slice(),
-                PtyInteraction::CreateExistingProject { .. } => b"jjjjc\r".as_slice(),
+                .any(|window| window == b"No human account is selected")
+        {
+            let setup = hq_output(state_root, &["human", "create"]);
+            assert!(setup.status.success(), "account setup failed: {setup:?}");
+            master.write_all(b"\x1b[15~").expect("F5 key writes");
+            master.flush().expect("F5 key flushes");
+            initial_key_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        let connected = bytes
+            .windows(b"Connected".len())
+            .any(|window| window == b"Connected");
+        let interaction_ready = match interaction {
+            PtyInteraction::QuitOnStart => true,
+            PtyInteraction::QuitAfterSetup => bytes
+                .windows(b"No human account is selected".len())
+                .any(|window| window == b"No human account is selected"),
+            PtyInteraction::CompleteFreshSetupAndReconnect => false,
+            _ => connected,
+        };
+        if !initial_key_sent
+            && alternate_screen_entered
+            && interaction_ready
+            && !matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
+        {
+            let keys: Vec<&[u8]> = match interaction {
+                PtyInteraction::QuitOnStart | PtyInteraction::QuitAfterSetup => vec![b"q"],
+                PtyInteraction::OpenNewLauncher => vec![b"n"],
+                PtyInteraction::CompleteFreshSetupAndReconnect => unreachable!(),
+                PtyInteraction::SubmitSelfNote(_) => vec![b"N"],
+                PtyInteraction::CreateAgent(_) => vec![b"l", b"l", b"l", b"c"],
+                PtyInteraction::StartRejectedSession => vec![b"l", b"l", b"l", b"\t"],
+                PtyInteraction::CreateExistingProject { .. } => {
+                    vec![b"l", b"l", b"l", b"l", b"c", b"\r"]
+                }
                 PtyInteraction::SendProjectInput { .. }
                 | PtyInteraction::DispatchProjectInput { .. }
                 | PtyInteraction::AddProjectResource { .. }
                 | PtyInteraction::CloseProject { .. }
                 | PtyInteraction::OpenProject { .. }
-                | PtyInteraction::SetProjectArchived { .. } => b"jjjjl".as_slice(),
-                PtyInteraction::CreateWorktreeProject { .. } => b"jjjjw".as_slice(),
+                | PtyInteraction::SetProjectArchived { .. } => {
+                    vec![b"l", b"l", b"l", b"l", b"\t"]
+                }
+                PtyInteraction::CreateWorktreeProject { .. } => {
+                    vec![b"l", b"l", b"l", b"l", b"w"]
+                }
             };
-            master.write_all(key).expect("initial TUI key writes");
-            master.flush().expect("initial TUI key flushes");
+            for key in keys {
+                master.write_all(key).expect("initial TUI key writes");
+                master.flush().expect("initial TUI key flushes");
+                std::thread::sleep(Duration::from_millis(100));
+            }
             initial_key_sent = true;
             exit_sent = matches!(
                 interaction,
                 PtyInteraction::QuitOnStart | PtyInteraction::QuitAfterSetup
             );
+        }
+        if matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
+            && initial_key_sent
+            && !content_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Get started with HQ".len())
+                    .any(|window| window == b"Get started with HQ")
+            })
+        {
+            let restarted = hq_output(state_root, &["daemon", "restart"]);
+            assert!(
+                restarted.status.success(),
+                "daemon restart failed: {restarted:?}"
+            );
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
+            && content_sent
+            && !managed_action_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Connected".len())
+                    .any(|window| window == b"Connected")
+            })
+        {
+            master.write_all(b"n").expect("New launcher key writes");
+            master.flush().expect("New launcher key flushes");
+            managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
+            && managed_action_sent
+            && !managed_provider_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Work with an agent on a project".len())
+                    .any(|window| window == b"Work with an agent on a project")
+            })
+        {
+            master.write_all(b"\x1bOP").expect("F1 key writes");
+            master.flush().expect("F1 key flushes");
+            managed_provider_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
+            && managed_provider_sent
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Help for New".len())
+                    .any(|window| window == b"Help for New")
+            })
+        {
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
         }
         if matches!(interaction, PtyInteraction::OpenNewLauncher)
             && initial_key_sent
@@ -807,8 +988,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !managed_provider_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"request".len())
-                    .any(|window| window == b"request")
+                    .windows(b"Assess project".len())
+                    .any(|window| window == b"Assess project")
             })
         {
             master.write_all(b"\r").expect("close assessment accepts");
@@ -901,8 +1082,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !managed_action_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"a add".len())
-                    .any(|window| window == b"a add")
+                    .windows(b"Assigned agent".len())
+                    .any(|window| window == b"Assigned agent")
             })
         {
             master.write_all(b"a").expect("resource add key writes");
@@ -1081,8 +1262,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"request".len())
-                    .any(|window| window == b"request")
+                    .windows(b"HQ could not make this change".len())
+                    .any(|window| window == b"HQ could not make this change")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -1122,7 +1303,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             let _ = child.kill();
             let _ = child.wait();
             panic!(
-                "TUI process timed out (content={content_sent}, action={managed_action_sent}, provider={managed_provider_sent}, resource={resource_commit_sent}, exit={exit_sent}); output: {}",
+                "TUI process timed out for {interaction:?} (initial={initial_key_sent}, content={content_sent}, action={managed_action_sent}, provider={managed_provider_sent}, resource={resource_commit_sent}, exit={exit_sent}); output: {}",
                 String::from_utf8_lossy(&bytes)
             );
         }
@@ -1148,6 +1329,12 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         before,
         after,
     }
+}
+
+fn serial_scenario() -> MutexGuard<'static, ()> {
+    PSEUDOTERMINAL_SCENARIO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn mailbox_contains(state_root: &Path, content: &str) -> bool {

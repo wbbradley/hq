@@ -172,8 +172,107 @@ fn identity_only_state_renders_setup_and_recovery_actions() {
     let rendered = render_text(&model);
     assert!(rendered.contains("No human account is selected"));
     assert!(rendered.contains("hq human create"));
-    assert!(rendered.contains("hq human join"));
+    assert!(rendered.contains("press F5 to continue"));
     assert!(!rendered.contains("hq human show"));
+
+    let help = update(model, UiEvent::Input(UiInput::Help))
+        .expect("account setup help")
+        .model;
+    let help = render_text(&help);
+    assert!(help.contains("Already have an HQ account?"), "{help}");
+    assert!(
+        help.contains("hq human join ABSOLUTE_INVITATION_PATH"),
+        "{help}"
+    );
+}
+
+#[test]
+fn fresh_workspace_renders_one_ordered_onboarding_step_at_a_time() {
+    let size = UiSize {
+        width: 104,
+        height: 24,
+    };
+
+    let empty = render_text(&loaded_snapshot_model(size, empty_render_snapshot(1)));
+    assert!(empty.contains("Get started with HQ"), "{empty}");
+    assert!(empty.contains("Account ready"), "{empty}");
+    assert!(
+        empty.contains("Current: add a project and choose the folder or resource it owns"),
+        "{empty}"
+    );
+    assert!(empty.contains("Press n New…"), "{empty}");
+    assert!(!empty.contains("provider namespace"), "{empty}");
+
+    let mut project_only = empty_render_snapshot(2);
+    project_only.projects = vec![onboarding_project()];
+    project_only.project_rows = vec![UiRow {
+        id: "project:release".to_owned(),
+        title: "release".to_owned(),
+        detail: "open".to_owned(),
+        state: UiRowState::Open,
+        kind: UiRowKind::Project,
+    }];
+    let project_only = render_text(&loaded_snapshot_model(size, project_only));
+    assert!(project_only.contains("Project ready"), "{project_only}");
+    assert!(
+        project_only.contains("Current: create an agent to do the work"),
+        "{project_only}"
+    );
+
+    let mut agent_only = empty_render_snapshot(3);
+    agent_only.projects = vec![onboarding_project()];
+    agent_only.agents = vec![onboarding_agent()];
+    let agent_only = render_text(&loaded_snapshot_model(size, agent_only));
+    assert!(agent_only.contains("Agent ready"), "{agent_only}");
+    assert!(
+        agent_only.contains("Current: connect an agent service"),
+        "{agent_only}"
+    );
+
+    let mut ready = empty_render_snapshot(4);
+    ready.projects = vec![onboarding_project()];
+    ready.agents = vec![onboarding_agent()];
+    ready.providers = vec![UiProvider {
+        provider: "codex".to_owned(),
+        name: "Codex".to_owned(),
+        available: true,
+        configured_default: true,
+    }];
+    let ready = render_text(&loaded_snapshot_model(size, ready));
+    assert!(ready.contains("Agent service ready"), "{ready}");
+    assert!(
+        ready.contains("Current: send the first project instruction"),
+        "{ready}"
+    );
+    assert!(
+        ready.contains("HQ will ask you to choose only if more than one"),
+        "{ready}"
+    );
+    assert!(ready.contains("service is"), "{ready}");
+}
+
+#[test]
+fn f1_opens_contextual_help_while_a_foreign_dialog_is_open() {
+    let launcher = update(
+        project_model(UiSize {
+            width: 104,
+            height: 24,
+        }),
+        UiEvent::Input(UiInput::Character('n')),
+    )
+    .expect("open New launcher")
+    .model;
+    let helped = update(launcher, UiEvent::Input(UiInput::Help))
+        .expect("open help from launcher")
+        .model;
+    let rendered = render_text(&helped);
+    assert!(rendered.contains("Help for New…"), "{rendered}");
+    assert!(
+        rendered.contains("Choose the kind of thing you want to do"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("F1 / Esc — close help"), "{rendered}");
+    assert!(helped.new_modal().is_some());
 }
 
 #[test]
@@ -395,7 +494,7 @@ fn contextual_help_covers_every_section_with_and_without_a_selection() {
                     "missing section phrase for {section:?} at {size:?}:\n{rendered}"
                 );
                 assert!(rendered.contains("Available actions"));
-                assert!(rendered.contains("? / Esc — close help"));
+                assert!(rendered.contains("F1/?/Esc close help"));
                 if selected {
                     assert!(rendered.contains("Selected: Example item"));
                     assert!(rendered.contains("State: needs attention"));
@@ -1563,6 +1662,45 @@ fn empty_render_snapshot(revision: u64) -> UiSnapshot {
         providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
+    }
+}
+
+fn onboarding_project() -> UiProject {
+    UiProject {
+        project_id: [1; 32],
+        home: [9; 32],
+        name: "release".to_owned(),
+        lifecycle: "open".to_owned(),
+        archived: false,
+        claimable: true,
+        assignment: None,
+        threads: Vec::new(),
+        head: [2; 32],
+        input_sequence: 0,
+        resources: vec![UiProjectResource {
+            resource_id: [3; 32],
+            display_path: "/workspace/release".to_owned(),
+            canonical_path: "/workspace/release".to_owned(),
+            health: "healthy".to_owned(),
+            primary: true,
+            active_claim: true,
+            conflicting_projects: Vec::new(),
+        }],
+    }
+}
+
+fn onboarding_agent() -> UiAgent {
+    UiAgent {
+        agent_id: [2; 32],
+        names: vec!["builder".to_owned()],
+        mailboxes: vec![UiAgentMailbox {
+            installation_id: [9; 32],
+            mailbox_id: [3; 32],
+        }],
+        lifecycle: UiAgentLifecycle::Active,
+        runnable: false,
+        status: hq_tui::UiAgentStatus::Unassigned,
+        sessions: Vec::new(),
     }
 }
 

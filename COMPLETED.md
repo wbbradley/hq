@@ -1,5 +1,54 @@
 # Completed
 
+## 2026-08-29 — First-run guidance and fresh-user acceptance
+
+Turned bare interactive `hq` into one ordered first-run journey. Missing device identity now fails
+before terminal activation with a plain-language reason, one exact setup action, and the command
+that resumes onboarding. Identity and successful human-account output leave the next action on
+screen. An identity-only TUI explains what the account is for, gives account creation as the one
+primary action, keeps invitation-based joining in contextual help, and offers an in-place F5 reload
+so the user does not have to remember or reconstruct a previous screen.
+
+The ordinary empty Inbox now shows one current onboarding step at a time: project and folder or
+resource ownership, agent creation, agent-service readiness, and the first project instruction.
+Completed prerequisites stay visible. Provider namespaces remain impossible to type: one available
+service is automatic, several remain typed choices, and none becomes its own explained setup state.
+The project path continues to recommend an existing folder while keeping Git worktree creation in
+the advanced option.
+
+F1 now opens help from every ordinary screen and dialog without consuming text input, closing the
+interaction, or losing its fields; F5 refreshes authoritative state with the same retention. Dialog
+help explains the user's current decision, while technical evidence remains separately disclosed.
+The documented first-run walkthrough includes terminal captures and an acceptance ledger spanning
+fresh account setup, folder-backed projects, agents, provider choice, first input and exact
+conversation return, direct-message discovery, help, restart, and reconnect. The installed
+pseudoterminal harness now serializes complete fresh-state setup and synchronizes on visible state,
+making all twelve scenarios deterministic under the full workspace suite.
+
+Formatting, architecture verification, qualification-evidence validation, strict workspace
+Clippy, locked workspace check/test/build, 68 pure-model tests, 29 render contracts, and all 12
+installed pseudoterminal scenarios pass.
+
+### Original plan entry
+
+### Add first-run guidance and fresh-user acceptance coverage
+
+Make bare `hq` useful without prior knowledge of commands or domain terminology.
+
+- Detect missing identity, missing human account, missing providers, no projects, and no agents as
+  distinct setup states. Present an ordered setup path in the TUI or, where the node cannot yet run,
+  in a focused pre-TUI screen with one exact action and an explanation of its result. Do not present
+  authority jargon as onboarding copy.
+- After account setup, lead to the ordinary empty TUI and the `New...` workflow rather than a dead
+  end. Never require users to remember a command printed on a previous screen.
+- Add scenario tests beginning with a fresh state root and covering account setup, folder-backed
+  project creation, agent creation, provider selection, first project instruction, return to the
+  resulting conversation, direct-message discovery, contextual help, restart, and reconnect.
+- Conduct a copy and interaction audit from the perspective of a user seeing every screen for the
+  first time. Remove unexplained nouns, raw state codes, silent keys, success acknowledgements that
+  require dismissal, and dead ends. Record the final walkthrough and screenshots in
+  `docs/rust/tui.md`.
+
 ## 2026-08-29 — Guided New workflow
 
 Added a global `n` launcher that starts from user intent: work with an agent on a project, send a
