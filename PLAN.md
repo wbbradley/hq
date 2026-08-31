@@ -27,104 +27,59 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Define the Projects workspace interaction model
+### Define the Inbox conversation surface as a chat interface
 
-Rethink Projects as a mostly modeless workspace for finding a project, understanding its status and
-ownership, and continuing its work. Produce and review the interaction specification before
-queuing implementation; do not turn the current `Project details` modal and its shortcut wall into
-a differently styled modal without first agreeing on the product nouns, verbs, and boundaries.
+Replace the protocol-shaped transcript presentation with a calm, readable messaging surface before
+building the Projects workspace that will navigate into it.
 
-- Inventory every datum and command currently packed into `UiProjectModal::Details`. Classify each
-  as primary project work, ordinary administration, exceptional recovery, destructive lifecycle,
-  or technical evidence, and record why it belongs in Projects, Inbox, contextual help, or nowhere
-  in the ordinary UI.
-- Define a novice-facing noun model centered on **project** (the durable work/ownership container),
-  **conversation** (where the user and agent collaborate), **agent** or **worker** (who handles the
-  project), and **folder** (the ordinary-language view of an owned resource). Keep assignment,
-  thread, provider session, dispatch, operation, and claim as technical terms unless an exceptional
-  decision or recovery genuinely requires one.
-- Define the primary verbs before laying out controls. Selecting a project should expose a clear
-  summary, and its primary action should open or continue the project conversation in Inbox.
-  Project administration should use explicit object-bearing labels such as `Add folder`, `Change
-  folder path`, `Remove folder`, `Use as working folder`, `Change assigned agent`, `Close project`,
-  `Reopen project`, and `Archive project`; verify the exact wording against the underlying semantic
-  effect rather than preserving `add`, `replace`, `primary`, or `move` by inertia.
-- Produce wide and compact interaction maps for a modeless master/detail workspace. On wide
-  terminals, project selection should update an adjacent detail/administration pane. On compact
-  terminals, use ordinary navigable screens with a clear back path rather than an overlay that
-  captures the application. Reserve modal confirmations for bounded destructive or force decisions,
-  and keep forms, progress, routine outcomes, and technical inspection in their owning pane where
-  possible.
-- Replace the undifferentiated shortcut block with labeled, state-dependent controls or a
-  discoverable action menu. For each current key (`a`, `e`, `x`, `p`, `r`/`R`, `n`, `v`, `d`, `h`,
-  `c`/`o`, and `z`), decide whether to retain it as a secondary accelerator, rename it, move it to a
-  relevant subview, expose it only during recovery, or remove it. Pending dispatch should normally
-  be automatic and appear as a plainly named retry only when recovery is needed; folder health
-  checks should live with folder status; `n send instructions` must disappear entirely; and local
-  shortcuts must not obscure or conflict with global meanings.
-- Walk the proposed model through fresh creation, an active conversation, an unassigned or blocked
-  project, multiple folders, ownership conflict, agent handoff, pending-delivery recovery,
-  close/reopen, archive/unarchive, and narrow-terminal use. Record a noun/verb glossary,
-  state-dependent action matrix, terminal wireframes, focus/key behavior, and progressive-disclosure
-  rules in `docs/rust/tui.md` (or a linked focused design note), including a migration path away from
-  `UiProjectModal::Details`.
-- Stop for user review of that interaction specification. After its nouns, primary action, layout,
-  and contextual action matrix are agreed, add a separate front-of-queue implementation task with
-  test-first model, responsive render, installed PTY, accessibility, documentation, and removal
-  coverage; do not silently treat approval of this research task as approval of an invented UI.
+- Make the Conversation pane the dominant wide-screen surface. Bound the Inbox list to a useful
+  scanning width and give remaining columns to the transcript; retain an understandable compact
+  layout and one-level focus navigation.
+- Define participant-facing author labels such as `You` and `Alice` from typed identity context.
+  Do not expose message purpose names, presentation kinds, shortened mailbox IDs, `message · open`,
+  or `information only` as ordinary transcript chrome.
+- Start ordinary message text at column zero of the pane's content area. Use whitespace,
+  theme-derived author color, weight, and restrained background treatment to establish hierarchy
+  instead of nested indentation or terminal boxes. Preserve a useful no-color presentation.
+- Distinguish human/agent messages from tool and lifecycle activity. Decide what activity is shown
+  inline, summarized, grouped, or progressively disclosed, while retaining exact command output,
+  failure evidence, stable IDs, routing, and causal metadata in technical details.
+- Define selection, scrolling, reply/archive affordances, paging, long-line wrapping, multiline
+  content, loading/failure/empty states, and the modeless drafting relationship without making the
+  transcript feel like a list of database records.
+- Produce wide and compact wireframes plus semantic theme roles and an implementation migration in
+  a focused design note linked from `docs/rust/tui.md`. Stop for review, then queue a separate
+  test-first implementation task covering mapping, pure-model behavior, render snapshots,
+  no-color/accessibility, and installed PTY behavior.
 
-#### Implementation plan
+### Implement the approved Projects workspace
 
-1. Audit the current implementation in `crates/hq-tui/src/model.rs`,
-   `crates/hq-tui/src/render.rs`, `crates/hq-node/src/tui_client.rs`,
-   `crates/hq-node/src/local_client.rs`, `crates/hq-application/src/project.rs`, and
-   `crates/hq-projects/src/workflow.rs`. Record every field carried by `UiProject`, every datum
-   rendered by `UiProjectModal::Details`, every details key path, its state gate, and the actual
-   application or inspection effect. Treat reducer and workflow semantics as authoritative when
-   current labels disagree with behavior.
-2. Create `docs/rust/projects-workspace.md` as the reviewable product specification. Define the
-   novice-facing project, conversation, agent, and folder nouns; explicitly reserve assignment,
-   thread, provider session, dispatch, operation, claim, head, and resource identity for technical
-   disclosure. State what Projects owns, what Inbox owns, and what belongs only in contextual help
-   or recovery.
-3. In that specification, classify all current detail data and commands as primary work, ordinary
-   administration, exceptional recovery, destructive lifecycle, or technical evidence. Define
-   exact object-bearing labels and state-dependent availability for opening/continuing the project
-   conversation, adding/changing/removing/selecting/checking folders, assigning/changing an agent,
-   retrying delivery, closing/reopening, and archiving/restoring. Include an explicit disposition
-   for every current `a`, `e`, `x`, `p`, `r`, `R`, `v`, `d`, `h`, `c`, `o`, and `z` key.
-4. Specify persistent wide and compact master/detail interaction maps with terminal wireframes,
-   focus ownership, one-level back/forward traversal, selection-driven detail updates, an explicit
-   action menu, pane-owned forms/progress/results, and modal use limited to destructive or force
-   confirmations. Define which summary, folder, agent, conversation, recovery, and technical
-   evidence appears at each disclosure level without adding a message editor to Projects.
-5. Walk the proposal through new creation, active work, unassigned and blocked projects, multiple
-   folders, ownership conflict, agent handoff, pending-delivery recovery, close/reopen,
-   archive/restore, stale or uncertain operations, and narrow terminals. Record invariants and a
-   staged migration away from `UiProjectModal::Details`, including test seams and removal gates but
-   no production implementation in this task.
-6. Link the focused specification from `docs/rust/tui.md` and reconcile any nearby vocabulary that
-   still describes project details as a dialog-owned ordinary interaction. Verify the document
-   names every current datum and shortcut, uses the actual workflow semantics, and preserves Inbox
-   as the only message-composition surface.
-7. Run formatting and documentation checks plus the repository architecture/qualification
-   validations, strict locked workspace Clippy, and the complete locked workspace test suite to
-   prove the design-only change did not disturb the current baseline. Commit the review draft with
-   a Conventional Commit, then stop for user review of the nouns, primary action, responsive
-   layout, and contextual action matrix.
-8. After explicit user approval, incorporate requested specification changes, add a separate
-   front-of-queue implementation task with test-first model, responsive rendering, installed PTY,
-   accessibility, documentation, and old-modal removal coverage, then archive this completed design
-   task verbatim in `COMPLETED.md`. Do not start that implementation under the design-task approval.
+Replace `UiProjectModal::Details` with the modeless Projects workspace specified in
+`docs/rust/projects-workspace.md`.
 
-Risks and open questions: `UiProject` currently carries technical history and pending-input data
-that the details dialog does not render, so moving the same struct wholesale into a persistent pane
-would preserve the coupling this design is meant to remove; `h` is both the current details-dialog
-handoff shortcut and the global one-level back key; archive is presentation state at reduction but
-the archive command first closes an open project through the release workflow; and a project may
-have multiple Inbox conversations, so the primary action needs a deterministic, understandable
-choice between continuing the most relevant conversation and opening the Inbox project set without
-silently inventing identity or recency policy.
+- Add typed, decoupled project summary, folder, assigned-agent, conversation-count, recovery, and
+  technical-evidence presentation state. Preserve selection and focused objects by stable identity
+  across reload, resize, stale completion, and asynchronous operation results.
+- Implement persistent selection-driven list/detail panes on wide terminals and ordinary list,
+  detail, management, and form screens with one-level Back on compact terminals. Keep forms,
+  progress, normal results, and recoverable failures in their owning pane.
+- Add typed zero/one/many project-conversation navigation into Inbox, including a visible clearable
+  project filter. Keep all message composition in Inbox and never infer a canonical conversation
+  from a display label, recency, assignment, or provider session.
+- Implement labeled state-dependent project administration for folders, agent assignment,
+  lifecycle, recovery, and technical details. Keep ordinary delivery automatic; expose retry only
+  from typed stalled-delivery evidence. Use modal confirmation only for the approved bounded
+  destructive or force decisions.
+- Write failing pure-model and presentation tests first, then responsive render/snapshot,
+  executor/local-client, no-color/accessibility-text, and installed PTY coverage for every current
+  project-details command path and the specification's scenario matrix.
+- Remove `UiProjectModal::Details`, its selected-resource state, shortcut wall and key branches,
+  routine outcome dialogs, obsolete completion continuations, and all production rendering of
+  `Project details`, only after replacement coverage passes.
+- Update `docs/rust/tui.md`, `docs/rust/acceptance-scenarios.md`, and nearby architecture text to
+  match the approved nouns, primary action, responsive layout, and progressive disclosure. Keep
+  protocol/schema v1 shapes in place where changes are required; this pre-release work needs no
+  backwards-compatibility layer or version bump.
 
 ## Post-Plan Execution Steps
 
