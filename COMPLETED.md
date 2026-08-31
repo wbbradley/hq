@@ -10468,7 +10468,6 @@ If upcoming plan items need modifications due to a change during this implementa
 
 <!-- End of archived plan entry. -->
 
-
 ## 2026-08-30 — Projects workspace interaction specification
 
 Specified Projects as a mostly modeless workspace built around the ordinary nouns Project,
@@ -10900,5 +10899,54 @@ Implementation map:
 - `docs/projects.md`, `docs/rust/application-services.md`, `docs/rust/acceptance-scenarios.md`, and
   `docs/rust/tui.md`: document automatic delivery, typed eligibility, durable recovery, and the
   exceptional-only manual retry path.
+
+<!-- End of archived plan entry. -->
+
+## 2026-08-30 — Modeless Projects workspace
+
+Replaced the project details dialog and shortcut wall with a typed, selection-driven Projects
+workspace. Wide terminals keep the list and project summary visible together; compact terminals use
+one-level list, summary, management, folder, and form screens. Enter now routes project
+collaboration into Inbox with exact zero/one/many conversation behavior and a visible clearable
+project filter. Labeled state-dependent folder, agent, lifecycle, recovery, and technical actions
+replace object-bearing letter shortcuts, while routine forms and outcomes render in their owning
+pane and bounded destructive or force choices retain confirmation overlays.
+
+Added stable project/folder/action focus across refresh and resize, typed display-only joins for
+agent, folder ownership, conversation counts, recovery, and technical evidence, plus pure model,
+responsive render, no-color, executor, and installed PTY coverage. Updated the TUI and acceptance
+documentation without changing protocol/schema v1. Strict locked workspace Clippy and the complete
+locked all-target/all-feature test suite pass.
+
+### Original plan entry
+
+### Implement the approved Projects workspace
+
+Replace `UiProjectModal::Details` with the modeless Projects workspace specified in
+`docs/rust/projects-workspace.md`.
+
+- Add typed, decoupled project summary, folder, assigned-agent, conversation-count, recovery, and
+  technical-evidence presentation state. Preserve selection and focused objects by stable identity
+  across reload, resize, stale completion, and asynchronous operation results.
+- Implement persistent selection-driven list/detail panes on wide terminals and ordinary list,
+  detail, management, and form screens with one-level Back on compact terminals. Keep forms,
+  progress, normal results, and recoverable failures in their owning pane.
+- Add typed zero/one/many project-conversation navigation into Inbox, including a visible clearable
+  project filter. Keep all message composition in Inbox and never infer a canonical conversation
+  from a display label, recency, assignment, or provider session.
+- Implement labeled state-dependent project administration for folders, agent assignment,
+  lifecycle, recovery, and technical details. Keep ordinary delivery automatic; expose retry only
+  from typed stalled-delivery evidence. Use modal confirmation only for the approved bounded
+  destructive or force decisions.
+- Write failing pure-model and presentation tests first, then responsive render/snapshot,
+  executor/local-client, no-color/accessibility-text, and installed PTY coverage for every current
+  project-details command path and the specification's scenario matrix.
+- Remove `UiProjectModal::Details`, its selected-resource state, shortcut wall and key branches,
+  routine outcome dialogs, obsolete completion continuations, and all production rendering of
+  `Project details`, only after replacement coverage passes.
+- Update `docs/rust/tui.md`, `docs/rust/acceptance-scenarios.md`, and nearby architecture text to
+  match the approved nouns, primary action, responsive layout, and progressive disclosure. Keep
+  protocol/schema v1 shapes in place where changes are required; this pre-release work needs no
+  backwards-compatibility layer or version bump.
 
 <!-- End of archived plan entry. -->

@@ -27,35 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Implement the approved Projects workspace
-
-Replace `UiProjectModal::Details` with the modeless Projects workspace specified in
-`docs/rust/projects-workspace.md`.
-
-- Add typed, decoupled project summary, folder, assigned-agent, conversation-count, recovery, and
-  technical-evidence presentation state. Preserve selection and focused objects by stable identity
-  across reload, resize, stale completion, and asynchronous operation results.
-- Implement persistent selection-driven list/detail panes on wide terminals and ordinary list,
-  detail, management, and form screens with one-level Back on compact terminals. Keep forms,
-  progress, normal results, and recoverable failures in their owning pane.
-- Add typed zero/one/many project-conversation navigation into Inbox, including a visible clearable
-  project filter. Keep all message composition in Inbox and never infer a canonical conversation
-  from a display label, recency, assignment, or provider session.
-- Implement labeled state-dependent project administration for folders, agent assignment,
-  lifecycle, recovery, and technical details. Keep ordinary delivery automatic; expose retry only
-  from typed stalled-delivery evidence. Use modal confirmation only for the approved bounded
-  destructive or force decisions.
-- Write failing pure-model and presentation tests first, then responsive render/snapshot,
-  executor/local-client, no-color/accessibility-text, and installed PTY coverage for every current
-  project-details command path and the specification's scenario matrix.
-- Remove `UiProjectModal::Details`, its selected-resource state, shortcut wall and key branches,
-  routine outcome dialogs, obsolete completion continuations, and all production rendering of
-  `Project details`, only after replacement coverage passes.
-- Update `docs/rust/tui.md`, `docs/rust/acceptance-scenarios.md`, and nearby architecture text to
-  match the approved nouns, primary action, responsive layout, and progressive disclosure. Keep
-  protocol/schema v1 shapes in place where changes are required; this pre-release work needs no
-  backwards-compatibility layer or version bump.
-
 ## Post-Plan Execution Steps
 
 Execute these steps in order:
