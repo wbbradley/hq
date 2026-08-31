@@ -10950,3 +10950,60 @@ Replace `UiProjectModal::Details` with the modeless Projects workspace specified
   backwards-compatibility layer or version bump.
 
 <!-- End of archived plan entry. -->
+
+## 2026-08-31 — Safe multiline conversation message source
+
+Added a dedicated message-body presentation sanitizer at the node-to-TUI boundary. It normalizes
+CRLF and lone CR to LF, preserves paragraph structure, expands tabs to four spaces, neutralizes
+terminal controls, and leaves canonical content plus every non-message presentation path unchanged.
+Mapper coverage now exercises line endings, tabs, CSI/OSC-shaped content, C0/C1 and DEL controls,
+emoji, combining marks, and wide CJK text.
+
+Recorded the renderer decision after comparing current `tui-markdown`, `ratada::markdown`, and
+direct `pulldown-cmark` options. The decision selects `tui-markdown` with default features disabled
+behind an HQ-owned adapter, subject to strict width and measurement gates, with direct
+`pulldown-cmark` rendering retained as the fallback. Focused node/TUI suites and the locked
+workspace check, strict Clippy, all-target/all-feature test, and build gates pass.
+
+### Original plan entry
+
+### Preserve safe multiline conversation message source
+
+Preserve the line structure needed for Markdown at the node-to-TUI boundary without allowing
+message content to control the terminal. Record the dependency decision separately from the
+renderer so the later presentation change rests on a reviewed, replaceable boundary.
+
+#### Implementation
+
+- Add `docs/rust/decisions/conversation-markdown-renderer.md` comparing current compatible releases
+  of `tui-markdown`, `ratada::markdown`, and a focused `pulldown-cmark` adapter. Record Ratatui 0.30
+  compatibility, license, maintenance, dependency surface, `Text`/`Line` output, width/measurement
+  behavior, theming, supported structures, and terminal/resource side effects. Recommend
+  `tui-markdown` with default features disabled behind an HQ-owned adapter, subject to narrow-layout
+  gates; retain direct `pulldown-cmark` rendering as the fallback.
+- In `crates/hq-node/src/tui_client.rs`, replace message bodies' use of the single-line
+  `terminal_text` helper with a dedicated multiline presentation sanitizer. Normalize CRLF and lone
+  CR to LF, retain LF, expand tabs deterministically, and replace ESC, C0/C1 controls, DEL, and other
+  unsafe control/layout characters without collapsing Markdown paragraphs. Keep the existing
+  single-line sanitizer for labels, paths, IDs, and summaries.
+- Apply the multiline sanitizer only to `UiConversationEntryPresentation::Message.body`. Canonical
+  content, drafts, routing, reply targeting, delivery state, technical evidence, and typed activity
+  content remain unchanged.
+
+#### Tests and verification
+
+- Add node mapper tests covering LF, CRLF, lone CR, tabs, ESC/CSI/OSC payloads, C0/C1 controls, DEL,
+  controls inside code/link-looking text, emoji, combining marks, and wide CJK characters. Prove
+  line structure survives and no terminal control character reaches the TUI model.
+- Preserve existing conversation mapping, delivery, paging, and terminal-control tests. Run strict
+  workspace Clippy/build checks, focused node/TUI tests, and the complete workspace test suite.
+
+#### Acceptance criteria
+
+- Participant-authored message bodies reach the TUI with normalized multiline structure intact and
+  no unsafe terminal controls.
+- Single-line UI fields keep their current closed sanitization behavior.
+- The renderer choice and replacement boundary are documented without adding an unused renderer
+  dependency or changing ordinary conversation presentation yet.
+
+<!-- End of archived plan entry. -->

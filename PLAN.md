@@ -27,45 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Preserve safe multiline conversation message source
-
-Preserve the line structure needed for Markdown at the node-to-TUI boundary without allowing
-message content to control the terminal. Record the dependency decision separately from the
-renderer so the later presentation change rests on a reviewed, replaceable boundary.
-
-#### Implementation
-
-- Add `docs/rust/decisions/conversation-markdown-renderer.md` comparing current compatible releases
-  of `tui-markdown`, `ratada::markdown`, and a focused `pulldown-cmark` adapter. Record Ratatui 0.30
-  compatibility, license, maintenance, dependency surface, `Text`/`Line` output, width/measurement
-  behavior, theming, supported structures, and terminal/resource side effects. Recommend
-  `tui-markdown` with default features disabled behind an HQ-owned adapter, subject to narrow-layout
-  gates; retain direct `pulldown-cmark` rendering as the fallback.
-- In `crates/hq-node/src/tui_client.rs`, replace message bodies' use of the single-line
-  `terminal_text` helper with a dedicated multiline presentation sanitizer. Normalize CRLF and lone
-  CR to LF, retain LF, expand tabs deterministically, and replace ESC, C0/C1 controls, DEL, and other
-  unsafe control/layout characters without collapsing Markdown paragraphs. Keep the existing
-  single-line sanitizer for labels, paths, IDs, and summaries.
-- Apply the multiline sanitizer only to `UiConversationEntryPresentation::Message.body`. Canonical
-  content, drafts, routing, reply targeting, delivery state, technical evidence, and typed activity
-  content remain unchanged.
-
-#### Tests and verification
-
-- Add node mapper tests covering LF, CRLF, lone CR, tabs, ESC/CSI/OSC payloads, C0/C1 controls, DEL,
-  controls inside code/link-looking text, emoji, combining marks, and wide CJK characters. Prove
-  line structure survives and no terminal control character reaches the TUI model.
-- Preserve existing conversation mapping, delivery, paging, and terminal-control tests. Run strict
-  workspace Clippy/build checks, focused node/TUI tests, and the complete workspace test suite.
-
-#### Acceptance criteria
-
-- Participant-authored message bodies reach the TUI with normalized multiline structure intact and
-  no unsafe terminal controls.
-- Single-line UI fields keep their current closed sanitization behavior.
-- The renderer choice and replacement boundary are documented without adding an unused renderer
-  dependency or changing ordinary conversation presentation yet.
-
 ### Render conversation message bodies as themed Markdown
 
 Render only participant-authored message bodies as Markdown while keeping drafts as raw source and
