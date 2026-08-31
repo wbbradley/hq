@@ -2,6 +2,12 @@
 
 Status: Active pure-client contract
 
+Focused interaction specifications extend this contract: the
+[Inbox conversation surface](inbox-conversation-surface.md) is a review draft, and the approved
+[Projects workspace](projects-workspace.md) is queued for implementation. Until their production
+acceptance gates pass, descriptions below that name current rendering remain implementation truth,
+not patterns to preserve.
+
 `hq-tui` owns deterministic presentation state and borrowed Ratatui rendering. It does not own a
 terminal, clock, task runtime, local connection, storage handle, signer, filesystem, process, or
 domain mutation capability. The outer `hq-node` composition normalizes ordinary local API
@@ -195,8 +201,10 @@ rather than an internal identifier. Mailbox filters do not scan or reorder messa
 Selecting a summary issues the ordinary `ConversationPage` request with an opaque cursor, and a
 newer selection supersedes the pending preview without allowing a stale completion to replace it. Returned
 message/activity unions remain in reducer order; selected/coalesced activity is presented as
-an `update` marked `information only` on ordinary screens and is never converted into a message
-target. Its typed activity identity and status remain in technical details. The mapper also exposes only uniquely
+an `update` marked `information only` on current ordinary screens and is never converted into a
+message target. The Inbox conversation-surface specification replaces that legacy label with typed,
+compact activity while retaining identity, status, and exact detail in technical inspection. The
+mapper also exposes only uniquely
 named, uniquely bound, non-retired agent mailboxes as passive direct-target candidates. The protocol
 `AuthoritativeSnapshotDto` and presentation `UiSnapshot` are deliberately different records: one
 is canonical local-API data, while the other is a small complete navigation cache containing only
@@ -413,8 +421,11 @@ the selected conversation and a modeless draft pane occupies the lower portion o
 while composing. Project rows expose `r continue` for the exact selected thread and `c new
 conversation` for a separate root. A newly committed root is selected by its returned message ID,
 never by display text. An activated conversation centers rendering around the stable fact anchor,
-labels activity as an
-information-only update, and expands only typed routing, semantics, evidence, or activity sections. Enter
+and the current legacy renderer labels activity as an information-only update and expands typed
+routing, semantics, evidence, or activity sections inline. The reviewed replacement is specified in
+[Inbox conversation surface](inbox-conversation-surface.md): participant-oriented headings,
+column-zero author/body blocks, compact typed activity, measured wrapped heights, and an in-pane
+technical inspector. Enter
 opens a conversation or toggles its selected entry's details; PageDown requests the opaque next
 page; Escape collapses details and then the conversation. The conversation footer spells out the
 applicable `a archive` or `u restore` control for the selected exact message; contextual help carries
@@ -447,8 +458,9 @@ secondary evidence before they hide a required field, warning, action, or recove
 
 The proposed modeless Projects workspace, its user-facing nouns and verbs, state-dependent action
 matrix, responsive interaction maps, and migration away from the current Project details dialog are
-specified for review in `docs/rust/projects-workspace.md`. Until that specification is approved and
-implemented, the current project dialog is legacy behavior rather than a product pattern to copy.
+specified in [Projects workspace](projects-workspace.md). Its review decisions are approved and its
+implementation is queued; until replacement coverage passes, the current project dialog is legacy
+behavior rather than a product pattern to copy.
 
 Technical evidence is preserved, not translated away. Detail views and the `?` then `t` page label
 project, resource, assignment, message, request, provider/session, thread, revision, frontier,

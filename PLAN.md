@@ -52,6 +52,57 @@ building the Projects workspace that will navigate into it.
   test-first implementation task covering mapping, pure-model behavior, render snapshots,
   no-color/accessibility, and installed PTY behavior.
 
+#### Implementation plan
+
+1. Audit the transcript path from `ConversationContextDto` and `ConversationMessageDto` in
+   `crates/hq-local-api/src/protocol/v1.rs`, through snapshot/page mapping in
+   `crates/hq-node/src/tui_client.rs`, into `UiRow`, `UiConversationEntry`, focus/anchor behavior in
+   `crates/hq-tui/src/model.rs`, and layout/rendering in `crates/hq-tui/src/render.rs`. Record which
+   participant names and exact mailbox identities already exist at summary time, which entry
+   taxonomy is currently promoted to visible text, and which visual problems require typed
+   presentation data rather than parsing content.
+2. Audit the current wide/compact dimensions, wrapping and entry-capacity assumptions, model and
+   render tests in `crates/hq-tui/tests/{model,render_snapshots}.rs`, installed behavior in
+   `crates/hq-node/tests/unix_tui_terminal.rs`, and the semantic theme catalog in
+   `crates/hq-tui/src/theme.rs` plus `docs/tui-themes.md`. Treat no-color, narrow-screen, long
+   multiline-message, selection, paging, and modeless-draft behavior as first-class constraints.
+3. Create `docs/rust/inbox-conversation-surface.md` as a reviewable product specification. Define
+   the participant-oriented conversation title and list-row hierarchy; the bounded Inbox-list and
+   dominant transcript widths; column-zero message bodies; author, message, activity, selection,
+   paging, and draft hierarchy; and exactly which protocol state moves to contextual technical
+   details.
+4. Specify an ordinary transcript presentation model that resolves `You`, named participants, and
+   safe unnamed fallbacks from typed context. Separate message author/body/state from typed activity
+   summary/detail/status, identify which redundant activity may be omitted only by typed kind, and
+   prohibit inference from prose, sender ID prefixes, command strings, provider sessions, or message
+   purpose labels.
+5. Produce wide and compact terminal wireframes using the reported `hq · Alice` exchange, including
+   user prose, agent progress, command activity, final response, a selected item, an expanded
+   technical disclosure, and an open draft. Define full-row focus treatment that does not shift
+   message text, content-aware wrapped-height scrolling, older-page loading, empty/loading/failure
+   states, and a useful no-color equivalent.
+6. Define semantic theme-role additions and deterministic terminal, no-color, and Base16 mappings;
+   record text/icon fallbacks so color is supplementary. Add a staged implementation and removal
+   plan covering local-API/presentation identity context, mapper/model changes, responsive render,
+   obsolete `asynchronous · ID`, `message · open`, indentation, and `Conversation · complete`
+   removal, plus focused model/render/installed-PTY acceptance gates.
+7. Link the specification from `docs/rust/tui.md` and reconcile nearby prose that currently requires
+   protocol-shaped `update · information only` rendering or describes fixed entry-height behavior.
+   Run documentation formatting checks, architecture/qualification validation, strict locked
+   workspace Clippy, and the complete locked workspace test suite; commit the review draft with a
+   Conventional Commit, then stop for explicit review of the width, author/header hierarchy,
+   activity treatment, selection styling, and compact behavior.
+8. After explicit approval, incorporate revisions, add a separate front-of-queue implementation
+   task, and archive this design task verbatim in `COMPLETED.md`. Do not modify production transcript
+   behavior under design-task approval alone.
+
+Risks and open questions: the summary DTO already has a resolved participant but the page DTO does
+not carry that display context; successful turn-completion activity is currently distinguishable
+only by prose and therefore cannot be safely hidden without adding a typed activity kind; the
+renderer estimates every ordinary entry as three rows even when content wraps; and background-only
+selection would be inaccessible in no-color themes unless paired with weight, underline, or another
+non-color cue that does not re-indent the body.
+
 ### Implement the approved Projects workspace
 
 Replace `UiProjectModal::Details` with the modeless Projects workspace specified in
