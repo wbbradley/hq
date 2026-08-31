@@ -6,10 +6,10 @@ use std::{
 };
 
 use hq_domain::{
-    AccountId, ActivityKind, ActivityStatus, ContentText, ErrorCode, FactId, InstallationId,
-    MailboxAddress, MailboxId, MessageContent, MessageId, MessagePurpose, OperationCorrelation,
-    OperationId, PresentationKind, ProjectId, ProviderId, ProviderSessionId, ShortText, ThreadId,
-    Timestamp,
+    AccountId, ActivityKind, ActivityStatus, BoundedVec, CompletedFileChange,
+    CompletedItemPresentation, ContentText, ErrorCode, FactId, InstallationId, MailboxAddress,
+    MailboxId, MessageContent, MessageId, MessagePurpose, OperationCorrelation, OperationId,
+    PresentationKind, ProjectId, ProviderId, ProviderSessionId, ShortText, ThreadId, Timestamp,
 };
 use hq_reducer::{
     ActionGroupView, ActivityKey, ActivityRetentionView, ActivitySessionKey, ActivityView,
@@ -17,6 +17,7 @@ use hq_reducer::{
     MessageView, ThreadView,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -595,11 +596,16 @@ fn insert_projection(
                 return Err(corrupt());
             }
             let (status, failure_reason) = encode_status(&view.status);
+            let (item_present, item) = encode_text_option(view.item.as_ref());
+            let completed = encode_completed(view.completed.as_ref())?;
             transaction
                 .execute(
                     "INSERT INTO conversation_activities( \
-                         key_digest, fact_id, kind, sequence, status, failure_reason, content, truncated \
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                         key_digest, fact_id, kind, sequence, status, failure_reason, content, truncated, \
+                         source_installation, source_mailbox, provider, session, operation, item_present, \
+                         item, logical_key, runtime, occurred_at, completed \
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
+                         ?15, ?16, ?17, ?18, ?19)",
                     params![
                         digest.as_slice(),
                         view.fact_id.as_bytes().as_slice(),
@@ -609,6 +615,17 @@ fn insert_projection(
                         failure_reason,
                         view.content.as_str(),
                         i64::from(view.truncated),
+                        view.source.installation_id().as_bytes().as_slice(),
+                        view.source.mailbox_id().as_bytes().as_slice(),
+                        view.correlation.provider().as_str(),
+                        view.correlation.session().as_str(),
+                        view.correlation.operation().as_bytes().as_slice(),
+                        item_present,
+                        item,
+                        view.logical_key.as_str(),
+                        view.runtime.as_str(),
+                        view.occurred_at.as_unix_millis(),
+                        completed,
                     ],
                 )
                 .map_err(database)?;
@@ -723,6 +740,168 @@ fn encode_correlation(value: Option<&OperationCorrelation>) -> (i64, &str, &str,
             *correlation.operation().as_bytes(),
         )
     })
+}
+
+fn encode_text_option(value: Option<&ShortText>) -> (i64, &str) {
+    value.map_or((0, ""), |value| (1, value.as_str()))
+}
+
+fn decode_text(present: i64, value: String) -> Result<Option<ShortText>, StoreError> {
+    match (present, value.is_empty()) {
+        (0, true) => Ok(None),
+        (1, false) => ShortText::new(value).map(Some).map_err(|_| corrupt()),
+        _ => Err(corrupt()),
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum StoredCompletedItem {
+    Command {
+        command: String,
+        output: Option<String>,
+        exit_code: Option<i64>,
+        command_truncated: bool,
+        output_truncated: bool,
+    },
+    FileChange {
+        changes: Vec<StoredFileChange>,
+        changes_truncated: bool,
+    },
+    Tool {
+        name: String,
+        name_truncated: bool,
+    },
+    WebSearch {
+        query: String,
+        query_truncated: bool,
+    },
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredFileChange {
+    path: String,
+    diff: Option<String>,
+    path_truncated: bool,
+    diff_truncated: bool,
+}
+
+fn encode_completed(value: Option<&CompletedItemPresentation>) -> Result<Vec<u8>, StoreError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let stored = match value {
+        CompletedItemPresentation::Command {
+            command,
+            output,
+            exit_code,
+            command_truncated,
+            output_truncated,
+        } => StoredCompletedItem::Command {
+            command: command.as_str().to_owned(),
+            output: output.as_ref().map(|value| value.as_str().to_owned()),
+            exit_code: *exit_code,
+            command_truncated: *command_truncated,
+            output_truncated: *output_truncated,
+        },
+        CompletedItemPresentation::FileChange {
+            changes,
+            changes_truncated,
+        } => StoredCompletedItem::FileChange {
+            changes: changes
+                .as_slice()
+                .iter()
+                .map(|change| StoredFileChange {
+                    path: change.path.as_str().to_owned(),
+                    diff: change.diff.as_ref().map(|value| value.as_str().to_owned()),
+                    path_truncated: change.path_truncated,
+                    diff_truncated: change.diff_truncated,
+                })
+                .collect(),
+            changes_truncated: *changes_truncated,
+        },
+        CompletedItemPresentation::Tool {
+            name,
+            name_truncated,
+        } => StoredCompletedItem::Tool {
+            name: name.as_str().to_owned(),
+            name_truncated: *name_truncated,
+        },
+        CompletedItemPresentation::WebSearch {
+            query,
+            query_truncated,
+        } => StoredCompletedItem::WebSearch {
+            query: query.as_str().to_owned(),
+            query_truncated: *query_truncated,
+        },
+        CompletedItemPresentation::Unknown => StoredCompletedItem::Unknown,
+    };
+    serde_json::to_vec(&stored).map_err(|_| corrupt())
+}
+
+fn decode_completed(value: &[u8]) -> Result<Option<CompletedItemPresentation>, StoreError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let stored: StoredCompletedItem = serde_json::from_slice(value).map_err(|_| corrupt())?;
+    Ok(Some(match stored {
+        StoredCompletedItem::Command {
+            command,
+            output,
+            exit_code,
+            command_truncated,
+            output_truncated,
+        } => CompletedItemPresentation::Command {
+            command: ContentText::new(command).map_err(|_| corrupt())?,
+            output: output
+                .map(ContentText::new)
+                .transpose()
+                .map_err(|_| corrupt())?,
+            exit_code,
+            command_truncated,
+            output_truncated,
+        },
+        StoredCompletedItem::FileChange {
+            changes,
+            changes_truncated,
+        } => CompletedItemPresentation::FileChange {
+            changes: BoundedVec::new(
+                changes
+                    .into_iter()
+                    .map(|change| {
+                        Ok(CompletedFileChange {
+                            path: ContentText::new(change.path).map_err(|_| corrupt())?,
+                            diff: change
+                                .diff
+                                .map(ContentText::new)
+                                .transpose()
+                                .map_err(|_| corrupt())?,
+                            path_truncated: change.path_truncated,
+                            diff_truncated: change.diff_truncated,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, StoreError>>()?,
+            )
+            .map_err(|_| corrupt())?,
+            changes_truncated,
+        },
+        StoredCompletedItem::Tool {
+            name,
+            name_truncated,
+        } => CompletedItemPresentation::Tool {
+            name: ShortText::new(name).map_err(|_| corrupt())?,
+            name_truncated,
+        },
+        StoredCompletedItem::WebSearch {
+            query,
+            query_truncated,
+        } => CompletedItemPresentation::WebSearch {
+            query: ContentText::new(query).map_err(|_| corrupt())?,
+            query_truncated,
+        },
+        StoredCompletedItem::Unknown => CompletedItemPresentation::Unknown,
+    }))
 }
 
 fn encode_id_option<T>(value: Option<T>) -> (i64, [u8; 32])
@@ -1233,7 +1412,9 @@ fn load_activity(
 ) -> Result<ConversationProjection, StoreError> {
     let row = connection
         .query_row(
-            "SELECT fact_id, kind, sequence, status, failure_reason, content, truncated \
+            "SELECT fact_id, kind, sequence, status, failure_reason, content, truncated, \
+                    source_installation, source_mailbox, provider, session, operation, item_present, \
+                    item, logical_key, runtime, occurred_at, completed \
              FROM conversation_activities WHERE key_digest = ?1",
             [digest.as_slice()],
             |row| {
@@ -1245,6 +1426,17 @@ fn load_activity(
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, i64>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                    row.get::<_, Vec<u8>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, Vec<u8>>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
+                    row.get::<_, String>(15)?,
+                    row.get::<_, i64>(16)?,
+                    row.get::<_, Vec<u8>>(17)?,
                 ))
             },
         )
@@ -1252,14 +1444,28 @@ fn load_activity(
         .map_err(database)?
         .ok_or_else(corrupt)?;
     let sequence = u64::from_be_bytes(row.2.try_into().map_err(|_| corrupt())?);
-    Ok(ConversationProjection::Activity(ActivityView {
+    Ok(ConversationProjection::Activity(Box::new(ActivityView {
         fact_id: FactId::from_bytes(fixed(row.0)?),
+        source: MailboxAddress::new(
+            InstallationId::from_bytes(fixed(row.7)?),
+            MailboxId::from_bytes(fixed(row.8)?),
+        ),
+        correlation: OperationCorrelation::new(
+            ProviderId::new(row.9).map_err(|_| corrupt())?,
+            ProviderSessionId::new(row.10).map_err(|_| corrupt())?,
+            OperationId::from_bytes(fixed(row.11)?),
+        ),
+        item: decode_text(row.12, row.13)?,
         kind: decode_activity_kind(row.1).ok_or_else(corrupt)?,
         sequence: NonZeroU64::new(sequence).ok_or_else(corrupt)?,
+        logical_key: ShortText::new(row.14).map_err(|_| corrupt())?,
+        runtime: ShortText::new(row.15).map_err(|_| corrupt())?,
+        occurred_at: Timestamp::from_unix_millis(row.16),
         status: decode_status(row.3, row.4)?,
         content: ContentText::new(row.5).map_err(|_| corrupt())?,
         truncated: decode_bool(row.6)?,
-    }))
+        completed: decode_completed(&row.17)?,
+    })))
 }
 
 fn load_retention(
@@ -1922,27 +2128,48 @@ mod tests {
             ),
             (
                 keys[3].clone(),
-                ConversationProjection::Activity(ActivityView {
+                ConversationProjection::Activity(Box::new(ActivityView {
                     fact_id: id(10),
+                    source,
+                    correlation: correlation.clone(),
+                    item: Some(ShortText::new("progress-item").expect("item validates")),
                     kind: ActivityKind::Progress,
                     sequence: NonZeroU64::new(u64::MAX).expect("sequence is nonzero"),
+                    logical_key: ShortText::new("progress").expect("key validates"),
+                    runtime: ShortText::new("runtime").expect("runtime validates"),
+                    occurred_at: Timestamp::from_unix_millis(124),
                     status: ActivityStatus::Failed(
                         ErrorCode::new("failed").expect("reason validates"),
                     ),
                     content: ContentText::new("progress").expect("content validates"),
                     truncated: true,
-                }),
+                    completed: None,
+                })),
             ),
             (
                 keys[4].clone(),
-                ConversationProjection::Activity(ActivityView {
+                ConversationProjection::Activity(Box::new(ActivityView {
                     fact_id: id(13),
+                    source,
+                    correlation: correlation.clone(),
+                    item: Some(ShortText::new("completed-item").expect("item validates")),
                     kind: ActivityKind::CompletedItem,
                     sequence: NonZeroU64::MIN,
+                    logical_key: ShortText::new("completed").expect("key validates"),
+                    runtime: ShortText::new("runtime").expect("runtime validates"),
+                    occurred_at: Timestamp::from_unix_millis(125),
                     status: ActivityStatus::Succeeded,
                     content: ContentText::new("complete").expect("content validates"),
                     truncated: false,
-                }),
+                    completed: Some(CompletedItemPresentation::Command {
+                        command: ContentText::new("printf one\nprintf two")
+                            .expect("command validates"),
+                        output: Some(ContentText::new("one\ntwo").expect("output validates")),
+                        exit_code: Some(0),
+                        command_truncated: false,
+                        output_truncated: true,
+                    }),
+                })),
             ),
             (
                 keys[5].clone(),

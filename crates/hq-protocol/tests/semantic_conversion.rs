@@ -4,9 +4,10 @@
 
 use hq_domain::{
     ActivityKind, ActivityStatus, AgentId, AssignmentBinding, AssignmentId, AuthorityRole,
-    DispatchId, FactId, FactKind, InstallationId, MessagePurpose, ProjectActivityAttribution,
-    ProjectId, ProviderId, ProviderSessionId, RemoteCommandResult, ResourceHealth,
-    RuntimeObservation, SemanticPayload, SigningPublicKey, ThreadId,
+    CompletedItemPresentation, ContentText, DispatchId, FactId, FactKind, InstallationId,
+    MessagePurpose, ProjectActivityAttribution, ProjectId, ProviderId, ProviderSessionId,
+    RemoteCommandResult, ResourceHealth, RuntimeObservation, SemanticPayload, SigningPublicKey,
+    ThreadId,
 };
 use hq_protocol::{
     Bip340Signer, CanonicalEventPlan, DispatchOutcome, FailureClass, ProtocolNamespace,
@@ -207,7 +208,7 @@ fn activity_project_attribution_is_additive_and_historical_bytes_remain_exact() 
         source: *source,
         correlation: correlation.clone(),
         item: item.clone(),
-        kind: ActivityKind::AgentTurn,
+        kind: ActivityKind::CompletedItem,
         logical_key: logical_key.clone(),
         runtime: runtime.clone(),
         sequence: *sequence,
@@ -215,6 +216,13 @@ fn activity_project_attribution_is_additive_and_historical_bytes_remain_exact() 
         status: status.clone(),
         content: content.clone(),
         truncated: *truncated,
+        completed: Some(CompletedItemPresentation::Command {
+            command: ContentText::new("printf one\nprintf two").expect("command"),
+            output: Some(ContentText::new("one\ntwo").expect("output")),
+            exit_code: Some(0),
+            command_truncated: false,
+            output_truncated: true,
+        }),
     };
     let encoded = CanonicalEventPlan::new(
         historical.fact().author().installation_id(),
@@ -230,7 +238,12 @@ fn activity_project_attribution_is_additive_and_historical_bytes_remain_exact() 
         decoded.into_parts().4,
         SemanticPayload::HarnessActivityRecorded {
             project: Some(actual),
-            kind: ActivityKind::AgentTurn,
+            kind: ActivityKind::CompletedItem,
+            completed: Some(CompletedItemPresentation::Command {
+                exit_code: Some(0),
+                output_truncated: true,
+                ..
+            }),
             ..
         } if actual == attribution
     ));

@@ -13,7 +13,8 @@ use std::{
 };
 
 use hq_local_api::protocol::v1::{
-    ActivityStatusDto, AuthoritativeSnapshotDto, ConversationActivityKindDto,
+    ActivityStatusDto, AuthoritativeSnapshotDto, CompletedFileChangeDto,
+    CompletedItemPresentationDto, ConversationActivityDto, ConversationActivityKindDto,
     ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationMessageDto,
     ConversationPageDto, ConversationParticipantDto, DeviceGrantDto, Id32, MailboxAddressDto,
     MessagePurposeDto, PresentationKindDto, ProviderAvailabilityDto, ProviderCatalogDto,
@@ -24,17 +25,172 @@ use hq_node::{
     TuiExecutorError, tui_conversation_page, tui_snapshot, tui_snapshot_with_provider_catalog,
 };
 use hq_tui::{
-    UiAgentAction, UiConnectionState, UiConversationActivityKind, UiConversationAuthor,
-    UiConversationEntryPresentation, UiConversationPage, UiEffect, UiEvent, UiFailure,
-    UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence,
-    UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft,
-    UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
-    UiMessageDelivery, UiMessageState, UiModel, UiProjectAction, UiProjectExternalWarning,
-    UiProjectOutcome, UiProjectResourceCheck, UiProjectResult, UiRow, UiRowKind, UiRowState,
-    UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiAgentAction, UiCompletedItemPresentation, UiConnectionState, UiConversationActivityKind,
+    UiConversationAuthor, UiConversationEntryPresentation, UiConversationPage, UiEffect, UiEvent,
+    UiFailure, UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus,
+    UiHumanSelectionEvidence, UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult,
+    UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
+    UiManagedSessionResult, UiMessageDelivery, UiMessageState, UiModel, UiProjectAction,
+    UiProjectExternalWarning, UiProjectOutcome, UiProjectResourceCheck, UiProjectResult, UiRow,
+    UiRowKind, UiRowState, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+#[test]
+fn completed_command_mapping_is_typed_multiline_and_terminal_safe() {
+    let page = ConversationPageDto::new(
+        vec![ConversationEntryDto::Activity(Box::new(
+            ConversationActivityDto {
+                fact_id: Id32::new([1; 32]),
+                activity_kind: ConversationActivityKindDto::CompletedItem,
+                sequence: 2,
+                source_installation: Id32::new([3; 32]),
+                source_mailbox: Id32::new([4; 32]),
+                provider: "provider".to_owned(),
+                session: "session".to_owned(),
+                operation: Id32::new([2; 32]),
+                item: Some("command".to_owned()),
+                logical_key: "command".to_owned(),
+                runtime: "codex".to_owned(),
+                occurred_at_unix_ms: 42,
+                status: ActivityStatusDto::Failed {
+                    reason: "command_failed".to_owned(),
+                },
+                content: "detail\x1b[31mred\x1b[0m".to_owned(),
+                truncated: false,
+                completed: Some(CompletedItemPresentationDto::Command {
+                    command: "printf one\nprintf two\x1b[2J".to_owned(),
+                    output: Some(
+                        "one\n\x1b]8;;https://bad\x07two\x1b]8;;\x07\nthree\nfour".to_owned(),
+                    ),
+                    exit_code: Some(17),
+                    command_truncated: false,
+                    output_truncated: true,
+                }),
+            },
+        ))],
+        None,
+    )
+    .expect("page validates");
+    let mapped = tui_conversation_page(
+        "row",
+        &ConversationContextDto::Personal,
+        &MailboxAddressDto {
+            installation_id: Id32::new([3; 32]),
+            mailbox_id: Id32::new([4; 32]),
+        },
+        page,
+    );
+    assert!(matches!(
+        &mapped.entries[0].presentation,
+        UiConversationEntryPresentation::Activity {
+            summary,
+            detail,
+            completed: Some(UiCompletedItemPresentation::Command {
+                command,
+                output: Some(output),
+                exit_code: Some(17),
+                output_truncated: true,
+                ..
+            }),
+            ..
+        } if summary == "Command failed"
+            && detail == "detailred"
+            && command == "printf one\nprintf two"
+            && output == "one\ntwo\nthree\nfour"
+    ));
+}
+
+#[test]
+fn completed_file_tool_and_search_mapping_uses_closed_typed_summaries() {
+    let activity = |seed, logical_key: &str, completed| {
+        ConversationEntryDto::Activity(Box::new(ConversationActivityDto {
+            fact_id: Id32::new([seed; 32]),
+            activity_kind: ConversationActivityKindDto::CompletedItem,
+            sequence: u64::from(seed),
+            source_installation: Id32::new([4; 32]),
+            source_mailbox: Id32::new([5; 32]),
+            provider: "provider".to_owned(),
+            session: "session".to_owned(),
+            operation: Id32::new([6; 32]),
+            item: Some(logical_key.to_owned()),
+            logical_key: logical_key.to_owned(),
+            runtime: "codex".to_owned(),
+            occurred_at_unix_ms: i64::from(seed),
+            status: ActivityStatusDto::Succeeded,
+            content: "bounded technical detail".to_owned(),
+            truncated: false,
+            completed: Some(completed),
+        }))
+    };
+    let page = ConversationPageDto::new(
+        vec![
+            activity(
+                1,
+                "file-change",
+                CompletedItemPresentationDto::FileChange {
+                    changes: vec![CompletedFileChangeDto {
+                        path: "src/main.rs".to_owned(),
+                        diff: Some("+safe".to_owned()),
+                        path_truncated: false,
+                        diff_truncated: false,
+                    }],
+                    changes_truncated: false,
+                },
+            ),
+            activity(
+                2,
+                "tool",
+                CompletedItemPresentationDto::Tool {
+                    name: "server/tool\u{1b}[2J".to_owned(),
+                    name_truncated: false,
+                },
+            ),
+            activity(
+                3,
+                "search",
+                CompletedItemPresentationDto::WebSearch {
+                    query: "typed\nquery".to_owned(),
+                    query_truncated: false,
+                },
+            ),
+        ],
+        None,
+    )
+    .expect("typed completed families validate");
+
+    let mapped = tui_conversation_page(
+        "row",
+        &ConversationContextDto::Personal,
+        &MailboxAddressDto {
+            installation_id: Id32::new([4; 32]),
+            mailbox_id: Id32::new([5; 32]),
+        },
+        page,
+    );
+    let summaries = mapped
+        .entries
+        .iter()
+        .map(|entry| match &entry.presentation {
+            UiConversationEntryPresentation::Activity { summary, .. } => summary.as_str(),
+            UiConversationEntryPresentation::Message { .. } => panic!("expected activity"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summaries,
+        [
+            "Changed 1 file",
+            "Tool: server/tool",
+            "Web search: typed query"
+        ]
+    );
+    assert!(
+        summaries
+            .iter()
+            .all(|summary| *summary != "Completed an item")
+    );
+}
 
 fn human_selection(
     installation: [u8; 32],
@@ -1221,6 +1377,7 @@ fn authoritative_snapshot_distinguishes_local_human_authority_failures() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
     let page = ConversationPageDto::new(
         vec![
@@ -1248,14 +1405,24 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
                 ready_answer: true,
                 thread_cancelled: false,
             })),
-            ConversationEntryDto::Activity {
+            ConversationEntryDto::Activity(Box::new(ConversationActivityDto {
                 fact_id: Id32::new([13; 32]),
                 activity_kind: ConversationActivityKindDto::Progress,
                 sequence: 4,
+                source_installation: Id32::new([15; 32]),
+                source_mailbox: Id32::new([16; 32]),
+                provider: "provider".to_owned(),
+                session: "session".to_owned(),
+                operation: Id32::new([14; 32]),
+                item: Some("item".to_owned()),
+                logical_key: "progress".to_owned(),
+                runtime: "runtime".to_owned(),
+                occurred_at_unix_ms: 4,
                 status: ActivityStatusDto::Running,
                 content: "building".to_owned(),
                 truncated: false,
-            },
+                completed: None,
+            })),
         ],
         Some("opaque-next".to_owned()),
     )
@@ -1309,7 +1476,7 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
     assert!(matches!(
         &mapped.entries[1].presentation,
         UiConversationEntryPresentation::Activity { summary, detail, .. }
-            if summary == "Work in progress…" && detail == "building"
+            if summary == "building" && detail == "building"
     ));
     assert_eq!(mapped.entries[1].message_state, None);
     assert_eq!(mapped.entries[1].message_target, None);
@@ -1542,14 +1709,27 @@ fn every_conversation_activity_kind_and_status_remains_typed() {
     for (dto_kind, ui_kind) in kinds {
         for status in statuses.clone() {
             let page = ConversationPageDto::new(
-                vec![ConversationEntryDto::Activity {
-                    fact_id: Id32::new([1; 32]),
-                    activity_kind: dto_kind,
-                    sequence: 1,
-                    status,
-                    content: "exact provider detail".to_owned(),
-                    truncated: true,
-                }],
+                vec![ConversationEntryDto::Activity(Box::new(
+                    ConversationActivityDto {
+                        fact_id: Id32::new([1; 32]),
+                        activity_kind: dto_kind,
+                        sequence: 1,
+                        source_installation: Id32::new([3; 32]),
+                        source_mailbox: Id32::new([4; 32]),
+                        provider: "provider".to_owned(),
+                        session: "session".to_owned(),
+                        operation: Id32::new([2; 32]),
+                        item: None,
+                        logical_key: "activity".to_owned(),
+                        runtime: "runtime".to_owned(),
+                        occurred_at_unix_ms: 1,
+                        status,
+                        content: "exact provider detail".to_owned(),
+                        truncated: true,
+                        completed: (dto_kind == ConversationActivityKindDto::CompletedItem)
+                            .then_some(CompletedItemPresentationDto::Unknown),
+                    },
+                ))],
                 None,
             )
             .expect("valid activity page");

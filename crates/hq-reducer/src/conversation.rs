@@ -301,16 +301,30 @@ pub struct ActionGroupView {
 pub struct ActivityView {
     /// Selected fact for a snapshot, or the durable completed item.
     pub fact_id: FactId,
+    /// Exact source mailbox participating in provider correlation.
+    pub source: MailboxAddress,
+    /// Exact provider, session, and operation identity.
+    pub correlation: OperationCorrelation,
+    /// Optional bounded provider item identity.
+    pub item: Option<ShortText>,
     /// Closed activity family retained independently from display content.
     pub kind: ActivityKind,
     /// Positive writer sequence.
     pub sequence: std::num::NonZeroU64,
+    /// Stable coalescing/history key within the operation.
+    pub logical_key: ShortText,
+    /// Bounded runtime identity.
+    pub runtime: ShortText,
+    /// Provider event occurrence time.
+    pub occurred_at: Timestamp,
     /// Typed activity state.
     pub status: ActivityStatus,
     /// Bounded display content.
     pub content: hq_domain::ContentText,
     /// Whether authoring truncated content.
     pub truncated: bool,
+    /// Structured completed-item presentation when this is a durable completed item.
+    pub completed: Option<hq_domain::CompletedItemPresentation>,
 }
 
 /// Deterministic disposable progress budget over permanent canonical activity facts.
@@ -332,7 +346,7 @@ pub enum ConversationProjection {
     /// Provider operation group.
     ActionGroup(ActionGroupView),
     /// Selected activity value.
-    Activity(ActivityView),
+    Activity(Box<ActivityView>),
     /// Progress-retention summary.
     ActivityRetention(ActivityRetentionView),
 }
@@ -1193,11 +1207,18 @@ fn activity_projections(
         .filter_map(|(key, fact_id)| {
             let winner = context.facts().get(*fact_id)?;
             let SemanticPayload::HarnessActivityRecorded {
+                source,
+                correlation,
+                item,
                 sequence,
+                logical_key,
+                runtime,
+                occurred_at,
                 status,
                 content,
                 truncated,
                 kind,
+                completed,
                 ..
             } = winner.payload()
             else {
@@ -1220,14 +1241,21 @@ fn activity_projections(
                 } else {
                     ConversationProjectionKey::Activity(key.clone())
                 },
-                ConversationProjection::Activity(ActivityView {
+                ConversationProjection::Activity(Box::new(ActivityView {
                     fact_id: winner.id(),
+                    source: *source,
+                    correlation: correlation.clone(),
+                    item: item.clone(),
                     kind: *kind,
                     sequence: *sequence,
+                    logical_key: logical_key.clone(),
+                    runtime: runtime.clone(),
+                    occurred_at: *occurred_at,
                     status: status.clone(),
                     content: content.clone(),
                     truncated: *truncated,
-                }),
+                    completed: completed.clone(),
+                })),
                 support,
             ))
         })

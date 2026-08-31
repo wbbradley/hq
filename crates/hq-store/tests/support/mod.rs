@@ -335,6 +335,63 @@ pub fn authored_durable_conversation_entry(index: u16, activity: bool) -> Verifi
     authored_conversation_entry_with_retention(index, activity, true)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn authored_agent_activity(
+    index: u16,
+    operation: OperationId,
+    item: Option<&str>,
+    kind: ActivityKind,
+    logical_key: &str,
+    sequence: u64,
+    status: ActivityStatus,
+    content: &str,
+) -> VerifiedSemanticFact {
+    let root = FactId::from_bytes(verified_fact().verified_event().event_id());
+    let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        BoundedSet::new([root]).expect("one parent validates"),
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            root,
+        )],
+    )
+    .expect("local authority validates");
+    let local = MailboxAddress::new(
+        authority_policy().local_installation(),
+        authority_policy().local_human_mailbox(),
+    );
+    let mut auxiliary = [0_u8; 32];
+    auxiliary[0] = 9;
+    auxiliary[30..].copy_from_slice(&index.to_be_bytes());
+    CanonicalEventPlan::new(
+        authority_policy().local_installation(),
+        Timestamp::from_unix_millis(3_000 + i64::from(index)),
+        FactScope::InstallationPrivate(authority_policy().local_installation()),
+        causal,
+        SemanticPayload::HarnessActivityRecorded {
+            project: None,
+            source: local,
+            correlation: OperationCorrelation::new(
+                ProviderId::new("paged-provider").expect("provider validates"),
+                ProviderSessionId::new("paged-session").expect("session validates"),
+                operation,
+            ),
+            item: item.map(|value| ShortText::new(value).expect("item validates")),
+            kind,
+            logical_key: ShortText::new(logical_key).expect("logical key validates"),
+            runtime: ShortText::new("runtime-1").expect("runtime validates"),
+            sequence: std::num::NonZeroU64::new(sequence).expect("sequence is positive"),
+            occurred_at: Timestamp::from_unix_millis(3_000 + i64::from(index)),
+            status,
+            content: ContentText::new(content).expect("content validates"),
+            truncated: false,
+            completed: (kind == ActivityKind::CompletedItem)
+                .then_some(hq_domain::CompletedItemPresentation::Unknown),
+        },
+    )
+    .sign(&signer(1), auxiliary)
+    .expect("agent activity signs")
+}
+
 pub fn authored_project_input(
     index: u16,
     project_id: ProjectId,
@@ -426,6 +483,7 @@ fn authored_conversation_entry_with_retention(
             status: ActivityStatus::Running,
             content: ContentText::new(format!("activity {index}")).expect("content validates"),
             truncated: false,
+            completed: durable.then_some(hq_domain::CompletedItemPresentation::Unknown),
         }
     } else {
         SemanticPayload::QuestionAsked(MessageContent {

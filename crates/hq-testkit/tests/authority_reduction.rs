@@ -1210,6 +1210,7 @@ fn account_actions_use_historical_membership_and_full_regrant_lineage() -> Resul
             status: hq_domain::ActivityStatus::Running,
             content: ContentText::new("running")?,
             truncated: false,
+            completed: None,
         },
     )?;
     let old_grant_reacceptance = accept_device(

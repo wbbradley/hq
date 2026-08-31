@@ -98,6 +98,7 @@ fn snapshot(key: HarnessSnapshotKey, sequence: u64, body: &str) -> HarnessBuffer
             status: ActivityStatus::Running,
             content: ContentText::new(body).expect("content validates"),
             truncated: false,
+            completed: None,
         },
     }
 }

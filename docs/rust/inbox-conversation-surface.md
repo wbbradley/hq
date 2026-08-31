@@ -137,31 +137,33 @@ line at column zero, separated by the same whitespace rhythm:
 ! Repository check failed · Review details
 ```
 
-The symbol, verb, and style all reflect typed activity status. Running activity remains visible.
-Failure and interruption always remain visible until superseded by authoritative state. Successful
-tool activity remains as one subdued line so the transcript explains what happened without dumping
-the command envelope into the conversation.
+The symbol, verb, and style all reflect typed activity status. Exactly one current live row occupies
+the conversation tail: it says `Agent is working…` until useful progress exists, then uses the
+latest canonical progress text. Terminal lifecycle evidence replaces it rather than coexisting.
+Failure and interruption remain visible. Completed commands show separately retained command text,
+up to three output lines, exit/failure state, and explicit omission markers; file changes, tools,
+and searches use their typed path/name/query fields.
 
-Raw executable paths, shell wrappers, exit-code framing, stdout/stderr, provider lifecycle text,
+Raw executable paths, shell wrappers, complete bounded stdout/stderr, provider lifecycle text,
 and stable failure reasons belong in an expandable activity inspector. That inspector may show the
 exact original content and typed status; it may not discard or paraphrase technical evidence.
 
-The activity projection must grow a closed typed kind and separate bounded summary/detail fields,
-for example:
+The activity projection carries a closed typed completed presentation:
 
 ```text
-Tool { summary, detail }
-AgentTurn { phase }
-System { summary, detail }
+Command { command, output, exit_code, truncation }
+FileChange { changes, truncation }
+Tool { name, truncation }
+WebSearch { query, truncation }
 ```
 
-Exact names are an implementation decision, but the contract is not: rendering, grouping, and
-omission use typed variants only. They never search activity prose or command strings.
+Rendering, grouping, and omission use these typed variants only. They never search activity prose
+or command strings. ANSI CSI/OSC sequences are removed, unsafe controls are neutralized, intended
+line boundaries survive, and no secret-detection heuristic changes disclosed command output.
 
-A successful `AgentTurn::Completed` immediately following a final answer is redundant and may be
-omitted from the ordinary transcript. It remains present in technical history. Without that typed
-kind, the existing `Codex turn completed` line must remain visible in a compact activity form.
-Failed or interrupted turns are never omitted.
+A terminal `AgentTurn` removes the transient row for only its exact source/provider/session/
+operation identity and remains once in ordinary history. Failed or interrupted turns are never
+omitted.
 
 ### Technical details
 

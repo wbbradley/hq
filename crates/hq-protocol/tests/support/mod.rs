@@ -97,7 +97,7 @@ pub fn valid_bodies() -> [(u64, String); 48] {
         (
             22,
             format!(
-                r#"{{"source":{mailbox},"operation":{operation},"item":null,"kind":"progress","logical_key":"key","runtime":"runtime","sequence":1,"occurred_at":0,"status":{{"state":"running"}},"content":"content","truncated":false}}"#
+                r#"{{"source":{mailbox},"operation":{operation},"item":null,"kind":"progress","logical_key":"key","runtime":"runtime","sequence":1,"occurred_at":0,"status":{{"state":"running"}},"content":"content","truncated":false,"completed":null}}"#
             ),
         ),
         (

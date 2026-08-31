@@ -13,16 +13,16 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentAttentionReason, UiAgentModal,
-    UiAgentProjectAssignment, UiAgentStatus, UiConnectionState, UiConversationAuthor,
-    UiConversationEntry, UiConversationEntryPresentation, UiFocus, UiHelpPage, UiHumanIssue,
-    UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanState, UiMailboxAction,
-    UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
-    UiManagedSessionOutcome, UiMessageDelivery, UiMessageState, UiModel, UiNewChoice, UiNewModal,
-    UiProjectAction, UiProjectAssignedAgentStatus, UiProjectCreationChoice, UiProjectFolderAction,
-    UiProjectFolderOwnership, UiProjectFormField, UiProjectInteraction, UiProjectLifecycle,
-    UiProjectManagementAction, UiProjectOutcome, UiProjectRecoverySummary, UiProjectSummaryFocus,
-    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
-    UiTechnicalSection, UiTheme, UiThemeRole,
+    UiAgentProjectAssignment, UiAgentStatus, UiCompletedItemPresentation, UiConnectionState,
+    UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiFocus,
+    UiHelpPage, UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanState,
+    UiMailboxAction, UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiMessageDelivery, UiMessageState, UiModel,
+    UiNewChoice, UiNewModal, UiProjectAction, UiProjectAssignedAgentStatus,
+    UiProjectCreationChoice, UiProjectFolderAction, UiProjectFolderOwnership, UiProjectFormField,
+    UiProjectInteraction, UiProjectLifecycle, UiProjectManagementAction, UiProjectOutcome,
+    UiProjectRecoverySummary, UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel,
+    UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, UiTheme, UiThemeRole,
     message_markdown::{MessageRenderCache, RenderedMessage},
     model::WIDE_WIDTH,
 };
@@ -3534,6 +3534,7 @@ fn render_technical_inspector(
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+#[allow(clippy::too_many_lines)]
 fn append_technical_section(
     lines: &mut Vec<Line<'static>>,
     section: &UiTechnicalSection,
@@ -3611,11 +3612,36 @@ fn append_technical_section(
         }
         UiTechnicalSection::Activity {
             sequence,
+            source_installation,
+            source_mailbox,
+            provider,
+            session,
+            operation,
+            item,
+            logical_key,
+            runtime,
+            occurred_at_unix_ms,
             status,
             truncated,
         } => {
             lines.push(Line::styled("Activity", section_style));
             lines.push(Line::from(format!("sequence: {sequence}")));
+            lines.push(Line::from(format!(
+                "source installation: {source_installation}"
+            )));
+            lines.push(Line::from(format!("source mailbox: {source_mailbox}")));
+            lines.push(Line::from(format!("provider: {provider}")));
+            lines.push(Line::from(format!("session: {session}")));
+            lines.push(Line::from(format!("operation: {operation}")));
+            lines.push(Line::from(format!(
+                "item: {}",
+                item.as_deref().unwrap_or("none")
+            )));
+            lines.push(Line::from(format!("logical key: {logical_key}")));
+            lines.push(Line::from(format!("runtime: {runtime}")));
+            lines.push(Line::from(format!(
+                "occurred at (unix ms): {occurred_at_unix_ms}"
+            )));
             lines.push(Line::from(format!(
                 "status: {}",
                 activity_status_label(status)
@@ -3691,6 +3717,7 @@ fn render_conversation_entries(
 
 struct ConversationEntryLayout {
     message: Option<Arc<RenderedMessage>>,
+    activity: Option<Vec<String>>,
     height: u16,
 }
 
@@ -3706,14 +3733,111 @@ fn conversation_entry_layout(
             let height = message.body_height().saturating_add(2);
             ConversationEntryLayout {
                 message: Some(message),
+                activity: None,
                 height,
             }
         }
-        UiConversationEntryPresentation::Activity { .. } => ConversationEntryLayout {
-            message: None,
-            height: 2,
-        },
+        UiConversationEntryPresentation::Activity { .. } => {
+            let activity = activity_preview(entry, width);
+            let height = u16::try_from(activity.len())
+                .unwrap_or(u16::MAX)
+                .saturating_add(1);
+            ConversationEntryLayout {
+                message: None,
+                activity: Some(activity),
+                height,
+            }
+        }
     }
+}
+
+fn activity_preview(entry: &UiConversationEntry, width: u16) -> Vec<String> {
+    const PREVIEW_LINES: usize = 3;
+    let UiConversationEntryPresentation::Activity {
+        summary,
+        status,
+        completed,
+        ..
+    } = &entry.presentation
+    else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    match completed {
+        Some(UiCompletedItemPresentation::Command {
+            command,
+            output,
+            exit_code,
+            command_truncated,
+            output_truncated,
+        }) => {
+            let state = match status {
+                UiActivityStatus::Succeeded => "completed",
+                UiActivityStatus::Failed { .. } => "failed",
+                UiActivityStatus::Interrupted => "interrupted",
+                UiActivityStatus::Snapshot | UiActivityStatus::Running => "activity",
+            };
+            let exit = exit_code.map_or_else(String::new, |code| format!(" · exit {code}"));
+            lines.push(format!("Command {state}{exit}"));
+            let command_lines = command.lines().collect::<Vec<_>>();
+            for (index, line) in command_lines.iter().take(PREVIEW_LINES).enumerate() {
+                lines.push(format!("{}{}", if index == 0 { "$ " } else { "  " }, line));
+            }
+            if *command_truncated || command_lines.len() > PREVIEW_LINES {
+                lines.push("  … command truncated".to_owned());
+            }
+            if let Some(output) = output {
+                let output_lines = output.lines().collect::<Vec<_>>();
+                lines.extend(
+                    output_lines
+                        .iter()
+                        .take(PREVIEW_LINES)
+                        .map(|line| format!("│ {line}")),
+                );
+                if *output_truncated || output_lines.len() > PREVIEW_LINES {
+                    lines.push("│ … output truncated".to_owned());
+                }
+            }
+        }
+        Some(UiCompletedItemPresentation::FileChange {
+            changes,
+            changes_truncated,
+        }) => {
+            lines.push(summary.clone());
+            lines.extend(
+                changes
+                    .iter()
+                    .take(PREVIEW_LINES)
+                    .map(|change| format!("  {}", change.path)),
+            );
+            if *changes_truncated || changes.len() > PREVIEW_LINES {
+                lines.push(format!(
+                    "  … {} more",
+                    changes.len().saturating_sub(PREVIEW_LINES)
+                ));
+            }
+        }
+        Some(
+            UiCompletedItemPresentation::Tool { .. }
+            | UiCompletedItemPresentation::WebSearch { .. }
+            | UiCompletedItemPresentation::Unknown,
+        )
+        | None => lines.push(summary.clone()),
+    }
+    lines
+        .into_iter()
+        .map(|line| clipped_preview_line(&line, usize::from(width)))
+        .collect()
+}
+
+fn clipped_preview_line(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    format!("{}…", display_prefix(value, width.saturating_sub(1)))
 }
 
 fn visible_conversation_entries(
@@ -3809,9 +3933,7 @@ fn render_conversation_entry(
                 );
             }
         }
-        UiConversationEntryPresentation::Activity {
-            status, summary, ..
-        } => {
+        UiConversationEntryPresentation::Activity { status, .. } => {
             let symbol = match status {
                 UiActivityStatus::Snapshot => "·",
                 UiActivityStatus::Running => "●",
@@ -3827,10 +3949,22 @@ fn render_conversation_entry(
                 UiActivityStatus::Failed { .. } => UiThemeRole::ConversationActivityError,
                 UiActivityStatus::Interrupted => UiThemeRole::ConversationActivityWarning,
             };
-            frame.render_widget(
-                Paragraph::new(format!("{symbol} {summary}")).style(theme.style(role)),
-                Rect { height: 1, ..area },
-            );
+            if let Some(lines) = &layout.activity {
+                let mut rendered = lines
+                    .iter()
+                    .map(|line| Line::from(line.clone()))
+                    .collect::<Vec<_>>();
+                if let Some(first) = rendered.first_mut() {
+                    first.spans.insert(0, Span::raw(format!("{symbol} ")));
+                }
+                frame.render_widget(
+                    Paragraph::new(rendered).style(theme.style(role)),
+                    Rect {
+                        height: area.height.saturating_sub(1),
+                        ..area
+                    },
+                );
+            }
         }
     }
 }
@@ -4128,10 +4262,12 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
 #[cfg(test)]
 mod tests {
     use super::{
-        conversation_entry_layout, display_prefix, display_suffix, inbox_list_width,
-        inert_draft_source, navigation_width, text_field_line, visible_conversation_entries,
+        activity_preview, conversation_entry_layout, display_prefix, display_suffix,
+        inbox_list_width, inert_draft_source, navigation_width, text_field_line,
+        visible_conversation_entries,
     };
     use crate::{
+        UiActivityStatus, UiCompletedItemPresentation, UiConversationActivityKind,
         UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiMessageState,
         UiTheme,
     };
@@ -4213,6 +4349,52 @@ mod tests {
         assert_eq!(
             conversation_entry_layout(&message(""), 20, &theme, &mut cache).height,
             3
+        );
+    }
+
+    #[test]
+    fn command_preview_is_bounded_to_three_output_lines_with_status_and_omission() {
+        let entry = UiConversationEntry {
+            id: "command".to_owned(),
+            presentation: UiConversationEntryPresentation::Activity {
+                kind: UiConversationActivityKind::CompletedItem,
+                status: UiActivityStatus::Failed {
+                    reason: "command_failed".to_owned(),
+                },
+                summary: "Command failed".to_owned(),
+                detail: "complete detail".to_owned(),
+                truncated: false,
+                completed: Some(UiCompletedItemPresentation::Command {
+                    command: "printf one\nprintf two".to_owned(),
+                    output: Some("one\ntwo\nthree\nfour".to_owned()),
+                    exit_code: Some(17),
+                    command_truncated: false,
+                    output_truncated: false,
+                }),
+            },
+            message_state: None,
+            delivery: None,
+            message_target: None,
+            technical: Vec::new(),
+        };
+        let preview = activity_preview(&entry, 80);
+        assert_eq!(preview[0], "Command failed · exit 17");
+        assert!(preview.iter().any(|line| line == "$ printf one"));
+        assert_eq!(
+            preview.iter().filter(|line| line.starts_with("│ ")).count(),
+            4
+        );
+        assert_eq!(
+            preview.last().map(String::as_str),
+            Some("│ … output truncated")
+        );
+
+        let mut cache = super::UiRenderCache::new();
+        assert_eq!(
+            conversation_entry_layout(&entry, 80, &UiTheme::terminal(), &mut cache).height,
+            u16::try_from(preview.len())
+                .unwrap_or(u16::MAX)
+                .saturating_add(1)
         );
     }
 

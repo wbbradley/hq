@@ -1139,7 +1139,7 @@ pub enum ConversationEntry {
     /// Typed projected message state.
     Message(Box<ConversationMessageEntry>),
     /// Typed selected or durable activity value.
-    Activity(ActivityView),
+    Activity(Box<ActivityView>),
 }
 
 impl ConversationEntry {

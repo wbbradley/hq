@@ -182,6 +182,7 @@ impl FactBuilder {
                 status: hq_domain::ActivityStatus::Running,
                 content: content_text("running")?,
                 truncated: false,
+                completed: None,
             },
             SemanticPayload::AgentNameClaimed {
                 agent_id,

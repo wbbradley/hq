@@ -2241,20 +2241,101 @@ pub enum ConversationEntryDto {
     /// Durable message presentation.
     Message(Box<ConversationMessageDto>),
     /// Durable or selected harness activity presentation.
-    Activity {
-        /// Canonical fact identity.
-        fact_id: Id32,
-        /// Closed activity family independent from display content.
-        activity_kind: ConversationActivityKindDto,
-        /// Positive source sequence.
-        sequence: u64,
-        /// Typed activity status and optional stable failure reason.
-        status: ActivityStatusDto,
-        /// Bounded display content.
-        content: String,
-        /// Whether authoring truncated the content.
-        truncated: bool,
+    Activity(Box<ConversationActivityDto>),
+}
+
+/// Durable or selected harness activity presentation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationActivityDto {
+    /// Canonical fact identity.
+    pub fact_id: Id32,
+    /// Closed activity family independent from display content.
+    pub activity_kind: ConversationActivityKindDto,
+    /// Positive source sequence.
+    pub sequence: u64,
+    /// Exact source installation identity.
+    pub source_installation: Id32,
+    /// Exact source mailbox identity.
+    pub source_mailbox: Id32,
+    /// Exact provider namespace.
+    pub provider: String,
+    /// Exact provider-scoped session identity.
+    pub session: String,
+    /// Exact operation identity.
+    pub operation: Id32,
+    /// Optional provider item identity.
+    pub item: Option<String>,
+    /// Stable logical key within the operation.
+    pub logical_key: String,
+    /// Bounded runtime identity.
+    pub runtime: String,
+    /// Signed occurrence time in Unix milliseconds.
+    pub occurred_at_unix_ms: i64,
+    /// Typed activity status and optional stable failure reason.
+    pub status: ActivityStatusDto,
+    /// Bounded display content.
+    pub content: String,
+    /// Whether authoring truncated the content.
+    pub truncated: bool,
+    /// Structured presentation for a durable completed item.
+    pub completed: Option<CompletedItemPresentationDto>,
+}
+
+/// One changed-file presentation record.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletedFileChangeDto {
+    /// Provider-reported changed path.
+    pub path: String,
+    /// Optional bounded diff retained for technical detail.
+    pub diff: Option<String>,
+    /// Whether the path was shortened.
+    pub path_truncated: bool,
+    /// Whether the diff was shortened.
+    pub diff_truncated: bool,
+}
+
+/// Closed completed-item presentation carried without parsing flattened prose.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CompletedItemPresentationDto {
+    /// Completed command execution.
+    Command {
+        /// Multiline command source.
+        command: String,
+        /// Optional aggregated command output.
+        output: Option<String>,
+        /// Provider-reported exit code.
+        exit_code: Option<i64>,
+        /// Whether command source was shortened.
+        command_truncated: bool,
+        /// Whether output was shortened.
+        output_truncated: bool,
     },
+    /// Completed file changes.
+    FileChange {
+        /// Bounded per-file records.
+        changes: Vec<CompletedFileChangeDto>,
+        /// Whether additional file records were omitted.
+        changes_truncated: bool,
+    },
+    /// Completed tool call.
+    Tool {
+        /// Retained server/tool or tool-family name.
+        name: String,
+        /// Whether the name was shortened.
+        name_truncated: bool,
+    },
+    /// Completed web search.
+    WebSearch {
+        /// Retained query.
+        query: String,
+        /// Whether the query was shortened.
+        query_truncated: bool,
+    },
+    /// Explicit unknown completed family.
+    Unknown,
 }
 
 /// Closed conversation-activity family on local API v1.
@@ -3824,18 +3905,63 @@ fn validate_page(page: &ConversationPageDto) -> Result<(), ValueError> {
                     message.correlation_operation.as_ref(),
                 )?;
             }
-            ConversationEntryDto::Activity {
-                status, content, ..
-            } => {
-                validate_text(content, CONTENT_MAX_BYTES)?;
-                if let ActivityStatusDto::Failed { reason } = status {
+            ConversationEntryDto::Activity(activity) => {
+                validate_text(&activity.content, CONTENT_MAX_BYTES)?;
+                validate_text(&activity.provider, PROVIDER_ID_MAX_BYTES)?;
+                validate_text(&activity.session, PROVIDER_SESSION_ID_MAX_BYTES)?;
+                if let Some(item) = &activity.item {
+                    validate_text(item, SHORT_TEXT_MAX_BYTES)?;
+                }
+                validate_text(&activity.logical_key, SHORT_TEXT_MAX_BYTES)?;
+                validate_text(&activity.runtime, SHORT_TEXT_MAX_BYTES)?;
+                if let ActivityStatusDto::Failed { reason } = &activity.status {
                     validate_text(reason, ERROR_CODE_MAX_BYTES)?;
+                }
+                if (activity.activity_kind == ConversationActivityKindDto::CompletedItem)
+                    != activity.completed.is_some()
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                if let Some(completed) = &activity.completed {
+                    validate_completed_item(completed)?;
                 }
             }
         }
-        if matches!(item, ConversationEntryDto::Activity { sequence: 0, .. }) {
+        if matches!(item, ConversationEntryDto::Activity(activity) if activity.sequence == 0) {
             return Err(ValueError::InvalidSequence);
         }
+    }
+    Ok(())
+}
+
+fn validate_completed_item(value: &CompletedItemPresentationDto) -> Result<(), ValueError> {
+    match value {
+        CompletedItemPresentationDto::Command {
+            command, output, ..
+        } => {
+            validate_text(command, CONTENT_MAX_BYTES)?;
+            if let Some(output) = output {
+                validate_text(output, CONTENT_MAX_BYTES)?;
+            }
+        }
+        CompletedItemPresentationDto::FileChange { changes, .. } => {
+            if changes.len() > hq_domain::MAX_COMPLETED_FILE_CHANGES {
+                return Err(ValueError::TooManyItems);
+            }
+            for change in changes {
+                validate_text(&change.path, CONTENT_MAX_BYTES)?;
+                if let Some(diff) = &change.diff {
+                    validate_text(diff, CONTENT_MAX_BYTES)?;
+                }
+            }
+        }
+        CompletedItemPresentationDto::Tool { name, .. } => {
+            validate_text(name, SHORT_TEXT_MAX_BYTES)?;
+        }
+        CompletedItemPresentationDto::WebSearch { query, .. } => {
+            validate_text(query, CONTENT_MAX_BYTES)?;
+        }
+        CompletedItemPresentationDto::Unknown => {}
     }
     Ok(())
 }

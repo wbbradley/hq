@@ -94,6 +94,8 @@ pub struct HarnessActivityFactRequest {
     pub content: ContentText,
     /// Whether provider content was explicitly shortened.
     pub truncated: bool,
+    /// Structured presentation for completed items; absent for other activity families.
+    pub completed: Option<hq_domain::CompletedItemPresentation>,
 }
 
 /// Plans one correlated agent output message under exact local binding evidence.
@@ -134,6 +136,7 @@ pub fn plan_harness_activity(
     request: HarnessActivityFactRequest,
 ) -> Result<FactPlan, ApplicationError> {
     validate(authority)?;
+    validate_activity_presentation(&request)?;
     let causal = causal(authority)?;
     Ok(FactPlan::new(
         authority.author,
@@ -153,6 +156,7 @@ pub fn plan_harness_activity(
             status: request.status,
             content: request.content,
             truncated: request.truncated,
+            completed: request.completed,
         },
         inputs.auxiliary_randomness,
     ))
@@ -198,6 +202,7 @@ pub fn plan_project_harness_activity(
     inputs: LocalFactInputs,
     request: HarnessActivityFactRequest,
 ) -> Result<FactPlan, ApplicationError> {
+    validate_activity_presentation(&request)?;
     let mut parent_ids = authority.support.clone();
     parent_ids.extend([authority.installation_root, authority.dispatch_fact]);
     let parents = BoundedSet::<FactId, MAX_FACT_PARENTS>::new(parent_ids)
@@ -228,9 +233,20 @@ pub fn plan_project_harness_activity(
             status: request.status,
             content: request.content,
             truncated: request.truncated,
+            completed: request.completed,
         },
         inputs.auxiliary_randomness,
     ))
+}
+
+fn validate_activity_presentation(
+    request: &HarnessActivityFactRequest,
+) -> Result<(), ApplicationError> {
+    if (request.kind == ActivityKind::CompletedItem) == request.completed.is_some() {
+        Ok(())
+    } else {
+        Err(ApplicationError::new(ApplicationErrorCode::InvalidRequest))
+    }
 }
 
 fn project_output_causal(
@@ -374,6 +390,7 @@ mod tests {
             status: ActivityStatus::Running,
             content: ContentText::new("working").expect("content"),
             truncated: true,
+            completed: None,
         };
         let plan =
             plan_harness_activity(&authority(), inputs(), request.clone()).expect("activity plan");

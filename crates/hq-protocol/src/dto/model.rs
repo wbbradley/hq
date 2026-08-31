@@ -403,6 +403,41 @@ pub(super) enum ActivityStatusDto {
     Failed(FailedStatusDto),
 }
 
+object!(CompletedFileChangeDto {
+    path: ContentText,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    diff: RequiredOption<ContentText>,
+    path_truncated: bool,
+    diff_truncated: bool,
+});
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub(super) enum CompletedItemPresentationDto {
+    Command {
+        command: ContentText,
+        #[serde(deserialize_with = "deserialize_required_option")]
+        output: RequiredOption<ContentText>,
+        #[serde(deserialize_with = "deserialize_required_option")]
+        exit_code: RequiredOption<i64>,
+        command_truncated: bool,
+        output_truncated: bool,
+    },
+    FileChange {
+        changes: Vec<CompletedFileChangeDto>,
+        changes_truncated: bool,
+    },
+    Tool {
+        name: ShortText,
+        name_truncated: bool,
+    },
+    WebSearch {
+        query: ContentText,
+        query_truncated: bool,
+    },
+    Unknown,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(super) enum SucceededStateTag {
     #[serde(rename = "succeeded")]
@@ -597,6 +632,8 @@ object!(HarnessActivityRecordedDto {
     status: ActivityStatusDto,
     content: ContentText,
     truncated: bool,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    completed: RequiredOption<CompletedItemPresentationDto>,
 });
 object!(AgentNameClaimedDto {
     agent: Hex32,

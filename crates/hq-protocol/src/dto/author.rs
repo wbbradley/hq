@@ -344,6 +344,7 @@ fn body(value: &domain::SemanticPayload) -> model::BodyDto {
             status,
             content,
             truncated,
+            completed,
         } => Output::HarnessActivityRecorded(model::HarnessActivityRecordedDto {
             project: project
                 .as_ref()
@@ -364,6 +365,7 @@ fn body(value: &domain::SemanticPayload) -> model::BodyDto {
             status: activity_status(status),
             content: content_text(content),
             truncated: *truncated,
+            completed: model::RequiredOption(completed.as_ref().map(completed_item)),
         }),
         Input::AgentNameClaimed {
             agent_id,
@@ -831,6 +833,57 @@ fn activity_status(value: &domain::ActivityStatus) -> model::ActivityStatusDto {
                 code: short_string(code.as_str()),
             })
         }
+    }
+}
+
+fn completed_item(
+    value: &domain::CompletedItemPresentation,
+) -> model::CompletedItemPresentationDto {
+    match value {
+        domain::CompletedItemPresentation::Command {
+            command,
+            output,
+            exit_code,
+            command_truncated,
+            output_truncated,
+        } => model::CompletedItemPresentationDto::Command {
+            command: content_text(command),
+            output: model::RequiredOption(output.as_ref().map(content_text)),
+            exit_code: model::RequiredOption(*exit_code),
+            command_truncated: *command_truncated,
+            output_truncated: *output_truncated,
+        },
+        domain::CompletedItemPresentation::FileChange {
+            changes,
+            changes_truncated,
+        } => model::CompletedItemPresentationDto::FileChange {
+            changes: changes
+                .as_slice()
+                .iter()
+                .map(|change| model::CompletedFileChangeDto {
+                    path: content_text(&change.path),
+                    diff: model::RequiredOption(change.diff.as_ref().map(content_text)),
+                    path_truncated: change.path_truncated,
+                    diff_truncated: change.diff_truncated,
+                })
+                .collect(),
+            changes_truncated: *changes_truncated,
+        },
+        domain::CompletedItemPresentation::Tool {
+            name,
+            name_truncated,
+        } => model::CompletedItemPresentationDto::Tool {
+            name: short(name),
+            name_truncated: *name_truncated,
+        },
+        domain::CompletedItemPresentation::WebSearch {
+            query,
+            query_truncated,
+        } => model::CompletedItemPresentationDto::WebSearch {
+            query: content_text(query),
+            query_truncated: *query_truncated,
+        },
+        domain::CompletedItemPresentation::Unknown => model::CompletedItemPresentationDto::Unknown,
     }
 }
 

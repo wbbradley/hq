@@ -1241,6 +1241,7 @@ fn activity(
         status: ActivityStatus::Running,
         content: content(body, scenario)?,
         truncated: false,
+        completed: None,
     })
 }
 

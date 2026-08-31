@@ -14,28 +14,30 @@ use std::{
 use hq_local_api::{
     BlockingClientError, ClientConnectionState, ClientEvent,
     protocol::v1::{
-        ActivityStatusDto, AuthoritativeSnapshotDto, ConversationActivityKindDto,
-        ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationMessageDto,
-        ConversationPageRequest, ConversationParticipantDto, Id32, MailboxAddressDto,
-        MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDto,
-        MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
-        MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, PresentationKindDto,
-        ProviderCatalogDto, Request, ResponseResult, SnapshotItem,
+        ActivityStatusDto, AuthoritativeSnapshotDto, CompletedItemPresentationDto,
+        ConversationActivityDto, ConversationActivityKindDto, ConversationContextDto,
+        ConversationEntryDto, ConversationKeyDto, ConversationMessageDto, ConversationPageRequest,
+        ConversationParticipantDto, Id32, MailboxAddressDto, MailboxCommandActionDto,
+        MailboxCommandRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
+        MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto,
+        MutationOutcomeDto, PresentationKindDto, ProviderCatalogDto, Request, ResponseResult,
+        SnapshotItem,
     },
 };
 use hq_tui::{
     EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase,
     UiAgentAttentionReason, UiAgentLifecycle, UiAgentMailbox, UiAgentProjectAssignment,
-    UiAgentSession, UiAgentStatus, UiConnectionState, UiConversationActivityKind,
-    UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
-    UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanIssue,
-    UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState,
-    UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageDelivery,
-    UiMessageState, UiMessageTarget, UiProject, UiProjectAction, UiProjectAssignment,
-    UiProjectExternalWarning, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
-    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind,
-    UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    UiAgentSession, UiAgentStatus, UiCompletedFileChange, UiCompletedItemPresentation,
+    UiConnectionState, UiConversationActivityKind, UiConversationAuthor, UiConversationEntry,
+    UiConversationEntryPresentation, UiConversationPage, UiConversationTarget, UiDirectTarget,
+    UiEffect, UiEvent, UiFailure, UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus,
+    UiHumanSelectionEvidence, UiHumanState, UiMailboxAction, UiMailboxCommandResult,
+    UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
+    UiManagedSessionResult, UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject,
+    UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot,
+    UiTechnicalSection, UiTimerKind,
 };
 
 use crate::{
@@ -2054,35 +2056,104 @@ fn tui_conversation_entry(
         ConversationEntryDto::Message(message) => {
             tui_message_entry(*message, local_human, participant)
         }
-        ConversationEntryDto::Activity {
-            fact_id,
-            activity_kind,
-            sequence,
-            status,
-            content,
-            truncated,
-        } => {
+        ConversationEntryDto::Activity(activity) => {
+            let ConversationActivityDto {
+                fact_id,
+                activity_kind,
+                sequence,
+                source_installation,
+                source_mailbox,
+                provider,
+                session,
+                operation,
+                item,
+                logical_key,
+                runtime,
+                occurred_at_unix_ms,
+                status,
+                content,
+                truncated,
+                completed,
+            } = *activity;
             let status = tui_activity_status(status);
             let kind = tui_activity_kind(activity_kind);
             UiConversationEntry {
                 id: full_id(fact_id),
                 presentation: UiConversationEntryPresentation::Activity {
                     kind,
-                    summary: activity_summary(kind, &status).to_owned(),
-                    detail: terminal_text(&content),
+                    summary: activity_summary(kind, &status, &content, completed.as_ref()),
+                    detail: terminal_structured_text(&content),
                     status: status.clone(),
                     truncated,
+                    completed: completed.map(tui_completed_item),
                 },
                 message_state: None,
                 delivery: None,
                 message_target: None,
                 technical: vec![UiTechnicalSection::Activity {
                     sequence,
+                    source_installation: full_id(source_installation),
+                    source_mailbox: full_id(source_mailbox),
+                    provider: terminal_text(&provider),
+                    session: terminal_text(&session),
+                    operation: full_id(operation),
+                    item: item.map(|value| terminal_text(&value)),
+                    logical_key: terminal_text(&logical_key),
+                    runtime: terminal_text(&runtime),
+                    occurred_at_unix_ms,
                     status,
                     truncated,
                 }],
             }
         }
+    }
+}
+
+fn tui_completed_item(value: CompletedItemPresentationDto) -> UiCompletedItemPresentation {
+    match value {
+        CompletedItemPresentationDto::Command {
+            command,
+            output,
+            exit_code,
+            command_truncated,
+            output_truncated,
+        } => UiCompletedItemPresentation::Command {
+            command: terminal_structured_text(&command),
+            output: output.map(|value| terminal_structured_text(&value)),
+            exit_code,
+            command_truncated,
+            output_truncated,
+        },
+        CompletedItemPresentationDto::FileChange {
+            changes,
+            changes_truncated,
+        } => UiCompletedItemPresentation::FileChange {
+            changes: changes
+                .into_iter()
+                .map(|change| UiCompletedFileChange {
+                    path: terminal_structured_text(&change.path).replace('\n', " "),
+                    diff: change.diff.map(|value| terminal_structured_text(&value)),
+                    path_truncated: change.path_truncated,
+                    diff_truncated: change.diff_truncated,
+                })
+                .collect(),
+            changes_truncated,
+        },
+        CompletedItemPresentationDto::Tool {
+            name,
+            name_truncated,
+        } => UiCompletedItemPresentation::Tool {
+            name: terminal_structured_text(&name).replace('\n', " "),
+            name_truncated,
+        },
+        CompletedItemPresentationDto::WebSearch {
+            query,
+            query_truncated,
+        } => UiCompletedItemPresentation::WebSearch {
+            query: terminal_structured_text(&query),
+            query_truncated,
+        },
+        CompletedItemPresentationDto::Unknown => UiCompletedItemPresentation::Unknown,
     }
 }
 
@@ -2109,10 +2180,53 @@ fn tui_activity_status(status: ActivityStatusDto) -> UiActivityStatus {
     }
 }
 
-const fn activity_summary(
+fn activity_summary(
     kind: UiConversationActivityKind,
     status: &UiActivityStatus,
-) -> &'static str {
+    content: &str,
+    completed: Option<&CompletedItemPresentationDto>,
+) -> String {
+    if kind == UiConversationActivityKind::Progress && matches!(status, UiActivityStatus::Running) {
+        let progress = terminal_structured_text(content).replace('\n', " ");
+        if !progress.trim().is_empty() {
+            return progress;
+        }
+    }
+    if kind == UiConversationActivityKind::CompletedItem {
+        return match completed {
+            Some(CompletedItemPresentationDto::Command { .. }) => match status {
+                UiActivityStatus::Succeeded => "Command completed".to_owned(),
+                UiActivityStatus::Failed { .. } => "Command failed".to_owned(),
+                UiActivityStatus::Interrupted => "Command interrupted".to_owned(),
+                UiActivityStatus::Snapshot | UiActivityStatus::Running => {
+                    "Command activity".to_owned()
+                }
+            },
+            Some(CompletedItemPresentationDto::FileChange { changes, .. }) => format!(
+                "Changed {} file{}",
+                changes.len(),
+                if changes.len() == 1 { "" } else { "s" }
+            ),
+            Some(CompletedItemPresentationDto::Tool { name, .. }) => {
+                format!(
+                    "Tool: {}",
+                    terminal_structured_text(name).replace('\n', " ")
+                )
+            }
+            Some(CompletedItemPresentationDto::WebSearch { query, .. }) => format!(
+                "Web search: {}",
+                terminal_structured_text(query).replace('\n', " ")
+            ),
+            Some(CompletedItemPresentationDto::Unknown) | None => match status {
+                UiActivityStatus::Succeeded => "Completed an item".to_owned(),
+                UiActivityStatus::Failed { .. } => "An item failed".to_owned(),
+                UiActivityStatus::Interrupted => "An item was interrupted".to_owned(),
+                UiActivityStatus::Snapshot | UiActivityStatus::Running => {
+                    "Item activity".to_owned()
+                }
+            },
+        };
+    }
     match (kind, status) {
         (UiConversationActivityKind::AgentTurn, UiActivityStatus::Running) => "Agent is working…",
         (UiConversationActivityKind::AgentTurn, UiActivityStatus::Succeeded) => "Agent finished",
@@ -2134,17 +2248,9 @@ const fn activity_summary(
         (UiConversationActivityKind::Progress, _) => "Progress updated",
         (UiConversationActivityKind::Plan, _) => "Plan updated",
         (UiConversationActivityKind::Diff, _) => "Changes updated",
-        (UiConversationActivityKind::CompletedItem, UiActivityStatus::Succeeded) => {
-            "Completed an item"
-        }
-        (UiConversationActivityKind::CompletedItem, UiActivityStatus::Failed { .. }) => {
-            "An item failed"
-        }
-        (UiConversationActivityKind::CompletedItem, UiActivityStatus::Interrupted) => {
-            "An item was interrupted"
-        }
-        (UiConversationActivityKind::CompletedItem, _) => "Item activity",
+        (UiConversationActivityKind::CompletedItem, _) => unreachable!(),
     }
+    .to_owned()
 }
 
 fn tui_message_entry(
@@ -2408,6 +2514,78 @@ fn terminal_message_body(value: &str) -> String {
     output
 }
 
+fn terminal_structured_text(value: &str) -> String {
+    #[derive(Clone, Copy)]
+    enum EscapeState {
+        Plain,
+        Escape,
+        Csi,
+        Osc,
+        OscEscape,
+    }
+
+    let mut output = String::with_capacity(value.len());
+    let mut characters = value.chars().peekable();
+    let mut state = EscapeState::Plain;
+    while let Some(character) = characters.next() {
+        state = match state {
+            EscapeState::Escape => match character {
+                '[' => EscapeState::Csi,
+                ']' => EscapeState::Osc,
+                _ => EscapeState::Plain,
+            },
+            EscapeState::Csi => {
+                if ('@'..='~').contains(&character) {
+                    EscapeState::Plain
+                } else {
+                    EscapeState::Csi
+                }
+            }
+            EscapeState::Osc => match character {
+                '\u{7}' => EscapeState::Plain,
+                '\u{1b}' => EscapeState::OscEscape,
+                _ => EscapeState::Osc,
+            },
+            EscapeState::OscEscape => {
+                if character == '\\' {
+                    EscapeState::Plain
+                } else {
+                    EscapeState::Osc
+                }
+            }
+            EscapeState::Plain => match character {
+                '\u{1b}' => EscapeState::Escape,
+                '\u{9b}' => EscapeState::Csi,
+                '\u{9d}' => EscapeState::Osc,
+                '\r' => {
+                    if characters.peek() == Some(&'\n') {
+                        characters.next();
+                    }
+                    output.push('\n');
+                    EscapeState::Plain
+                }
+                '\n' => {
+                    output.push('\n');
+                    EscapeState::Plain
+                }
+                '\t' => {
+                    output.push_str("    ");
+                    EscapeState::Plain
+                }
+                character if character.is_control() => {
+                    output.push(' ');
+                    EscapeState::Plain
+                }
+                character => {
+                    output.push(character);
+                    EscapeState::Plain
+                }
+            },
+        };
+    }
+    output
+}
+
 fn full_id(id: Id32) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(64);
@@ -2507,7 +2685,8 @@ const fn timer_kind_order(kind: UiTimerKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        conversation_identity, conversation_title, local_project_command, ui_project_outcome,
+        conversation_identity, conversation_title, local_project_command, terminal_structured_text,
+        ui_project_outcome,
     };
     use crate::local_client::{
         LocalProjectCommand, LocalProjectOutcome, LocalProjectResourceCheck,
@@ -2517,6 +2696,20 @@ mod tests {
         ConversationContextDto, ConversationKeyDto, ConversationParticipantDto, Id32,
     };
     use hq_tui::{UiProjectAction, UiProjectOutcome};
+
+    #[test]
+    fn structured_terminal_text_strips_escape_sequences_and_preserves_lines() {
+        let value = "one\r\ntwo\rthree\t\x1b[31mred\x1b[0m\x1b]8;;https://bad\x07link\x1b]8;;\x07\u{009b}2Jfour\u{007f}";
+        let rendered = terminal_structured_text(value);
+        assert_eq!(rendered, "one\ntwo\nthree    redlinkfour ");
+        assert!(!rendered.contains("31m"));
+        assert!(!rendered.contains("https://bad"));
+        assert!(
+            rendered
+                .chars()
+                .all(|character| !character.is_control() || character == '\n')
+        );
+    }
 
     #[test]
     fn project_conversation_identity_retains_both_full_ids() {

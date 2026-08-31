@@ -3,8 +3,8 @@
 use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroU64, time::Duration};
 
 use hq_domain::{
-    ActivityKind, ActivityStatus, AgentId, BoundedVec, CommandDigest, ContentText, MessageId,
-    OperationId, ProjectId, ProviderSessionId, ResourceLocator, ShortText,
+    ActivityKind, ActivityStatus, AgentId, BoundedVec, CommandDigest, CompletedItemPresentation,
+    ContentText, MessageId, OperationId, ProjectId, ProviderSessionId, ResourceLocator, ShortText,
 };
 
 use crate::HarnessEnvironment;
@@ -305,6 +305,8 @@ pub struct HarnessActivity {
     pub content: ContentText,
     /// Whether normalization explicitly shortened provider content.
     pub truncated: bool,
+    /// Structured presentation for completed items; absent for other activity families.
+    pub completed: Option<Box<CompletedItemPresentation>>,
 }
 
 /// One source-ordered normalized provider event.

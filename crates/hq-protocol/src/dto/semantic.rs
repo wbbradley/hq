@@ -341,6 +341,11 @@ fn payload(
                 },
                 FailureClass::ScopePayloadMismatch,
             )?;
+            ensure(
+                (value.kind == model::ActivityKindDto::CompletedItem)
+                    == value.completed.0.is_some(),
+                FailureClass::PayloadInvariant,
+            )?;
             Output::HarnessActivityRecorded {
                 project: value
                     .project
@@ -365,6 +370,7 @@ fn payload(
                 status: activity_status(&value.status)?,
                 content: content(&value.content)?,
                 truncated: value.truncated,
+                completed: value.completed.0.as_ref().map(completed_item).transpose()?,
             }
         }
         model::BodyDto::AgentNameClaimed(value) => Output::AgentNameClaimed {
@@ -733,6 +739,61 @@ const fn activity_kind(value: model::ActivityKindDto) -> domain::ActivityKind {
         model::ActivityKindDto::Diff => domain::ActivityKind::Diff,
         model::ActivityKindDto::CompletedItem => domain::ActivityKind::CompletedItem,
     }
+}
+
+fn completed_item(
+    value: &model::CompletedItemPresentationDto,
+) -> Result<domain::CompletedItemPresentation, ProtocolError> {
+    Ok(match value {
+        model::CompletedItemPresentationDto::Command {
+            command,
+            output,
+            exit_code,
+            command_truncated,
+            output_truncated,
+        } => domain::CompletedItemPresentation::Command {
+            command: content(command)?,
+            output: output.0.as_ref().map(content).transpose()?,
+            exit_code: exit_code.0,
+            command_truncated: *command_truncated,
+            output_truncated: *output_truncated,
+        },
+        model::CompletedItemPresentationDto::FileChange {
+            changes,
+            changes_truncated,
+        } => domain::CompletedItemPresentation::FileChange {
+            changes: domain::BoundedVec::new(
+                changes
+                    .iter()
+                    .map(|change| {
+                        Ok(domain::CompletedFileChange {
+                            path: content(&change.path)?,
+                            diff: change.diff.0.as_ref().map(content).transpose()?,
+                            path_truncated: change.path_truncated,
+                            diff_truncated: change.diff_truncated,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ProtocolError>>()?,
+            )
+            .map_err(|_| failure(FailureClass::DomainValueInvalid))?,
+            changes_truncated: *changes_truncated,
+        },
+        model::CompletedItemPresentationDto::Tool {
+            name,
+            name_truncated,
+        } => domain::CompletedItemPresentation::Tool {
+            name: short(name)?,
+            name_truncated: *name_truncated,
+        },
+        model::CompletedItemPresentationDto::WebSearch {
+            query,
+            query_truncated,
+        } => domain::CompletedItemPresentation::WebSearch {
+            query: content(query)?,
+            query_truncated: *query_truncated,
+        },
+        model::CompletedItemPresentationDto::Unknown => domain::CompletedItemPresentation::Unknown,
+    })
 }
 
 const fn initial_state(value: model::InitialStateDto) -> domain::InitialProjectState {

@@ -235,6 +235,7 @@ fn project_output_and_activity_join_only_their_initiating_exchange_for_every_arr
             status: ActivityStatus::Succeeded,
             content: ContentText::new("Codex turn completed")?,
             truncated: false,
+            completed: None,
         },
     )?;
     let variable = vec![
@@ -817,6 +818,8 @@ fn activity_fact(
             },
             content: ContentText::new(content)?,
             truncated: false,
+            completed: (kind == ActivityKind::CompletedItem)
+                .then_some(hq_domain::CompletedItemPresentation::Unknown),
         },
     )?)
 }
@@ -920,6 +923,7 @@ fn attributed_activity_requires_its_exact_dispatch_and_agent_source() -> Result<
                 status: ActivityStatus::Succeeded,
                 content: ContentText::new("complete")?,
                 truncated: false,
+                completed: None,
             },
         )?)
     };

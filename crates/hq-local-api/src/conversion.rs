@@ -3,16 +3,17 @@
 use crate::protocol::v1::{
     AgentRetirementOutcomeDto, AgentRetirementRequestDto, AgentSelectionCandidateDto,
     AgentSessionBindingDto, AgentSessionNameCandidateDto, AgentSessionRequestDto,
-    AgentSessionResultDto, AuthoritativeSnapshotDto, CanonicalEvidenceDto, ConversationContextDto,
-    ConversationEntryDto, ConversationKeyDto, ConversationPageDto, ConversationPageRequest,
-    ConversationParticipantDto, DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto,
-    EffectRequestDto, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, HealthDomainDto, Id32,
-    InvalidationTopic, MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS,
-    MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto,
-    MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto, MailboxDraftDto,
-    MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
-    MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
-    PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
+    AgentSessionResultDto, AuthoritativeSnapshotDto, CanonicalEvidenceDto, ConversationActivityDto,
+    ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationPageDto,
+    ConversationPageRequest, ConversationParticipantDto, DeviceGrantDto, DomainErrorDto,
+    DomainHealthDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse,
+    EvidenceIngestOutcomeDto, HealthDomainDto, Id32, InvalidationTopic,
+    MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MailboxAddressDto,
+    MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto,
+    MailboxDraftDeleteRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
+    MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto,
+    MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
+    PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCommandStageDto, ProjectExternalStateWarningDto,
     ProviderAvailabilityDto, ProviderCatalogDto, RelayAccessDto, RelayAuthenticationDto,
     RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto,
@@ -1903,14 +1904,81 @@ fn conversation_entry_to_v1(entry: &ConversationEntry) -> ConversationEntryDto {
                 thread_cancelled: entry.thread.as_ref().is_some_and(|thread| thread.cancelled),
             }))
         }
-        ConversationEntry::Activity(activity) => ConversationEntryDto::Activity {
-            fact_id: id32(activity.fact_id.as_bytes()),
-            activity_kind: conversation_activity_kind_to_v1(activity.kind),
-            sequence: activity.sequence.get(),
-            status: activity_status_to_v1(&activity.status),
-            content: activity.content.as_str().to_owned(),
-            truncated: activity.truncated,
+        ConversationEntry::Activity(activity) => {
+            ConversationEntryDto::Activity(Box::new(ConversationActivityDto {
+                fact_id: id32(activity.fact_id.as_bytes()),
+                activity_kind: conversation_activity_kind_to_v1(activity.kind),
+                sequence: activity.sequence.get(),
+                source_installation: id32(activity.source.installation_id().as_bytes()),
+                source_mailbox: id32(activity.source.mailbox_id().as_bytes()),
+                provider: activity.correlation.provider().as_str().to_owned(),
+                session: activity.correlation.session().as_str().to_owned(),
+                operation: id32(activity.correlation.operation().as_bytes()),
+                item: activity
+                    .item
+                    .as_ref()
+                    .map(|value| value.as_str().to_owned()),
+                logical_key: activity.logical_key.as_str().to_owned(),
+                runtime: activity.runtime.as_str().to_owned(),
+                occurred_at_unix_ms: activity.occurred_at.as_unix_millis(),
+                status: activity_status_to_v1(&activity.status),
+                content: activity.content.as_str().to_owned(),
+                truncated: activity.truncated,
+                completed: activity.completed.as_ref().map(completed_item_to_v1),
+            }))
+        }
+    }
+}
+
+fn completed_item_to_v1(
+    value: &hq_domain::CompletedItemPresentation,
+) -> crate::protocol::v1::CompletedItemPresentationDto {
+    use crate::protocol::v1::{CompletedFileChangeDto, CompletedItemPresentationDto};
+    match value {
+        hq_domain::CompletedItemPresentation::Command {
+            command,
+            output,
+            exit_code,
+            command_truncated,
+            output_truncated,
+        } => CompletedItemPresentationDto::Command {
+            command: command.as_str().to_owned(),
+            output: output.as_ref().map(|value| value.as_str().to_owned()),
+            exit_code: *exit_code,
+            command_truncated: *command_truncated,
+            output_truncated: *output_truncated,
         },
+        hq_domain::CompletedItemPresentation::FileChange {
+            changes,
+            changes_truncated,
+        } => CompletedItemPresentationDto::FileChange {
+            changes: changes
+                .as_slice()
+                .iter()
+                .map(|change| CompletedFileChangeDto {
+                    path: change.path.as_str().to_owned(),
+                    diff: change.diff.as_ref().map(|value| value.as_str().to_owned()),
+                    path_truncated: change.path_truncated,
+                    diff_truncated: change.diff_truncated,
+                })
+                .collect(),
+            changes_truncated: *changes_truncated,
+        },
+        hq_domain::CompletedItemPresentation::Tool {
+            name,
+            name_truncated,
+        } => CompletedItemPresentationDto::Tool {
+            name: name.as_str().to_owned(),
+            name_truncated: *name_truncated,
+        },
+        hq_domain::CompletedItemPresentation::WebSearch {
+            query,
+            query_truncated,
+        } => CompletedItemPresentationDto::WebSearch {
+            query: query.as_str().to_owned(),
+            query_truncated: *query_truncated,
+        },
+        hq_domain::CompletedItemPresentation::Unknown => CompletedItemPresentationDto::Unknown,
     }
 }
 

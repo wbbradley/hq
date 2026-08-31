@@ -3,7 +3,8 @@
 use std::{collections::BTreeMap, fmt::Write as _, num::NonZeroU64};
 
 use hq_domain::{
-    ActivityKind, ActivityStatus, CONTENT_MAX_BYTES, ContentText, ErrorCode, MessageId,
+    ActivityKind, ActivityStatus, BoundedVec, CONTENT_MAX_BYTES, CompletedFileChange,
+    CompletedItemPresentation, ContentText, ErrorCode, MAX_COMPLETED_FILE_CHANGES, MessageId,
     OperationId, SHORT_TEXT_MAX_BYTES, ShortText,
 };
 use hq_harness::{HarnessActivity, HarnessEvent, HarnessOutput, HarnessOutputKind};
@@ -66,6 +67,7 @@ impl Normalizer {
                 "operation",
                 ActivityStatus::Running,
                 "Codex turn started",
+                None,
             );
         }
         let status = turn_status(&value.turn.status)?;
@@ -82,6 +84,7 @@ impl Normalizer {
             "operation",
             status,
             content,
+            None,
         )
     }
 
@@ -102,6 +105,7 @@ impl Normalizer {
                 content,
                 status,
                 logical_key,
+                presentation,
             } => self.activity(
                 operation_id,
                 Some(&value.item.id),
@@ -109,6 +113,7 @@ impl Normalizer {
                 logical_key,
                 status,
                 &content,
+                Some(presentation),
             ),
         }
     }
@@ -129,6 +134,7 @@ impl Normalizer {
             "plan",
             ActivityStatus::Snapshot,
             &format_plan(&value),
+            None,
         )
     }
 
@@ -152,6 +158,7 @@ impl Normalizer {
                 .as_deref()
                 .filter(|content| !content.is_empty())
                 .unwrap_or("(no changes)"),
+            None,
         )
     }
 
@@ -174,9 +181,11 @@ impl Normalizer {
             "progress",
             ActivityStatus::Running,
             &value.message,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn activity(
         &mut self,
         operation_id: OperationId,
@@ -185,6 +194,7 @@ impl Normalizer {
         logical_key: &str,
         status: ActivityStatus,
         content: &str,
+        completed: Option<CompletedItemPresentation>,
     ) -> Option<HarnessEvent> {
         self.sequence = self.sequence.saturating_add(1).max(1);
         let (content, truncated) = bounded(content, CONTENT_MAX_BYTES);
@@ -203,6 +213,7 @@ impl Normalizer {
             })
             .ok()?,
             truncated,
+            completed: completed.map(Box::new),
         }))
     }
 }
@@ -266,6 +277,7 @@ enum CompletedItem {
         content: String,
         status: ActivityStatus,
         logical_key: &'static str,
+        presentation: CompletedItemPresentation,
     },
 }
 
@@ -282,6 +294,13 @@ fn completed_item(item: &ThreadItem) -> Option<CompletedItem> {
             content: item.query.clone(),
             status: ActivityStatus::Succeeded,
             logical_key: "web-search",
+            presentation: {
+                let (query, query_truncated) = bounded(&item.query, CONTENT_MAX_BYTES);
+                CompletedItemPresentation::WebSearch {
+                    query: ContentText::new(query).ok()?,
+                    query_truncated,
+                }
+            },
         }),
         _ => None,
     }
@@ -305,6 +324,24 @@ fn command_item(item: &ThreadItem) -> Option<CompletedItem> {
         content,
         status,
         logical_key: "command",
+        presentation: {
+            let (command, command_truncated) = bounded(&item.command, CONTENT_MAX_BYTES);
+            let (output, output_truncated) = item
+                .aggregated_output
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(|value| bounded(value, CONTENT_MAX_BYTES))
+                .map_or((None, false), |(value, truncated)| {
+                    (ContentText::new(value).ok(), truncated)
+                });
+            CompletedItemPresentation::Command {
+                command: ContentText::new(command).ok()?,
+                output,
+                exit_code: item.exit_code,
+                command_truncated,
+                output_truncated,
+            }
+        },
     })
 }
 
@@ -329,6 +366,33 @@ fn file_item(item: &ThreadItem) -> Option<CompletedItem> {
         content,
         status,
         logical_key: "file-change",
+        presentation: {
+            let changes_truncated = item.changes.len() > MAX_COMPLETED_FILE_CHANGES;
+            let changes = item
+                .changes
+                .iter()
+                .take(MAX_COMPLETED_FILE_CHANGES)
+                .map(|change| {
+                    let (path, path_truncated) = bounded(&change.path, CONTENT_MAX_BYTES);
+                    let (diff, diff_truncated) = if change.diff.is_empty() {
+                        (None, false)
+                    } else {
+                        let (diff, truncated) = bounded(&change.diff, CONTENT_MAX_BYTES);
+                        (ContentText::new(diff).ok(), truncated)
+                    };
+                    Some(CompletedFileChange {
+                        path: ContentText::new(path).ok()?,
+                        diff,
+                        path_truncated,
+                        diff_truncated,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            CompletedItemPresentation::FileChange {
+                changes: BoundedVec::new(changes).ok()?,
+                changes_truncated,
+            }
+        },
     })
 }
 
@@ -339,10 +403,18 @@ fn tool_item(item: &ThreadItem) -> Option<CompletedItem> {
         "collabAgentToolCall" => format!("collab/{}", item.tool),
         _ => item.tool.clone(),
     };
-    (!name.trim_matches('/').is_empty()).then_some(CompletedItem::Activity {
+    if name.trim_matches('/').is_empty() {
+        return None;
+    }
+    let (bounded_name, name_truncated) = bounded(&name, SHORT_TEXT_MAX_BYTES);
+    Some(CompletedItem::Activity {
         content: name,
         status,
         logical_key: "tool",
+        presentation: CompletedItemPresentation::Tool {
+            name: ShortText::new(bounded_name).ok()?,
+            name_truncated,
+        },
     })
 }
 
@@ -407,6 +479,7 @@ fn stable_message_id(value: &[u8]) -> MessageId {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -434,6 +507,121 @@ mod tests {
                 status: ActivityStatus::Running,
                 ..
             })]
+        ));
+    }
+
+    #[test]
+    fn completed_items_preserve_bounded_structured_fields_without_provider_payloads() {
+        let command: ThreadItem = serde_json::from_value(json!({
+            "type": "commandExecution",
+            "id": "command",
+            "status": "failed",
+            "command": "printf 'one\ntwo'",
+            "aggregatedOutput": "first\nsecond\nthird\nfourth",
+            "exitCode": 17,
+            "processId": 4242,
+            "secretEnvironment": {"TOKEN": "excluded"}
+        }))
+        .expect("command decodes");
+        let Some(CompletedItem::Activity { presentation, .. }) = completed_item(&command) else {
+            panic!("command normalizes");
+        };
+        assert!(matches!(
+            presentation,
+            CompletedItemPresentation::Command {
+                command,
+                output: Some(output),
+                exit_code: Some(17),
+                command_truncated: false,
+                output_truncated: false,
+            } if command.as_str() == "printf 'one\ntwo'"
+                && output.as_str() == "first\nsecond\nthird\nfourth"
+        ));
+
+        let file: ThreadItem = serde_json::from_value(json!({
+            "type": "fileChange",
+            "id": "files",
+            "status": "completed",
+            "changes": [
+                {"path": "src/main.rs", "diff": "@@ -1 +1 @@"},
+                {"path": "README.md"}
+            ]
+        }))
+        .expect("file item decodes");
+        let Some(CompletedItem::Activity { presentation, .. }) = completed_item(&file) else {
+            panic!("file item normalizes");
+        };
+        assert!(matches!(
+            presentation,
+            CompletedItemPresentation::FileChange { changes, changes_truncated: false }
+                if changes.as_slice().len() == 2
+                    && changes.as_slice()[0].path.as_str() == "src/main.rs"
+                    && changes.as_slice()[1].diff.is_none()
+        ));
+
+        for (input, expected) in [
+            (
+                json!({"type":"mcpToolCall","id":"tool","status":"completed","server":"git","tool":"status","arguments":{"secret":"excluded"},"result":"excluded"}),
+                "git/status",
+            ),
+            (
+                json!({"type":"dynamicToolCall","id":"tool","status":"completed","tool":"render","arguments":{"secret":"excluded"}}),
+                "render",
+            ),
+            (
+                json!({"type":"collabAgentToolCall","id":"tool","status":"completed","tool":"send_message","prompt":"excluded"}),
+                "collab/send_message",
+            ),
+        ] {
+            let item: ThreadItem = serde_json::from_value(input).expect("tool decodes");
+            assert!(matches!(
+                completed_item(&item),
+                Some(CompletedItem::Activity {
+                    presentation: CompletedItemPresentation::Tool { name, .. },
+                    ..
+                }) if name.as_str() == expected
+            ));
+        }
+
+        let search: ThreadItem = serde_json::from_value(json!({
+            "type": "webSearch",
+            "id": "search",
+            "query": "typed query",
+            "results": [{"title":"excluded", "body":"excluded"}]
+        }))
+        .expect("search decodes");
+        assert!(matches!(
+            completed_item(&search),
+            Some(CompletedItem::Activity {
+                presentation: CompletedItemPresentation::WebSearch { query, .. },
+                ..
+            }) if query.as_str() == "typed query"
+        ));
+    }
+
+    #[test]
+    fn command_fields_truncate_on_utf8_boundaries_and_empty_output_stays_absent() {
+        let command = format!("{}é", "x".repeat(CONTENT_MAX_BYTES));
+        let item: ThreadItem = serde_json::from_value(json!({
+            "type": "commandExecution",
+            "id": "command",
+            "status": "completed",
+            "command": command,
+            "aggregatedOutput": "",
+        }))
+        .expect("command decodes");
+        assert!(matches!(
+            completed_item(&item),
+            Some(CompletedItem::Activity {
+                presentation: CompletedItemPresentation::Command {
+                    command,
+                    output: None,
+                    command_truncated: true,
+                    output_truncated: false,
+                    ..
+                },
+                ..
+            }) if command.as_str().len() == CONTENT_MAX_BYTES
         ));
     }
 }

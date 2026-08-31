@@ -89,8 +89,19 @@ runtime lifetimes for one logical key are reported as a normalized conflict. Com
 individual durable history rather than coalescing.
 
 Every selected or durable `ActivityView` retains its closed activity kind explicitly alongside
-status, content, and truncation. Consumers therefore never infer kind from an activity projection
-key, provider prose, or executable detail.
+full source/provider/session/operation/item correlation, logical/runtime identity, occurrence time,
+status, content, and truncation. Durable completed items additionally carry a closed command,
+file-change, tool, web-search, or explicit-unknown presentation. Command source, output, exit code,
+file paths/diffs, tool name, and query remain separate bounded fields with truncation evidence;
+consumers therefore never infer kind or field boundaries from provider prose.
+
+Ordinary conversation pages omit replaceable progress and running `AgentTurn` records from durable
+history. The store derives one live tail below pagination: for each fully qualified running
+operation it selects the canonically latest non-empty progress winner across item keys, falling back
+to the running turn, then exposes the canonically latest active operation as the final row. A
+terminal turn removes that operation from live selection and remains once in canonical history.
+Continuation pages never carry a second copy, while the TUI retains and repositions the typed live
+row after appended durable entries.
 
 Canonical activity facts are permanent. The disposable view retains snapshot winners, every
 completed record, and the canonically newest 200 progress winners per source/provider session.

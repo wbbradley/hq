@@ -365,6 +365,60 @@ pub enum UiActivityStatus {
     Interrupted,
 }
 
+/// One terminal-safe changed-file presentation record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiCompletedFileChange {
+    /// Provider-reported changed path.
+    pub path: String,
+    /// Optional diff retained for technical detail.
+    pub diff: Option<String>,
+    /// Whether the path was shortened.
+    pub path_truncated: bool,
+    /// Whether the diff was shortened.
+    pub diff_truncated: bool,
+}
+
+/// Closed completed-item presentation independent from flattened activity detail.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiCompletedItemPresentation {
+    /// Completed command execution.
+    Command {
+        /// Terminal-safe multiline command source.
+        command: String,
+        /// Optional terminal-safe multiline output.
+        output: Option<String>,
+        /// Provider-reported exit code.
+        exit_code: Option<i64>,
+        /// Whether command source was shortened.
+        command_truncated: bool,
+        /// Whether output was shortened.
+        output_truncated: bool,
+    },
+    /// Completed file changes.
+    FileChange {
+        /// Bounded per-file presentation records.
+        changes: Vec<UiCompletedFileChange>,
+        /// Whether additional records were omitted.
+        changes_truncated: bool,
+    },
+    /// Completed tool call.
+    Tool {
+        /// Retained server/tool or tool-family name.
+        name: String,
+        /// Whether the name was shortened.
+        name_truncated: bool,
+    },
+    /// Completed web search.
+    WebSearch {
+        /// Retained query.
+        query: String,
+        /// Whether the query was shortened.
+        query_truncated: bool,
+    },
+    /// Explicit unknown completed family.
+    Unknown,
+}
+
 /// Closed ordinary presentation for one conversation entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiConversationEntryPresentation {
@@ -387,6 +441,8 @@ pub enum UiConversationEntryPresentation {
         detail: String,
         /// Whether the provider boundary explicitly shortened the detail.
         truncated: bool,
+        /// Structured completed-item presentation when available.
+        completed: Option<UiCompletedItemPresentation>,
     },
 }
 
@@ -438,6 +494,24 @@ pub enum UiTechnicalSection {
     Activity {
         /// Positive source sequence selected by the reducer.
         sequence: u64,
+        /// Exact source installation identity.
+        source_installation: String,
+        /// Exact source mailbox identity.
+        source_mailbox: String,
+        /// Exact provider namespace.
+        provider: String,
+        /// Exact provider-scoped session identity.
+        session: String,
+        /// Exact operation identity.
+        operation: String,
+        /// Optional provider item identity.
+        item: Option<String>,
+        /// Stable coalescing/history key.
+        logical_key: String,
+        /// Bounded runtime identity.
+        runtime: String,
+        /// Signed occurrence time in Unix milliseconds.
+        occurred_at_unix_ms: i64,
         /// Closed activity status.
         status: UiActivityStatus,
         /// Whether content was explicitly truncated at authoring.
@@ -7535,7 +7609,7 @@ fn conversation_loaded(
         });
     }
     if let Some(conversation) = &mut model.conversation {
-        move_running_agent_turns_to_tail(&mut conversation.entries);
+        place_live_activity_at_tail(&mut conversation.entries);
     }
     model.conversation_anchor = model.conversation.as_ref().and_then(|conversation| {
         if followed_tail || previous_anchor.is_none() {
@@ -7567,13 +7641,14 @@ fn conversation_loaded(
     Ok(())
 }
 
-fn move_running_agent_turns_to_tail(entries: &mut Vec<UiConversationEntry>) {
+fn place_live_activity_at_tail(entries: &mut Vec<UiConversationEntry>) {
     let (mut settled, running): (Vec<_>, Vec<_>) =
         std::mem::take(entries).into_iter().partition(|entry| {
             !matches!(
                 entry.presentation,
                 UiConversationEntryPresentation::Activity {
-                    kind: UiConversationActivityKind::AgentTurn,
+                    kind: UiConversationActivityKind::AgentTurn
+                        | UiConversationActivityKind::Progress,
                     status: UiActivityStatus::Running,
                     ..
                 }
@@ -7876,7 +7951,7 @@ fn append_committed_message(model: &mut UiModel, draft: &UiMailboxDraft, message
         }),
         technical: Vec::new(),
     });
-    move_running_agent_turns_to_tail(&mut conversation.entries);
+    place_live_activity_at_tail(&mut conversation.entries);
     model.conversation_anchor = Some(id);
     model.focus = UiFocus::Conversation;
     model.technical_visible = false;

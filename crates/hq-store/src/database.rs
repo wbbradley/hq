@@ -30,9 +30,9 @@ use hq_protocol::{
     DispatchOutcome, MAX_EVENT_BYTES, ProtocolNamespace, RawEventBytes, VerifiedSemanticFact,
 };
 use hq_reducer::{
-    AgentLifecycle, AgentProjection, AgentProjectionKey, AuthorityPolicy, AuthorityProjection,
-    AuthorityProjectionKey, ConversationKey, ConversationProjection, DecisionStatus,
-    MembershipState, MessageView, ProjectProjection, ProjectProjectionKey,
+    ActivityView, AgentLifecycle, AgentProjection, AgentProjectionKey, AuthorityPolicy,
+    AuthorityProjection, AuthorityProjectionKey, ConversationKey, ConversationProjection,
+    DecisionStatus, MembershipState, MessageView, ProjectProjection, ProjectProjectionKey,
 };
 use rusqlite::{
     Connection, Error as SqlError, ErrorCode, OpenFlags, OptionalExtension, Transaction,
@@ -654,7 +654,18 @@ CREATE TABLE conversation_activities (
     status INTEGER NOT NULL CHECK(status BETWEEN 1 AND 5),
     failure_reason TEXT NOT NULL CHECK(typeof(failure_reason) = 'text' AND length(CAST(failure_reason AS BLOB)) <= 96),
     content TEXT NOT NULL CHECK(typeof(content) = 'text' AND length(CAST(content AS BLOB)) BETWEEN 1 AND 16384),
-    truncated INTEGER NOT NULL CHECK(truncated IN (0, 1))
+    truncated INTEGER NOT NULL CHECK(truncated IN (0, 1)),
+    source_installation BLOB NOT NULL CHECK(typeof(source_installation) = 'blob' AND length(source_installation) = 32),
+    source_mailbox BLOB NOT NULL CHECK(typeof(source_mailbox) = 'blob' AND length(source_mailbox) = 32),
+    provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) BETWEEN 1 AND 64),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) BETWEEN 1 AND 256),
+    operation BLOB NOT NULL CHECK(typeof(operation) = 'blob' AND length(operation) = 32),
+    item_present INTEGER NOT NULL CHECK(item_present IN (0, 1)),
+    item TEXT NOT NULL CHECK(typeof(item) = 'text' AND length(CAST(item AS BLOB)) <= 128),
+    logical_key TEXT NOT NULL CHECK(typeof(logical_key) = 'text' AND length(CAST(logical_key AS BLOB)) BETWEEN 1 AND 128),
+    runtime TEXT NOT NULL CHECK(typeof(runtime) = 'text' AND length(CAST(runtime AS BLOB)) BETWEEN 1 AND 128),
+    occurred_at INTEGER NOT NULL,
+    completed BLOB NOT NULL CHECK(typeof(completed) = 'blob' AND length(completed) <= 2200000)
 ) STRICT, WITHOUT ROWID;
 
 CREATE UNIQUE INDEX conversation_activities_by_fact_id ON conversation_activities(fact_id);
@@ -1642,13 +1653,29 @@ impl Database {
         if !persisted {
             return Ok(Page::new(Vec::new(), None));
         }
-        let row_limit = i64::try_from(limit + 1)
+        let live_tail = if cursor.is_none() {
+            load_conversation_live_tail(&self.connection, key_digest)?
+        } else {
+            None
+        };
+        let history_limit = if live_tail.is_some() {
+            limit.saturating_sub(1).max(1)
+        } else {
+            limit
+        };
+        let row_limit = i64::try_from(history_limit + 1)
             .map_err(|_| StoreError::new(StoreErrorClass::InvalidOperationalRequest))?;
         let mut statement = self
             .connection
             .prepare(
                 "SELECT position, fact_id, entry_kind FROM reduction_conversation_order \
-                 WHERE key_digest = ?1 AND position > ?2 ORDER BY position LIMIT ?3",
+                 WHERE key_digest = ?1 AND position > ?2 \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM conversation_activities activity \
+                     WHERE activity.fact_id = reduction_conversation_order.fact_id \
+                       AND (activity.kind = 2 OR (activity.kind = 6 AND activity.status = 2)) \
+                   ) \
+                 ORDER BY position LIMIT ?3",
             )
             .map_err(sql_error)?;
         let rows = statement
@@ -1660,20 +1687,13 @@ impl Database {
                 ))
             })
             .map_err(sql_error)?;
-        let mut selected = Vec::with_capacity(limit + 1);
-        for (offset, row) in rows.enumerate() {
-            let (position, fact_id, entry_kind) = row.map_err(sql_error)?;
-            let expected = after
-                .checked_add(1)
-                .and_then(|value| value.checked_add(i64::try_from(offset).ok()?))
-                .ok_or_else(|| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))?;
-            if position != expected {
-                return Err(StoreError::new(StoreErrorClass::RebuildableStateCorrupt));
-            }
+        let mut selected = Vec::with_capacity(history_limit + 1);
+        for row in rows {
+            let (_position, fact_id, entry_kind) = row.map_err(sql_error)?;
             selected.push((FactId::from_bytes(fixed_bytes(fact_id)?), entry_kind));
         }
-        let has_more = selected.len() > limit;
-        selected.truncate(limit);
+        let has_more = selected.len() > history_limit;
+        selected.truncate(history_limit);
         let next_cursor = if has_more {
             let fact_id = selected
                 .last()
@@ -1683,10 +1703,13 @@ impl Database {
         } else {
             None
         };
-        let items = selected
+        let mut items = selected
             .into_iter()
             .map(|(fact_id, kind)| conversation::load_entry(&self.connection, fact_id, kind))
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(live_tail) = live_tail {
+            items.push(ConversationEntry::Activity(Box::new(live_tail)));
+        }
         Ok(Page::new(items, next_cursor))
     }
 
@@ -1850,6 +1873,63 @@ impl Database {
     ) -> Result<Vec<crate::StoredProjectSaga>, StoreError> {
         project_saga::load_runnable(&self.connection, limit)
     }
+}
+
+fn load_conversation_live_tail(
+    connection: &Connection,
+    key_digest: [u8; 32],
+) -> Result<Option<ActivityView>, StoreError> {
+    type OperationKey = (MailboxAddress, String, String, OperationId);
+    type Candidate = (i64, ActivityView);
+
+    let mut statement = connection
+        .prepare(
+            "SELECT ordered.position, ordered.fact_id \
+             FROM reduction_conversation_order ordered \
+             JOIN conversation_activities activity ON activity.fact_id = ordered.fact_id \
+             WHERE ordered.key_digest = ?1 AND activity.kind IN (2, 6) \
+             ORDER BY ordered.position",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map([key_digest.as_slice()], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(sql_error)?;
+    let mut operations = BTreeMap::<OperationKey, (Option<Candidate>, Option<Candidate>)>::new();
+    for row in rows {
+        let (position, fact_id) = row.map_err(sql_error)?;
+        let fact_id = FactId::from_bytes(fixed_bytes(fact_id)?);
+        let ConversationEntry::Activity(activity) =
+            conversation::load_entry(connection, fact_id, 2)?
+        else {
+            return Err(StoreError::new(StoreErrorClass::RebuildableStateCorrupt));
+        };
+        let activity = *activity;
+        let key = (
+            activity.source,
+            activity.correlation.provider().as_str().to_owned(),
+            activity.correlation.session().as_str().to_owned(),
+            activity.correlation.operation(),
+        );
+        let candidates = operations.entry(key).or_default();
+        match (activity.kind, &activity.status) {
+            (hq_domain::ActivityKind::AgentTurn, hq_domain::ActivityStatus::Running) => {
+                candidates.0 = Some((position, activity));
+            }
+            (hq_domain::ActivityKind::Progress, hq_domain::ActivityStatus::Running)
+                if !activity.content.as_str().trim().is_empty() =>
+            {
+                candidates.1 = Some((position, activity));
+            }
+            _ => {}
+        }
+    }
+    Ok(operations
+        .into_values()
+        .filter_map(|(running, progress)| running.map(|fallback| progress.unwrap_or(fallback)))
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, activity)| activity))
 }
 
 fn conversation_summaries(

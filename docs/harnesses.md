@@ -148,7 +148,7 @@ collide with different content.
 ### Canonical activity stream
 
 Normalized operation status, plan, diff, completed command, completed file change, completed tool
-call, and progress records are schema-3 `harness.activity` events. They use the same signing,
+call, web search, and progress records become FCT-022 `HarnessActivityRecorded` facts. They use the same signing,
 canonical log, active-human-account audience, membership parents, per-device encrypted outbox,
 inbound authorization, replay, and rebuild path as account messages. They remain a separate
 non-message stream: an activity is not a mutation receipt, inbox row, unread unit, delivery claim,
@@ -158,21 +158,24 @@ Canonical source identity is the originating installation and agent mailbox. Pro
 operation/item values remain opaque correlation. Projection keys include both identities, so equal
 provider session IDs from different providers or source mailboxes cannot merge. Operation, plan,
 and diff snapshots are latest-wins; repeated item/progress keys coalesce deterministically; terminal
-operation and completed item records remain logical history. Titles are limited to 1 KiB, general
-and command bodies to 12 KiB, and progress to 4 KiB. UTF-8 truncation is explicit, and authoring may
-shorten further after JSON escaping to fit the complete 64 KiB signed wire envelope.
+operation and completed item records remain logical history. Completed items retain a closed
+provider-neutral presentation: command source, aggregated output and exit code; bounded file
+path/diff records; server/tool or tool-family name; or web query. Adapter-only arguments, results,
+process IDs, web results, and other provider payload are excluded. Every string and collection is
+bounded independently at a UTF-8 boundary with explicit truncation evidence.
 
 The canonical log retains superseded activity. The disposable SQLite projection retains only
 selected winners and the newest 200 progress records per source/provider session; a rebuild
-reproduces that projection. The legacy activity query returns at most 1,000 chronological projected
-rows. Mixed `conversation/entries` pages place typed messages and projected activity in reducer
-display order; project-attributed activity joins the exact project/thread exchange captured by its
-dispatch, while direct activity remains provider-session grouped. The TUI consumes that order
-directly rather than sorting occurrence timestamps.
+reproduces that projection. Ordinary conversation pages retain canonical durable order but do not
+emit replaceable progress or running-turn facts as history. The initial indexed page adds one
+derived live tail: the latest useful progress for a fully correlated running operation, or the
+running-turn fallback. Terminal evidence removes that tail and remains once in history.
+Project-attributed activity joins the exact project/thread exchange captured by its dispatch, while
+direct activity remains provider-session grouped.
 
-The TUI hides non-actionable activity cards in the selected provider/session conversation by
-default. Focus the message pane and press `e` to show every activity card fully expanded or hide
-them all again. Visible cards disclose failed states and truncation. Activity
+The TUI keeps activity compact and non-actionable. Typed command previews disclose at most three
+terminal-safe output lines plus status and omission cues; full bounded detail is available through
+the inspector. Visible rows disclose failed states and truncation. Activity
 never creates or selects an inbox row and does not affect open/unread counts, replies,
 archive/restore, drafts, action-unit grouping, final-answer styling, or delivery. Manual scrolling
 anchors only to logical message IDs across coalescing, rebuild reordering, and resize.

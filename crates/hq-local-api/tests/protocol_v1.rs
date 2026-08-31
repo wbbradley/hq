@@ -16,16 +16,16 @@ use hq_local_api::protocol::v1::{
     ActivityStatusDto, AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
     AgentSelectionCandidateDto, AgentSessionBindingDto, AgentSessionNameCandidateDto,
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
-    CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationActivityKindDto,
-    ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationMessageDto,
-    ConversationPageDto, ConversationPageRequest, ConversationParticipantDto, DecodeError,
-    DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto,
-    EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, FrameDecoder,
-    HealthDomainDto, Id32, InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest,
-    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MAX_PROVIDER_CATALOG_ITEMS,
-    MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto,
-    MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto, MailboxDraftDto,
-    MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+    CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, CompletedItemPresentationDto,
+    ConversationActivityDto, ConversationActivityKindDto, ConversationContextDto,
+    ConversationEntryDto, ConversationKeyDto, ConversationMessageDto, ConversationPageDto,
+    ConversationPageRequest, ConversationParticipantDto, DecodeError, DeviceGrantDto,
+    DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto, EncodeError, ErrorClass,
+    ErrorResponse, EvidenceIngestOutcomeDto, FrameDecoder, HealthDomainDto, Id32,
+    InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest, LifecycleState, LifecycleStatus,
+    MAX_FRAME_BYTES, MAX_PROVIDER_CATALOG_ITEMS, MailboxAddressDto, MailboxCommandActionDto,
+    MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto,
+    MailboxDraftDto, MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
     MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCreationRequestDto, ProjectExternalStateWarningDto,
@@ -1102,33 +1102,88 @@ fn conversation_message_page_preserves_addressing_state_and_ready_thread_semanti
 
 #[test]
 fn conversation_activity_status_preserves_typed_failure_reason() {
-    let entry = ConversationEntryDto::Activity {
+    let entry = ConversationEntryDto::Activity(Box::new(ConversationActivityDto {
         fact_id: Id32::new([1; 32]),
         activity_kind: ConversationActivityKindDto::AgentTurn,
         sequence: 1,
+        source_installation: Id32::new([3; 32]),
+        source_mailbox: Id32::new([4; 32]),
+        provider: "provider".to_owned(),
+        session: "session".to_owned(),
+        operation: Id32::new([2; 32]),
+        item: None,
+        logical_key: "operation".to_owned(),
+        runtime: "runtime".to_owned(),
+        occurred_at_unix_ms: 1,
         status: ActivityStatusDto::Failed {
             reason: "provider_unavailable".to_owned(),
         },
         content: "operation failed".to_owned(),
         truncated: false,
-    };
+        completed: None,
+    }));
     let page = ConversationPageDto::new(vec![entry], None).expect("typed activity validates");
     round_trip(&WireMessage::Response(ResponseEnvelope::success(
         RequestId::new(1).expect("nonzero"),
         ResponseResult::ConversationPage(page),
     )));
 
-    let invalid = ConversationEntryDto::Activity {
+    let invalid = ConversationEntryDto::Activity(Box::new(ConversationActivityDto {
         fact_id: Id32::new([1; 32]),
         activity_kind: ConversationActivityKindDto::AgentTurn,
         sequence: 1,
+        source_installation: Id32::new([3; 32]),
+        source_mailbox: Id32::new([4; 32]),
+        provider: "provider".to_owned(),
+        session: "session".to_owned(),
+        operation: Id32::new([2; 32]),
+        item: None,
+        logical_key: "operation".to_owned(),
+        runtime: "runtime".to_owned(),
+        occurred_at_unix_ms: 1,
         status: ActivityStatusDto::Failed {
             reason: "x".repeat(1_000),
         },
         content: "operation failed".to_owned(),
         truncated: false,
-    };
+        completed: None,
+    }));
     assert!(ConversationPageDto::new(vec![invalid], None).is_err());
+}
+
+#[test]
+fn conversation_completed_command_round_trips_separate_multiline_fields() {
+    let entry = ConversationEntryDto::Activity(Box::new(ConversationActivityDto {
+        fact_id: Id32::new([1; 32]),
+        activity_kind: ConversationActivityKindDto::CompletedItem,
+        sequence: 2,
+        source_installation: Id32::new([3; 32]),
+        source_mailbox: Id32::new([4; 32]),
+        provider: "provider".to_owned(),
+        session: "session".to_owned(),
+        operation: Id32::new([2; 32]),
+        item: Some("command".to_owned()),
+        logical_key: "command".to_owned(),
+        runtime: "codex".to_owned(),
+        occurred_at_unix_ms: 42,
+        status: ActivityStatusDto::Failed {
+            reason: "command_failed".to_owned(),
+        },
+        content: "full bounded detail".to_owned(),
+        truncated: false,
+        completed: Some(CompletedItemPresentationDto::Command {
+            command: "printf one\nprintf two".to_owned(),
+            output: Some("one\ntwo\nthree\nfour".to_owned()),
+            exit_code: Some(17),
+            command_truncated: false,
+            output_truncated: true,
+        }),
+    }));
+    let page = ConversationPageDto::new(vec![entry], None).expect("completed command validates");
+    round_trip(&WireMessage::Response(ResponseEnvelope::success(
+        RequestId::new(1).expect("nonzero"),
+        ResponseResult::ConversationPage(page),
+    )));
 }
 
 #[test]

@@ -1192,6 +1192,7 @@ fn buffered_activity(activity: HarnessActivity) -> HarnessBufferedEvent {
     update_activity_status(&mut digest, &activity.status);
     update_digest_text(&mut digest, activity.content.as_str());
     digest.update([u8::from(activity.truncated)]);
+    update_completed_digest(&mut digest, activity.completed.as_deref());
     let digest = CommandDigest::from_bytes(digest.finalize().into());
     if activity.status == ActivityStatus::Snapshot {
         HarnessBufferedEvent::Snapshot {
@@ -1209,6 +1210,18 @@ fn buffered_activity(activity: HarnessActivity) -> HarnessBufferedEvent {
             digest,
             activity,
         }
+    }
+}
+
+fn update_completed_digest(
+    digest: &mut Sha256,
+    completed: Option<&hq_domain::CompletedItemPresentation>,
+) {
+    digest.update([u8::from(completed.is_some())]);
+    if let Some(completed) = completed {
+        let encoded = completed.canonical_digest_bytes();
+        digest.update(encoded.len().to_be_bytes());
+        digest.update(encoded);
     }
 }
 

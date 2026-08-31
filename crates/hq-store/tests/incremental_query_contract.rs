@@ -3,17 +3,192 @@
 #![allow(clippy::expect_used)]
 
 use hq_application::{ClientProjection, ConversationContext};
-use hq_domain::{MailboxAddress, PageCursor, ProjectId, ProviderId, ProviderSessionId, ThreadId};
+use hq_domain::{
+    FactId, MailboxAddress, PageCursor, ProjectId, ProviderId, ProviderSessionId, ThreadId,
+};
 use hq_store::{ConversationEntry, ConversationKey, IngestOutcome, StoreErrorClass};
 use rusqlite::{Connection, params};
 
 mod support;
 
 use support::{
-    TestDirectory, TestStoreExt, authored_conversation_entry, authored_durable_conversation_entry,
-    authored_project_input, authority_policy, open_store, seed_canonical_corpus, verified_account,
-    verified_child, verified_fact, verified_incomplete_peer_question, verified_question,
+    TestDirectory, TestStoreExt, authored_agent_activity, authored_conversation_entry,
+    authored_durable_conversation_entry, authored_project_input, authority_policy, open_store,
+    seed_canonical_corpus, verified_account, verified_child, verified_fact,
+    verified_incomplete_peer_question, verified_question,
 };
+
+#[test]
+fn active_operation_has_one_latest_progress_tail_and_terminal_replaces_it() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let root = verified_fact();
+    let root_id = root.verified_event().event_id();
+    store.append_verified(root).expect("authority root ingests");
+    store
+        .append_verified(verified_child(root_id))
+        .expect("activity source mailbox ingests");
+    let operation = hq_domain::OperationId::from_bytes([0x91; 32]);
+    for fact in [
+        authored_agent_activity(
+            1,
+            operation,
+            None,
+            hq_domain::ActivityKind::AgentTurn,
+            "operation",
+            1,
+            hq_domain::ActivityStatus::Running,
+            "started",
+        ),
+        authored_agent_activity(
+            2,
+            operation,
+            Some("compile"),
+            hq_domain::ActivityKind::Progress,
+            "progress",
+            2,
+            hq_domain::ActivityStatus::Running,
+            "compiling",
+        ),
+        authored_agent_activity(
+            3,
+            operation,
+            Some("tests"),
+            hq_domain::ActivityKind::Progress,
+            "progress",
+            3,
+            hq_domain::ActivityStatus::Running,
+            "running tests",
+        ),
+    ] {
+        store.append_verified(fact).expect("activity ingests");
+    }
+    let key = ConversationKey::ProviderSession {
+        counterparty: MailboxAddress::new(
+            authority_policy().local_installation(),
+            authority_policy().local_human_mailbox(),
+        ),
+        provider: ProviderId::new("paged-provider").expect("provider validates"),
+        session: ProviderSessionId::new("paged-session").expect("session validates"),
+    };
+    let active = store
+        .load_conversation_entries(&key, 10, None)
+        .expect("active page loads");
+    assert!(matches!(
+        active.items(),
+        [ConversationEntry::Activity(activity)]
+            if activity.kind == hq_domain::ActivityKind::Progress
+                && activity.content.as_str() == "running tests"
+    ));
+
+    store
+        .append_verified(authored_agent_activity(
+            4,
+            operation,
+            None,
+            hq_domain::ActivityKind::AgentTurn,
+            "operation",
+            4,
+            hq_domain::ActivityStatus::Succeeded,
+            "completed",
+        ))
+        .expect("terminal activity ingests");
+    let terminal = store
+        .load_conversation_entries(&key, 10, None)
+        .expect("terminal page loads");
+    assert!(matches!(
+        terminal.items(),
+        [ConversationEntry::Activity(activity)]
+            if activity.kind == hq_domain::ActivityKind::AgentTurn
+                && activity.status == hq_domain::ActivityStatus::Succeeded
+    ));
+}
+
+#[test]
+fn long_history_pages_expose_one_live_tail_without_repeating_retained_progress() {
+    let directory = TestDirectory::new();
+    let database = directory.database_path();
+    open_store(&database).close().expect("schema initializes");
+    let root = verified_fact();
+    let root_id = root.verified_event().event_id();
+    let operation = hq_domain::OperationId::from_bytes([0x92; 32]);
+    let mut facts = vec![root, verified_child(root_id)];
+    facts.extend((0..250).map(|index| authored_durable_conversation_entry(index, false)));
+    facts.push(authored_agent_activity(
+        300,
+        operation,
+        None,
+        hq_domain::ActivityKind::AgentTurn,
+        "operation",
+        1,
+        hq_domain::ActivityStatus::Running,
+        "started",
+    ));
+    for offset in 0..205_u16 {
+        let key = format!("progress-{offset}");
+        facts.push(authored_agent_activity(
+            301 + offset,
+            operation,
+            Some(&key),
+            hq_domain::ActivityKind::Progress,
+            &key,
+            u64::from(offset) + 2,
+            hq_domain::ActivityStatus::Running,
+            &key,
+        ));
+    }
+    seed_canonical_corpus(&database, &facts);
+
+    let key = ConversationKey::ProviderSession {
+        counterparty: MailboxAddress::new(
+            authority_policy().local_installation(),
+            authority_policy().local_human_mailbox(),
+        ),
+        provider: ProviderId::new("paged-provider").expect("provider validates"),
+        session: ProviderSessionId::new("paged-session").expect("session validates"),
+    };
+    let store = open_store(&database);
+    store
+        .repair(authority_policy())
+        .expect("large conversation repairs");
+    let first = store
+        .load_conversation_entries(&key, 200, None)
+        .expect("initial page loads");
+    assert_eq!(first.items().len(), 200);
+    assert!(matches!(
+        first.items().last(),
+        Some(ConversationEntry::Activity(activity))
+            if activity.kind == hq_domain::ActivityKind::Progress
+                && activity.content.as_str() == "progress-204"
+    ));
+
+    let mut message_count = first
+        .items()
+        .iter()
+        .filter(|entry| matches!(entry, ConversationEntry::Message(_)))
+        .count();
+    let mut cursor = first.next_cursor().cloned();
+    while let Some(current) = cursor {
+        let page = store
+            .load_conversation_entries(&key, 200, Some(&current))
+            .expect("continuation page loads");
+        assert!(
+            page.items()
+                .iter()
+                .all(|entry| matches!(entry, ConversationEntry::Message(_)))
+        );
+        message_count += page.items().len();
+        cursor = page.next_cursor().cloned();
+    }
+    assert_eq!(message_count, 250);
+
+    store.close().expect("store closes");
+    let reopened = open_store(&database);
+    let reopened_first = reopened
+        .load_conversation_entries(&key, 200, None)
+        .expect("reopened initial page loads");
+    assert_eq!(reopened_first.items(), first.items());
+}
 
 #[test]
 fn project_thread_keys_persist_rebuild_reopen_and_page_independently() {
@@ -295,10 +470,13 @@ fn equal_time_mixed_pages_concatenate_to_local_reducer_order_after_repair_and_re
     store
         .append_verified(verified_child(root_id))
         .expect("activity source mailbox ingests");
+    let mut transient = std::collections::BTreeSet::new();
     for index in (0..24).rev() {
-        store
-            .append_verified(authored_conversation_entry(index, index % 2 == 1))
-            .expect("mixed entry ingests");
+        let fact = authored_conversation_entry(index, index % 2 == 1);
+        if index % 2 == 1 {
+            transient.insert(FactId::from_bytes(fact.verified_event().event_id()));
+        }
+        store.append_verified(fact).expect("mixed entry ingests");
     }
     let key = ConversationKey::ProviderSession {
         counterparty: MailboxAddress::new(
@@ -315,7 +493,12 @@ fn equal_time_mixed_pages_concatenate_to_local_reducer_order_after_repair_and_re
         .expect("conversation order exists")
         .clone();
     assert_eq!(expected.len(), 24);
-    assert_eq!(load_all_ids(&store, &key, 5), expected);
+    let durable = expected
+        .iter()
+        .copied()
+        .filter(|fact_id| !transient.contains(fact_id))
+        .collect::<Vec<_>>();
+    assert_eq!(load_all_ids(&store, &key, 5), durable);
 
     let first = store
         .load_conversation_entries(&key, 5, None)
@@ -337,10 +520,10 @@ fn equal_time_mixed_pages_concatenate_to_local_reducer_order_after_repair_and_re
     );
 
     store.repair(authority_policy()).expect("repair succeeds");
-    assert_eq!(load_all_ids(&store, &key, 7), expected);
+    assert_eq!(load_all_ids(&store, &key, 7), durable);
     store.close().expect("store closes");
     let reopened = open_store(&database);
-    assert_eq!(load_all_ids(&reopened, &key, 6), expected);
+    assert_eq!(load_all_ids(&reopened, &key, 6), durable);
 }
 
 fn load_all_ids(

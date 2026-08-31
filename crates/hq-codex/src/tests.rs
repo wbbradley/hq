@@ -118,8 +118,8 @@ mod adapter {
     };
 
     use hq_domain::{
-        ActivityKind, ActivityStatus, AgentId, CommandDigest, ContentText, MessageId, OperationId,
-        ProviderId, ProviderSessionId, ShortText,
+        ActivityKind, ActivityStatus, AgentId, CommandDigest, CompletedItemPresentation,
+        ContentText, MessageId, OperationId, ProviderId, ProviderSessionId, ShortText,
     };
     use hq_harness::{
         HarnessActivity, HarnessCancellationOutcome, HarnessCapabilities, HarnessCapability,
@@ -1049,6 +1049,16 @@ mod adapter {
                 content: ContentText::new("echo hi\nok\nExit code: 0")
                     .map_err(|_| conformance_failure(scenario))?,
                 truncated: false,
+                completed: Some(Box::new(CompletedItemPresentation::Command {
+                    command: ContentText::new("echo hi")
+                        .map_err(|_| conformance_failure(scenario))?,
+                    output: Some(
+                        ContentText::new("ok").map_err(|_| conformance_failure(scenario))?,
+                    ),
+                    exit_code: Some(0),
+                    command_truncated: false,
+                    output_truncated: false,
+                })),
             }),
             HarnessEvent::Output(HarnessOutput {
                 output_id: derived_output("finished"),

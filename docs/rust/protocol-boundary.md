@@ -55,3 +55,9 @@ cargo +nightly-2026-08-26 fuzz run dto_content \
 
 Generated corpus and crash artifacts are diagnostic inputs; minimize and promote every useful
 regression into a named deterministic test before committing it.
+
+FCT-022 activity decoding enforces its completed-item discriminator intrinsically: only
+`CompletedItem` may carry the required-nullable structured presentation, and that kind must carry
+one. Command/output/exit, file path/diff, tool name, and web query decode into independently bounded
+domain values with explicit truncation flags. The current pre-release schema changed in place; no
+legacy flattened completed-item compatibility branch or downstream prose parser exists.

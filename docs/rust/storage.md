@@ -159,6 +159,13 @@ current local position through the unique covering index, selects at most `limit
 and hydrates at most `limit` exact projections. It never loads the canonical corpus, loads a full
 projection snapshot, or sorts conversation history.
 
+The indexed read filters retained `Progress` and running `AgentTurn` facts out of durable cursor
+pages. On the initial page only, it derives a single presentation tail from the bounded selected
+activity rows: a fully correlated running turn is replaced by its canonically latest non-empty
+progress winner, if any. Terminal turn evidence removes that live candidate and remains ordinary
+history. Original positions continue to anchor cursors, so filtered rows cannot duplicate or omit
+durable entries at a page boundary.
+
 ## Explicit repair
 
 `repair(policy)` first computes the complete oracle without writes. It then opens one transaction,
@@ -387,8 +394,10 @@ only a relational identity and is recomputed from those columns on load. Dedicat
 tables retain thread roots, answers, cancellations, pairwise causal relations and ready order;
 typed message content, optional recipient/correlation/project shapes, reversible state frontier and
 peer receipt evidence; action-group order and final answer; selected snapshots and permanent
-completed records. Every selected or durable activity value stores its closed kind explicitly, so
-completed-item values do not rely on reconstructing kind from their projection key. The remaining
+completed records. Every activity row stores full correlation metadata and a bounded typed
+completed-item blob whose decode reconstructs and revalidates command/output/exit, file path/diff,
+tool-name, or web-query fields. Completed-item values do not rely on reconstructing kind or field
+boundaries from their projection key or flattened content. The remaining
 tables retain progress order and total, aggregate frontiers, and support. This field is part of the
 clean pre-release schema-v1 definition; it required no migration or version bump.
 

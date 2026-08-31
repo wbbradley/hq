@@ -682,6 +682,7 @@ fn output_and_activity(
             status: ActivityStatus::Succeeded,
             content: ContentText::new(activity_body).expect("activity validates"),
             truncated: false,
+            completed: None,
         },
     }
 }
@@ -721,6 +722,7 @@ fn activity(sequence: u64, status: ActivityStatus, content: &str) -> HarnessActi
         status,
         content: ContentText::new(content).expect("content validates"),
         truncated: false,
+        completed: None,
     }
 }
 

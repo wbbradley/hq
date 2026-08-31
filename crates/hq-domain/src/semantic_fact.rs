@@ -18,6 +18,8 @@ pub const MAX_FACT_AUTHORITIES: usize = 8;
 pub const SHORT_TEXT_MAX_BYTES: usize = 128;
 /// Maximum message or diagnostic content length in UTF-8 bytes.
 pub const CONTENT_MAX_BYTES: usize = 16_384;
+/// Maximum changed files retained by one completed file-change item.
+pub const MAX_COMPLETED_FILE_CHANGES: usize = 64;
 /// Maximum relay hints carried by an identity or route fact.
 pub const MAX_RELAY_HINTS: usize = 8;
 
@@ -148,6 +150,130 @@ pub enum ActivityStatus {
     Failed(ErrorCode),
     /// The correlated operation or item was explicitly interrupted.
     Interrupted,
+}
+
+/// One bounded changed-file record retained for completed-item presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletedFileChange {
+    /// Provider-reported path, bounded independently from its diff.
+    pub path: ContentText,
+    /// Optional bounded provider diff for explicit technical disclosure.
+    pub diff: Option<ContentText>,
+    /// Whether the path was shortened during normalization.
+    pub path_truncated: bool,
+    /// Whether the diff was shortened during normalization.
+    pub diff_truncated: bool,
+}
+
+/// Closed provider-neutral presentation for a durable completed activity item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompletedItemPresentation {
+    /// A completed command with command and output kept as separate fields.
+    Command {
+        /// Bounded command source, including intentional newlines.
+        command: ContentText,
+        /// Optional bounded aggregated output.
+        output: Option<ContentText>,
+        /// Provider-reported process exit code when available.
+        exit_code: Option<i64>,
+        /// Whether the command source was shortened.
+        command_truncated: bool,
+        /// Whether aggregated output was shortened.
+        output_truncated: bool,
+    },
+    /// A completed set of file changes.
+    FileChange {
+        /// Bounded per-file path and optional diff records.
+        changes: BoundedVec<CompletedFileChange, MAX_COMPLETED_FILE_CHANGES>,
+        /// Whether additional changed-file records were omitted.
+        changes_truncated: bool,
+    },
+    /// A completed MCP, dynamic, or collaboration tool call.
+    Tool {
+        /// Retained server/tool or tool-family name.
+        name: ShortText,
+        /// Whether the name was shortened.
+        name_truncated: bool,
+    },
+    /// A completed web search.
+    WebSearch {
+        /// Retained bounded search query.
+        query: ContentText,
+        /// Whether the query was shortened.
+        query_truncated: bool,
+    },
+    /// An explicitly retained completed family without structured presentation data.
+    Unknown,
+}
+
+impl CompletedItemPresentation {
+    /// Encodes the bounded typed value for collision-resistant local digest inputs.
+    pub fn canonical_digest_bytes(&self) -> Vec<u8> {
+        fn put_text(output: &mut Vec<u8>, value: &str) {
+            output.extend_from_slice(&value.len().to_be_bytes());
+            output.extend_from_slice(value.as_bytes());
+        }
+        fn put_optional_text(output: &mut Vec<u8>, value: Option<&ContentText>) {
+            output.push(u8::from(value.is_some()));
+            if let Some(value) = value {
+                put_text(output, value.as_str());
+            }
+        }
+
+        let mut output = Vec::new();
+        match self {
+            Self::Command {
+                command,
+                output: command_output,
+                exit_code,
+                command_truncated,
+                output_truncated,
+            } => {
+                output.push(1);
+                put_text(&mut output, command.as_str());
+                put_optional_text(&mut output, command_output.as_ref());
+                output.push(u8::from(exit_code.is_some()));
+                if let Some(exit_code) = exit_code {
+                    output.extend_from_slice(&exit_code.to_be_bytes());
+                }
+                output.extend([u8::from(*command_truncated), u8::from(*output_truncated)]);
+            }
+            Self::FileChange {
+                changes,
+                changes_truncated,
+            } => {
+                output.push(2);
+                output.extend_from_slice(&changes.as_slice().len().to_be_bytes());
+                for change in changes.as_slice() {
+                    put_text(&mut output, change.path.as_str());
+                    put_optional_text(&mut output, change.diff.as_ref());
+                    output.extend([
+                        u8::from(change.path_truncated),
+                        u8::from(change.diff_truncated),
+                    ]);
+                }
+                output.push(u8::from(*changes_truncated));
+            }
+            Self::Tool {
+                name,
+                name_truncated,
+            } => {
+                output.push(3);
+                put_text(&mut output, name.as_str());
+                output.push(u8::from(*name_truncated));
+            }
+            Self::WebSearch {
+                query,
+                query_truncated,
+            } => {
+                output.push(4);
+                put_text(&mut output, query.as_str());
+                output.push(u8::from(*query_truncated));
+            }
+            Self::Unknown => output.push(5),
+        }
+        output
+    }
 }
 
 /// Terminal/runtime observation without claiming external truth.
@@ -388,6 +514,8 @@ pub enum SemanticPayload {
         status: ActivityStatus,
         content: ContentText,
         truncated: bool,
+        /// Structured presentation for completed items; absent for other activity families.
+        completed: Option<CompletedItemPresentation>,
     },
     /// FCT-023.
     AgentNameClaimed {

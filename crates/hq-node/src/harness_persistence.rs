@@ -168,6 +168,7 @@ impl<P: CommitFacts + Send + Sync> HarnessPersistencePort for CanonicalHarnessPe
                 status: activity.status,
                 content: activity.content,
                 truncated: activity.truncated,
+                completed: activity.completed.map(|value| *value),
             };
             let inputs = LocalFactInputs {
                 authored_at: occurred_at,
@@ -585,6 +586,12 @@ fn activity_digest(
     update_status(&mut digest, &activity.status);
     update_text(&mut digest, activity.content.as_str());
     digest.update([u8::from(activity.truncated)]);
+    digest.update([u8::from(activity.completed.is_some())]);
+    if let Some(completed) = activity.completed.as_deref() {
+        let encoded = completed.canonical_digest_bytes();
+        digest.update(encoded.len().to_be_bytes());
+        digest.update(encoded);
+    }
     update_delivery_attribution(&mut digest, delivery);
     CommandDigest::from_bytes(digest.finalize().into())
 }
@@ -968,6 +975,7 @@ mod tests {
             status: ActivityStatus::Running,
             content: ContentText::new("secret diagnostic text").expect("content"),
             truncated: true,
+            completed: None,
         };
         active
             .persistence
@@ -1171,6 +1179,7 @@ mod tests {
             status: ActivityStatus::Succeeded,
             content: ContentText::new("complete").expect("activity"),
             truncated: false,
+            completed: None,
         };
         persistence
             .persist_activity(

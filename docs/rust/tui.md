@@ -212,8 +212,11 @@ newer selection supersedes the pending preview without allowing a stale completi
 Returned message/activity unions remain in reducer order. The page mapper classifies an author as
 `You`, the named or fallback participant, or `Unknown sender` from exact mailbox evidence; labels
 never become routing authority. It maps the closed status, agent-turn, progress, plan, diff, and
-completed-item activity kinds to compact ordinary summaries while preserving exact detail and
-technical evidence. Activity remains non-actionable. The mapper also exposes only uniquely
+completed-item activity kinds without parsing content. The current live row shows the latest
+non-empty progress text or `Agent is working…`; typed command rows show command source, up to three
+terminal-safe output lines, exit/failure state, and omission markers. File, tool, and web-search
+rows show typed path counts/names/queries while preserving exact bounded detail and complete
+correlation metadata in the inspector. Activity remains non-actionable. The mapper also exposes only uniquely
 named, uniquely bound, non-retired agent mailboxes as passive direct-target candidates. The protocol
 `AuthoritativeSnapshotDto` and presentation `UiSnapshot` are deliberately different records: one
 is canonical local-API data, while the other is a small complete navigation cache containing only
@@ -463,6 +466,11 @@ applicable `a archive` or `u restore` control for the selected exact message; co
 the wider reply, direct-message, note, navigation, and quit reference. Stable failures replace the
 ordinary footer with a plain failure statement and recovery action; their stable code remains in
 technical help. The Agents and Projects footers expose their
+
+Transient activity is already consolidated below this model. Refresh replaces the one live tail
+entry in place; terminal evidence removes it, continuation pages cannot duplicate it, and a typed
+tail-placement pass keeps it below newly appended durable rows. A reader following the tail moves
+to the replacement; a reader on another fact keeps that stable fact anchor.
 primary inspect, create, search, and help controls; responsive tests cover wide and compact
 modeless-draft, agent-detail, and managed-switch rendering. Styling
 supplements these text markers and is not the sole carrier of state.

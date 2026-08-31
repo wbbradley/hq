@@ -89,7 +89,7 @@ fn decoded_values_collections_and_intrinsic_agreement_are_bounded() {
             envelope(
                 22,
                 &format!(
-                    r#"{{"source":{{"installation":"{A}","mailbox":"{B}"}},"operation":{{"provider":"p","session":"s","id":"{C}"}},"item":null,"kind":"progress","logical_key":"key","runtime":"runtime","sequence":0,"occurred_at":0,"status":{{"state":"running"}},"content":"content","truncated":false}}"#
+                    r#"{{"source":{{"installation":"{A}","mailbox":"{B}"}},"operation":{{"provider":"p","session":"s","id":"{C}"}},"item":null,"kind":"progress","logical_key":"key","runtime":"runtime","sequence":0,"occurred_at":0,"status":{{"state":"running"}},"content":"content","truncated":false,"completed":null}}"#
                 ),
                 &format!(r#"["local","{A}"]"#),
                 "[]",
@@ -101,7 +101,7 @@ fn decoded_values_collections_and_intrinsic_agreement_are_bounded() {
             envelope(
                 22,
                 &format!(
-                    r#"{{"source":{{"installation":"{A}","mailbox":"{B}"}},"operation":{{"provider":"p","session":"s","id":"{C}"}},"item":null,"kind":"progress","logical_key":"key","runtime":"runtime","sequence":1,"occurred_at":9223372036854775808,"status":{{"state":"running"}},"content":"content","truncated":false}}"#
+                    r#"{{"source":{{"installation":"{A}","mailbox":"{B}"}},"operation":{{"provider":"p","session":"s","id":"{C}"}},"item":null,"kind":"progress","logical_key":"key","runtime":"runtime","sequence":1,"occurred_at":9223372036854775808,"status":{{"state":"running"}},"content":"content","truncated":false,"completed":null}}"#
                 ),
                 &format!(r#"["local","{A}"]"#),
                 "[]",
@@ -277,7 +277,7 @@ fn activity_content(field: &str, value: &str) -> String {
     envelope(
         22,
         &format!(
-            r#"{{"source":{{"installation":"{A}","mailbox":"{B}"}},"operation":{{"provider":"{provider}","session":"{session}","id":"{C}"}},"item":null,"kind":"progress","logical_key":"key","runtime":"runtime","sequence":1,"occurred_at":0,"status":{{"state":"running"}},"content":"{content}","truncated":false}}"#
+            r#"{{"source":{{"installation":"{A}","mailbox":"{B}"}},"operation":{{"provider":"{provider}","session":"{session}","id":"{C}"}},"item":null,"kind":"progress","logical_key":"key","runtime":"runtime","sequence":1,"occurred_at":0,"status":{{"state":"running"}},"content":"{content}","truncated":false,"completed":null}}"#
         ),
         &format!(r#"["local","{A}"]"#),
         "[]",

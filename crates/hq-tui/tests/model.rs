@@ -7,18 +7,18 @@ use std::time::Duration;
 use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase, UiAgentLifecycle,
     UiAgentMailbox, UiAgentModal, UiAgentProjectAssignment, UiAgentSession, UiAgentStatus,
-    UiConnectionState, UiConversationActivityKind, UiConversationAuthor, UiConversationEntry,
-    UiConversationEntryPresentation, UiConversationPage, UiConversationTarget, UiDirectTarget,
-    UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput, UiMailboxAction,
-    UiMailboxDraft, UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageDelivery,
-    UiMessageState, UiMessageTarget, UiModel, UiNewChoice, UiNewModal, UiPendingProjectInput,
-    UiProject, UiProjectAction, UiProjectAssignment, UiProjectCreationChoice,
-    UiProjectFolderAction, UiProjectFormField, UiProjectInteraction, UiProjectManagementAction,
-    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
-    UiProjectResult, UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider,
-    UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind,
-    update,
+    UiCompletedItemPresentation, UiConnectionState, UiConversationActivityKind,
+    UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
+    UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage,
+    UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftPane,
+    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
+    UiManagedSessionResult, UiMessageDelivery, UiMessageState, UiMessageTarget, UiModel,
+    UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject, UiProjectAction,
+    UiProjectAssignment, UiProjectCreationChoice, UiProjectFolderAction, UiProjectFormField,
+    UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome, UiProjectResource,
+    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus,
+    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
+    UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -1767,7 +1767,7 @@ fn invalidation_reloads_an_open_conversation_and_ignores_its_stale_page() {
         },
     )
     .expect("fresh page applies");
-    assert_eq!(fresh.model.conversation_anchor(), Some("message-2"));
+    assert_eq!(fresh.model.conversation_anchor(), Some("message-0"));
 }
 
 #[test]
@@ -2195,6 +2195,16 @@ fn live_agent_status_stays_at_the_presentation_tail_after_new_authoritative_outp
         summary: "Agent is working…".to_owned(),
         detail: "turn running".to_owned(),
         truncated: false,
+        completed: None,
+    };
+    let mut completed_item = entry("completed-item", true);
+    completed_item.presentation = UiConversationEntryPresentation::Activity {
+        kind: UiConversationActivityKind::CompletedItem,
+        status: UiActivityStatus::Succeeded,
+        summary: "Completed an item".to_owned(),
+        detail: "item complete".to_owned(),
+        truncated: false,
+        completed: Some(UiCompletedItemPresentation::Unknown),
     };
     let opened = opened_conversation(vec![entry("question", false), working.clone()]);
     assert_eq!(opened.conversation_anchor(), Some("working"));
@@ -2222,7 +2232,7 @@ fn live_agent_status_stays_at_the_presentation_tail_after_new_authoritative_outp
                     entry("question", false),
                     working,
                     entry("alice-reply", false),
-                    entry("completed-item", true),
+                    completed_item,
                 ],
                 next_cursor: None,
             },
@@ -4839,6 +4849,7 @@ fn entry(id: &str, activity: bool) -> UiConversationEntry {
                 summary: format!("{id} summary"),
                 detail: format!("{id} content"),
                 truncated: false,
+                completed: None,
             }
         } else {
             UiConversationEntryPresentation::Message {
@@ -4852,6 +4863,15 @@ fn entry(id: &str, activity: bool) -> UiConversationEntry {
         technical: if activity {
             vec![UiTechnicalSection::Activity {
                 sequence: 2,
+                source_installation: "installation".to_owned(),
+                source_mailbox: "mailbox".to_owned(),
+                provider: "provider".to_owned(),
+                session: "session".to_owned(),
+                operation: "operation".to_owned(),
+                item: Some("item".to_owned()),
+                logical_key: "progress".to_owned(),
+                runtime: "runtime".to_owned(),
+                occurred_at_unix_ms: 2,
                 status: UiActivityStatus::Running,
                 truncated: false,
             }]
