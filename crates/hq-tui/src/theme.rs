@@ -2,7 +2,7 @@
 
 use ratatui::style::{Color, Style};
 
-const ROLE_COUNT: usize = 40;
+const ROLE_COUNT: usize = 42;
 
 /// Every independently configurable visual role in the HQ terminal interface.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -18,6 +18,10 @@ pub enum UiThemeRole {
     TextTechnical,
     /// Section and dialog headings.
     Heading,
+    /// Title of the pane that currently owns keyboard focus.
+    PaneTitleFocused,
+    /// Title of a selected pane that does not currently own keyboard focus.
+    PaneTitleUnfocused,
     /// Primary interactive accent.
     Accent,
     /// Reserved local-human author label in a conversation.
@@ -98,6 +102,8 @@ impl UiThemeRole {
         Self::TextMuted,
         Self::TextTechnical,
         Self::Heading,
+        Self::PaneTitleFocused,
+        Self::PaneTitleUnfocused,
         Self::Accent,
         Self::ConversationAuthorSelf,
         Self::ConversationAuthorParticipant,
@@ -143,6 +149,8 @@ impl UiThemeRole {
             Self::TextMuted => "ui.text.muted",
             Self::TextTechnical => "ui.text.technical",
             Self::Heading => "ui.heading",
+            Self::PaneTitleFocused => "ui.pane.title.focused",
+            Self::PaneTitleUnfocused => "ui.pane.title.unfocused",
             Self::Accent => "ui.accent",
             Self::ConversationAuthorSelf => "conversation.author.self",
             Self::ConversationAuthorParticipant => "conversation.author.participant",
@@ -242,6 +250,16 @@ impl UiTheme {
         );
         set(
             &mut styles,
+            UiThemeRole::PaneTitleFocused,
+            Style::new().fg(Color::Cyan).bold(),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::PaneTitleUnfocused,
+            Style::new().fg(Color::DarkGray).bold(),
+        );
+        set(
+            &mut styles,
             UiThemeRole::Accent,
             Style::new().fg(Color::Cyan),
         );
@@ -293,7 +311,7 @@ impl UiTheme {
         set(
             &mut styles,
             UiThemeRole::SelectionUnfocused,
-            Style::new().fg(Color::Cyan).bold(),
+            Style::new().fg(Color::DarkGray).bold(),
         );
         set(
             &mut styles,
@@ -411,6 +429,10 @@ impl UiTheme {
     }
 
     /// Uses terminal defaults and non-color modifiers only.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "complete closed semantic role catalog"
+    )]
     pub fn no_color() -> Self {
         let mut styles = [Style::new(); ROLE_COUNT];
         set(
@@ -421,6 +443,16 @@ impl UiTheme {
         set(&mut styles, UiThemeRole::TextMuted, Style::new().dim());
         set(&mut styles, UiThemeRole::TextTechnical, Style::new().dim());
         set(&mut styles, UiThemeRole::Heading, Style::new().bold());
+        set(
+            &mut styles,
+            UiThemeRole::PaneTitleFocused,
+            Style::new().bold().underlined(),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::PaneTitleUnfocused,
+            Style::new().bold(),
+        );
         set(&mut styles, UiThemeRole::Accent, Style::new().bold());
         set(
             &mut styles,
@@ -528,6 +560,14 @@ impl UiTheme {
             .with_style(UiThemeRole::TextMuted, Style::new().fg(muted))
             .with_style(UiThemeRole::TextTechnical, Style::new().fg(muted).dim())
             .with_style(UiThemeRole::Heading, Style::new().fg(accent).bold())
+            .with_style(
+                UiThemeRole::PaneTitleFocused,
+                Style::new().fg(accent).bold(),
+            )
+            .with_style(
+                UiThemeRole::PaneTitleUnfocused,
+                Style::new().fg(muted).bold(),
+            )
             .with_style(UiThemeRole::Accent, Style::new().fg(accent))
             .with_style(
                 UiThemeRole::ConversationAuthorSelf,

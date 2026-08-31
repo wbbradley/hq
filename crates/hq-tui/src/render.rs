@@ -2704,7 +2704,10 @@ fn render_project_workspace_detail(
         format!("Project · {}", summary.name)
     };
     let mut lines = vec![
-        Line::styled(title, theme.style(UiThemeRole::Heading)),
+        Line::styled(
+            title,
+            pane_title_style(theme, project_detail_pane_focused(model)),
+        ),
         Line::from(project_lifecycle_label(summary.lifecycle)),
         Line::default(),
     ];
@@ -2999,7 +3002,7 @@ fn render_compact_selected_summary(
                 section_label(model.section()),
                 section_item_label(model.section(), count)
             ),
-            theme.style(UiThemeRole::Heading),
+            pane_title_style(theme, summary_pane_focused(model)),
         ),
         Line::default(),
     ];
@@ -3129,7 +3132,7 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
                 section_label(model.section()),
                 section_item_label(model.section(), count)
             ),
-            theme.style(UiThemeRole::Heading),
+            pane_title_style(theme, summary_pane_focused(model)),
         ),
         Line::default(),
     ];
@@ -3340,7 +3343,7 @@ fn render_conversation(
     if let Some(conversation) = conversation {
         let mut header = vec![Line::styled(
             conversation.title.as_str(),
-            theme.style(UiThemeRole::Heading),
+            pane_title_style(theme, model.focus() == UiFocus::Conversation),
         )];
         if let Some(context) = &conversation.context {
             header.push(Line::styled(
@@ -3946,6 +3949,25 @@ fn selected_style(theme: &UiTheme, focused: bool) -> Style {
     } else {
         UiThemeRole::SelectionUnfocused
     })
+}
+
+fn pane_title_style(theme: &UiTheme, focused: bool) -> Style {
+    theme.style(if focused {
+        UiThemeRole::PaneTitleFocused
+    } else {
+        UiThemeRole::PaneTitleUnfocused
+    })
+}
+
+fn summary_pane_focused(model: &UiModel) -> bool {
+    model.focus() == UiFocus::Content
+        && (model.section() != UiSection::Projects
+            || model.project_workspace_level() == UiProjectWorkspaceLevel::List)
+}
+
+fn project_detail_pane_focused(model: &UiModel) -> bool {
+    model.focus() == UiFocus::Content
+        && model.project_workspace_level() != UiProjectWorkspaceLevel::List
 }
 
 const fn connection_label(state: UiConnectionState) -> &'static str {

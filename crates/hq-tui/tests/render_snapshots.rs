@@ -261,6 +261,60 @@ fn status_roles_are_independently_overridable() {
 }
 
 #[test]
+fn pane_titles_distinguish_active_focus_from_selected_context() {
+    let focused = Style::new()
+        .fg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD);
+    let unfocused = Style::new().fg(Color::Blue);
+    let theme = UiTheme::terminal()
+        .with_style(UiThemeRole::PaneTitleFocused, focused)
+        .with_style(UiThemeRole::PaneTitleUnfocused, unfocused);
+
+    let inbox = render_buffer_with_theme(
+        &ready_model(UiSize {
+            width: 104,
+            height: 18,
+        }),
+        &theme,
+    );
+    let inbox_title = inbox
+        .cell(find_text_start(&inbox, "Inbox · 3 conversations"))
+        .expect("focused Inbox title");
+    assert_eq!(inbox_title.fg, Color::LightCyan);
+    assert!(inbox_title.modifier.contains(Modifier::BOLD));
+
+    let conversation = render_buffer_with_theme(
+        &conversation_model(UiSize {
+            width: 104,
+            height: 18,
+        }),
+        &theme,
+    );
+    let inbox_context = conversation
+        .cell(find_text_start(&conversation, "Inbox · 3 conversations"))
+        .expect("unfocused Inbox title");
+    let conversation_title = conversation
+        .cell(find_text_start(&conversation, "Alice"))
+        .expect("focused conversation title");
+    assert_eq!(inbox_context.fg, Color::Blue);
+    assert_eq!(conversation_title.fg, Color::LightCyan);
+    assert!(conversation_title.modifier.contains(Modifier::BOLD));
+
+    let no_color = render_buffer_with_theme(
+        &ready_model(UiSize {
+            width: 104,
+            height: 18,
+        }),
+        &UiTheme::no_color(),
+    );
+    let no_color_title = no_color
+        .cell(find_text_start(&no_color, "Inbox · 3 conversations"))
+        .expect("no-color focused Inbox title");
+    assert!(no_color_title.modifier.contains(Modifier::BOLD));
+    assert!(no_color_title.modifier.contains(Modifier::UNDERLINED));
+}
+
+#[test]
 fn no_color_theme_retains_a_non_color_focus_cue() {
     let launcher = update(
         project_model(UiSize {
