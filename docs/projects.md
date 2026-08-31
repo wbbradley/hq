@@ -312,11 +312,20 @@ Project messages are immutably bound to the project and their causal conversatio
 to an execution thread. This matters because a message can be created while the project is closed,
 unassigned, or between threads.
 
-The home daemon sequences every valid and causally usable project input. It emits a signed
+The home daemon sequences every valid and causally usable human project input. Only typed questions
+and asynchronous human messages are eligible; project status and final-output messages are never
+inputs, even when they name the same project and mailbox. The daemon emits a signed
 acceptance/sequence fact so dispatch never depends on relay receipt order or client timestamps. A
 separate home-signed dispatch record binds an input message to the assignment epoch, agent, and
 thread that actually received it. Each input is dispatched at most once, using the bridge's durable
 idempotency and reconciliation machinery.
+
+After sequencing, the home automatically schedules the oldest pending input for every runnable
+project through the ordinary durable project saga. Closed, unassigned, blocked, and otherwise
+non-runnable projects retain accepted input until they become runnable. Stable command and delivery
+identities make post-commit, startup, drain, and busy-workflow retries converge without submitting
+the same input twice. Manual dispatch is not an ordinary messaging step; it is a typed recovery
+action exposed only when stalled-delivery evidence requires intervention.
 
 Agent output retains immutable agent, thread, and assignment-epoch provenance. The project mailbox
 remains the conversation address and reply target. UIs present dual attribution such as

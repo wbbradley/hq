@@ -19,8 +19,8 @@ use hq_domain::{Page, PageCursor, Timestamp};
 use hq_projects::{
     ApplicationCanonicalProjectPort, ApplicationProjectInputReconciler,
     ApplicationRemoteProjectCommandPort, GitWorktreeAdapter, GitWorktreeAdapterConfig,
-    ProjectCommandRouter, ProjectRuntimePort, ProjectWorkerPort, ProjectWorkflowManager,
-    ReconcileProjectInputs,
+    PlanAutomaticProjectDispatches, ProjectCommandRouter, ProjectInputReconciliation,
+    ProjectRuntimePort, ProjectWorkerPort, ProjectWorkflowManager, ReconcileProjectInputs,
 };
 use hq_protocol::Bip340Signer;
 use hq_reducer::{AuthorityPolicy, ConversationKey};
@@ -91,6 +91,26 @@ pub type StandardProjectNodeComponent<R> = ProjectNodeComponent<
     ProjectResourceAdapter,
     ApplicationProjectInputReconciler<WakingApplicationStore<RelayNodeComponent>>,
 >;
+
+/// Result of one bounded project-message sequencing and automatic-dispatch pass.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectMessageReconciliation {
+    /// Human project inputs accepted during this pass.
+    pub inputs: ProjectInputReconciliation,
+    /// Automatic dispatch commands admitted by the durable project worker.
+    pub dispatch_commands: usize,
+    /// Whether either sequencing or dispatch planning reached the supplied bound.
+    pub truncated: bool,
+}
+
+/// Project-owned capability that sequences human messages and starts durable pending dispatch.
+pub trait ReconcileProjectMessages {
+    /// Reconciles at most `limit` inputs and runnable projects.
+    fn reconcile_project_messages(
+        &self,
+        limit: usize,
+    ) -> Result<ProjectMessageReconciliation, ApplicationError>;
+}
 
 /// Composes the complete standard project worker without taking store or signer ownership.
 pub fn compose_standard_project_component<R: ProjectRuntimePort>(
@@ -163,15 +183,50 @@ impl<W, F, I> ProjectNodeComponent<W, F, I> {
     fn repair(&self) -> Result<(), ComponentError>
     where
         W: ProjectWorkerPort,
-        I: ReconcileProjectInputs,
+        I: ReconcileProjectInputs + PlanAutomaticProjectDispatches,
     {
         self.inputs
             .reconcile_project_inputs(self.config.recovery_limit.get())
             .map_err(|_| ComponentError::unavailable())?;
         self.worker
             .repair_pending(self.config.recovery_time, self.config.recovery_limit.get())
+            .map_err(|_| ComponentError::unavailable())?;
+        self.dispatch_automatic(self.config.recovery_limit.get())
             .map(|_| ())
             .map_err(|_| ComponentError::unavailable())
+    }
+
+    fn dispatch_automatic(&self, limit: usize) -> Result<(usize, bool), ApplicationError>
+    where
+        W: ControlProjects,
+        I: PlanAutomaticProjectDispatches,
+    {
+        let plan = self.inputs.plan_automatic_project_dispatches(limit)?;
+        let mut admitted = 0;
+        for request in plan.requests {
+            let outcome = self.worker.control_project(request)?;
+            if !matches!(outcome, ProjectCommandOutcome::Rejected { .. }) {
+                admitted += 1;
+            }
+        }
+        Ok((admitted, plan.truncated))
+    }
+
+    fn reconcile_messages(
+        &self,
+        limit: usize,
+    ) -> Result<ProjectMessageReconciliation, ApplicationError>
+    where
+        W: ControlProjects,
+        I: ReconcileProjectInputs + PlanAutomaticProjectDispatches,
+    {
+        let inputs = self.inputs.reconcile_project_inputs(limit)?;
+        let (dispatch_commands, dispatch_truncated) = self.dispatch_automatic(limit)?;
+        Ok(ProjectMessageReconciliation {
+            truncated: inputs.truncated || dispatch_truncated,
+            inputs,
+            dispatch_commands,
+        })
     }
 }
 
@@ -185,8 +240,8 @@ impl<W, F, I> std::fmt::Debug for ProjectNodeComponent<W, F, I> {
     }
 }
 
-impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs> NodeComponent
-    for ProjectNodeComponent<W, F, I>
+impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs + PlanAutomaticProjectDispatches>
+    NodeComponent for ProjectNodeComponent<W, F, I>
 {
     fn start(&mut self, _cancellation: CancellationToken) -> Result<(), ComponentError> {
         self.repair()?;
@@ -210,13 +265,17 @@ impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs> NodeComponent
     }
 }
 
-impl<W: ProjectWorkerPort, F, I> ControlProjects for ProjectNodeComponent<W, F, I> {
+impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs + PlanAutomaticProjectDispatches>
+    ControlProjects for ProjectNodeComponent<W, F, I>
+{
     fn control_project(
         &self,
         request: ProjectCommandRequest,
     ) -> Result<ProjectCommandOutcome, ApplicationError> {
         self.ensure_accepting()?;
-        self.worker.control_project(request)
+        let outcome = self.worker.control_project(request)?;
+        self.reconcile_messages(self.config.recovery_limit.get())?;
+        Ok(outcome)
     }
 }
 
@@ -247,5 +306,17 @@ impl<W, F, I: ReconcileProjectInputs> ReconcileProjectInputs for ProjectNodeComp
     ) -> Result<hq_projects::ProjectInputReconciliation, ApplicationError> {
         self.ensure_accepting()?;
         self.inputs.reconcile_project_inputs(limit)
+    }
+}
+
+impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs + PlanAutomaticProjectDispatches>
+    ReconcileProjectMessages for ProjectNodeComponent<W, F, I>
+{
+    fn reconcile_project_messages(
+        &self,
+        limit: usize,
+    ) -> Result<ProjectMessageReconciliation, ApplicationError> {
+        self.ensure_accepting()?;
+        self.reconcile_messages(limit)
     }
 }

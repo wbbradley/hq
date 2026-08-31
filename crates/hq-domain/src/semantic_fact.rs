@@ -79,6 +79,13 @@ pub enum MessagePurpose {
     ProjectOutput,
 }
 
+impl MessagePurpose {
+    /// Whether this purpose represents human work that a project may sequence and dispatch.
+    pub const fn is_project_input(self) -> bool {
+        matches!(self, Self::Question | Self::Asynchronous)
+    }
+}
+
 /// Typed presentation semantics carried without parsing message text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PresentationKind {

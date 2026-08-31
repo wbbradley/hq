@@ -10,14 +10,13 @@ use hq_local_api::{
     LifecycleControl,
     protocol::v1::{BuildMetadata, LifecycleRequest, LifecycleState, LifecycleStatus},
 };
-use hq_projects::ReconcileProjectInputs;
 use hq_reducer::AuthorityPolicy;
 use tokio::{signal::unix::Signal, time::Instant};
 
 use crate::{
     LocalSessionPump, LocalSessionPumpConfig, LocalSessionPumpEvent, LocalSessionPumpOpenError,
     LocalSessionPumpShutdownReport, NodeComponent, NodeLifecycleError, NodeOwner,
-    NodeShutdownReport, ReadinessRecord, ShutdownIntent,
+    NodeShutdownReport, ReadinessRecord, ReconcileProjectMessages, ShutdownIntent,
 };
 
 /// Explicit immutable inputs for one local node runtime generation.
@@ -100,7 +99,7 @@ where
     L: NodeComponent,
     R: NodeComponent + PublishWake + ConfigureRelays,
     H: NodeComponent + ControlHarness + hq_application::QueryProviders,
-    P: NodeComponent + InspectResource + ControlProjects + RetireAgents + ReconcileProjectInputs,
+    P: NodeComponent + InspectResource + ControlProjects + RetireAgents + ReconcileProjectMessages,
 {
     /// Opens runtime artifacts for one already-ready node owner.
     pub fn start(

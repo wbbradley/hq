@@ -494,7 +494,7 @@ fn installed_tui_creates_and_manages_an_existing_tree_project() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn installed_guided_work_creates_everything_and_dispatches_the_first_instruction_once() {
+fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation() {
     let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -548,6 +548,41 @@ fn installed_guided_work_creates_everything_and_dispatches_the_first_instruction
         project["inputs"][0]["message_id"],
         project["dispatches"][0]["message_id"]
     );
+
+    let follow_up = "continue with the installed follow-up";
+    let reply = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::ReplyToProjectConversation {
+            name,
+            initial: content,
+            content: follow_up,
+        },
+    );
+    assert!(
+        reply.status.success(),
+        "guided reply failed: {:?}",
+        reply.bytes
+    );
+    for phrase in ["Agent is working", "finished-turn-2"] {
+        assert!(
+            reply
+                .bytes
+                .windows(phrase.len())
+                .any(|window| window == phrase.as_bytes()),
+            "guided reply did not render {phrase:?}: {:?}",
+            reply.bytes
+        );
+    }
+    let project = project_json(&state_root, name);
+    assert_eq!(project["inputs"].as_array().map(Vec::len), Some(2));
+    assert_eq!(project["dispatches"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        project["inputs"][1]["message_id"],
+        project["dispatches"][1]["message_id"]
+    );
+    assert!(mailbox_contains(&state_root, follow_up));
+    assert!(mailbox_contains(&state_root, "finished-turn-2"));
 }
 
 #[test]
@@ -712,6 +747,11 @@ enum PtyInteraction<'content> {
     CompleteFreshSetupAndReconnect,
     SubmitSelfNote(&'content str),
     NavigateInboxConversation(&'content str),
+    ReplyToProjectConversation {
+        name: &'content str,
+        initial: &'content str,
+        content: &'content str,
+    },
     CreateAgent(&'content str),
     StartRejectedSession,
     CreateExistingProject {
@@ -859,7 +899,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::OpenNewLauncher => vec![b"n"],
                 PtyInteraction::CompleteFreshSetupAndReconnect => unreachable!(),
                 PtyInteraction::SubmitSelfNote(_) => vec![b"N"],
-                PtyInteraction::NavigateInboxConversation(_) => Vec::new(),
+                PtyInteraction::NavigateInboxConversation(_)
+                | PtyInteraction::ReplyToProjectConversation { .. } => Vec::new(),
                 PtyInteraction::CreateAgent(_) => vec![b"l", b"l", b"l", b"c"],
                 PtyInteraction::StartRejectedSession => vec![b"l", b"l", b"l", b"\t"],
                 PtyInteraction::CreateExistingProject { .. } => {
@@ -1011,6 +1052,90 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             master.write_all(&[0x03]).expect("Ctrl-C writes");
             master.flush().expect("Ctrl-C flushes");
             exit_sent = true;
+        }
+        if let PtyInteraction::ReplyToProjectConversation { name, initial, .. } = interaction
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(name.len())
+                .any(|window| window == name.as_bytes())
+            && bytes
+                .windows(initial.len())
+                .any(|window| window == initial.as_bytes())
+        {
+            master
+                .write_all(b"\t\r")
+                .expect("project conversation entry keys write");
+            master
+                .flush()
+                .expect("project conversation entry keys flush");
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(
+            interaction,
+            PtyInteraction::ReplyToProjectConversation { .. }
+        ) && content_sent
+            && !managed_action_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows("h/← Inbox".len())
+                    .any(|window| window == "h/← Inbox".as_bytes())
+            })
+        {
+            master.write_all(b"r").expect("project reply key writes");
+            master.flush().expect("project reply key flushes");
+            managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::ReplyToProjectConversation { content, .. } = interaction
+            && managed_action_sent
+            && !managed_provider_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Continue project conversation".len())
+                    .any(|window| window == b"Continue project conversation")
+                    && bytes[offset..]
+                        .windows(b"0/16384 bytes".len())
+                        .any(|window| window == b"0/16384 bytes")
+            })
+        {
+            master
+                .write_all(format!("{content}\r").as_bytes())
+                .expect("project follow-up writes");
+            master.flush().expect("project follow-up flushes");
+            managed_provider_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(
+            interaction,
+            PtyInteraction::ReplyToProjectConversation { .. }
+        ) && managed_provider_sent
+            && !resource_commit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Agent is working".len())
+                    .any(|window| window == b"Agent is working")
+            })
+        {
+            resource_commit_sent = true;
+        }
+        if let PtyInteraction::ReplyToProjectConversation { name, .. } = interaction
+            && resource_commit_sent
+            && !exit_sent
+            && Instant::now() >= next_state_probe_at
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"finished-turn-2".len())
+                    .any(|window| window == b"finished-turn-2")
+            })
+        {
+            next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
+            if project_has_dispatch_count(state_root, name, 2) {
+                master.write_all(&[0x03]).expect("Ctrl-C writes");
+                master.flush().expect("Ctrl-C flushes");
+                exit_sent = true;
+            }
         }
         if let PtyInteraction::CreateAgent(name) = interaction
             && initial_key_sent
@@ -1581,6 +1706,12 @@ fn project_is_runnable_with_one_dispatch(state_root: &Path, name: &str) -> bool 
         && project["inputs"][0]["message_id"] == project["dispatches"][0]["message_id"]
 }
 
+fn project_has_dispatch_count(state_root: &Path, name: &str, expected: usize) -> bool {
+    let project = project_json(state_root, name);
+    project["inputs"].as_array().map(Vec::len) == Some(expected)
+        && project["dispatches"].as_array().map(Vec::len) == Some(expected)
+}
+
 fn hq_output(state_root: &Path, arguments: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_hq"));
     command.arg("--state-root").arg(state_root);
@@ -1620,8 +1751,10 @@ fn install_fake_codex(directory: &Path) {
 import json
 import os
 import sys
+import time
 
 thread_id = "hq-test-thread"
+turn_number = 0
 for line in sys.stdin:
     with open(os.path.join(os.path.dirname(__file__), "calls.log"), "a") as log:
         log.write(line)
@@ -1638,7 +1771,17 @@ for line in sys.stdin:
         thread_id = message.get("params", {}).get("threadId", thread_id)
         result = {"thread": {"id": thread_id, "turns": []}}
     elif method == "turn/start":
-        result = {"turn": {"id": "hq-test-turn", "status": "inProgress", "items": []}}
+        turn_number += 1
+        turn_id = f"hq-test-turn-{turn_number}"
+        turn = {"id": turn_id, "status": "inProgress", "items": []}
+        print(json.dumps({"method": "turn/started", "params": {"threadId": thread_id, "turn": turn}}), flush=True)
+        print(json.dumps({"id": request_id, "result": {"turn": turn}}), flush=True)
+        time.sleep(0.25)
+        item = {"type": "agentMessage", "id": f"answer-{turn_number}", "text": f"finished-turn-{turn_number}", "phase": "final_answer"}
+        print(json.dumps({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": item}}), flush=True)
+        completed = {"id": turn_id, "status": "completed", "items": [item]}
+        print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": completed}}), flush=True)
+        continue
     elif method == "thread/read":
         result = {"thread": {"id": thread_id, "turns": []}}
     elif method in ("turn/interrupt", "turn/steer"):

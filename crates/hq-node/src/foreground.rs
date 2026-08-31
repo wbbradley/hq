@@ -352,3 +352,12 @@ impl hq_projects::ReconcileProjectInputs for DormantNodeComponent {
         unavailable()
     }
 }
+
+impl crate::ReconcileProjectMessages for DormantNodeComponent {
+    fn reconcile_project_messages(
+        &self,
+        _limit: usize,
+    ) -> Result<crate::ProjectMessageReconciliation, ApplicationError> {
+        unavailable()
+    }
+}

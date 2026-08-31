@@ -3,9 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentIntent, AuthorityRole, CommandDigest,
     CommandId, ContentText, DispatchId, ErrorCode, Fact, FactId, FactScope, InitialProjectState,
-    InstallationId, MailboxAddress, MailboxId, MessageContent, MessageId, OperationCorrelation,
-    ProjectId, ProjectResource, RemoteCommandResult, ResourceId, ResourceLocator, ResourceScheme,
-    RuntimeObservation, SemanticPayload, ShortText, ThreadId, Timestamp,
+    InstallationId, MailboxAddress, MailboxId, MessageContent, MessageId, MessagePurpose,
+    OperationCorrelation, ProjectId, ProjectResource, RemoteCommandResult, ResourceId,
+    ResourceLocator, ResourceScheme, RuntimeObservation, SemanticPayload, ShortText, ThreadId,
+    Timestamp,
 };
 
 use crate::{
@@ -1191,13 +1192,27 @@ fn valid_project_input(
         && context.facts().get(input_fact_id).is_some_and(|candidate| {
             context.is_projected(candidate.id())
                 && candidate.scope() == &FactScope::AccountAddressed(project.account_id)
-                && message_content(candidate.payload()).is_some_and(|message| {
+                && project_input_message(candidate.payload()).is_some_and(|message| {
                     message.message_id == message_id
                         && message.project_id == Some(project.project_id)
                         && message.recipient
                             == Some(MailboxAddress::new(project.home, project.mailbox_id))
                 })
         })
+}
+
+fn project_input_message(payload: &SemanticPayload) -> Option<&MessageContent> {
+    match payload {
+        SemanticPayload::QuestionAsked(message) if message.purpose == MessagePurpose::Question => {
+            Some(message)
+        }
+        SemanticPayload::AsynchronousMessageSent { message, .. }
+            if message.purpose == MessagePurpose::Asynchronous =>
+        {
+            Some(message)
+        }
+        _ => None,
+    }
 }
 
 fn valid_acceptance_parent(

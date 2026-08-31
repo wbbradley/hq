@@ -120,6 +120,13 @@ thread. After a later snapshot proves the assignment runnable, the Inbox selects
 conversation; the accepted message remains pending for the project workflow's exactly-once
 dispatch.
 
+Within an open project conversation, `r` opens the modeless continuation draft. Sending it commits
+one typed human project message; the project-owned post-commit operation sequences and dispatches
+it automatically through the existing assignment and thread. The conversation shows working
+activity and refreshes with status and final output in place. Those agent-authored outputs are never
+eligible for project input. Ordinary messaging exposes no manual dispatch step; retry appears only
+as a typed recovery action when canonical stalled-delivery evidence exists.
+
 One available agent service is selected automatically without a confirmation dialog. Several
 available services open a service chooser; none leave that screen open with actionable setup
 guidance. A real assignment move

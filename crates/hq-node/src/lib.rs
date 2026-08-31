@@ -112,7 +112,8 @@ pub use node_coordinator::{
     ProcessNodeLauncher,
 };
 pub use project_component::{
-    ProjectNodeComponent, ProjectNodeConfig, StandardProjectNodeComponent, StandardProjectWorker,
+    ProjectMessageReconciliation, ProjectNodeComponent, ProjectNodeConfig,
+    ReconcileProjectMessages, StandardProjectNodeComponent, StandardProjectWorker,
     WakingApplicationStore, compose_standard_project_component,
 };
 pub use project_resource::ProjectResourceAdapter;

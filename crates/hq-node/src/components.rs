@@ -17,7 +17,6 @@ use hq_domain::{FactId, Page, PageCursor, Revision};
 use hq_local_api::RevisionHub;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use hq_local_api::protocol::v1::{BuildMetadata, Id32, LifecycleState, LifecycleStatus};
-use hq_projects::ReconcileProjectInputs;
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 use hq_store::StoreGateway;
 
@@ -27,8 +26,8 @@ use crate::{
     NodePhase, ReadinessRecord, RuntimeArtifactError, local_transport::ready_record,
 };
 use crate::{
-    CancellationToken, NodeAdmission, NodeFoundation, NodeLifecycleError, TaskJoinReport,
-    TaskTracker,
+    CancellationToken, NodeAdmission, NodeFoundation, NodeLifecycleError, ReconcileProjectMessages,
+    TaskJoinReport, TaskTracker,
 };
 
 /// Closed long-lived component catalog.
@@ -209,7 +208,7 @@ impl<R, H, P> QueryDomain for NodeApplicationPorts<'_, R, H, P> {
     }
 }
 
-impl<R, H, P: ReconcileProjectInputs> CommitFacts for NodeApplicationPorts<'_, R, H, P> {
+impl<R, H, P: ReconcileProjectMessages> CommitFacts for NodeApplicationPorts<'_, R, H, P> {
     fn commit_facts(&self, request: FactMutation) -> Result<MutationAttempt, ApplicationError> {
         let attempt = self.store.commit_facts(request)?;
         if matches!(
@@ -217,7 +216,7 @@ impl<R, H, P: ReconcileProjectInputs> CommitFacts for NodeApplicationPorts<'_, R
             MutationAttempt::Completed(receipt)
                 if matches!(receipt.outcome(), hq_application::MutationOutcome::Committed)
         ) {
-            self.project.reconcile_project_inputs(256)?;
+            self.project.reconcile_project_messages(256)?;
         }
         Ok(attempt)
     }
@@ -230,7 +229,7 @@ impl<R, H, P: ReconcileProjectInputs> CommitFacts for NodeApplicationPorts<'_, R
     }
 }
 
-impl<R, H, P: ReconcileProjectInputs> ControlMailbox for NodeApplicationPorts<'_, R, H, P> {
+impl<R, H, P: ReconcileProjectMessages> ControlMailbox for NodeApplicationPorts<'_, R, H, P> {
     fn mailbox_drafts(&self) -> Result<Vec<MailboxDraft>, ApplicationError> {
         self.store.mailbox_drafts()
     }
@@ -265,12 +264,12 @@ impl<R, H, P: ReconcileProjectInputs> ControlMailbox for NodeApplicationPorts<'_
                 if matches!(receipt.outcome(), hq_application::MutationOutcome::Committed)
             )
         {
-            let first = self.project.reconcile_project_inputs(256)?;
-            if first.accepted == 0 {
+            let first = self.project.reconcile_project_messages(256)?;
+            if first.inputs.accepted == 0 {
                 // A draft-backed mutation may publish its committed receipt before the
                 // projection consumed by the project component reaches that revision. One
                 // bounded repair pass crosses that handoff without retrying the mutation.
-                self.project.reconcile_project_inputs(256)?;
+                self.project.reconcile_project_messages(256)?;
             }
         }
         Ok(attempt)
@@ -371,7 +370,7 @@ impl<R, H, P> ApplicationPorts for NodeApplicationPorts<'_, R, H, P>
 where
     R: PublishWake + ConfigureRelays,
     H: ControlHarness + hq_application::QueryProviders,
-    P: InspectResource + ControlProjects + RetireAgents + ReconcileProjectInputs,
+    P: InspectResource + ControlProjects + RetireAgents + ReconcileProjectMessages,
 {
 }
 
@@ -460,7 +459,7 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
     where
         R: PublishWake + ConfigureRelays,
         H: ControlHarness,
-        P: InspectResource + ControlProjects + RetireAgents + ReconcileProjectInputs,
+        P: InspectResource + ControlProjects + RetireAgents + ReconcileProjectMessages,
     {
         let foundation = self.foundation.as_ref()?;
         let components = self.components.as_ref()?;

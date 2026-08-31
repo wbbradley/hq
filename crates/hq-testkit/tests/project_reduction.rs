@@ -1058,6 +1058,39 @@ fn input_dispatch_and_output_keep_exact_provenance_and_late_output_is_inert()
             message: output_message(first_output_id, "before handoff")?,
         },
     )?;
+    let output_replayed_as_input = project_transition(
+        &mut values,
+        &world,
+        &first_output,
+        SemanticPayload::ProjectInputAccepted {
+            project_id,
+            message_id: first_output_id,
+            input_fact_id: first_output.id(),
+            sequence: NonZeroU64::new(2).ok_or("nonzero")?,
+        },
+    )?;
+    let malformed_report = reduce_complete(
+        world.base().into_iter().chain(agent.facts.clone()).chain([
+            create.clone(),
+            configuring.clone(),
+            message.clone(),
+            runnable.clone(),
+            accepted.clone(),
+            dispatched.clone(),
+            first_output.clone(),
+            output_replayed_as_input.clone(),
+        ]),
+        &world.reducer(),
+    )?;
+    assert_eq!(
+        malformed_report.decisions()[&output_replayed_as_input.id()].status(),
+        DecisionStatus::Invalid
+    );
+    assert!(
+        !malformed_report
+            .projections()
+            .contains_key(&ProjectProjectionKey::Input(first_output_id))
+    );
     let ended = project_transition(
         &mut values,
         &world,

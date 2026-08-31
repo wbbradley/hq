@@ -342,7 +342,7 @@ pub enum ConversationProjection {
 pub enum ConversationReason {
     /// Historical authority policy rejected the fact.
     Authority(AuthorityReason),
-    /// Message sender, author, scope, or recipient disagree.
+    /// Message sender, author, scope, recipient, or typed purpose disagree.
     AddressMismatch,
     /// A child names or cites the wrong root/thread family.
     ThreadMismatch,
@@ -469,10 +469,14 @@ fn classify_conversation(
     context: &ReductionContext<'_, ConversationReason>,
 ) -> DomainDecision<ConversationReason> {
     let result = match fact.payload() {
-        SemanticPayload::QuestionAsked(message) => validate_message_address(fact, message)
-            .and_then(|()| validate_message_identity(message.message_id, context)),
+        SemanticPayload::QuestionAsked(message) => {
+            validate_message_purpose(message, MessagePurpose::Question)
+                .and_then(|()| validate_message_address(fact, message))
+                .and_then(|()| validate_message_identity(message.message_id, context))
+        }
         SemanticPayload::AsynchronousMessageSent { thread_id, message } => {
-            validate_message_address(fact, message)
+            validate_message_purpose(message, MessagePurpose::Asynchronous)
+                .and_then(|()| validate_message_address(fact, message))
                 .and_then(|()| {
                     thread_id.map_or(Ok(()), |thread_id| {
                         validate_asynchronous_continuation(fact, thread_id, message, context)
@@ -487,7 +491,8 @@ fn classify_conversation(
             thread_id,
             message,
             ..
-        } => validate_message_address(fact, message)
+        } => validate_message_purpose(message, MessagePurpose::ProjectOutput)
+            .and_then(|()| validate_message_address(fact, message))
             .and_then(|()| {
                 validate_project_runtime_parent(
                     fact,
@@ -501,7 +506,8 @@ fn classify_conversation(
             })
             .and_then(|()| validate_message_identity(message.message_id, context)),
         SemanticPayload::AnswerGiven { thread_id, message } => {
-            validate_message_address(fact, message)
+            validate_message_purpose(message, MessagePurpose::Question)
+                .and_then(|()| validate_message_address(fact, message))
                 .and_then(|()| validate_answer(fact, *thread_id, message, context))
                 .and_then(|()| validate_message_identity(message.message_id, context))
         }
@@ -712,6 +718,15 @@ fn validate_message_address(
         FactScope::RemoteControl { .. } => false,
     };
     valid
+        .then_some(())
+        .ok_or(ConversationReason::AddressMismatch)
+}
+
+fn validate_message_purpose(
+    message: &MessageContent,
+    expected: MessagePurpose,
+) -> Result<(), ConversationReason> {
+    (message.purpose == expected)
         .then_some(())
         .ok_or(ConversationReason::AddressMismatch)
 }

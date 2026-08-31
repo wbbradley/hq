@@ -221,6 +221,17 @@ reconciles an uncertain submission before retry and authors `ProjectInputDispatc
 that ledger reports definite acceptance. The workflow adds no second provider queue and never
 concatenates backlog messages.
 
+The project component owns a bounded post-commit reconciliation operation. It first accepts only
+typed human project questions or asynchronous messages, then derives stable `DispatchPending`
+commands for runnable projects from authoritative pending-input state. Mailbox and generic fact
+committers invoke that operation without depending on provider details. Project-command, startup,
+and drain boundaries invoke the same operation for repair. Agent project output is excluded at
+conversation classification, acceptance planning, and project reduction, so status and final
+messages cannot advance the input sequence or replay into the provider. A busy or reconcilable saga
+leaves the authoritative pending input in place, allowing the same stable automatic command to be
+retried safely. Manual dispatch remains an exceptional typed recovery action for a surfaced stalled
+delivery, not part of normal composition.
+
 Project workflow intake uses one public passive `ProjectCommandRequest` with stable command and
 operation identities, an exact digest, account/project/home identities, an optional expected
 project head, explicit issue time, and a closed `ProjectCommandAction`. Every existing-project

@@ -115,6 +115,15 @@ impl hq_projects::ReconcileProjectInputs for UnavailableNodeComponent {
     }
 }
 
+impl hq_node::ReconcileProjectMessages for UnavailableNodeComponent {
+    fn reconcile_project_messages(
+        &self,
+        _limit: usize,
+    ) -> Result<hq_node::ProjectMessageReconciliation, ApplicationError> {
+        unavailable()
+    }
+}
+
 impl PublishWake for UnavailableNodeComponent {
     fn publish_wake(&self, _revision: Revision) -> Result<WakeDisposition, ApplicationError> {
         unavailable()
