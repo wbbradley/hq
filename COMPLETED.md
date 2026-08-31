@@ -1,5 +1,109 @@
 # Completed
 
+## 2026-08-30 — Responsive chat-like Inbox conversation surface
+
+Reworked Inbox into a conversation-dominant responsive workspace. Wide layouts now use a bounded
+participant-first Inbox list and give remaining width to Conversation; compact Conversation and
+Draft focus retain only the selected summary above the transcript. Messages and compact typed
+activity render at the pane edge, wrapped entry heights are measured with Ratatui around the stable
+fact anchor, and full-row selection no longer inserts a marker or moves text.
+
+Added closed author, activity-status, and focused/retained transcript-selection theme roles across
+terminal, no-color, Base16, native inheritance, style tests, and documentation. Older-page requests
+now retain typed cursor provenance so loading and failure preserve the transcript and anchor. Exact
+routing, semantics, evidence, activity state, and raw detail moved out of transcript rows into a
+bounded wide inspector or compact/draft-safe secondary pane; Back closes details before leaving the
+conversation. Participant hierarchy, onboarding copy, snapshots, model and mapper contracts,
+installed PTY coverage, acceptance documentation, and obsolete-label assertions were updated. The
+stack was rebased onto the Gruvbox-default mainline, and formatting, architecture/qualification
+validation, strict workspace Clippy, and the complete locked all-target/all-feature suite pass.
+
+### Original plan entry
+
+### Complete the responsive chat-like Inbox conversation surface
+
+Finish `docs/rust/inbox-conversation-surface.md` after typed voices and activity land.
+
+- Replace the 60/40 wide split with the approved bounded 24–36-column Inbox list and dominant
+  Conversation pane while preserving the always-visible compact stacked layout and one-level Back.
+- Measure wrapped display-cell spans around the stable fact anchor instead of assuming fixed entry
+  heights; cover paragraphs, wide Unicode, long content, paging, failure, resize, and an open draft.
+- Add dedicated author/activity/full-row-focus semantic theme roles with terminal, no-color,
+  Base16, native-theme, style-snapshot, and documentation coverage. Selection must not add a marker
+  or shift the text origin.
+- Move technical disclosure into the wide in-pane inspector or compact secondary screen without
+  overwriting a draft; retain exact routing, semantics, evidence, activity detail, and action state.
+- Finish participant/list hierarchy, actionable-only paging, loading/empty/failure states, compact
+  behavior, installed PTY coverage, and removal assertions for `Conversation · complete`, all
+  renderer-added transcript indentation, and obsolete presentation paths.
+- Update TUI/theme/acceptance/behavior-ledger documentation and archive the approved umbrella
+  implementation only after both stack layers pass the complete verification suite.
+
+#### Implementation plan
+
+1. Add failing render boundary tests in `crates/hq-tui/src/render.rs` and
+   `crates/hq-tui/tests/render_snapshots.rs` for the one Inbox-list width policy at the 96-column
+   wide threshold, the 24/32/36-column bounds, a 48-column Conversation target when space permits,
+   and allocation of every later column to Conversation. Replace the 60/40 split only through that
+   tested helper; make compact Conversation focus contract the list to its heading and selected row
+   while list focus retains the four-row transcript preview.
+2. Add failing node presentation tests for direct, project, personal, and unresolved Inbox list
+   hierarchy. Change `crates/hq-node/src/tui_client.rs` so conversation rows lead with the singular
+   participant (`Alice`, `Project agent`, `Other participant`, or `Personal notes`) and put optional
+   project name plus bounded preview on the second line. Keep stable row keys and typed action
+   targets unchanged; never recover context from the display strings.
+3. Add dedicated closed theme roles in `crates/hq-tui/src/theme.rs` for self/participant authors,
+   neutral/success/warning/error activity, and focused/unfocused transcript selection. Extend the
+   terminal, no-color, and Base16 mappings; native theme parsing and inherited overrides; role
+   completeness/configurability tests; style-buffer assertions; bundled-theme coverage; and
+   `docs/tui-themes.md`. Color remains supplementary to author labels, status symbols, bold/dim,
+   and reverse focus.
+4. Replace the fixed three/six-row capacity estimate with one display-cell-aware entry measurement
+   and viewport-selection path. Measure the exact Ratatui wrapping of author/body paragraphs and
+   compact activity at the current inner width, reserve separator rows, keep the stable fact anchor
+   visible and approximately centered, recalculate on resize/draft/inspector changes, and clip only
+   when one selected entry itself exceeds the available viewport. Add multiline, empty-paragraph,
+   long-word, wide-Unicode, narrow-width, resize, paging, and draft-constrained tests.
+5. Render each transcript item in its measured rectangle. Paint focused or retained selection over
+   every row cell without a marker or changed text origin; layer the dedicated author, ordinary
+   body, and typed activity styles over that surface. Remove inline technical rows from entry
+   rendering and add absence/style tests proving ordinary text starts at column zero and focus does
+   not reflow it.
+6. Replace the conversation failure tuple with typed initial/older-page presentation state while
+   retaining the same opaque cursor effect authority. First-page loading/failure may show an empty
+   state; older-page loading/failure must retain the complete transcript and show only the
+   actionable `Loading older messages…` or `Older messages could not be loaded · PageDown retry`
+   line. Preserve the anchor across success, failure, selection changes, invalidation, and reload.
+7. Move selected-entry technical disclosure into a bounded lower inspector on wide terminals. On
+   compact terminals, and whenever a draft occupies the lower Conversation region, use a secondary
+   details screen with `h`/Left/Escape returning to the same anchor. Render namespaced Routing,
+   Semantics, Evidence, and Activity sections with exact unabridged values and raw activity detail;
+   never close, overwrite, or reinterpret a modeless draft.
+8. Update footer and pure-model contracts so list selection and transcript focus remain distinct,
+   `h`/Left closes details before returning Conversation to Inbox, another `h`/Left returns to
+   navigation, and entry actions remain based only on `UiMessageTarget` plus typed state. Cover
+   full-row focused/unfocused behavior, activity non-actionability, archive/reply controls, and
+   retained draft focus without introducing a modal or conversation dismissal.
+9. Expand wide/compact text and style snapshots plus installed PTY coverage around the approved
+   Alice/project exchange, personal notes, long wrapped content, no-color, open draft, inspector,
+   older-page failure, and resize. Assert absence of `Conversation · complete`, protocol purpose/ID
+   headings, `message · open`, `update · information only`, list/transcript selection markers, and
+   renderer-added transcript indentation.
+10. Reconcile `docs/rust/{tui,inbox-conversation-surface,acceptance-scenarios,behavior-ledger}.md`
+    and theme documentation with the completed surface. Run formatting, architecture/qualification
+    validation, strict locked workspace Clippy, the complete locked all-target/all-feature test
+    suite, and installed conversation PTY coverage. Commit with a Conventional Commit, archive this
+    task verbatim, and leave the approved Projects workspace at the front of `PLAN.md`.
+
+Risks and open questions: Ratatui wrapping must be the measurement oracle or selection will drift
+from rendered display cells; a selected message taller than the complete transcript viewport has
+no intra-message scroll state and therefore needs deterministic clipping; exact technical values
+may wrap to many rows, so the inspector must be bounded without abbreviating its source data; theme
+role growth makes native files intentionally partial through inheritance but keeps the resolved
+catalog closed; and older-page failure currently loses whether its request had a cursor, so the
+model needs typed request provenance rather than inference from the retained conversation.
+
+
 ## 2026-08-29 — Clap-owned CLI grammar and generated help
 
 Replaced the installed client's handwritten parser and duplicated help matrix with one private,
