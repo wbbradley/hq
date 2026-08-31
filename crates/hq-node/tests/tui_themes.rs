@@ -233,6 +233,34 @@ fn catalog_exposes_builtins_active_choice_and_invalid_user_files() {
 }
 
 #[test]
+fn automatic_catalog_choice_is_gruvbox_dark_medium_unless_no_color_is_requested() {
+    let directory = TestDirectory::new();
+    let environment = environment(&directory);
+    let catalog = list_tui_themes(None, &environment).expect("automatic catalog");
+    assert!(
+        catalog
+            .iter()
+            .any(|entry| { entry.selector == "gruvbox-dark-medium" && entry.active })
+    );
+    assert!(
+        !catalog
+            .iter()
+            .any(|entry| entry.selector == "terminal" && entry.active)
+    );
+
+    let no_color = TuiThemeEnvironment {
+        no_color: Some("1".into()),
+        ..environment
+    };
+    let catalog = list_tui_themes(None, &no_color).expect("no-color catalog");
+    assert!(
+        catalog
+            .iter()
+            .any(|entry| entry.selector == "no-color" && entry.active)
+    );
+}
+
+#[test]
 fn installed_resolution_reports_selected_file_before_terminal_composition() {
     let directory = TestDirectory::new();
     let environment = environment(&directory);

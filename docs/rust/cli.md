@@ -72,11 +72,11 @@ input fails explicitly. Other commands do not read stdin.
 lists the reserved bundled selectors plus discovered user files, marks the active choice, retains
 scheme name and author, and reports invalid definitions without requiring the user to guess a
 name. `config set theme NAME_OR_ABSOLUTE_PATH` validates and persists a selection;
-`config set theme none` restores automatic `terminal`/`NO_COLOR` behavior. Named files are found in
-`$XDG_CONFIG_HOME/hq/themes` or `~/.config/hq/themes`. Resolution happens before raw mode or the
-alternate screen, so a missing or invalid selected file produces an ordinary actionable terminal
-diagnostic. See [TUI themes](../tui-themes.md) for built-ins, Base16 import, and the native role
-schema.
+`config set theme none` restores automatic `gruvbox-dark-medium`/`NO_COLOR` behavior. Named files
+are found in `$XDG_CONFIG_HOME/hq/themes` or `~/.config/hq/themes`. Resolution happens before raw
+mode or the alternate screen, so a missing or invalid selected file produces an ordinary actionable
+terminal diagnostic. See [TUI themes](../tui-themes.md) for built-ins, Base16 import, and the native
+role schema.
 
 `human create [LABEL]` starts or connects to the node, reconciles the reserved human mailbox,
 authors the installation's deterministic but separately namespaced creator-account identity when

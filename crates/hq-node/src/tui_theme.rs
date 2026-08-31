@@ -19,6 +19,7 @@ const MAX_THEME_BYTES: u64 = 65_536;
 const MAX_THEME_FILES: usize = 256;
 const MAX_INHERITANCE_DEPTH: usize = 8;
 const MAX_METADATA_BYTES: usize = 256;
+const DEFAULT_THEME_NAME: &str = "gruvbox-dark-medium";
 const BUILTIN_BASE16: [(&str, &[u8]); 6] = [
     (
         "gruvbox-dark-hard",
@@ -200,7 +201,9 @@ pub fn resolve_tui_theme(
         return Ok(UiTheme::no_color());
     }
     let Some(selection) = selection else {
-        return Ok(UiTheme::terminal());
+        return builtin_theme(DEFAULT_THEME_NAME)?.ok_or_else(|| {
+            TuiThemeError::new(TuiThemeErrorClass::Invalid, "default built-in theme")
+        });
     };
     let theme_directory = environment.theme_directory().ok();
     ThemeResolver::new(theme_directory).resolve_selection(selection)
@@ -214,7 +217,7 @@ pub fn list_tui_themes(
     let automatic = if selection.is_none() && environment.no_color_requested() {
         "no-color"
     } else {
-        "terminal"
+        DEFAULT_THEME_NAME
     };
     let active = selection.map_or(automatic, ThemeSelection::as_str);
     let mut entries = BUILTIN_NAMES
@@ -938,6 +941,16 @@ palette:
     }
 
     #[test]
+    fn automatic_default_is_gruvbox_dark_medium() {
+        assert_eq!(
+            super::resolve_tui_theme(None, &TuiThemeEnvironment::default())
+                .expect("automatic Gruvbox theme")
+                .name(),
+            "Gruvbox dark, medium"
+        );
+    }
+
+    #[test]
     fn no_color_only_applies_without_an_explicit_selection() {
         let environment = TuiThemeEnvironment {
             no_color: Some("1".into()),
@@ -948,6 +961,13 @@ palette:
                 .expect("automatic no-color")
                 .name(),
             "no-color"
+        );
+        let explicit = crate::ThemeSelection::new("terminal".to_owned()).expect("selection");
+        assert_eq!(
+            super::resolve_tui_theme(Some(&explicit), &environment)
+                .expect("explicit theme wins")
+                .name(),
+            "terminal"
         );
     }
 

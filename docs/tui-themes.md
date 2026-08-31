@@ -24,8 +24,8 @@ regular, non-symlink files and, on Unix, must not be group- or world-writable. H
 names, reserved built-in names, unsafe files, malformed definitions, and unresolved parents rather
 than guessing.
 
-With no explicit selection, HQ uses `terminal`. A nonempty `NO_COLOR` changes that automatic choice
-to `no-color`; an explicit configured choice wins. The bundled choices are:
+With no explicit selection, HQ uses `gruvbox-dark-medium`. A nonempty `NO_COLOR` changes that
+automatic choice to `no-color`; an explicit configured choice wins. The bundled choices are:
 
 - `terminal`
 - `no-color`
