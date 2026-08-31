@@ -1,10 +1,10 @@
  HQ   Inbox
  this device Connected
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
- › Inbox               │ Inbox · 3 conversations                        │ Conversation · complete
+ › Inbox               │ Inbox · 3 conversations                        │Loading messages…
    Sent                │                                                │
-   Archived            │   Build release                                │ Loading the selected
-   Agents              │     open · agent-1                             │conversation…
+   Archived            │   Build release                                │
+   Agents              │     open · agent-1                             │
    Projects            │ › Deploy production                            │
                        │     waiting · waiting for approval             │
                        │   Investigate timeout                          │

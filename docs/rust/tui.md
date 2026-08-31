@@ -2,11 +2,12 @@
 
 Status: Active pure-client contract
 
-Focused interaction specifications extend this contract: the
-[Inbox conversation surface](inbox-conversation-surface.md) is a review draft, and the approved
-[Projects workspace](projects-workspace.md) is queued for implementation. Until their production
-acceptance gates pass, descriptions below that name current rendering remain implementation truth,
-not patterns to preserve.
+Focused interaction specifications extend this contract. The approved
+[Inbox conversation surface](inbox-conversation-surface.md) has its typed presentation boundary in
+production; its responsive viewport, dedicated theme roles, and inspector remain queued. The
+approved [Projects workspace](projects-workspace.md) is also queued for implementation. Until each
+remaining production acceptance gate passes, descriptions below that name current rendering remain
+implementation truth, not patterns to preserve.
 
 `hq-tui` owns deterministic presentation state and borrowed Ratatui rendering. It does not own a
 terminal, clock, task runtime, local connection, storage handle, signer, filesystem, process, or
@@ -194,17 +195,18 @@ Agents, Projects, and typed provider choices. Section navigation selects an alre
 mapped slice and performs no client request, so it never replaces visible content with a loading
 state. Invalidation and periodic repair load a replacement bundle in the background while the
 previous complete bundle remains visible. Conversation summaries carry store-derived open,
-archived, and local-human-authored counts plus a typed project/participant presentation context and
-one sanitized bounded message preview. The node uses the typed context for human titles such as
-`Release · Alice`, `Me and Alice`, and `Personal notes`; unresolved names use `unnamed participant`
-rather than an internal identifier. Mailbox filters do not scan or reorder message bodies.
+archived, and local-human-authored counts, the exact reserved local-human mailbox, a typed
+project/participant presentation context, and one sanitized bounded message preview. The node uses
+the typed context for list titles such as `Release · Alice`, `Me and Alice`, and `Personal notes`;
+unresolved names use an honest fallback rather than an internal identifier. Mailbox filters do not
+scan or reorder message bodies.
 Selecting a summary issues the ordinary `ConversationPage` request with an opaque cursor, and a
-newer selection supersedes the pending preview without allowing a stale completion to replace it. Returned
-message/activity unions remain in reducer order; selected/coalesced activity is presented as
-an `update` marked `information only` on current ordinary screens and is never converted into a
-message target. The Inbox conversation-surface specification replaces that legacy label with typed,
-compact activity while retaining identity, status, and exact detail in technical inspection. The
-mapper also exposes only uniquely
+newer selection supersedes the pending preview without allowing a stale completion to replace it.
+Returned message/activity unions remain in reducer order. The page mapper classifies an author as
+`You`, the named or fallback participant, or `Unknown sender` from exact mailbox evidence; labels
+never become routing authority. It maps the closed status, agent-turn, progress, plan, diff, and
+completed-item activity kinds to compact ordinary summaries while preserving exact detail and
+technical evidence. Activity remains non-actionable. The mapper also exposes only uniquely
 named, uniquely bound, non-retired agent mailboxes as passive direct-target candidates. The protocol
 `AuthoritativeSnapshotDto` and presentation `UiSnapshot` are deliberately different records: one
 is canonical local-API data, while the other is a small complete navigation cache containing only
@@ -421,11 +423,11 @@ the selected conversation and a modeless draft pane occupies the lower portion o
 while composing. Project rows expose `r continue` for the exact selected thread and `c new
 conversation` for a separate root. A newly committed root is selected by its returned message ID,
 never by display text. An activated conversation centers rendering around the stable fact anchor,
-and the current legacy renderer labels activity as an information-only update and expands typed
-routing, semantics, evidence, or activity sections inline. The reviewed replacement is specified in
-[Inbox conversation surface](inbox-conversation-surface.md): participant-oriented headings,
-column-zero author/body blocks, compact typed activity, measured wrapped heights, and an in-pane
-technical inspector. Enter
+and the current intermediate renderer shows participant-oriented headings, column-zero author/body
+blocks, and compact typed activity. It still expands typed routing, semantics, evidence, or
+activity sections inline and uses a fixed-height viewport. The remaining replacement is specified
+in [Inbox conversation surface](inbox-conversation-surface.md): measured wrapped heights,
+dedicated semantic styles, and an in-pane technical inspector. Enter
 opens a conversation or toggles its selected entry's details; PageDown requests the opaque next
 page; Escape collapses details and then the conversation. The conversation footer spells out the
 applicable `a archive` or `u restore` control for the selected exact message; contextual help carries

@@ -301,6 +301,8 @@ pub struct ActionGroupView {
 pub struct ActivityView {
     /// Selected fact for a snapshot, or the durable completed item.
     pub fact_id: FactId,
+    /// Closed activity family retained independently from display content.
+    pub kind: ActivityKind,
     /// Positive writer sequence.
     pub sequence: std::num::NonZeroU64,
     /// Typed activity state.
@@ -1205,6 +1207,7 @@ fn activity_projections(
                 },
                 ConversationProjection::Activity(ActivityView {
                     fact_id: winner.id(),
+                    kind: *kind,
                     sequence: *sequence,
                     status: status.clone(),
                     content: content.clone(),

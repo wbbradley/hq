@@ -116,6 +116,8 @@ pub struct MessageContent {
 pub enum ActivityKind {
     /// Operation status snapshot.
     Status,
+    /// Lifecycle state of one provider-neutral agent turn.
+    AgentTurn,
     /// Incremental progress record.
     Progress,
     /// Plan or task state.

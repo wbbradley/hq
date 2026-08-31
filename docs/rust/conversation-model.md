@@ -60,10 +60,11 @@ Messages precede activity only on an exact ready-key time tie. These fields orde
 never grant authority or resolve domain conflicts.
 
 The authoritative client snapshot exposes conversation discovery summaries with the latest
-presented fact plus open, archived, and reserved-local-human-authored message counts. These counts
-are derived from the same projected message set and explicit local authority policy; they are
-filter metadata, not canonical facts or ordering inputs. Clients load history only through bounded
-opaque-cursor pages and must preserve the returned union order unchanged.
+presented fact; open, archived, and reserved-local-human-authored message counts; the exact reserved
+local-human mailbox; and typed project/participant display context. Counts are derived from the
+same projected message set and explicit local authority policy; display context is passive and
+never routing authority. Neither is a canonical fact or ordering input. Clients load history only
+through bounded opaque-cursor pages and must preserve the returned union order unchanged.
 
 Conversation identity is a closed typed union. Ordinary uncorrelated messages use an exact causal
 thread and counterparty; direct runtime output uses the exact counterparty/provider/session pair.
@@ -86,6 +87,10 @@ kind, item, logical key, and runtime. A higher semantic sequence wins even when 
 sequence with unequal content conflicts instead of choosing by timestamp or fact ID. Concurrent
 runtime lifetimes for one logical key are reported as a normalized conflict. Completed items remain
 individual durable history rather than coalescing.
+
+Every selected or durable `ActivityView` retains its closed activity kind explicitly alongside
+status, content, and truncation. Consumers therefore never infer kind from an activity projection
+key, provider prose, or executable detail.
 
 Canonical activity facts are permanent. The disposable view retains snapshot winners, every
 completed record, and the canonically newest 200 progress winners per source/provider session.

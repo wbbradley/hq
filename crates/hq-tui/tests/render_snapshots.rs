@@ -4,13 +4,14 @@
 
 use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentLifecycle, UiAgentMailbox,
-    UiAgentProjectAssignment, UiAgentSession, UiAgentStatus, UiConversationEntry,
-    UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiFailure, UiHumanState,
-    UiInput, UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, UiTheme, UiThemeRole, render, update,
+    UiAgentProjectAssignment, UiAgentSession, UiAgentStatus, UiConversationActivityKind,
+    UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
+    UiEffect, UiEvent, UiFailure, UiHumanState, UiInput, UiMailboxDraft, UiMailboxDraftTarget,
+    UiMessageState, UiModel, UiProject, UiProjectAction, UiProjectAssignment,
+    UiProjectExternalWarning, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
+    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind,
+    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTheme, UiThemeRole, render,
+    update,
 };
 use ratatui::{
     Terminal,
@@ -701,16 +702,20 @@ fn conversation_layout_preserves_reducer_order_and_typed_activity_state() {
         .expect("render buffer");
     assert_eq!(model, before, "rendering must only borrow the model");
     let rendered = snapshot_text(terminal.backend().buffer());
-    let message = rendered.find("question · peer").expect("message rendered");
+    let message = rendered.find("Alice").expect("author rendered");
     let activity = rendered
-        .find("activity · running")
+        .find("● Work in progress…")
         .expect("activity rendered");
     assert!(message < activity, "reducer page order is retained");
-    assert!(contains_visible_words_in_order(
-        &rendered,
-        "update information only compiling"
-    ));
-    assert!(rendered.contains("Conversation · complete"));
+    assert!(rendered.contains("Can we ship?"));
+    for obsolete in [
+        "Conversation · complete",
+        "question · peer",
+        "message · open",
+        "update · information only",
+    ] {
+        assert!(!rendered.contains(obsolete), "obsolete label: {obsolete}");
+    }
 }
 
 #[test]
@@ -1566,9 +1571,10 @@ fn ordinary_surfaces_use_user_intentions_and_label_technical_evidence() {
             .model;
         let conversation = render_text(&conversation);
         assert!(
-            conversation.contains("update · information only"),
+            conversation.contains("● Work in progress…"),
             "conversation at {size:?}:\n{conversation}"
         );
+        assert!(!conversation.contains("update · information only"));
         assert!(!conversation.contains("non-actionable"));
 
         let human = loaded_snapshot_model(
@@ -2311,13 +2317,16 @@ fn conversation_model_with_state(size: UiSize, state: UiMessageState) -> UiModel
         UiEvent::ConversationLoaded {
             effect_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
                 row_id: "deploy-9".to_owned(),
                 entries: vec![
                     UiConversationEntry {
                         id: "message-1".to_owned(),
-                        kind: UiConversationEntryKind::Message,
-                        content: "Can we ship?".to_owned(),
-                        summary: "question · peer".to_owned(),
+                        presentation: UiConversationEntryPresentation::Message {
+                            author: UiConversationAuthor::Participant("Alice".to_owned()),
+                            body: "Can we ship?".to_owned(),
+                        },
                         message_state: Some(state),
                         message_target: Some(hq_tui::UiMessageTarget {
                             message_id: [1; 32],
@@ -2327,9 +2336,13 @@ fn conversation_model_with_state(size: UiSize, state: UiMessageState) -> UiModel
                     },
                     UiConversationEntry {
                         id: "activity-2".to_owned(),
-                        kind: UiConversationEntryKind::Activity,
-                        content: "compiling".to_owned(),
-                        summary: "activity · running".to_owned(),
+                        presentation: UiConversationEntryPresentation::Activity {
+                            kind: UiConversationActivityKind::Progress,
+                            status: UiActivityStatus::Running,
+                            summary: "Work in progress…".to_owned(),
+                            detail: "compiling".to_owned(),
+                            truncated: false,
+                        },
                         message_state: None,
                         message_target: None,
                         technical: vec![UiTechnicalSection::Activity {

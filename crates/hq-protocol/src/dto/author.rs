@@ -810,6 +810,7 @@ fn binding(value: &domain::AssignmentBinding) -> model::BindingDto {
 fn activity_kind(value: domain::ActivityKind) -> model::ActivityKindDto {
     match value {
         domain::ActivityKind::Status => model::ActivityKindDto::Status,
+        domain::ActivityKind::AgentTurn => model::ActivityKindDto::AgentTurn,
         domain::ActivityKind::Progress => model::ActivityKindDto::Progress,
         domain::ActivityKind::Plan => model::ActivityKindDto::Plan,
         domain::ActivityKind::Diff => model::ActivityKindDto::Diff,

@@ -526,7 +526,7 @@ CREATE TABLE conversation_aggregate_keys (
     operation_id BLOB NOT NULL CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
     item_present INTEGER NOT NULL CHECK(item_present IN (0, 1)),
     item TEXT NOT NULL CHECK(typeof(item) = 'text' AND length(CAST(item AS BLOB)) <= 128),
-    activity_kind INTEGER NOT NULL CHECK(activity_kind BETWEEN 0 AND 5),
+    activity_kind INTEGER NOT NULL CHECK(activity_kind BETWEEN 0 AND 6),
     logical_key TEXT NOT NULL CHECK(typeof(logical_key) = 'text' AND length(CAST(logical_key AS BLOB)) <= 128),
     runtime TEXT NOT NULL CHECK(typeof(runtime) = 'text' AND length(CAST(runtime AS BLOB)) <= 128)
 ) STRICT, WITHOUT ROWID;
@@ -547,7 +547,7 @@ CREATE TABLE conversation_projection_keys (
     operation_id BLOB NOT NULL CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
     item_present INTEGER NOT NULL CHECK(item_present IN (0, 1)),
     item TEXT NOT NULL CHECK(typeof(item) = 'text' AND length(CAST(item AS BLOB)) <= 128),
-    activity_kind INTEGER NOT NULL CHECK(activity_kind BETWEEN 0 AND 5),
+    activity_kind INTEGER NOT NULL CHECK(activity_kind BETWEEN 0 AND 6),
     logical_key TEXT NOT NULL CHECK(typeof(logical_key) = 'text' AND length(CAST(logical_key AS BLOB)) <= 128),
     runtime TEXT NOT NULL CHECK(typeof(runtime) = 'text' AND length(CAST(runtime AS BLOB)) <= 128)
 ) STRICT, WITHOUT ROWID;
@@ -649,6 +649,7 @@ CREATE TABLE conversation_action_entries (
 CREATE TABLE conversation_activities (
     key_digest BLOB PRIMARY KEY NOT NULL REFERENCES conversation_projection_keys(key_digest),
     fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 6),
     sequence BLOB NOT NULL CHECK(typeof(sequence) = 'blob' AND length(sequence) = 8),
     status INTEGER NOT NULL CHECK(status BETWEEN 1 AND 5),
     failure_reason TEXT NOT NULL CHECK(typeof(failure_reason) = 'text' AND length(CAST(failure_reason AS BLOB)) <= 96),
@@ -1902,6 +1903,7 @@ fn conversation_summaries(
             Ok(ConversationSummary {
                 key: key.clone(),
                 context: conversation_context(key, order, &presentation),
+                local_human,
                 root_message: match key {
                     ConversationKey::ProjectThread { thread, .. } => order
                         .iter()

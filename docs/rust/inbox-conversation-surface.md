@@ -1,7 +1,8 @@
 # Inbox conversation surface specification
 
-Status: review draft. This document specifies presentation and interaction only. It does not
-authorize production implementation until the review decisions at the end are approved.
+Status: approved, implementation in progress. The typed conversation voices and activity boundary
+are implemented. Responsive pane sizing, measured scrolling, dedicated theme roles, and the
+technical inspector remain acceptance work.
 
 ## Product intent
 
@@ -21,9 +22,9 @@ The visual model is a quiet full-width transcript rather than speech bubbles. Bu
 scarce terminal width, make long technical prose ragged, and imply that color or horizontal
 position carries authorship. HQ instead uses explicit author labels, whitespace, and theme roles.
 
-## Current implementation audit
+## Pre-implementation audit
 
-The current presentation creates the reported result directly:
+The presentation before this specification was approved created the reported result directly:
 
 - `render_rows` gives the Inbox list 60 percent of the post-navigation width and the Conversation
   pane 40 percent.
@@ -39,7 +40,7 @@ The current presentation creates the reported result directly:
   its body over many more. Long messages can therefore be clipped or make anchor placement
   unpredictable.
 
-The data is close to what the new surface needs, but it is split at the wrong boundary.
+The data was close to what the new surface needed, but it was split at the wrong boundary.
 `ConversationContextDto` already carries a resolved project and participant name plus exact
 participant mailbox evidence for each summary. `ConversationMessageDto` carries exact sender and
 recipient mailboxes for each entry. The summary mapper discards its participant context after
@@ -47,7 +48,7 @@ building a row title, while the page mapper receives no display context and ther
 protocol purpose plus sender ID. The implementation must retain typed conversation display context
 through the page presentation; it must not parse the current row title to recover it.
 
-Activity has typed status but no typed activity kind or human summary/detail split. In particular,
+Activity had typed status but no typed activity kind or human summary/detail split. In particular,
 `Codex turn completed` cannot safely be recognized as redundant without parsing prose. Any rule
 that hides or rewrites activity therefore requires typed source data first.
 
@@ -389,6 +390,16 @@ The local API remains v1 during this pre-release work. Typed activity kind/summa
 context can change the existing v1 DTOs in place; no migration, compatibility decoder, or version
 bump is required.
 
+Implemented boundary: application snapshots now retain the exact reserved local-human mailbox;
+local API v1 carries it with conversation context and carries a closed activity kind on page
+entries. The reducer and schema-v1 activity projection retain that kind explicitly. The node maps
+exact sender evidence into `You`, the named/fallback participant, or `Unknown sender`, and maps
+typed activity kind/status into a generic ordinary summary while retaining the exact original
+detail. `UiConversationEntry` is a closed message-or-activity presentation, so action targets and
+technical evidence remain independent from display prose. The intermediate renderer now removes
+ordinary purpose/ID, `message · open`, `update · information only`, and
+`Conversation · complete` labels and begins transcript entries at column zero.
+
 ## Implementation migration and acceptance gates
 
 1. Add failing mapper tests for named project/direct participants, local-human authorship,
@@ -429,6 +440,6 @@ Approval of this specification means agreement on these five product decisions o
 5. **Focus and details:** full-row theme selection never shifts text; technical evidence moves to
    an in-pane inspector, and no-color retains labels plus non-color focus cues.
 
-After review, requested revisions belong in this document. A separate implementation task must
-then name test-first DTO/mapping, pure-model, measured-layout, theme/accessibility, render snapshot,
-installed PTY, documentation, and obsolete-presentation removal coverage.
+The five decisions above are approved. Requested revisions still belong in this document. The
+remaining implementation task owns measured layout, theme/accessibility, the inspector, render
+snapshots, installed PTY coverage, and final obsolete-presentation removal gates.

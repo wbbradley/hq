@@ -19,7 +19,9 @@ These values belong to the consumer boundary, not storage. A persistence adapter
 and reconstruct them through strict relational codecs, but callers never receive tables, SQL keys,
 serialized reducer structs, or a persistence handle. Unified conversation pages contain only the
 closed `ConversationEntry::{Message, Activity}` union and retain reducer-derived order and the
-store-owned cursor.
+store-owned cursor. Conversation discovery summaries retain the exact reserved local-human mailbox
+plus typed project/participant display context so a consumer can classify message voices without
+parsing names or protocol purpose.
 
 ## Consumer-owned ports
 

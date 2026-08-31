@@ -62,7 +62,7 @@ impl Normalizer {
             return self.activity(
                 operation_id,
                 None,
-                ActivityKind::Status,
+                ActivityKind::AgentTurn,
                 "operation",
                 ActivityStatus::Running,
                 "Codex turn started",
@@ -78,7 +78,7 @@ impl Normalizer {
         self.activity(
             operation_id,
             None,
-            ActivityKind::Status,
+            ActivityKind::AgentTurn,
             "operation",
             status,
             content,
@@ -404,4 +404,36 @@ fn stable_message_id(value: &[u8]) -> MessageId {
     digest.update(b"hq.codex.output.v1\0");
     digest.update(value);
     MessageId::from_bytes(digest.finalize().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn turn_lifecycle_is_typed_independently_from_generic_status() {
+        let operation = OperationId::from_bytes([7; 32]);
+        let operations = BTreeMap::from([("turn-1".to_owned(), operation)]);
+        let mut normalizer = Normalizer::new();
+
+        let events = normalizer.notification(
+            "turn/started",
+            json!({
+                "threadId": "thread-1",
+                "turn": {"id": "turn-1", "status": "inProgress", "items": []}
+            }),
+            "thread-1",
+            &operations,
+        );
+
+        assert!(matches!(
+            events.as_slice(),
+            [HarnessEvent::Activity(HarnessActivity {
+                kind: ActivityKind::AgentTurn,
+                status: ActivityStatus::Running,
+                ..
+            })]
+        ));
+    }
 }

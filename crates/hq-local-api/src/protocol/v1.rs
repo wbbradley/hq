@@ -1759,6 +1759,8 @@ pub enum SnapshotItem {
         key: ConversationKeyDto,
         /// Typed authoritative human-facing context.
         context: ConversationContextDto,
+        /// Exact reserved local-human mailbox for author presentation.
+        local_human: MailboxAddressDto,
         /// Stable initiating message identity for a project thread.
         root_message: Option<Id32>,
         /// Sanitized bounded one-line message preview.
@@ -2242,6 +2244,8 @@ pub enum ConversationEntryDto {
     Activity {
         /// Canonical fact identity.
         fact_id: Id32,
+        /// Closed activity family independent from display content.
+        activity_kind: ConversationActivityKindDto,
         /// Positive source sequence.
         sequence: u64,
         /// Typed activity status and optional stable failure reason.
@@ -2251,6 +2255,24 @@ pub enum ConversationEntryDto {
         /// Whether authoring truncated the content.
         truncated: bool,
     },
+}
+
+/// Closed conversation-activity family on local API v1.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationActivityKindDto {
+    /// Generic operation status.
+    Status,
+    /// Provider-neutral agent-turn lifecycle.
+    AgentTurn,
+    /// Incremental progress.
+    Progress,
+    /// Plan or task state.
+    Plan,
+    /// Proposed-change snapshot.
+    Diff,
+    /// Durable completed command, file, or tool item.
+    CompletedItem,
 }
 
 /// Typed activity status on the stable local protocol.

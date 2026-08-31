@@ -387,7 +387,10 @@ only a relational identity and is recomputed from those columns on load. Dedicat
 tables retain thread roots, answers, cancellations, pairwise causal relations and ready order;
 typed message content, optional recipient/correlation/project shapes, reversible state frontier and
 peer receipt evidence; action-group order and final answer; selected snapshots and permanent
-completed records; the progress-retention order and total; aggregate frontiers; and support.
+completed records. Every selected or durable activity value stores its closed kind explicitly, so
+completed-item values do not rely on reconstructing kind from their projection key. The remaining
+tables retain progress order and total, aggregate frontiers, and support. This field is part of the
+clean pre-release schema-v1 definition; it required no migration or version bump.
 
 Private exhaustive codecs cover every closed message purpose, presentation kind, activity kind and
 status, causal relation, boolean, fixed identity, bounded content/provider/session/error value, and

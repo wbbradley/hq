@@ -414,7 +414,7 @@ fn active_operation_race(
         matches!(
             event,
             HarnessEventPoll::Event(HarnessEvent::Activity(HarnessActivity {
-                kind: ActivityKind::Status,
+                kind: ActivityKind::Status | ActivityKind::AgentTurn,
                 ..
             }))
         ),

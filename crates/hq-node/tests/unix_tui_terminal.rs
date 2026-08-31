@@ -250,18 +250,25 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
         "Inbox navigation failed: {:?}",
         run.bytes
     );
-    for phrase in [
-        "Personal notes",
-        content,
-        "Conversation",
-        "h/← Inbox",
-        "Enter open",
-    ] {
+    for phrase in ["Personal notes", content, "You", "h/← Inbox", "Enter open"] {
         assert!(
             run.bytes
                 .windows(phrase.len())
                 .any(|window| window == phrase.as_bytes()),
             "Inbox navigation omitted {phrase:?}: {:?}",
+            run.bytes
+        );
+    }
+    for obsolete in [
+        "Conversation · complete",
+        "message · open",
+        "update · information only",
+    ] {
+        assert!(
+            !run.bytes
+                .windows(obsolete.len())
+                .any(|window| window == obsolete.as_bytes()),
+            "Inbox navigation retained {obsolete:?}: {:?}",
             run.bytes
         );
     }
@@ -969,9 +976,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && bytes
                 .windows(content.len())
                 .any(|window| window == content.as_bytes())
-            && bytes
-                .windows(b"Conversation".len())
-                .any(|window| window == b"Conversation")
+            && bytes.windows(b"You".len()).any(|window| window == b"You")
         {
             master
                 .write_all(b"\t\r")

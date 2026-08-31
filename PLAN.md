@@ -27,39 +27,114 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Implement the approved chat-like Inbox conversation surface
+### Add typed conversation voices and activity presentation
 
-Implement the reviewed interaction contract in `docs/rust/inbox-conversation-surface.md` before
-building the Projects workspace that navigates into it.
+Establish the typed data boundary required by the approved Inbox conversation design, then switch
+ordinary entry rendering away from protocol taxonomy and IDs without yet taking on the responsive
+viewport, theme-role, or inspector work.
 
-- Carry typed conversation display context through summary selection and page presentation so
-  messages render as `You`, a resolved participant such as `Alice`, or an honest typed fallback.
-  Replace the free-form entry summary with separate author/message/activity presentation; never
-  recover identity by parsing row titles, purpose labels, command text, or shortened IDs.
-- Add typed activity kind plus bounded human summary and exact detail to local API v1, reduction,
-  persistence/projection, and TUI mapping as required. Keep protocol/schema version 1 in place
-  without compatibility branches. Hide redundant successful turn completion only by typed kind;
-  retain failures, interruptions, exact command output, and evidence.
-- Replace the wide 60/40 split with one tested bounded-width function: Inbox list 24–36 columns,
-  preferring 32, with at least 48 Conversation columns when available and every extra column going
-  to Conversation. Preserve the always-visible compact stacked relationship and one-level Back.
-- Render participant/context headings, column-zero author/body blocks, compact activity, actionable
-  paging only, and modeless drafting without a Conversation box. Remove ordinary rendering of
-  `Conversation · complete`, purpose/ID headings, `message · open`,
-  `update · information only`, and renderer-added body indentation.
-- Replace fixed entry-height capacity with display-cell-aware wrapped spans anchored by stable fact
-  identity. Preserve paragraphs, wide Unicode, long content, selection across resize/reload/page
-  load, and retained history on older-page failure.
-- Add full-row transcript focus styles and semantic author/activity roles with explicit terminal,
-  no-color, Base16, native-theme parsing, and documentation coverage. Color must supplement author
-  labels, status symbols/text, reverse/weight focus, and other non-color cues.
-- Move selected-entry technical disclosure into the approved in-pane inspector or compact secondary
-  screen without overwriting the draft. Preserve complete routing, semantics, causal evidence,
-  activity detail, exact IDs, and action targeting.
-- Write failing protocol/projection/mapper and pure-model tests first, followed by measured-layout,
-  style-aware wide/compact render snapshots, no-color/accessibility text, failure/paging/draft, and
-  installed PTY coverage based on the reviewed Alice/project exchange. Update TUI, theme,
-  acceptance-scenario, and behavior-ledger documentation, then remove obsolete presentation paths.
+- Preserve the reserved local-human mailbox and resolved conversation participant as typed display
+  context from the authoritative snapshot through the node's conversation-page mapper.
+- Classify every message author as `You`, the named/fallback participant, or unknown from exact
+  mailbox evidence. Display labels must never become routing or action authority.
+- Extend the closed activity kind with an agent-turn variant, retain activity kind in the reducer
+  projection and store schema-v1 projection rows, and expose kind through local API v1 without a
+  migration, compatibility branch, or version bump.
+- Replace `UiConversationEntry`'s free-form kind/summary/content combination with typed message
+  and activity presentation carrying author/body or kind/status/summary/exact detail. Preserve
+  message targets and all technical evidence independently.
+- Render the typed participant heading, optional project context, author/body blocks, and compact
+  activity lines at column zero using existing theme roles as an intermediate presentation. Remove
+  ordinary purpose/ID, `message · open`, and `update · information only` chrome now; leave width,
+  measured scrolling, dedicated theme roles, full-row focus, and the inspector to the next task.
+- Add domain/protocol/reducer/store/local-API/node/TUI tests first for exact author classification,
+  unresolved fallbacks, every activity kind/status, agent-turn typing, schema-v1 persistence,
+  technical-detail retention, action capability, and absence of obsolete ordinary labels.
+
+#### Implementation plan
+
+1. Add failing domain/protocol normalization tests in
+   `crates/hq-codex/src/{normalize.rs,tests.rs}`,
+   `crates/hq-protocol/{src/dto/{model,author,semantic}.rs,tests/semantic_conversion.rs}`, and
+   relevant fact-catalog vectors proving Codex turn lifecycle records use a new closed
+   `ActivityKind::AgentTurn` while status, progress, plan, diff, and completed-item semantics remain
+   unchanged and exhaustive.
+2. Extend `ActivityKind` in `crates/hq-domain/src/semantic_fact.rs`, its protocol author/decoder
+   maps, normalization, digests, fixtures, and exhaustive tests. Keep canonical fact family/version
+   1 and storage schema version 1; change current pre-release shapes in place without a legacy
+   decoder or migration.
+3. Add failing reducer and store contracts for retaining `ActivityView.kind` through reduction,
+   repair, reopen, indexed conversation paging, and corruption checks. Modify
+   `crates/hq-reducer/src/conversation.rs`,
+   `crates/hq-store/src/database.rs`, and
+   `crates/hq-store/src/database/conversation.rs` so every activity projection row stores its
+   closed kind explicitly, including durable completed items whose projection key alone does not
+   contain the kind. Expand the schema-v1 kind bound and exact dump/corruption coverage in place.
+4. Add `local_human: MailboxAddress` to the application `ConversationSummary` in
+   `crates/hq-application/src/snapshot.rs` and populate it from the already authoritative
+   presentation policy in `crates/hq-store/src/database.rs`. Carry it as
+   `MailboxAddressDto` on local API v1 conversation summaries, add a closed
+   `ConversationActivityKindDto` to activity page entries, update conversion/validation, and write
+   strict round-trip/incoherence tests in `crates/hq-local-api/{src/{conversion,protocol/v1}.rs,
+   tests/protocol_v1.rs}`.
+5. Replace the TUI entry's parallel `kind`, `content`, and free-form `summary` fields in
+   `crates/hq-tui/src/model.rs` with a closed presentation enum: message author plus body, or typed
+   activity kind/status plus bounded ordinary summary and exact detail. Add conversation title and
+   optional project-context fields to `UiConversationPage`; retain stable fact identity,
+   `UiMessageTarget`, exceptional message state, and namespaced technical sections as independent
+   fields.
+6. Retain each row's snapshot context inside `LocalTuiClient` in
+   `crates/hq-node/src/tui_client.rs` beside its exact conversation key. When its page returns,
+   classify sender mailboxes against exact local-human and participant evidence; use `You`, the
+   sanitized resolved participant name, `Project agent`/`Other participant`, or `Unknown sender`
+   without parsing row titles or purpose strings. Map activity kind/status to a generic typed
+   summary while preserving the unmodified content as detail and all current technical evidence.
+7. Write mapper/executor and pure-model tests in
+   `crates/hq-node/tests/tui_effect_executor.rs` and `crates/hq-tui/tests/model.rs` for project,
+   direct, personal, unresolved, and conflicting author contexts; every activity kind/status;
+   activity non-actionability; message reply/archive capability; stale page/context behavior; and
+   stable selection/reload. Update all fixtures exhaustively rather than adding compatibility
+   constructors.
+8. Adapt `crates/hq-tui/src/render.rs` and focused render tests to the new typed enum. Render the
+   conversation's participant title and optional project line, then unindented explicit author/body
+   blocks or one compact status-symbol/activity-summary line. Hide normal open state, purpose,
+   presentation, shortened sender ID, and `information only`; show archived/rejected only when
+   exceptional. Keep current layout, entry-capacity estimate, selection marker/style, technical
+   expansion, and general theme roles temporarily so the next task owns their coordinated removal.
+9. Update `docs/rust/tui.md`, `docs/rust/inbox-conversation-surface.md`, acceptance scenarios,
+   behavior-ledger evidence, and any protocol/storage documentation affected by the in-place v1
+   activity-kind and local-human-context additions. Mark only the typed-presentation migration stage
+   complete; do not claim the responsive surface is finished.
+10. Run formatting, architecture/qualification validation, strict locked workspace Clippy, the
+    complete locked all-target/all-feature test suite, and installed conversation PTY coverage. Fix
+    warnings and regressions, commit with a Conventional Commit, then archive this subtask verbatim
+    while leaving the responsive rendering task at the front of `PLAN.md`.
+
+Risks and open questions: adding a canonical activity enum variant touches exhaustive semantic fact
+adapters and published fixtures; the activity projection currently discards kind and completed-item
+keys cannot reconstruct it, so persistence must carry it explicitly; personal/project author
+classification is only honest when the summary retains the exact local-human mailbox; and this
+subtask intentionally leaves the old percentage split and fixed-height viewport in place for one
+stack layer while removing their most confusing visible labels.
+
+### Complete the responsive chat-like Inbox conversation surface
+
+Finish `docs/rust/inbox-conversation-surface.md` after typed voices and activity land.
+
+- Replace the 60/40 wide split with the approved bounded 24–36-column Inbox list and dominant
+  Conversation pane while preserving the always-visible compact stacked layout and one-level Back.
+- Measure wrapped display-cell spans around the stable fact anchor instead of assuming fixed entry
+  heights; cover paragraphs, wide Unicode, long content, paging, failure, resize, and an open draft.
+- Add dedicated author/activity/full-row-focus semantic theme roles with terminal, no-color,
+  Base16, native-theme, style-snapshot, and documentation coverage. Selection must not add a marker
+  or shift the text origin.
+- Move technical disclosure into the wide in-pane inspector or compact secondary screen without
+  overwriting a draft; retain exact routing, semantics, evidence, activity detail, and action state.
+- Finish participant/list hierarchy, actionable-only paging, loading/empty/failure states, compact
+  behavior, installed PTY coverage, and removal assertions for `Conversation · complete`, all
+  renderer-added transcript indentation, and obsolete presentation paths.
+- Update TUI/theme/acceptance/behavior-ledger documentation and archive the approved umbrella
+  implementation only after both stack layers pass the complete verification suite.
 
 ### Implement the approved Projects workspace
 

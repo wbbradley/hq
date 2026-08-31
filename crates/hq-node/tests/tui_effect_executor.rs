@@ -13,24 +13,25 @@ use std::{
 };
 
 use hq_local_api::protocol::v1::{
-    ActivityStatusDto, AuthoritativeSnapshotDto, ConversationContextDto, ConversationEntryDto,
-    ConversationKeyDto, ConversationMessageDto, ConversationPageDto, ConversationParticipantDto,
-    DeviceGrantDto, Id32, MailboxAddressDto, MessagePurposeDto, PresentationKindDto,
-    ProviderAvailabilityDto, ProviderCatalogDto, ResourceLocatorDto, ResourceSchemeDto,
-    SnapshotItem,
+    ActivityStatusDto, AuthoritativeSnapshotDto, ConversationActivityKindDto,
+    ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationMessageDto,
+    ConversationPageDto, ConversationParticipantDto, DeviceGrantDto, Id32, MailboxAddressDto,
+    MessagePurposeDto, PresentationKindDto, ProviderAvailabilityDto, ProviderCatalogDto,
+    ResourceLocatorDto, ResourceSchemeDto, SnapshotItem,
 };
 use hq_node::{
     TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiEffectExecutor,
     TuiExecutorError, tui_conversation_page, tui_snapshot, tui_snapshot_with_provider_catalog,
 };
 use hq_tui::{
-    UiAgentAction, UiConnectionState, UiConversationEntryKind, UiConversationPage, UiEffect,
-    UiEvent, UiFailure, UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus,
-    UiHumanSelectionEvidence, UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult,
-    UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiManagedSessionResult, UiMessageState, UiModel, UiProjectAction, UiProjectExternalWarning,
-    UiProjectOutcome, UiProjectResourceCheck, UiProjectResult, UiRow, UiRowKind, UiRowState,
-    UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiAgentAction, UiConnectionState, UiConversationActivityKind, UiConversationAuthor,
+    UiConversationEntryPresentation, UiConversationPage, UiEffect, UiEvent, UiFailure,
+    UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence,
+    UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft,
+    UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
+    UiMessageState, UiModel, UiProjectAction, UiProjectExternalWarning, UiProjectOutcome,
+    UiProjectResourceCheck, UiProjectResult, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
+    UiTechnicalSection, UiTimerKind, update,
 };
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
@@ -610,6 +611,10 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
                         name: Some("builder".to_owned()),
                     },
                 },
+                local_human: MailboxAddressDto {
+                    installation_id: Id32::new([17; 32]),
+                    mailbox_id: Id32::new([18; 32]),
+                },
                 root_message: None,
                 preview: Some("Can we ship?".to_owned()),
                 latest_fact: Some(Id32::new([4; 32])),
@@ -733,6 +738,10 @@ fn authoritative_snapshot_preserves_project_thread_conversation_identity() {
                     mailbox: Some(Id32::new([0x23; 32])),
                     name: Some("alice".to_owned()),
                 }),
+            },
+            local_human: MailboxAddressDto {
+                installation_id: Id32::new([0x24; 32]),
+                mailbox_id: Id32::new([0x25; 32]),
             },
             root_message: Some(Id32::new([0x54; 32])),
             preview: Some("Let's have a conversation.".to_owned()),
@@ -1238,6 +1247,7 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
             })),
             ConversationEntryDto::Activity {
                 fact_id: Id32::new([13; 32]),
+                activity_kind: ConversationActivityKindDto::Progress,
                 sequence: 4,
                 status: ActivityStatusDto::Running,
                 content: "building".to_owned(),
@@ -1248,16 +1258,34 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
     )
     .expect("valid page");
 
-    let mapped = tui_conversation_page("thread-row", page);
+    let context = ConversationContextDto::Direct {
+        participant: ConversationParticipantDto {
+            agent: Some(Id32::new([14; 32])),
+            installation: Some(Id32::new([6; 32])),
+            mailbox: Some(Id32::new([7; 32])),
+            name: Some("Alice".to_owned()),
+        },
+    };
+    let local_human = MailboxAddressDto {
+        installation_id: Id32::new([4; 32]),
+        mailbox_id: Id32::new([5; 32]),
+    };
+    let mapped = tui_conversation_page("thread-row", &context, &local_human, page);
     assert_eq!(mapped.row_id, "thread-row");
+    assert_eq!(mapped.title, "Alice");
     assert_eq!(mapped.next_cursor.as_deref(), Some("opaque-next"));
     assert_eq!(mapped.entries.len(), 2);
-    assert_eq!(mapped.entries[0].kind, UiConversationEntryKind::Message);
+    assert!(matches!(
+        &mapped.entries[0].presentation,
+        UiConversationEntryPresentation::Message {
+            author: UiConversationAuthor::You,
+            body,
+        } if body == "hello world"
+    ));
     assert_eq!(
         mapped.entries[0].message_state,
         Some(UiMessageState::Archived)
     );
-    assert_eq!(mapped.entries[0].content, "hello world");
     assert!(matches!(
         mapped.entries[0].message_target,
         Some(hq_tui::UiMessageTarget { message_id, reply_allowed: true })
@@ -1271,13 +1299,234 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
             UiTechnicalSection::Evidence { ready_answer: true, .. }
         ] if purpose == "question"
     ));
-    assert_eq!(mapped.entries[1].kind, UiConversationEntryKind::Activity);
+    assert!(matches!(
+        &mapped.entries[1].presentation,
+        UiConversationEntryPresentation::Activity { summary, detail, .. }
+            if summary == "Work in progress…" && detail == "building"
+    ));
     assert_eq!(mapped.entries[1].message_state, None);
     assert_eq!(mapped.entries[1].message_target, None);
     assert!(matches!(
         mapped.entries[1].technical.as_slice(),
         [UiTechnicalSection::Activity { sequence: 4, .. }]
     ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn conversation_author_classification_uses_only_exact_mailbox_evidence() {
+    let local_human = MailboxAddressDto {
+        installation_id: Id32::new([4; 32]),
+        mailbox_id: Id32::new([5; 32]),
+    };
+    let map_author = |context: ConversationContextDto, installation, mailbox| {
+        let page = ConversationPageDto::new(
+            vec![ConversationEntryDto::Message(Box::new(
+                conversation_message(installation, mailbox),
+            ))],
+            None,
+        )
+        .expect("valid message page");
+        let mapped = tui_conversation_page("row", &context, &local_human, page);
+        let UiConversationEntryPresentation::Message { author, .. } =
+            &mapped.entries[0].presentation
+        else {
+            panic!("message remains typed")
+        };
+        (mapped.title, mapped.context, author.clone())
+    };
+
+    let direct = ConversationContextDto::Direct {
+        participant: ConversationParticipantDto {
+            agent: None,
+            installation: Some(Id32::new([6; 32])),
+            mailbox: Some(Id32::new([7; 32])),
+            name: Some("Alice".to_owned()),
+        },
+    };
+    assert_eq!(
+        map_author(direct, Id32::new([6; 32]), Id32::new([7; 32])),
+        (
+            "Alice".to_owned(),
+            None,
+            UiConversationAuthor::Participant("Alice".to_owned()),
+        )
+    );
+
+    let unnamed = ConversationContextDto::Direct {
+        participant: ConversationParticipantDto {
+            agent: None,
+            installation: Some(Id32::new([6; 32])),
+            mailbox: Some(Id32::new([7; 32])),
+            name: None,
+        },
+    };
+    assert_eq!(
+        map_author(unnamed, Id32::new([6; 32]), Id32::new([7; 32])).2,
+        UiConversationAuthor::Participant("Other participant".to_owned())
+    );
+
+    let project = ConversationContextDto::Project {
+        project: Id32::new([8; 32]),
+        name: Some("Release".to_owned()),
+        participant: Some(ConversationParticipantDto {
+            agent: Some(Id32::new([9; 32])),
+            installation: Some(Id32::new([6; 32])),
+            mailbox: Some(Id32::new([7; 32])),
+            name: None,
+        }),
+    };
+    assert_eq!(
+        map_author(project, Id32::new([6; 32]), Id32::new([7; 32])),
+        (
+            "Project agent".to_owned(),
+            Some("Project · Release".to_owned()),
+            UiConversationAuthor::Participant("Project agent".to_owned()),
+        )
+    );
+
+    assert_eq!(
+        map_author(
+            ConversationContextDto::Personal,
+            local_human.installation_id,
+            local_human.mailbox_id,
+        ),
+        ("Personal notes".to_owned(), None, UiConversationAuthor::You)
+    );
+
+    let unresolved = ConversationContextDto::Direct {
+        participant: ConversationParticipantDto {
+            agent: None,
+            installation: Some(Id32::new([6; 32])),
+            mailbox: None,
+            name: Some("Alice".to_owned()),
+        },
+    };
+    assert_eq!(
+        map_author(unresolved, Id32::new([6; 32]), Id32::new([7; 32])).2,
+        UiConversationAuthor::Unknown
+    );
+
+    let conflicting = ConversationContextDto::Direct {
+        participant: ConversationParticipantDto {
+            agent: None,
+            installation: Some(local_human.installation_id),
+            mailbox: Some(local_human.mailbox_id),
+            name: Some("Alias".to_owned()),
+        },
+    };
+    assert_eq!(
+        map_author(
+            conflicting,
+            local_human.installation_id,
+            local_human.mailbox_id,
+        )
+        .2,
+        UiConversationAuthor::You,
+        "local-human evidence wins a contradictory display context"
+    );
+}
+
+#[test]
+fn every_conversation_activity_kind_and_status_remains_typed() {
+    let kinds = [
+        (
+            ConversationActivityKindDto::Status,
+            UiConversationActivityKind::Status,
+        ),
+        (
+            ConversationActivityKindDto::AgentTurn,
+            UiConversationActivityKind::AgentTurn,
+        ),
+        (
+            ConversationActivityKindDto::Progress,
+            UiConversationActivityKind::Progress,
+        ),
+        (
+            ConversationActivityKindDto::Plan,
+            UiConversationActivityKind::Plan,
+        ),
+        (
+            ConversationActivityKindDto::Diff,
+            UiConversationActivityKind::Diff,
+        ),
+        (
+            ConversationActivityKindDto::CompletedItem,
+            UiConversationActivityKind::CompletedItem,
+        ),
+    ];
+    let statuses = [
+        ActivityStatusDto::Snapshot,
+        ActivityStatusDto::Running,
+        ActivityStatusDto::Succeeded,
+        ActivityStatusDto::Failed {
+            reason: "tool_failed".to_owned(),
+        },
+        ActivityStatusDto::Interrupted,
+    ];
+    let context = ConversationContextDto::Personal;
+    let local_human = MailboxAddressDto {
+        installation_id: Id32::new([4; 32]),
+        mailbox_id: Id32::new([5; 32]),
+    };
+
+    for (dto_kind, ui_kind) in kinds {
+        for status in statuses.clone() {
+            let page = ConversationPageDto::new(
+                vec![ConversationEntryDto::Activity {
+                    fact_id: Id32::new([1; 32]),
+                    activity_kind: dto_kind,
+                    sequence: 1,
+                    status,
+                    content: "exact provider detail".to_owned(),
+                    truncated: true,
+                }],
+                None,
+            )
+            .expect("valid activity page");
+            let mapped = tui_conversation_page("row", &context, &local_human, page);
+            assert!(matches!(
+                &mapped.entries[0].presentation,
+                UiConversationEntryPresentation::Activity {
+                    kind,
+                    summary,
+                    detail,
+                    truncated: true,
+                    ..
+                } if *kind == ui_kind
+                    && !summary.is_empty()
+                    && detail == "exact provider detail"
+            ));
+            assert!(mapped.entries[0].message_target.is_none());
+        }
+    }
+}
+
+fn conversation_message(sender_installation: Id32, sender_mailbox: Id32) -> ConversationMessageDto {
+    ConversationMessageDto {
+        fact_id: Id32::new([1; 32]),
+        message_id: Id32::new([2; 32]),
+        thread_id: Id32::new([3; 32]),
+        content: "hello".to_owned(),
+        sender_installation,
+        sender_mailbox,
+        recipient_installation: None,
+        recipient_mailbox: None,
+        purpose: MessagePurposeDto::Asynchronous,
+        presentation: PresentationKindDto::Message,
+        correlation_provider: None,
+        correlation_session: None,
+        correlation_operation: None,
+        project_id: None,
+        open: true,
+        rejected: false,
+        state_frontier: Vec::new(),
+        peer_received_by: Vec::new(),
+        root_fact: None,
+        root_message: None,
+        ready_answer: false,
+        thread_cancelled: false,
+    }
 }
 
 #[test]
@@ -1408,6 +1657,8 @@ impl TuiClientPort for ScriptedTuiClient {
             .expect("conversation requests lock")
             .push((row_id.to_owned(), cursor));
         Ok(UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
             row_id: row_id.to_owned(),
             entries: Vec::new(),
             next_cursor: None,
@@ -1474,6 +1725,8 @@ impl TuiClientPort for ProjectTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
             row_id: row_id.to_owned(),
             entries: Vec::new(),
             next_cursor: None,
@@ -1563,6 +1816,8 @@ impl TuiClientPort for ManagedSessionTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
             row_id: row_id.to_owned(),
             entries: Vec::new(),
             next_cursor: None,
@@ -1619,6 +1874,8 @@ impl TuiClientPort for AgentTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
             row_id: row_id.to_owned(),
             entries: Vec::new(),
             next_cursor: None,
@@ -1711,6 +1968,8 @@ impl TuiClientPort for SlowSnapshotClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
             row_id: row_id.to_owned(),
             entries: Vec::new(),
             next_cursor: None,
@@ -1753,6 +2012,8 @@ impl TuiClientPort for ImmediateSnapshotClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
             row_id: row_id.to_owned(),
             entries: Vec::new(),
             next_cursor: None,
@@ -1803,6 +2064,8 @@ impl TuiClientPort for MailboxTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
             row_id: row_id.to_owned(),
             entries: Vec::new(),
             next_cursor: None,

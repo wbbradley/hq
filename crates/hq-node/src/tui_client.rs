@@ -14,8 +14,9 @@ use std::{
 use hq_local_api::{
     BlockingClientError, ClientConnectionState, ClientEvent,
     protocol::v1::{
-        ActivityStatusDto, AuthoritativeSnapshotDto, ConversationContextDto, ConversationEntryDto,
-        ConversationKeyDto, ConversationMessageDto, ConversationPageRequest, Id32,
+        ActivityStatusDto, AuthoritativeSnapshotDto, ConversationActivityKindDto,
+        ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationMessageDto,
+        ConversationPageRequest, ConversationParticipantDto, Id32, MailboxAddressDto,
         MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDto,
         MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
         MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, PresentationKindDto,
@@ -25,10 +26,11 @@ use hq_local_api::{
 use hq_tui::{
     EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase,
     UiAgentAttentionReason, UiAgentLifecycle, UiAgentMailbox, UiAgentProjectAssignment,
-    UiAgentSession, UiAgentStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
-    UiConversationPage, UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure,
-    UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence,
-    UiHumanState, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget,
+    UiAgentSession, UiAgentStatus, UiConnectionState, UiConversationActivityKind,
+    UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
+    UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanIssue,
+    UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState,
+    UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget,
     UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState,
     UiMessageTarget, UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning,
     UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
@@ -176,6 +178,13 @@ pub struct LocalTuiClient {
     state: StatePaths,
     observed_connection: Option<ClientConnectionState>,
     conversation_keys: BTreeMap<String, ConversationKeyDto>,
+    conversation_presentations: BTreeMap<String, ConversationPresentationContext>,
+}
+
+#[derive(Clone)]
+struct ConversationPresentationContext {
+    context: ConversationContextDto,
+    local_human: MailboxAddressDto,
 }
 
 impl LocalTuiClient {
@@ -186,6 +195,7 @@ impl LocalTuiClient {
             state,
             observed_connection: None,
             conversation_keys: BTreeMap::new(),
+            conversation_presentations: BTreeMap::new(),
         }
     }
 }
@@ -205,6 +215,25 @@ impl TuiClientPort for LocalTuiClient {
                     let row_id = conversation_identity(key.clone());
                     Some((row_id, key.clone()))
                 }
+                _ => None,
+            })
+            .collect();
+        self.conversation_presentations = snapshot
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SnapshotItem::Conversation {
+                    key,
+                    context,
+                    local_human,
+                    ..
+                } => Some((
+                    conversation_identity(key.clone()),
+                    ConversationPresentationContext {
+                        context: context.clone(),
+                        local_human: local_human.clone(),
+                    },
+                )),
                 _ => None,
             })
             .collect();
@@ -243,6 +272,14 @@ impl TuiClientPort for LocalTuiClient {
                 code: "conversation_stale".to_owned(),
                 action: "reload the Inbox and select the conversation again".to_owned(),
             })?;
+        let presentation = self
+            .conversation_presentations
+            .get(row_id)
+            .cloned()
+            .ok_or_else(|| UiFailure {
+                code: "conversation_stale".to_owned(),
+                action: "reload the Inbox and select the conversation again".to_owned(),
+            })?;
         let request = ConversationPageRequest::new(key, 100, cursor).map_err(|_| UiFailure {
             code: "conversation_page_invalid".to_owned(),
             action: "reload the Inbox and select the conversation again".to_owned(),
@@ -255,7 +292,12 @@ impl TuiClientPort for LocalTuiClient {
             ClientEvent::Response {
                 result: ResponseResult::ConversationPage(page),
                 ..
-            } => Ok(tui_conversation_page(row_id, page)),
+            } => Ok(tui_conversation_page(
+                row_id,
+                &presentation.context,
+                &presentation.local_human,
+                page,
+            )),
             _ => Err(UiFailure {
                 code: "conversation_response_invalid".to_owned(),
                 action: "reload the Inbox and select the conversation again".to_owned(),
@@ -1985,31 +2027,52 @@ struct ConversationCounts {
 /// Maps one bounded reducer-ordered local-API page into passive TUI presentation.
 pub fn tui_conversation_page(
     row_id: &str,
+    context: &ConversationContextDto,
+    local_human: &MailboxAddressDto,
     page: hq_local_api::protocol::v1::ConversationPageDto,
 ) -> UiConversationPage {
+    let heading = conversation_heading(context);
     UiConversationPage {
         row_id: row_id.to_owned(),
-        entries: page.items.into_iter().map(tui_conversation_entry).collect(),
+        title: heading.title,
+        context: heading.context,
+        entries: page
+            .items
+            .into_iter()
+            .map(|entry| tui_conversation_entry(entry, local_human, heading.participant.as_ref()))
+            .collect(),
         next_cursor: page.next_cursor,
     }
 }
 
-fn tui_conversation_entry(entry: ConversationEntryDto) -> UiConversationEntry {
+fn tui_conversation_entry(
+    entry: ConversationEntryDto,
+    local_human: &MailboxAddressDto,
+    participant: Option<&ConversationParticipantPresentation>,
+) -> UiConversationEntry {
     match entry {
-        ConversationEntryDto::Message(message) => tui_message_entry(*message),
+        ConversationEntryDto::Message(message) => {
+            tui_message_entry(*message, local_human, participant)
+        }
         ConversationEntryDto::Activity {
             fact_id,
+            activity_kind,
             sequence,
             status,
             content,
             truncated,
         } => {
             let status = tui_activity_status(status);
+            let kind = tui_activity_kind(activity_kind);
             UiConversationEntry {
                 id: full_id(fact_id),
-                kind: UiConversationEntryKind::Activity,
-                content: terminal_text(&content),
-                summary: format!("activity · {}", activity_status_label(&status)),
+                presentation: UiConversationEntryPresentation::Activity {
+                    kind,
+                    summary: activity_summary(kind, &status).to_owned(),
+                    detail: terminal_text(&content),
+                    status: status.clone(),
+                    truncated,
+                },
                 message_state: None,
                 message_target: None,
                 technical: vec![UiTechnicalSection::Activity {
@@ -2019,6 +2082,17 @@ fn tui_conversation_entry(entry: ConversationEntryDto) -> UiConversationEntry {
                 }],
             }
         }
+    }
+}
+
+const fn tui_activity_kind(kind: ConversationActivityKindDto) -> UiConversationActivityKind {
+    match kind {
+        ConversationActivityKindDto::Status => UiConversationActivityKind::Status,
+        ConversationActivityKindDto::AgentTurn => UiConversationActivityKind::AgentTurn,
+        ConversationActivityKindDto::Progress => UiConversationActivityKind::Progress,
+        ConversationActivityKindDto::Plan => UiConversationActivityKind::Plan,
+        ConversationActivityKindDto::Diff => UiConversationActivityKind::Diff,
+        ConversationActivityKindDto::CompletedItem => UiConversationActivityKind::CompletedItem,
     }
 }
 
@@ -2034,17 +2108,49 @@ fn tui_activity_status(status: ActivityStatusDto) -> UiActivityStatus {
     }
 }
 
-const fn activity_status_label(status: &UiActivityStatus) -> &str {
-    match status {
-        UiActivityStatus::Snapshot => "snapshot",
-        UiActivityStatus::Running => "running",
-        UiActivityStatus::Succeeded => "succeeded",
-        UiActivityStatus::Failed { .. } => "failed",
-        UiActivityStatus::Interrupted => "interrupted",
+const fn activity_summary(
+    kind: UiConversationActivityKind,
+    status: &UiActivityStatus,
+) -> &'static str {
+    match (kind, status) {
+        (UiConversationActivityKind::AgentTurn, UiActivityStatus::Running) => "Agent is working…",
+        (UiConversationActivityKind::AgentTurn, UiActivityStatus::Succeeded) => "Agent finished",
+        (UiConversationActivityKind::AgentTurn, UiActivityStatus::Failed { .. }) => {
+            "Agent stopped with an error"
+        }
+        (UiConversationActivityKind::AgentTurn, UiActivityStatus::Interrupted) => {
+            "Agent was interrupted"
+        }
+        (UiConversationActivityKind::AgentTurn, UiActivityStatus::Snapshot) => "Agent status",
+        (UiConversationActivityKind::Status, UiActivityStatus::Failed { .. }) => {
+            "Status update failed"
+        }
+        (UiConversationActivityKind::Status, _) => "Status update",
+        (UiConversationActivityKind::Progress, UiActivityStatus::Running) => "Work in progress…",
+        (UiConversationActivityKind::Progress, UiActivityStatus::Failed { .. }) => {
+            "Progress stopped with an error"
+        }
+        (UiConversationActivityKind::Progress, _) => "Progress updated",
+        (UiConversationActivityKind::Plan, _) => "Plan updated",
+        (UiConversationActivityKind::Diff, _) => "Changes updated",
+        (UiConversationActivityKind::CompletedItem, UiActivityStatus::Succeeded) => {
+            "Completed an item"
+        }
+        (UiConversationActivityKind::CompletedItem, UiActivityStatus::Failed { .. }) => {
+            "An item failed"
+        }
+        (UiConversationActivityKind::CompletedItem, UiActivityStatus::Interrupted) => {
+            "An item was interrupted"
+        }
+        (UiConversationActivityKind::CompletedItem, _) => "Item activity",
     }
 }
 
-fn tui_message_entry(message: ConversationMessageDto) -> UiConversationEntry {
+fn tui_message_entry(
+    message: ConversationMessageDto,
+    local_human: &MailboxAddressDto,
+    participant: Option<&ConversationParticipantPresentation>,
+) -> UiConversationEntry {
     let state = if message.rejected {
         UiMessageState::Rejected
     } else if message.open {
@@ -2061,9 +2167,10 @@ fn tui_message_entry(message: ConversationMessageDto) -> UiConversationEntry {
         .map(|(installation, mailbox)| mailbox_address(installation, mailbox));
     UiConversationEntry {
         id: full_id(message.fact_id),
-        kind: UiConversationEntryKind::Message,
-        content: terminal_text(&message.content),
-        summary: format!("{purpose} · {}", short_id(message.sender_mailbox)),
+        presentation: UiConversationEntryPresentation::Message {
+            author: conversation_author(&message, local_human, participant),
+            body: terminal_text(&message.content),
+        },
         message_state: Some(state),
         message_target: Some(UiMessageTarget {
             message_id: message.message_id.bytes(),
@@ -2094,6 +2201,96 @@ fn tui_message_entry(message: ConversationMessageDto) -> UiConversationEntry {
                 thread_cancelled: message.thread_cancelled,
             },
         ],
+    }
+}
+
+#[derive(Clone)]
+struct ConversationParticipantPresentation {
+    installation: Id32,
+    mailbox: Id32,
+    label: String,
+}
+
+struct ConversationHeading {
+    title: String,
+    context: Option<String>,
+    participant: Option<ConversationParticipantPresentation>,
+}
+
+fn conversation_heading(context: &ConversationContextDto) -> ConversationHeading {
+    match context {
+        ConversationContextDto::Personal => ConversationHeading {
+            title: "Personal notes".to_owned(),
+            context: None,
+            participant: None,
+        },
+        ConversationContextDto::Direct { participant } => {
+            let label = participant
+                .name
+                .as_deref()
+                .map_or_else(|| "Other participant".to_owned(), terminal_text);
+            ConversationHeading {
+                title: label.clone(),
+                context: None,
+                participant: conversation_participant(participant, label),
+            }
+        }
+        ConversationContextDto::Project {
+            name, participant, ..
+        } => {
+            let project = name
+                .as_deref()
+                .map_or_else(|| "Unnamed project".to_owned(), terminal_text);
+            let label = participant
+                .as_ref()
+                .and_then(|value| value.name.as_deref())
+                .map_or_else(|| "Project agent".to_owned(), terminal_text);
+            ConversationHeading {
+                title: label.clone(),
+                context: Some(format!("Project · {project}")),
+                participant: participant
+                    .as_ref()
+                    .and_then(|value| conversation_participant(value, label)),
+            }
+        }
+    }
+}
+
+fn conversation_participant(
+    participant: &ConversationParticipantDto,
+    label: String,
+) -> Option<ConversationParticipantPresentation> {
+    participant
+        .installation
+        .zip(participant.mailbox)
+        .map(
+            |(installation, mailbox)| ConversationParticipantPresentation {
+                installation,
+                mailbox,
+                label,
+            },
+        )
+}
+
+fn conversation_author(
+    message: &ConversationMessageDto,
+    local_human: &MailboxAddressDto,
+    participant: Option<&ConversationParticipantPresentation>,
+) -> UiConversationAuthor {
+    if message.sender_installation == local_human.installation_id
+        && message.sender_mailbox == local_human.mailbox_id
+    {
+        UiConversationAuthor::You
+    } else if let Some(participant) = participant {
+        if message.sender_installation == participant.installation
+            && message.sender_mailbox == participant.mailbox
+        {
+            UiConversationAuthor::Participant(participant.label.clone())
+        } else {
+            UiConversationAuthor::Unknown
+        }
+    } else {
+        UiConversationAuthor::Unknown
     }
 }
 

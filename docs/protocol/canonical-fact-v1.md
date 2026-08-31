@@ -151,7 +151,7 @@ Closed enum strings are:
 - locator scheme: `git`, `worktree`, `container`, `opaque`;
 - message purpose: `question`, `asynchronous`, `project-output`;
 - presentation: `message`, `final-answer`, `status`;
-- activity kind: `status`, `progress`, `plan`, `diff`, `completed-item`;
+- activity kind: `status`, `agent-turn`, `progress`, `plan`, `diff`, `completed-item`;
 - activity status: `{"state":"snapshot"}`, `{"state":"running"}`,
   `{"state":"succeeded"}`, `{"state":"failed","code":text}`,
   `{"state":"interrupted"}`;

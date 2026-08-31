@@ -327,6 +327,7 @@ pub fn snapshot_to_v1(
             ClientProjection::Conversation {
                 key,
                 context,
+                local_human,
                 root_message,
                 preview,
                 latest_fact,
@@ -336,6 +337,10 @@ pub fn snapshot_to_v1(
             } => SnapshotItem::Conversation {
                 key: conversation_key_to_v1(&key),
                 context: conversation_context_to_v1(context),
+                local_human: MailboxAddressDto {
+                    installation_id: id32(local_human.installation_id().as_bytes()),
+                    mailbox_id: id32(local_human.mailbox_id().as_bytes()),
+                },
                 root_message: root_message.map(|message| id32(message.as_bytes())),
                 preview: preview.map(hq_domain::ShortText::into_string),
                 latest_fact: latest_fact.map(|fact| id32(fact.as_bytes())),
@@ -1900,11 +1905,26 @@ fn conversation_entry_to_v1(entry: &ConversationEntry) -> ConversationEntryDto {
         }
         ConversationEntry::Activity(activity) => ConversationEntryDto::Activity {
             fact_id: id32(activity.fact_id.as_bytes()),
+            activity_kind: conversation_activity_kind_to_v1(activity.kind),
             sequence: activity.sequence.get(),
             status: activity_status_to_v1(&activity.status),
             content: activity.content.as_str().to_owned(),
             truncated: activity.truncated,
         },
+    }
+}
+
+const fn conversation_activity_kind_to_v1(
+    kind: hq_domain::ActivityKind,
+) -> crate::protocol::v1::ConversationActivityKindDto {
+    use crate::protocol::v1::ConversationActivityKindDto;
+    match kind {
+        hq_domain::ActivityKind::Status => ConversationActivityKindDto::Status,
+        hq_domain::ActivityKind::AgentTurn => ConversationActivityKindDto::AgentTurn,
+        hq_domain::ActivityKind::Progress => ConversationActivityKindDto::Progress,
+        hq_domain::ActivityKind::Plan => ConversationActivityKindDto::Plan,
+        hq_domain::ActivityKind::Diff => ConversationActivityKindDto::Diff,
+        hq_domain::ActivityKind::CompletedItem => ConversationActivityKindDto::CompletedItem,
     }
 }
 

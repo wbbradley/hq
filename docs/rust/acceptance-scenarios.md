@@ -247,6 +247,13 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 
 ## Inbox composition gates
 
+- Conversation pages retain exact local-human and participant mailbox context. Ordinary messages
+  render as `You`, the named/honest fallback participant, or `Unknown sender` from that evidence;
+  purpose enums and IDs are not displayed or parsed as authorship.
+- Closed status, agent-turn, progress, plan, diff, and completed-item activity kinds survive
+  normalization, reduction, schema-v1 persistence, local API conversion, and TUI mapping. Ordinary
+  activity is compact and non-actionable; exact content and failure evidence remain available as
+  technical detail.
 - Message text is entered only in the modeless Inbox draft pane; project details and guided setup
   contain no message-entry dialog or `send instructions` action.
 - A project conversation row retains typed project, thread, and initiating-message identities.

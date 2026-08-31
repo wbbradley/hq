@@ -366,6 +366,7 @@ object!(ProjectActivityAttributionDto {
 #[serde(rename_all = "kebab-case")]
 pub(super) enum ActivityKindDto {
     Status,
+    AgentTurn,
     Progress,
     Plan,
     Diff,

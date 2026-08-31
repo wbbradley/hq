@@ -13,13 +13,14 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentAttentionReason, UiAgentModal,
-    UiAgentProjectAssignment, UiAgentStatus, UiConnectionState, UiConversationEntry,
-    UiConversationEntryKind, UiFocus, UiHelpPage, UiHumanIssue, UiHumanMembershipEvidence,
-    UiHumanMembershipStatus, UiHumanState, UiMailboxAction, UiMailboxDraftPane,
-    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiMessageState, UiModel, UiNewChoice, UiNewModal, UiProjectAction, UiProjectCreationChoice,
-    UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread, UiProvider, UiRow,
-    UiRowKind, UiRowState, UiSection, UiTechnicalSection, UiTheme, UiThemeRole, model::WIDE_WIDTH,
+    UiAgentProjectAssignment, UiAgentStatus, UiConnectionState, UiConversationAuthor,
+    UiConversationEntry, UiConversationEntryPresentation, UiFocus, UiHelpPage, UiHumanIssue,
+    UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanState, UiMailboxAction,
+    UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
+    UiManagedSessionOutcome, UiMessageState, UiModel, UiNewChoice, UiNewModal, UiProjectAction,
+    UiProjectCreationChoice, UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread,
+    UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, UiTheme, UiThemeRole,
+    model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -3052,54 +3053,62 @@ fn render_conversation(
     let start = selected_index
         .saturating_sub(capacity / 2)
         .min(conversation.map_or(0, |value| value.entries.len().saturating_sub(capacity)));
-    let paging = conversation
-        .and_then(|value| value.next_cursor.as_ref())
-        .map_or("complete", |_| "PageDown loads more");
-    let mut lines = vec![
-        Line::styled(
-            format!(" Conversation · {paging}"),
-            theme.style(UiThemeRole::Heading),
-        ),
-        Line::default(),
-    ];
+    let mut lines = Vec::new();
     if let Some(conversation) = conversation {
+        lines.push(Line::styled(
+            conversation.title.as_str(),
+            theme.style(UiThemeRole::Heading),
+        ));
+        if let Some(context) = &conversation.context {
+            lines.push(Line::styled(
+                context.as_str(),
+                theme.style(UiThemeRole::TextMuted),
+            ));
+        }
+        if conversation.next_cursor.is_some() {
+            lines.push(Line::styled(
+                "Older messages available · PageDown",
+                theme.style(UiThemeRole::TextMuted),
+            ));
+        }
+        lines.push(Line::default());
         for entry in conversation.entries.iter().skip(start).take(capacity) {
             lines.extend(render_conversation_entry(model, entry, theme));
         }
         if conversation.entries.is_empty() {
             lines.push(Line::styled(
-                " No conversation entries",
+                "No messages yet.",
                 theme.style(UiThemeRole::TextMuted),
             ));
         }
     } else if model.conversation_loading() {
         lines.push(Line::styled(
-            " Loading the selected conversation…",
+            "Loading messages…",
             theme.style(UiThemeRole::Warning),
         ));
     } else if let Some(failure) = model.conversation_failure() {
         lines.push(Line::styled(
-            " The selected conversation is unavailable.",
+            "Messages could not be loaded.",
             theme.style(UiThemeRole::Attention),
         ));
-        lines.push(Line::from(format!(" {}", failure.action)));
+        lines.push(Line::from(failure.action.clone()));
     } else if let Some(row) = model
         .selected_row_data()
         .filter(|row| row.kind != UiRowKind::Conversation)
     {
         lines.push(Line::styled(
-            format!(" {}", row.title),
+            row.title.clone(),
             theme.style(UiThemeRole::Heading),
         ));
-        lines.push(Line::from(format!(" {}", row.detail)));
+        lines.push(Line::from(row.detail.clone()));
     } else if model.selected_row_data().is_some() {
         lines.push(Line::styled(
-            " The selected conversation has not loaded yet.",
+            "Loading messages…",
             theme.style(UiThemeRole::TextMuted),
         ));
     } else {
         lines.push(Line::styled(
-            " No conversation is selected.",
+            "No conversation is selected.",
             theme.style(UiThemeRole::TextMuted),
         ));
     }
@@ -3123,35 +3132,68 @@ fn render_conversation_entry<'entry>(
     theme: &UiTheme,
 ) -> Vec<Line<'entry>> {
     let selected = model.conversation_anchor() == Some(entry.id.as_str());
-    let marker = if selected { " › " } else { "   " };
     let style = if selected {
         selected_style(theme, model.focus() == UiFocus::Conversation)
     } else {
         theme.style(UiThemeRole::Text)
     };
-    let kind = match entry.kind {
-        UiConversationEntryKind::Message => "message",
-        UiConversationEntryKind::Activity => "update",
+    let mut lines = match &entry.presentation {
+        UiConversationEntryPresentation::Message { author, body } => {
+            let author = match author {
+                UiConversationAuthor::You => "You",
+                UiConversationAuthor::Participant(label) => label,
+                UiConversationAuthor::Unknown => "Unknown sender",
+            };
+            let exceptional = match entry.message_state {
+                Some(UiMessageState::Archived) => " · Archived",
+                Some(UiMessageState::Rejected) => " · Could not be delivered",
+                Some(UiMessageState::Open) | None => "",
+            };
+            vec![
+                Line::styled(format!("{author}{exceptional}"), style),
+                Line::styled(body.as_str(), style),
+                Line::default(),
+            ]
+        }
+        UiConversationEntryPresentation::Activity {
+            status, summary, ..
+        } => {
+            let symbol = match status {
+                UiActivityStatus::Snapshot => "·",
+                UiActivityStatus::Running => "●",
+                UiActivityStatus::Succeeded => "✓",
+                UiActivityStatus::Failed { .. } => "!",
+                UiActivityStatus::Interrupted => "×",
+            };
+            let activity_style = if selected {
+                style
+            } else {
+                match status {
+                    UiActivityStatus::Snapshot | UiActivityStatus::Running => {
+                        theme.style(UiThemeRole::TextMuted)
+                    }
+                    UiActivityStatus::Succeeded => theme.style(UiThemeRole::Success),
+                    UiActivityStatus::Failed { .. } => theme.style(UiThemeRole::Error),
+                    UiActivityStatus::Interrupted => theme.style(UiThemeRole::Warning),
+                }
+            };
+            vec![
+                Line::styled(format!("{symbol} {summary}"), activity_style),
+                Line::default(),
+            ]
+        }
     };
-    let state = match entry.message_state {
-        Some(UiMessageState::Open) => "open",
-        Some(UiMessageState::Archived) => "archived",
-        Some(UiMessageState::Rejected) => "rejected",
-        None => "information only",
-    };
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(marker, style),
-            Span::styled(entry.summary.as_str(), style),
-        ]),
-        Line::from(format!("     {kind} · {state} · {}", entry.content)),
-        Line::default(),
-    ];
     if selected && model.technical_visible() {
+        if let UiConversationEntryPresentation::Activity { detail, .. } = &entry.presentation {
+            lines.push(Line::styled(
+                format!("activity detail: {detail}"),
+                theme.style(UiThemeRole::TextTechnical),
+            ));
+        }
         for section in &entry.technical {
             lines.push(Line::styled(
-                format!("     {}", technical_summary(section)),
-                theme.style(UiThemeRole::TextMuted),
+                technical_summary(section),
+                theme.style(UiThemeRole::TextTechnical),
             ));
         }
     }

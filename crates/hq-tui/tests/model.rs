@@ -7,16 +7,16 @@ use std::time::Duration;
 use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase, UiAgentLifecycle,
     UiAgentMailbox, UiAgentModal, UiAgentProjectAssignment, UiAgentSession, UiAgentStatus,
-    UiConnectionState, UiConversationEntry, UiConversationEntryKind, UiConversationPage,
-    UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage,
-    UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftPane,
-    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel, UiNewChoice, UiNewModal,
-    UiPendingProjectInput, UiProject, UiProjectAction, UiProjectAssignment,
-    UiProjectCreationChoice, UiProjectFormField, UiProjectModal, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, UiTimerKind, update,
+    UiConnectionState, UiConversationActivityKind, UiConversationAuthor, UiConversationEntry,
+    UiConversationEntryPresentation, UiConversationPage, UiConversationTarget, UiDirectTarget,
+    UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput, UiMailboxAction,
+    UiMailboxDraft, UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState,
+    UiMessageTarget, UiModel, UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject,
+    UiProjectAction, UiProjectAssignment, UiProjectCreationChoice, UiProjectFormField,
+    UiProjectModal, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
+    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind,
+    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -1389,6 +1389,8 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
         UiEvent::ConversationLoaded {
             effect_id: page_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: Some("Project · Release".to_owned()),
                 row_id: "thread-a".to_owned(),
                 entries: vec![entry("message-1", false), entry("activity-2", true)],
                 next_cursor: Some("next-page".to_owned()),
@@ -1398,11 +1400,11 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
     .expect("page applies");
     assert_eq!(opened.model.focus(), UiFocus::Conversation);
     assert_eq!(opened.model.conversation_anchor(), Some("message-1"));
+    let conversation = opened.model.conversation().expect("conversation");
+    assert_eq!(conversation.title, "Alice");
+    assert_eq!(conversation.context.as_deref(), Some("Project · Release"));
     assert_eq!(
-        opened
-            .model
-            .conversation()
-            .expect("conversation")
+        conversation
             .entries
             .iter()
             .map(|entry| entry.id.as_str())
@@ -1434,6 +1436,8 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
         UiEvent::ConversationLoaded {
             effect_id: more_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: Some("Project · Release".to_owned()),
                 row_id: "thread-a".to_owned(),
                 entries: vec![entry("message-3", false)],
                 next_cursor: None,
@@ -1480,6 +1484,8 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
         UiEvent::ConversationLoaded {
             effect_id: first_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
                 row_id: "thread-a".to_owned(),
                 entries: vec![entry("wrong-message", false)],
                 next_cursor: None,
@@ -1493,6 +1499,8 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
         UiEvent::ConversationLoaded {
             effect_id: second_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
                 row_id: "thread-b".to_owned(),
                 entries: vec![entry("right-message", false)],
                 next_cursor: None,
@@ -1532,6 +1540,8 @@ fn entering_an_eagerly_loading_conversation_reuses_the_pending_request() {
         UiEvent::ConversationLoaded {
             effect_id: page_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
                 row_id: "thread-a".to_owned(),
                 entries: vec![entry("message-1", false)],
                 next_cursor: None,
@@ -1560,6 +1570,8 @@ fn inbox_left_and_right_navigation_moves_one_visible_level_at_a_time() {
         UiEvent::ConversationLoaded {
             effect_id: page_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
                 row_id: "thread-a".to_owned(),
                 entries: vec![entry("message-1", false)],
                 next_cursor: None,
@@ -1598,6 +1610,8 @@ fn invalidation_reloads_an_open_conversation_and_ignores_its_stale_page() {
         UiEvent::ConversationLoaded {
             effect_id: first_page_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
                 row_id: "thread-a".to_owned(),
                 entries: vec![entry("message-1", false), entry("message-2", false)],
                 next_cursor: None,
@@ -1625,6 +1639,8 @@ fn invalidation_reloads_an_open_conversation_and_ignores_its_stale_page() {
         UiEvent::ConversationLoaded {
             effect_id: first_page_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
                 row_id: "thread-a".to_owned(),
                 entries: vec![entry("stale", false)],
                 next_cursor: None,
@@ -1638,6 +1654,8 @@ fn invalidation_reloads_an_open_conversation_and_ignores_its_stale_page() {
         UiEvent::ConversationLoaded {
             effect_id: fresh_page_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
                 row_id: "thread-a".to_owned(),
                 entries: vec![entry("message-0", true), entry("message-2", false)],
                 next_cursor: None,
@@ -1667,6 +1685,8 @@ fn reconnect_preserves_the_open_conversation_until_authoritative_repair() {
         UiEvent::ConversationLoaded {
             effect_id: page_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
                 row_id: "thread-a".to_owned(),
                 entries: vec![entry("message-1", false)],
                 next_cursor: None,
@@ -2870,6 +2890,8 @@ fn mailbox_navigation_workspace_survives_visiting_agent_session_management() {
         UiEvent::ConversationLoaded {
             effect_id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
                 row_id: "thread-a".to_owned(),
                 entries: vec![entry("message-a", false)],
                 next_cursor: None,
@@ -4251,6 +4273,8 @@ fn opened_conversation(entries: Vec<UiConversationEntry>) -> UiModel {
         UiEvent::ConversationLoaded {
             effect_id: id,
             page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
                 row_id: "thread-a".to_owned(),
                 entries,
                 next_cursor: None,
@@ -4343,13 +4367,20 @@ fn managed_session_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, &UiManaged
 fn entry(id: &str, activity: bool) -> UiConversationEntry {
     UiConversationEntry {
         id: id.to_owned(),
-        kind: if activity {
-            UiConversationEntryKind::Activity
+        presentation: if activity {
+            UiConversationEntryPresentation::Activity {
+                kind: UiConversationActivityKind::Progress,
+                status: UiActivityStatus::Running,
+                summary: format!("{id} summary"),
+                detail: format!("{id} content"),
+                truncated: false,
+            }
         } else {
-            UiConversationEntryKind::Message
+            UiConversationEntryPresentation::Message {
+                author: UiConversationAuthor::You,
+                body: format!("{id} content"),
+            }
         },
-        content: format!("{id} content"),
-        summary: format!("{id} summary"),
         message_state: (!activity).then_some(UiMessageState::Open),
         message_target: None,
         technical: if activity {

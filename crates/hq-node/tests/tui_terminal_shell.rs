@@ -293,6 +293,8 @@ impl TuiClientPort for EmptyClient {
         _cursor: Option<String>,
     ) -> Result<hq_tui::UiConversationPage, hq_tui::UiFailure> {
         Ok(hq_tui::UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
             row_id: row_id.to_owned(),
             entries: Vec::new(),
             next_cursor: None,

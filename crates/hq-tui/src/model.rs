@@ -308,13 +308,32 @@ pub enum UiMessageState {
     Rejected,
 }
 
-/// Closed reducer-owned conversation entry family.
+/// One human-facing message author resolved from exact conversation context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiConversationAuthor {
+    /// The reserved local human mailbox.
+    You,
+    /// The singular resolved or honest fallback counterparty.
+    Participant(String),
+    /// Sender evidence did not match either proven participant.
+    Unknown,
+}
+
+/// Closed activity family retained independently from display prose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UiConversationEntryKind {
-    /// Durable message presentation.
-    Message,
-    /// Non-actionable durable or coalesced activity presentation.
-    Activity,
+pub enum UiConversationActivityKind {
+    /// Generic operation status.
+    Status,
+    /// Provider-neutral agent-turn lifecycle.
+    AgentTurn,
+    /// Incremental progress.
+    Progress,
+    /// Plan or task state.
+    Plan,
+    /// Proposed-change snapshot.
+    Diff,
+    /// Durable completed command, file, or tool item.
+    CompletedItem,
 }
 
 /// Closed activity status presented without parsing a display string.
@@ -333,6 +352,31 @@ pub enum UiActivityStatus {
     },
     /// Correlated work was explicitly interrupted.
     Interrupted,
+}
+
+/// Closed ordinary presentation for one conversation entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiConversationEntryPresentation {
+    /// One participant-authored message.
+    Message {
+        /// Typed author independent from the visible label.
+        author: UiConversationAuthor,
+        /// Bounded sanitized message body.
+        body: String,
+    },
+    /// One non-actionable activity record.
+    Activity {
+        /// Closed activity family.
+        kind: UiConversationActivityKind,
+        /// Typed lifecycle state.
+        status: UiActivityStatus,
+        /// Short ordinary-language transcript line.
+        summary: String,
+        /// Exact bounded activity content for technical inspection.
+        detail: String,
+        /// Whether the provider boundary explicitly shortened the detail.
+        truncated: bool,
+    },
 }
 
 /// One typed namespaced technical disclosure section.
@@ -395,12 +439,8 @@ pub enum UiTechnicalSection {
 pub struct UiConversationEntry {
     /// Stable canonical fact identity used as the logical scroll anchor.
     pub id: String,
-    /// Typed entry family.
-    pub kind: UiConversationEntryKind,
-    /// Bounded sanitized display content.
-    pub content: String,
-    /// Stable display source or status summary.
-    pub summary: String,
+    /// Typed ordinary presentation independent from action authority.
+    pub presentation: UiConversationEntryPresentation,
     /// Typed message state; absent for non-actionable activity.
     pub message_state: Option<UiMessageState>,
     /// Typed canonical action target; absent for activity and diagnostic entries.
@@ -1321,6 +1361,10 @@ pub enum UiMailboxDraftPane {
 pub struct UiConversationPage {
     /// Stable summary-row identity requested by the model.
     pub row_id: String,
+    /// Participant-oriented conversation heading.
+    pub title: String,
+    /// Optional project or other useful conversation context.
+    pub context: Option<String>,
     /// Reducer-ordered entries for this page.
     pub entries: Vec<UiConversationEntry>,
     /// Opaque continuation cursor when more reducer-ordered entries exist.
@@ -1332,6 +1376,10 @@ pub struct UiConversationPage {
 pub struct UiConversation {
     /// Stable summary-row identity.
     pub row_id: String,
+    /// Participant-oriented conversation heading.
+    pub title: String,
+    /// Optional project or other useful conversation context.
+    pub context: Option<String>,
     /// Reducer-ordered entries loaded so far.
     pub entries: Vec<UiConversationEntry>,
     /// Opaque next-page cursor.
@@ -6636,11 +6684,15 @@ fn conversation_loaded(
         && let Some(conversation) = &mut model.conversation
         && conversation.row_id == page.row_id
     {
+        conversation.title = page.title;
+        conversation.context = page.context;
         conversation.entries.extend(page.entries);
         conversation.next_cursor = page.next_cursor;
     } else {
         model.conversation = Some(UiConversation {
             row_id: page.row_id,
+            title: page.title,
+            context: page.context,
             entries: page.entries,
             next_cursor: page.next_cursor,
         });

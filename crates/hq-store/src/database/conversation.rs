@@ -598,11 +598,12 @@ fn insert_projection(
             transaction
                 .execute(
                     "INSERT INTO conversation_activities( \
-                         key_digest, fact_id, sequence, status, failure_reason, content, truncated \
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                         key_digest, fact_id, kind, sequence, status, failure_reason, content, truncated \
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         digest.as_slice(),
                         view.fact_id.as_bytes().as_slice(),
+                        encode_activity_kind(view.kind),
                         view.sequence.get().to_be_bytes().as_slice(),
                         status,
                         failure_reason,
@@ -1232,30 +1233,32 @@ fn load_activity(
 ) -> Result<ConversationProjection, StoreError> {
     let row = connection
         .query_row(
-            "SELECT fact_id, sequence, status, failure_reason, content, truncated \
+            "SELECT fact_id, kind, sequence, status, failure_reason, content, truncated \
              FROM conversation_activities WHERE key_digest = ?1",
             [digest.as_slice()],
             |row| {
                 Ok((
                     row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             },
         )
         .optional()
         .map_err(database)?
         .ok_or_else(corrupt)?;
-    let sequence = u64::from_be_bytes(row.1.try_into().map_err(|_| corrupt())?);
+    let sequence = u64::from_be_bytes(row.2.try_into().map_err(|_| corrupt())?);
     Ok(ConversationProjection::Activity(ActivityView {
         fact_id: FactId::from_bytes(fixed(row.0)?),
+        kind: decode_activity_kind(row.1).ok_or_else(corrupt)?,
         sequence: NonZeroU64::new(sequence).ok_or_else(corrupt)?,
-        status: decode_status(row.2, row.3)?,
-        content: ContentText::new(row.4).map_err(|_| corrupt())?,
-        truncated: decode_bool(row.5)?,
+        status: decode_status(row.3, row.4)?,
+        content: ContentText::new(row.5).map_err(|_| corrupt())?,
+        truncated: decode_bool(row.6)?,
     }))
 }
 
@@ -1354,6 +1357,7 @@ fn load_ordered(
 const fn encode_activity_kind(value: ActivityKind) -> i64 {
     match value {
         ActivityKind::Status => 1,
+        ActivityKind::AgentTurn => 6,
         ActivityKind::Progress => 2,
         ActivityKind::Plan => 3,
         ActivityKind::Diff => 4,
@@ -1364,6 +1368,7 @@ const fn encode_activity_kind(value: ActivityKind) -> i64 {
 const fn decode_activity_kind(value: i64) -> Option<ActivityKind> {
     match value {
         1 => Some(ActivityKind::Status),
+        6 => Some(ActivityKind::AgentTurn),
         2 => Some(ActivityKind::Progress),
         3 => Some(ActivityKind::Plan),
         4 => Some(ActivityKind::Diff),
@@ -1680,7 +1685,7 @@ fn row_digest(connection: &Connection) -> Result<[u8; 32], StoreError> {
         "SELECT quote(key_digest)||char(31)||quote(fact_id) FROM conversation_message_receipts ORDER BY key_digest, fact_id",
         "SELECT quote(key_digest)||char(31)||quote(final_answer_present)||char(31)||quote(final_answer) FROM conversation_action_groups ORDER BY key_digest",
         "SELECT quote(key_digest)||char(31)||quote(position)||char(31)||quote(fact_id) FROM conversation_action_entries ORDER BY key_digest, position",
-        "SELECT quote(key_digest)||char(31)||quote(fact_id)||char(31)||quote(sequence)||char(31)||quote(status)||char(31)||quote(failure_reason)||char(31)||quote(content)||char(31)||quote(truncated) FROM conversation_activities ORDER BY key_digest",
+        "SELECT quote(key_digest)||char(31)||quote(fact_id)||char(31)||quote(kind)||char(31)||quote(sequence)||char(31)||quote(status)||char(31)||quote(failure_reason)||char(31)||quote(content)||char(31)||quote(truncated) FROM conversation_activities ORDER BY key_digest",
         "SELECT quote(key_digest)||char(31)||quote(total_progress) FROM conversation_activity_retentions ORDER BY key_digest",
         "SELECT quote(key_digest)||char(31)||quote(position)||char(31)||quote(fact_id) FROM conversation_retained_progress ORDER BY key_digest, position",
     ];
@@ -1739,6 +1744,7 @@ mod tests {
     fn conversation_scalar_codecs_are_closed_and_full_width() {
         for value in [
             ActivityKind::Status,
+            ActivityKind::AgentTurn,
             ActivityKind::Progress,
             ActivityKind::Plan,
             ActivityKind::Diff,
@@ -1750,7 +1756,7 @@ mod tests {
             );
         }
         assert_eq!(decode_activity_kind(0), None);
-        assert_eq!(decode_activity_kind(6), None);
+        assert_eq!(decode_activity_kind(7), None);
         for value in [
             MessagePurpose::Question,
             MessagePurpose::Asynchronous,
@@ -1807,6 +1813,7 @@ mod tests {
             "UPDATE conversation_action_groups SET final_answer_present = 0",
             "UPDATE conversation_action_entries SET position = position + 10",
             "UPDATE conversation_activities SET content = 'changed'",
+            "UPDATE conversation_activities SET kind = CASE kind WHEN 1 THEN 2 ELSE 1 END",
             "UPDATE conversation_activity_retentions SET total_progress = total_progress + 1",
             "UPDATE conversation_retained_progress SET position = position + 10",
         ] {
@@ -1917,6 +1924,7 @@ mod tests {
                 keys[3].clone(),
                 ConversationProjection::Activity(ActivityView {
                     fact_id: id(10),
+                    kind: ActivityKind::Progress,
                     sequence: NonZeroU64::new(u64::MAX).expect("sequence is nonzero"),
                     status: ActivityStatus::Failed(
                         ErrorCode::new("failed").expect("reason validates"),
@@ -1929,6 +1937,7 @@ mod tests {
                 keys[4].clone(),
                 ConversationProjection::Activity(ActivityView {
                     fact_id: id(13),
+                    kind: ActivityKind::CompletedItem,
                     sequence: NonZeroU64::MIN,
                     status: ActivityStatus::Succeeded,
                     content: ContentText::new("complete").expect("content validates"),

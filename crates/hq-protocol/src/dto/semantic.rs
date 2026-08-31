@@ -727,6 +727,7 @@ const fn presentation(value: model::PresentationDto) -> domain::PresentationKind
 const fn activity_kind(value: model::ActivityKindDto) -> domain::ActivityKind {
     match value {
         model::ActivityKindDto::Status => domain::ActivityKind::Status,
+        model::ActivityKindDto::AgentTurn => domain::ActivityKind::AgentTurn,
         model::ActivityKindDto::Progress => domain::ActivityKind::Progress,
         model::ActivityKindDto::Plan => domain::ActivityKind::Plan,
         model::ActivityKindDto::Diff => domain::ActivityKind::Diff,

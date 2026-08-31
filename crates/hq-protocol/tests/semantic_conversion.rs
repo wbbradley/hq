@@ -178,7 +178,7 @@ fn activity_project_attribution_is_additive_and_historical_bytes_remain_exact() 
         source,
         correlation,
         item,
-        kind,
+        kind: _,
         logical_key,
         runtime,
         sequence,
@@ -207,7 +207,7 @@ fn activity_project_attribution_is_additive_and_historical_bytes_remain_exact() 
         source: *source,
         correlation: correlation.clone(),
         item: item.clone(),
-        kind: *kind,
+        kind: ActivityKind::AgentTurn,
         logical_key: logical_key.clone(),
         runtime: runtime.clone(),
         sequence: *sequence,
@@ -230,6 +230,7 @@ fn activity_project_attribution_is_additive_and_historical_bytes_remain_exact() 
         decoded.into_parts().4,
         SemanticPayload::HarnessActivityRecorded {
             project: Some(actual),
+            kind: ActivityKind::AgentTurn,
             ..
         } if actual == attribution
     ));

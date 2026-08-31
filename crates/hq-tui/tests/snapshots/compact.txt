@@ -9,8 +9,8 @@ Inbox · Sent · Archived · Agents · Projects
      open · agent-1
  › Deploy production
 ────────────────────────────────────────────────────────────────────────
- Conversation · complete
+Loading messages…
 
- Loading the selected conversation…
+
 ────────────────────────────────────────────────────────────────────────
  Enter open · ? help · q quit

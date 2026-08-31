@@ -9,22 +9,23 @@ use hq_application::{
 use hq_domain::{
     AccountId, BoundedSet, BoundedText, CausalReferences, CommandDigest, CommandId,
     EncryptionPublicKey, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
-    MessageId, OperationId, ProjectId, ResourceId, ResourceLocator, ResourceScheme, Revision,
-    SemanticPayload, ShortText, SigningPublicKey, ThreadId, Timestamp,
+    MailboxAddress, MailboxId, MessageId, OperationId, ProjectId, ResourceId, ResourceLocator,
+    ResourceScheme, Revision, SemanticPayload, ShortText, SigningPublicKey, ThreadId, Timestamp,
 };
 use hq_local_api::protocol::v1::{
     ActivityStatusDto, AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
     AgentSelectionCandidateDto, AgentSessionBindingDto, AgentSessionNameCandidateDto,
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
-    CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationContextDto,
-    ConversationEntryDto, ConversationKeyDto, ConversationMessageDto, ConversationPageDto,
-    ConversationPageRequest, ConversationParticipantDto, DecodeError, DeviceGrantDto,
-    DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto, EncodeError, ErrorClass,
-    ErrorResponse, EvidenceIngestOutcomeDto, FrameDecoder, HealthDomainDto, Id32,
-    InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest, LifecycleState, LifecycleStatus,
-    MAX_FRAME_BYTES, MAX_PROVIDER_CATALOG_ITEMS, MailboxAddressDto, MailboxCommandActionDto,
-    MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto,
-    MailboxDraftDto, MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+    CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationActivityKindDto,
+    ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationMessageDto,
+    ConversationPageDto, ConversationPageRequest, ConversationParticipantDto, DecodeError,
+    DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto,
+    EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, FrameDecoder,
+    HealthDomainDto, Id32, InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest,
+    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MAX_PROVIDER_CATALOG_ITEMS,
+    MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto,
+    MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto, MailboxDraftDto,
+    MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
     MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCreationRequestDto, ProjectExternalStateWarningDto,
@@ -131,6 +132,10 @@ fn project_thread_snapshot_summary_converts_to_the_same_typed_v1_key() {
                 name: Some(ShortText::new("release").expect("project name")),
                 participant: None,
             },
+            local_human: MailboxAddress::new(
+                InstallationId::from_bytes([0x45; 32]),
+                MailboxId::from_bytes([0x46; 32]),
+            ),
             root_message: Some(MessageId::from_bytes([0x44; 32])),
             preview: Some(ShortText::new("Ship it").expect("preview")),
             latest_fact: Some(FactId::from_bytes([0x43; 32])),
@@ -186,6 +191,10 @@ fn conversation_summary_validation_rejects_incoherent_v1_context_without_a_versi
     let summary = |context, preview| SnapshotItem::Conversation {
         key: ConversationKeyDto::ProjectThread { project, thread },
         context,
+        local_human: MailboxAddressDto {
+            installation_id: id(0x55),
+            mailbox_id: id(0x56),
+        },
         root_message: Some(id(0x54)),
         preview,
         latest_fact: None,
@@ -1095,6 +1104,7 @@ fn conversation_message_page_preserves_addressing_state_and_ready_thread_semanti
 fn conversation_activity_status_preserves_typed_failure_reason() {
     let entry = ConversationEntryDto::Activity {
         fact_id: Id32::new([1; 32]),
+        activity_kind: ConversationActivityKindDto::AgentTurn,
         sequence: 1,
         status: ActivityStatusDto::Failed {
             reason: "provider_unavailable".to_owned(),
@@ -1110,6 +1120,7 @@ fn conversation_activity_status_preserves_typed_failure_reason() {
 
     let invalid = ConversationEntryDto::Activity {
         fact_id: Id32::new([1; 32]),
+        activity_kind: ConversationActivityKindDto::AgentTurn,
         sequence: 1,
         status: ActivityStatusDto::Failed {
             reason: "x".repeat(1_000),
@@ -1353,6 +1364,10 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
                     mailbox: Some(id(2)),
                     name: Some("helper".to_owned()),
                 },
+            },
+            local_human: MailboxAddressDto {
+                installation_id: id(1),
+                mailbox_id: id(13),
             },
             root_message: None,
             preview: Some("Can we ship?".to_owned()),

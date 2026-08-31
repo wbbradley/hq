@@ -1240,6 +1240,7 @@ fn update_activity_status(digest: &mut Sha256, status: &ActivityStatus) {
 const fn activity_kind_code(kind: ActivityKind) -> u8 {
     match kind {
         ActivityKind::Status => 1,
+        ActivityKind::AgentTurn => 6,
         ActivityKind::Progress => 2,
         ActivityKind::Plan => 3,
         ActivityKind::Diff => 4,

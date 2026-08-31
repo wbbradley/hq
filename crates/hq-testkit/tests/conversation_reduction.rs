@@ -1822,6 +1822,7 @@ fn activity_is_inert_coalesces_by_sequence_and_reports_equal_sequence_collisions
         return Err("missing selected activity".into());
     };
     assert_eq!(activity.fact_id, newer.id());
+    assert_eq!(activity.kind, ActivityKind::Progress);
     assert_eq!(activity.sequence.get(), 2);
     assert!(message_view(&report, question_id)?.open);
     assert_eq!(
@@ -2018,6 +2019,15 @@ fn activity_namespaces_completed_history_and_canonical_mixed_order_are_determini
                 completed_one.id()
             ))
     );
+    for fact in [&completed_one, &completed_two] {
+        let Some(ConversationProjection::Activity(activity)) = expected
+            .projections()
+            .get(&ConversationProjectionKey::ActivityRecord(fact.id()))
+        else {
+            return Err("missing durable completed activity".into());
+        };
+        assert_eq!(activity.kind, ActivityKind::CompletedItem);
+    }
     assert!(
         expected
             .projections()
