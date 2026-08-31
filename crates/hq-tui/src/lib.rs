@@ -19,11 +19,15 @@ pub use model::{
     UiInput, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftPane,
     UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
     UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel, UiNewChoice, UiNewModal,
-    UiPendingProjectInput, UiProject, UiProjectAction, UiProjectAssignment,
-    UiProjectCreationChoice, UiProjectExternalWarning, UiProjectFormField, UiProjectModal,
-    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
-    UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
-    UiSnapshot, UiTechnicalSection, UiTimerKind, UiTransition, update,
+    UiPendingProjectInput, UiProject, UiProjectAction, UiProjectAssignedAgentStatus,
+    UiProjectAssignedAgentSummary, UiProjectAssignment, UiProjectConversationSummary,
+    UiProjectCreationChoice, UiProjectExternalWarning, UiProjectFolderAction,
+    UiProjectFolderOwnership, UiProjectFolderSummary, UiProjectFormField, UiProjectInboxFilter,
+    UiProjectInteraction, UiProjectLifecycle, UiProjectManagementAction, UiProjectOutcome,
+    UiProjectRecoverySummary, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
+    UiProjectResult, UiProjectSummary, UiProjectSummaryFocus, UiProjectTechnicalEvidence,
+    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
+    UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, UiTransition, update,
 };
 pub use render::render;
 pub use theme::{Base16Palette, UiTheme, UiThemeRole};

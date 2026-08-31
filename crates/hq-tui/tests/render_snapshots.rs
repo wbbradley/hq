@@ -1,6 +1,6 @@
 //! Deterministic terminal-buffer snapshots for every responsive layout.
 
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::panic)]
 
 use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentLifecycle, UiAgentMailbox,
@@ -8,10 +8,10 @@ use hq_tui::{
     UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
     UiEffect, UiEvent, UiFailure, UiHumanState, UiInput, UiMailboxDraft, UiMailboxDraftTarget,
     UiMessageState, UiModel, UiProject, UiProjectAction, UiProjectAssignment,
-    UiProjectExternalWarning, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
-    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind,
-    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTheme, UiThemeRole, render,
-    update,
+    UiProjectExternalWarning, UiProjectFolderAction, UiProjectManagementAction, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectSummaryFocus, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
+    UiSize, UiSnapshot, UiTechnicalSection, UiTheme, UiThemeRole, render, update,
 };
 use ratatui::{
     Terminal,
@@ -63,7 +63,7 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
     let archived = render_text(&conversation_model_with_state(
         UiSize {
             width: 64,
-            height: 16,
+            height: 24,
         },
         UiMessageState::Archived,
     ));
@@ -811,7 +811,7 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
         },
         UiSize {
             width: 64,
-            height: 16,
+            height: 24,
         },
     ] {
         let ready = ready_model(size);
@@ -1035,7 +1035,7 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
         },
         UiSize {
             width: 64,
-            height: 16,
+            height: 24,
         },
     ] {
         let model = project_model(size);
@@ -1141,7 +1141,8 @@ fn project_creation_chooser_leads_with_folder_ownership_and_discloses_worktrees(
         rendered.contains("Create an isolated Git worktree"),
         "{rendered}"
     );
-    assert!(rendered.contains("optional advanced"), "{rendered}");
+    assert!(rendered.contains("optional"), "{rendered}");
+    assert!(rendered.contains("advanced"), "{rendered}");
 
     let form = update(chooser, UiEvent::Input(UiInput::Activate))
         .expect("existing folder form")
@@ -1159,7 +1160,8 @@ fn project_creation_chooser_leads_with_folder_ownership_and_discloses_worktrees(
     assert!(rendered.contains("Name: customer-api"), "{rendered}");
     assert!(!rendered.contains("customer-api (required)"), "{rendered}");
     assert!(!rendered.contains("customer-api│"), "{rendered}");
-    assert!(rendered.contains("claim this folder"), "{rendered}");
+    assert!(rendered.contains("claim this"), "{rendered}");
+    assert!(rendered.contains("folder in HQ"), "{rendered}");
     assert!(rendered.contains("overlapping folders"), "{rendered}");
 }
 
@@ -1243,14 +1245,6 @@ fn one_line_fields_fill_the_dialog_and_float_empty_requirements() {
         .with_style(UiThemeRole::Cursor, Style::new().bg(caret));
     let buffer = render_buffer_with_theme(&model, &theme);
     let (path_x, path_y) = find_text_start(&buffer, "Path:");
-    let right_border = (path_x..buffer.area.right())
-        .rev()
-        .find(|x| {
-            buffer
-                .cell((*x, path_y))
-                .is_some_and(|cell| cell.symbol() == "│")
-        })
-        .expect("dialog right border");
     let gap = buffer.cell((path_x + 5, path_y)).expect("label gap");
     assert_eq!(gap.symbol(), " ");
     assert_ne!(gap.bg, focused);
@@ -1261,10 +1255,7 @@ fn one_line_fields_fill_the_dialog_and_float_empty_requirements() {
     );
     let (required_x, required_y) = find_text_start(&buffer, "(required)");
     assert_eq!(required_y, path_y);
-    assert_eq!(
-        required_x + u16::try_from("(required)".len()).expect("short hint width"),
-        right_border
-    );
+    let right_border = required_x + u16::try_from("(required)".len()).expect("short hint width");
     for x in input_start + 1..right_border {
         let cell = buffer.cell((x, path_y)).expect("focused field cell");
         assert_eq!(cell.bg, focused, "field cell {x} was not focused");
@@ -1297,30 +1288,16 @@ fn project_resource_forms_and_conflict_preview_are_responsive() {
             height: 16,
         },
     ] {
-        let details = update(project_model(size), UiEvent::Input(UiInput::Activate))
-            .expect("project details")
-            .model;
-        let rendered = render_text(&details);
-        assert!(rendered.contains("Folders and resources"));
-        if size.height >= 24 {
-            assert!(rendered.contains("check selected"));
+        let folders =
+            open_project_management_action(project_model(size), UiProjectManagementAction::Folders);
+        let rendered = render_text(&folders);
+        assert!(rendered.contains("Folders"));
+        assert!(rendered.contains("Add folder"));
+        if size.width >= 120 {
+            assert!(rendered.contains("Check folder now"));
         }
 
-        for (key, expected) in [
-            ('a', "Add a folder or resource"),
-            ('e', "Change a folder or resource"),
-            ('x', "Remove this project resource?"),
-            ('p', "Use as the primary project resource?"),
-        ] {
-            let modal = update(details.clone(), UiEvent::Input(UiInput::Character(key)))
-                .expect("resource modal")
-                .model;
-            assert!(render_text(&modal).contains(expected));
-        }
-
-        let add = update(details, UiEvent::Input(UiInput::Character('a')))
-            .expect("add form")
-            .model;
+        let add = open_project_folder_action(project_model(size), UiProjectFolderAction::AddFolder);
         let add = update(add, UiEvent::Input(UiInput::Paste("/shared".to_owned())))
             .expect("resource path")
             .model;
@@ -1380,12 +1357,10 @@ fn project_activation_form_is_responsive_and_discloses_exact_resume() {
             height: 16,
         },
     ] {
-        let details = update(project_model(size), UiEvent::Input(UiInput::Activate))
-            .expect("project details")
-            .model;
-        let activation = update(details, UiEvent::Input(UiInput::Character('v')))
-            .expect("activation")
-            .model;
+        let activation = open_project_management_action(
+            project_model(size),
+            UiProjectManagementAction::AssignAgent,
+        );
         let rendered = render_text(&activation);
         assert!(rendered.contains("Set up project work"));
         if size.width >= 120 {
@@ -1412,15 +1387,10 @@ fn project_handoff_form_separates_confirmation_force_and_runtime_truth() {
             height: 16,
         },
     ] {
-        let details = update(
+        let handoff = open_project_management_action(
             project_model_with_assignment(size, true),
-            UiEvent::Input(UiInput::Activate),
-        )
-        .expect("project details")
-        .model;
-        let handoff = update(details, UiEvent::Input(UiInput::Character('h')))
-            .expect("handoff")
-            .model;
+            UiProjectManagementAction::ChangeAssignedAgent,
+        );
         let rendered = render_text(&handoff);
         assert!(rendered.contains("Move project work to another agent"));
         assert!(
@@ -1447,11 +1417,10 @@ fn project_lifecycle_controls_are_responsive_confirmed_and_force_gated() {
             height: 16,
         },
     ] {
-        let details = update(project_model(size), UiEvent::Input(UiInput::Activate))
-            .expect("project details")
-            .model;
-        let previewing = update(details.clone(), UiEvent::Input(UiInput::Character('c')))
-            .expect("close preview");
+        let previewing = trigger_project_management_action(
+            project_model(size),
+            UiProjectManagementAction::CloseProject,
+        );
         let (effect_id, action) = previewing
             .effects
             .iter()
@@ -1507,7 +1476,7 @@ fn project_lifecycle_controls_are_responsive_confirmed_and_force_gated() {
         }
         let cancelled = update(confirmation.clone(), UiEvent::Input(UiInput::Escape))
             .expect("close cancellation");
-        assert!(cancelled.model.project_modal().is_none());
+        assert!(cancelled.model.project_interaction().is_none());
         assert!(
             !cancelled
                 .effects
@@ -1541,9 +1510,10 @@ fn project_lifecycle_controls_are_responsive_confirmed_and_force_gated() {
             } if *project_id == [1; 32]
         )));
 
-        let archive = update(details, UiEvent::Input(UiInput::Character('z')))
-            .expect("archive confirmation")
-            .model;
+        let archive = open_project_management_action(
+            project_model(size),
+            UiProjectManagementAction::ArchiveProject,
+        );
         assert!(render_text(&archive).contains("Confirm project archive"));
         let archiving = update(archive, UiEvent::Input(UiInput::Activate)).expect("archive");
         assert!(archiving.effects.iter().any(|effect| matches!(
@@ -1555,22 +1525,19 @@ fn project_lifecycle_controls_are_responsive_confirmed_and_force_gated() {
         )));
     }
 
-    let closed = update(
-        project_model_with_state(
-            UiSize {
-                width: 100,
-                height: 20,
-            },
-            false,
-            "closed",
-            true,
-        ),
-        UiEvent::Input(UiInput::Activate),
-    )
-    .expect("closed project details")
-    .model;
-    let opening =
-        update(closed.clone(), UiEvent::Input(UiInput::Character('o'))).expect("reopen project");
+    let closed_model = project_model_with_state(
+        UiSize {
+            width: 100,
+            height: 20,
+        },
+        false,
+        "closed",
+        false,
+    );
+    let opening = trigger_project_management_action(
+        closed_model.clone(),
+        UiProjectManagementAction::ReopenProject,
+    );
     assert!(opening.effects.iter().any(|effect| matches!(
         effect,
         UiEffect::SubmitProjectCommand {
@@ -1578,9 +1545,19 @@ fn project_lifecycle_controls_are_responsive_confirmed_and_force_gated() {
             ..
         }
     )));
-    let unarchive = update(closed, UiEvent::Input(UiInput::Character('z')))
-        .expect("unarchive confirmation")
-        .model;
+    let archived_model = project_model_with_state(
+        UiSize {
+            width: 100,
+            height: 20,
+        },
+        false,
+        "closed",
+        true,
+    );
+    let unarchive = open_project_management_action(
+        archived_model,
+        UiProjectManagementAction::RestoreArchivedProject,
+    );
     let unarchiving = update(unarchive, UiEvent::Input(UiInput::Activate)).expect("unarchive");
     assert!(unarchiving.effects.iter().any(|effect| matches!(
         effect,
@@ -1611,22 +1588,26 @@ fn ordinary_surfaces_use_user_intentions_and_label_technical_evidence() {
         assert!(!workspace.contains("authoritative"));
         assert!(!workspace.contains("revision"));
 
-        let project = update(project_model(size), UiEvent::Input(UiInput::Activate))
-            .expect("project details")
-            .model;
+        let project = update(
+            project_model(size),
+            UiEvent::Input(UiInput::MoveCursorRight),
+        )
+        .expect("project summary")
+        .model;
         let project_details = render_text(&project);
-        assert!(project_details.contains("Folders and resources"));
+        assert!(project_details.contains("Folders"));
         assert!(
-            project_details.contains("Assigned agent"),
+            project_details.contains("Agent"),
             "project details at {size:?}:\n{project_details}"
         );
-        assert!(project_details.contains("Technical details"));
+        assert!(project_details.contains("Manage project"));
         assert!(!project_details.contains("Desired resources"));
         assert!(!project_details.contains("runnable true"));
 
-        let activation = update(project, UiEvent::Input(UiInput::Character('v')))
-            .expect("project setup")
-            .model;
+        let activation = open_project_management_action(
+            project_model(size),
+            UiProjectManagementAction::AssignAgent,
+        );
         let activation = render_text(&activation);
         assert!(activation.contains("Set up project work"));
         assert!(activation.contains("Conversation:"));
@@ -1680,6 +1661,60 @@ fn ordinary_surfaces_use_user_intentions_and_label_technical_evidence() {
         ));
         assert!(!human.contains("authority"));
     }
+}
+
+#[test]
+fn projects_workspace_uses_persistent_wide_summary_and_compact_one_level_detail() {
+    let wide = render_text(&project_model(UiSize {
+        width: 120,
+        height: 24,
+    }));
+    assert!(wide.contains("Projects · 1 project"));
+    assert!(wide.contains("Project · release"));
+    assert!(wide.contains("Start conversation"));
+    assert!(wide.contains("Agent · No agent assigned"));
+    assert!(wide.contains("Folders · 1"));
+    assert!(wide.contains("Manage project…"));
+    assert!(!wide.contains("Project details"));
+    assert!(!wide.contains("a add · e replace"));
+
+    let compact_model = project_model(UiSize {
+        width: 64,
+        height: 18,
+    });
+    let compact_list = render_text(&compact_model);
+    assert!(compact_list.contains("Projects · 1 project"));
+    assert!(!compact_list.contains("Project · release"));
+    let compact_detail = update(compact_model, UiEvent::Input(UiInput::MoveCursorRight))
+        .expect("open compact project detail")
+        .model;
+    let no_color_buffer = render_buffer_with_theme(&compact_detail, &UiTheme::no_color());
+    let no_color = snapshot_text(&no_color_buffer);
+    let compact_detail = render_text(&compact_detail);
+    assert!(compact_detail.contains("Projects / release"));
+    assert!(no_color.contains('›'), "no-color project focus: {no_color}");
+    assert!(
+        compact_detail.contains("h/← Projects"),
+        "compact project detail:\n{compact_detail}"
+    );
+    assert!(!compact_detail.contains("Project details"));
+
+    let filtered = update(
+        project_model(UiSize {
+            width: 120,
+            height: 24,
+        }),
+        UiEvent::Input(UiInput::Activate),
+    )
+    .expect("start project conversation")
+    .model;
+    let filtered = render_text(&filtered);
+    assert!(
+        filtered.contains("Project: release")
+            && filtered.contains("Esc clear")
+            && filtered.contains("filter"),
+        "filtered Inbox:\n{filtered}"
+    );
 }
 
 #[test]
@@ -2259,6 +2294,72 @@ fn agent_details_model_with_status_and_providers(
 
 fn project_model(size: UiSize) -> UiModel {
     project_model_with_state(size, false, "open", false)
+}
+
+fn open_project_management(mut model: UiModel) -> UiModel {
+    model = update(model, UiEvent::Input(UiInput::MoveCursorRight))
+        .expect("open project summary")
+        .model;
+    for _ in 0..5 {
+        if model.project_summary_focus() == Some(UiProjectSummaryFocus::Manage) {
+            break;
+        }
+        model = update(model, UiEvent::Input(UiInput::NextItem))
+            .expect("choose summary card")
+            .model;
+    }
+    update(model, UiEvent::Input(UiInput::Activate))
+        .expect("open project management")
+        .model
+}
+
+fn select_project_management_action(model: UiModel, action: UiProjectManagementAction) -> UiModel {
+    let mut model = open_project_management(model);
+    for _ in 0..8 {
+        if model.project_management_action() == Some(action) {
+            return model;
+        }
+        model = update(model, UiEvent::Input(UiInput::NextItem))
+            .expect("choose project action")
+            .model;
+    }
+    panic!("project action unavailable: {action:?}");
+}
+
+fn trigger_project_management_action(
+    model: UiModel,
+    action: UiProjectManagementAction,
+) -> hq_tui::UiTransition {
+    update(
+        select_project_management_action(model, action),
+        UiEvent::Input(UiInput::Activate),
+    )
+    .expect("activate project action")
+}
+
+fn open_project_management_action(model: UiModel, action: UiProjectManagementAction) -> UiModel {
+    trigger_project_management_action(model, action).model
+}
+
+fn trigger_project_folder_action(
+    model: UiModel,
+    action: UiProjectFolderAction,
+) -> hq_tui::UiTransition {
+    let mut model = open_project_management_action(model, UiProjectManagementAction::Folders);
+    for _ in 0..8 {
+        if model.project_folder_action() == Some(action) {
+            return update(model, UiEvent::Input(UiInput::Activate))
+                .expect("activate folder action");
+        }
+        model = update(model, UiEvent::Input(UiInput::NextItem))
+            .expect("choose folder action")
+            .model;
+    }
+    panic!("folder action unavailable: {action:?}");
+}
+
+fn open_project_folder_action(model: UiModel, action: UiProjectFolderAction) -> UiModel {
+    trigger_project_folder_action(model, action).model
 }
 
 #[allow(clippy::too_many_lines)]

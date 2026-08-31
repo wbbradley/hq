@@ -1,7 +1,7 @@
 //! Pure identity-aware TUI transition algebra.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
     path::{Component, Path, PathBuf},
     time::Duration,
@@ -698,6 +698,226 @@ pub struct UiProject {
     pub resources: Vec<UiProjectResource>,
 }
 
+/// Ordinary lifecycle shown by the Projects workspace without exposing reducer vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiProjectLifecycle {
+    /// The project can own folders and accept new work.
+    Open,
+    /// A close workflow is still making progress or needs recovery.
+    Closing,
+    /// The project is visible but not accepting new work.
+    Closed,
+    /// The closed project is hidden from ordinary active work.
+    Archived,
+    /// Authoritative state could not be classified safely.
+    NeedsAttention,
+}
+
+/// Plain ownership state for one project folder.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiProjectFolderOwnership {
+    /// This project currently owns the folder in HQ.
+    Owned,
+    /// Another project overlaps this folder.
+    Conflicted,
+    /// Ownership evidence is incomplete.
+    NeedsAttention,
+}
+
+/// Decoupled ordinary presentation for one project folder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiProjectFolderSummary {
+    /// Stable identity used for focus and exact commands.
+    pub folder_id: [u8; 32],
+    /// Familiar user-facing path.
+    pub path: String,
+    /// Whether this is the assignment's default working folder.
+    pub working_folder: bool,
+    /// Bounded authoritative health label.
+    pub health: String,
+    /// Typed ownership state.
+    pub ownership: UiProjectFolderOwnership,
+    /// Resolved conflicting project names, with honest unnamed fallbacks.
+    pub conflicting_projects: Vec<String>,
+}
+
+/// Ordinary status of the agent responsible for one project.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiProjectAssignedAgentStatus {
+    /// No agent is responsible yet.
+    Unassigned,
+    /// HQ is preparing the assigned agent.
+    SettingUp,
+    /// The assigned agent can receive project messages.
+    Ready,
+    /// Assignment state needs explicit attention.
+    NeedsAttention,
+}
+
+/// Decoupled assigned-agent card presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiProjectAssignedAgentSummary {
+    /// Exact assigned agent identity when one exists.
+    pub agent_id: Option<[u8; 32]>,
+    /// Resolved authoritative name; absent means `Unnamed agent`.
+    pub name: Option<String>,
+    /// Typed ordinary status.
+    pub status: UiProjectAssignedAgentStatus,
+    /// Working folder acknowledged by the assignment.
+    pub working_folder: Option<String>,
+}
+
+/// Counts and exact row identities for project conversations owned by Inbox.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiProjectConversationSummary {
+    /// Nonarchived project conversations available in Inbox.
+    pub open: usize,
+    /// Archived project conversations retained for history.
+    pub archived: usize,
+    /// Exact nonarchived Inbox row identities in authoritative order.
+    pub open_rows: Vec<String>,
+    /// Exact archived Inbox row identities in authoritative order.
+    pub archived_rows: Vec<String>,
+}
+
+/// Typed reason the selected project needs an exceptional recovery surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiProjectRecoverySummary {
+    /// One or more folders have conflicting or incomplete ownership.
+    FolderOwnership,
+    /// Assignment setup is explicitly blocked.
+    AssignedAgentBlocked,
+    /// More than one assignment candidate exists.
+    AssignedAgentConflict,
+}
+
+/// Exact evidence kept out of the ordinary project summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiProjectTechnicalEvidence {
+    /// Stable project identity.
+    pub project_id: [u8; 32],
+    /// Home installation identity.
+    pub home: [u8; 32],
+    /// Current authoritative project version.
+    pub head: [u8; 32],
+    /// Next accepted-input sequence.
+    pub input_sequence: u64,
+    /// Exact assignment epoch when assigned.
+    pub assignment_id: Option<[u8; 32]>,
+    /// Provider namespace when assigned.
+    pub provider: Option<String>,
+    /// Provider session when acknowledged.
+    pub session: Option<String>,
+    /// Immutable project thread when runnable.
+    pub thread_id: Option<[u8; 32]>,
+}
+
+/// Selection-driven Projects workspace summary assembled from authoritative typed identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiProjectSummary {
+    /// Stable selected project identity.
+    pub project_id: [u8; 32],
+    /// Current authoritative project name.
+    pub name: String,
+    /// Typed lifecycle presentation.
+    pub lifecycle: UiProjectLifecycle,
+    /// Inbox-owned conversation relationship.
+    pub conversations: UiProjectConversationSummary,
+    /// Assigned-agent relationship.
+    pub assigned_agent: UiProjectAssignedAgentSummary,
+    /// Folder cards in stable project order, working folder first.
+    pub folders: Vec<UiProjectFolderSummary>,
+    /// Exceptional recovery banners, absent during ordinary waiting.
+    pub recovery: Vec<UiProjectRecoverySummary>,
+    /// Exact progressively disclosed evidence.
+    pub technical: UiProjectTechnicalEvidence,
+}
+
+/// Modeless navigation depth inside Projects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiProjectWorkspaceLevel {
+    /// Select a project from the catalog.
+    List,
+    /// Inspect and collaborate from the selected project's summary.
+    Summary,
+    /// Choose one labeled administrative action.
+    Manage,
+    /// Inspect folders and choose one exact folder action.
+    Folders,
+}
+
+/// Labeled state-dependent action selected in Manage project.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiProjectManagementAction {
+    /// Open folder administration.
+    Folders,
+    /// Assign an agent to an unassigned project.
+    AssignAgent,
+    /// Change the agent responsible for an assigned project.
+    ChangeAssignedAgent,
+    /// Close an open project after fresh release assessment.
+    CloseProject,
+    /// Reopen one visible closed project.
+    ReopenProject,
+    /// Archive a visible project, closing it first when required.
+    ArchiveProject,
+    /// Restore an archived project as closed and visible.
+    RestoreArchivedProject,
+    /// Inspect exact IDs, bindings, and causal evidence.
+    TechnicalDetails,
+}
+
+/// Labeled action selected in project folder administration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiProjectFolderAction {
+    /// Add another folder to the project.
+    AddFolder,
+    /// Change the selected folder's path.
+    ChangeFolderPath,
+    /// Remove the selected folder from HQ while keeping disk state.
+    RemoveFolder,
+    /// Make the selected folder the default working folder.
+    UseAsWorkingFolder,
+    /// Refresh the selected folder's health and release evidence.
+    CheckFolderNow,
+    /// Refresh every project folder when more than one exists.
+    CheckAllFolders,
+}
+
+/// Stable card focus within the selected project summary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiProjectSummaryFocus {
+    /// Inbox-owned project conversations.
+    Conversation,
+    /// Named agent responsible for the project.
+    AssignedAgent,
+    /// Project folders and working-folder status.
+    Folders,
+    /// Exceptional recovery evidence.
+    Recovery,
+    /// Labeled project administration.
+    Manage,
+}
+
+impl UiProjectSummaryFocus {
+    const ALL: [Self; 5] = [
+        Self::Conversation,
+        Self::AssignedAgent,
+        Self::Folders,
+        Self::Recovery,
+        Self::Manage,
+    ];
+}
+
+/// Visible typed Inbox filter installed by Projects navigation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiProjectInboxFilter {
+    /// Stable project identity; labels never become routing authority.
+    pub project_id: [u8; 32],
+    /// Current display-only project name.
+    pub project_name: String,
+}
+
 /// Exact project catalog, creation, or input command chosen by the pure model.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1057,16 +1277,12 @@ pub enum UiNewModal {
 /// Current project catalog, creation, input, or outcome interaction.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UiProjectModal {
+pub enum UiProjectInteraction {
     ChooseCreation {
         selected: UiProjectCreationChoice,
     },
     Search {
         query: String,
-    },
-    Details {
-        project: UiProject,
-        selected_resource: Option<[u8; 32]>,
     },
     CreateExisting {
         name: String,
@@ -1101,11 +1317,6 @@ pub enum UiProjectModal {
         project: UiProject,
         resource_id: [u8; 32],
         force: bool,
-        submitting: bool,
-    },
-    ConfirmPrimaryResource {
-        project: UiProject,
-        resource_id: [u8; 32],
         submitting: bool,
     },
     Activate {
@@ -1478,7 +1689,7 @@ impl UiCompletionNotice {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UiProjectCompletionContinuation {
     Select,
-    Details,
+    Summary,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1858,7 +2069,15 @@ pub struct UiModel {
     mailbox_modal: Option<UiMailboxModal>,
     mailbox_draft: Option<UiMailboxDraftPane>,
     agent_modal: Option<UiAgentModal>,
-    project_modal: Option<UiProjectModal>,
+    project_interaction: Option<UiProjectInteraction>,
+    project_summary: Option<UiProjectSummary>,
+    project_workspace_level: UiProjectWorkspaceLevel,
+    project_summary_focus: UiProjectSummaryFocus,
+    project_management_action: Option<UiProjectManagementAction>,
+    project_folder_action: UiProjectFolderAction,
+    project_folder_id: Option<[u8; 32]>,
+    project_filter: Option<UiProjectInboxFilter>,
+    project_filter_rows: Vec<UiRow>,
     new_modal: Option<UiNewModal>,
     agent_search: String,
     project_search: String,
@@ -1906,7 +2125,15 @@ impl UiModel {
             mailbox_modal: None,
             mailbox_draft: None,
             agent_modal: None,
-            project_modal: None,
+            project_interaction: None,
+            project_summary: None,
+            project_workspace_level: UiProjectWorkspaceLevel::List,
+            project_summary_focus: UiProjectSummaryFocus::Conversation,
+            project_management_action: None,
+            project_folder_action: UiProjectFolderAction::AddFolder,
+            project_folder_id: None,
+            project_filter: None,
+            project_filter_rows: Vec::new(),
             new_modal: None,
             agent_search: String::new(),
             project_search: String::new(),
@@ -1960,11 +2187,13 @@ impl UiModel {
 
     pub(crate) fn project_field_is_focused(&self, field: UiProjectFormField) -> bool {
         if self.form.active != self.active_form_kind() {
-            return (matches!(self.project_modal, Some(UiProjectModal::AddResource { .. }))
-                && field == UiProjectFormField::Path)
+            return (matches!(
+                self.project_interaction,
+                Some(UiProjectInteraction::AddResource { .. })
+            ) && field == UiProjectFormField::Path)
                 || (matches!(
-                    self.project_modal,
-                    Some(UiProjectModal::ConfirmClose { .. })
+                    self.project_interaction,
+                    Some(UiProjectInteraction::ConfirmClose { .. })
                 ) && field == UiProjectFormField::Confirmation);
         }
         self.form.focused == Some(UiFormField::Project(field))
@@ -2030,27 +2259,31 @@ impl UiModel {
 
     fn active_form_kind(&self) -> Option<UiFormKind> {
         match (
-            &self.project_modal,
+            &self.project_interaction,
             &self.agent_modal,
             &self.mailbox_modal,
             &self.mailbox_draft,
         ) {
-            (Some(UiProjectModal::Search { .. }), _, _, _) => Some(UiFormKind::ProjectSearch),
-            (Some(UiProjectModal::CreateExisting { .. }), _, _, _) => {
+            (Some(UiProjectInteraction::Search { .. }), _, _, _) => Some(UiFormKind::ProjectSearch),
+            (Some(UiProjectInteraction::CreateExisting { .. }), _, _, _) => {
                 Some(UiFormKind::ProjectCreateExisting)
             }
-            (Some(UiProjectModal::CreateWorktree { .. }), _, _, _) => {
+            (Some(UiProjectInteraction::CreateWorktree { .. }), _, _, _) => {
                 Some(UiFormKind::ProjectCreateWorktree)
             }
-            (Some(UiProjectModal::AddResource { .. }), _, _, _) => {
+            (Some(UiProjectInteraction::AddResource { .. }), _, _, _) => {
                 Some(UiFormKind::ProjectAddResource)
             }
-            (Some(UiProjectModal::ReplaceResource { .. }), _, _, _) => {
+            (Some(UiProjectInteraction::ReplaceResource { .. }), _, _, _) => {
                 Some(UiFormKind::ProjectReplaceResource)
             }
-            (Some(UiProjectModal::Activate { .. }), _, _, _) => Some(UiFormKind::ProjectActivate),
-            (Some(UiProjectModal::Handoff { .. }), _, _, _) => Some(UiFormKind::ProjectHandoff),
-            (Some(UiProjectModal::ConfirmClose { .. }), _, _, _) => {
+            (Some(UiProjectInteraction::Activate { .. }), _, _, _) => {
+                Some(UiFormKind::ProjectActivate)
+            }
+            (Some(UiProjectInteraction::Handoff { .. }), _, _, _) => {
+                Some(UiFormKind::ProjectHandoff)
+            }
+            (Some(UiProjectInteraction::ConfirmClose { .. }), _, _, _) => {
                 Some(UiFormKind::ProjectConfirmClose)
             }
             (_, Some(UiAgentModal::Search { .. }), _, _) => Some(UiFormKind::AgentSearch),
@@ -2108,9 +2341,13 @@ impl UiModel {
 
     /// Borrows the latest rows for the selected semantic section.
     pub fn rows(&self) -> Option<&[UiRow]> {
-        self.snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.rows(self.section))
+        self.snapshot.as_ref().map(|snapshot| {
+            if self.section == UiSection::Inbox && self.project_filter.is_some() {
+                self.project_filter_rows.as_slice()
+            } else {
+                snapshot.rows(self.section)
+            }
+        })
     }
 
     /// Returns current local human-account availability when a snapshot exists.
@@ -2170,8 +2407,53 @@ impl UiModel {
     }
 
     /// Borrows the current project interaction.
-    pub const fn project_modal(&self) -> Option<&UiProjectModal> {
-        self.project_modal.as_ref()
+    pub const fn project_interaction(&self) -> Option<&UiProjectInteraction> {
+        self.project_interaction.as_ref()
+    }
+
+    /// Borrows the selected project's decoupled authoritative workspace summary.
+    pub const fn project_summary(&self) -> Option<&UiProjectSummary> {
+        self.project_summary.as_ref()
+    }
+
+    /// Returns the current modeless Projects navigation depth.
+    pub const fn project_workspace_level(&self) -> UiProjectWorkspaceLevel {
+        self.project_workspace_level
+    }
+
+    /// Returns the stable selected card within a project summary.
+    pub const fn project_summary_focus(&self) -> Option<UiProjectSummaryFocus> {
+        match self.project_workspace_level {
+            UiProjectWorkspaceLevel::List => None,
+            UiProjectWorkspaceLevel::Summary
+            | UiProjectWorkspaceLevel::Manage
+            | UiProjectWorkspaceLevel::Folders => Some(self.project_summary_focus),
+        }
+    }
+
+    /// Returns the selected labeled Manage project action.
+    pub const fn project_management_action(&self) -> Option<UiProjectManagementAction> {
+        self.project_management_action
+    }
+
+    /// Returns the selected labeled folder action.
+    pub const fn project_folder_action(&self) -> Option<UiProjectFolderAction> {
+        match self.project_workspace_level {
+            UiProjectWorkspaceLevel::Folders => Some(self.project_folder_action),
+            UiProjectWorkspaceLevel::List
+            | UiProjectWorkspaceLevel::Summary
+            | UiProjectWorkspaceLevel::Manage => None,
+        }
+    }
+
+    /// Returns the exact folder currently selected for object-bearing actions.
+    pub const fn selected_project_folder(&self) -> Option<[u8; 32]> {
+        self.project_folder_id
+    }
+
+    /// Borrows the visible typed project filter currently applied to Inbox.
+    pub const fn project_filter(&self) -> Option<&UiProjectInboxFilter> {
+        self.project_filter.as_ref()
     }
 
     /// Borrows the current global `New...` interaction.
@@ -2507,6 +2789,7 @@ impl UiModel {
         self.section = next;
         self.restore_section_workspace();
         self.reconcile_current_section();
+        self.refresh_selected_project_summary();
     }
 
     fn schedule_timer(
@@ -2527,11 +2810,7 @@ impl UiModel {
     }
 
     fn move_row_selection(&mut self, forward: bool) -> bool {
-        let Some(rows) = self
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.rows(self.section))
-        else {
+        let Some(rows) = self.rows() else {
             return false;
         };
         if rows.is_empty() {
@@ -2552,6 +2831,10 @@ impl UiModel {
         } else {
             self.selected_row = Some(selected);
             self.close_conversation();
+            if self.section == UiSection::Projects {
+                self.project_summary_focus = UiProjectSummaryFocus::Conversation;
+                self.refresh_selected_project_summary();
+            }
             true
         }
     }
@@ -2586,10 +2869,8 @@ impl UiModel {
 
     fn selected_row_is_conversation(&self) -> bool {
         self.selected_row.as_ref().is_some_and(|selected| {
-            self.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot
-                    .rows(self.section)
-                    .iter()
+            self.rows().is_some_and(|rows| {
+                rows.iter()
                     .any(|row| &row.id == selected && row.kind == UiRowKind::Conversation)
             })
         })
@@ -2621,8 +2902,9 @@ impl UiModel {
             targets.clone_from(&snapshot.direct_targets);
         }
         refresh_agent_modal(self, &snapshot);
-        refresh_project_modal(self, &snapshot);
+        refresh_project_interaction(self, &snapshot);
         refresh_new_modal(self, &snapshot);
+        self.refresh_project_filter(&snapshot);
         self.snapshot = Some(snapshot);
         if let Some((project_id, root_message)) = self.pending_project_conversation
             && let Some(row_id) = self.snapshot.as_ref().and_then(|snapshot| {
@@ -2645,33 +2927,252 @@ impl UiModel {
             self.pending_project_conversation = None;
         }
         self.reconcile_current_section();
+        self.refresh_selected_project_summary();
         select_agent_search_match(self, false);
         select_project_search_match(self, false);
     }
 
+    fn refresh_project_filter(&mut self, snapshot: &UiSnapshot) {
+        let Some(mut filter) = self.project_filter.take() else {
+            self.project_filter_rows.clear();
+            return;
+        };
+        let Some(project) = snapshot
+            .projects
+            .iter()
+            .find(|project| project.project_id == filter.project_id)
+        else {
+            self.project_filter_rows.clear();
+            return;
+        };
+        filter.project_name.clone_from(&project.name);
+        self.project_filter_rows = project_conversation_rows(snapshot, filter.project_id);
+        self.project_filter = Some(filter);
+    }
+
+    fn refresh_selected_project_summary(&mut self) {
+        self.project_summary = self.snapshot.as_ref().and_then(|snapshot| {
+            let selected = self.selected_row.as_deref()?;
+            let project = snapshot
+                .projects
+                .iter()
+                .find(|project| agent_hex(project.project_id) == selected)?;
+            Some(project_summary(snapshot, project))
+        });
+        if self.project_summary.is_none() {
+            self.project_workspace_level = UiProjectWorkspaceLevel::List;
+            self.project_summary_focus = UiProjectSummaryFocus::Conversation;
+        }
+    }
+
+    fn install_project_filter(&mut self, project: &UiProject) {
+        self.project_filter = Some(UiProjectInboxFilter {
+            project_id: project.project_id,
+            project_name: project.name.clone(),
+        });
+        self.project_filter_rows = self.snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
+            project_conversation_rows(snapshot, project.project_id)
+        });
+    }
+
+    fn clear_project_filter(&mut self) {
+        self.project_filter = None;
+        self.project_filter_rows.clear();
+        self.reconcile_current_section();
+    }
+
     fn reconcile_current_section(&mut self) {
-        let Some(snapshot) = &self.snapshot else {
+        if self.snapshot.is_none() {
             self.selected_row = None;
             self.close_conversation();
             return;
-        };
-        let rows = snapshot.rows(self.section);
+        }
+        let rows = self
+            .rows()
+            .unwrap_or_default()
+            .iter()
+            .map(|row| (row.id.clone(), row.kind))
+            .collect::<Vec<_>>();
         let keep = self.selected_row.as_ref().and_then(|selected| {
             rows.iter()
-                .find(|row| &row.id == selected)
-                .map(|row| row.id.clone())
+                .find(|(row_id, _)| row_id == selected)
+                .map(|(row_id, _)| row_id.clone())
         });
-        self.selected_row = keep.or_else(|| rows.first().map(|row| row.id.clone()));
+        self.selected_row = keep.or_else(|| rows.first().map(|(row_id, _)| row_id.clone()));
         let conversation_survives = self.conversation.as_ref().is_some_and(|conversation| {
             self.selected_row.as_ref() == Some(&conversation.row_id)
-                && rows
-                    .iter()
-                    .any(|row| row.id == conversation.row_id && row.kind == UiRowKind::Conversation)
+                && rows.iter().any(|(row_id, kind)| {
+                    *row_id == conversation.row_id && *kind == UiRowKind::Conversation
+                })
         });
         if !conversation_survives {
             self.close_conversation();
         }
     }
+}
+
+#[allow(clippy::too_many_lines)]
+fn project_summary(snapshot: &UiSnapshot, project: &UiProject) -> UiProjectSummary {
+    let lifecycle = if project.archived {
+        UiProjectLifecycle::Archived
+    } else {
+        match project.lifecycle.as_str() {
+            "open" => UiProjectLifecycle::Open,
+            "closing" => UiProjectLifecycle::Closing,
+            "closed" => UiProjectLifecycle::Closed,
+            _ => UiProjectLifecycle::NeedsAttention,
+        }
+    };
+    let conversations = project_conversation_summary(snapshot, project.project_id);
+    let assigned_agent = match &project.assignment {
+        None => UiProjectAssignedAgentSummary {
+            agent_id: None,
+            name: None,
+            status: UiProjectAssignedAgentStatus::Unassigned,
+            working_folder: None,
+        },
+        Some(assignment) => {
+            let name = snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.agent_id == assignment.agent_id)
+                .and_then(|agent| match agent.names.as_slice() {
+                    [name] => Some(name.clone()),
+                    _ => None,
+                });
+            let status = if assignment.cardinality_conflicted || assignment.blocked.is_some() {
+                UiProjectAssignedAgentStatus::NeedsAttention
+            } else if assignment.runnable {
+                UiProjectAssignedAgentStatus::Ready
+            } else {
+                UiProjectAssignedAgentStatus::SettingUp
+            };
+            UiProjectAssignedAgentSummary {
+                agent_id: Some(assignment.agent_id),
+                name,
+                status,
+                working_folder: assignment.launch_directory.clone(),
+            }
+        }
+    };
+    let mut folders = project
+        .resources
+        .iter()
+        .map(|resource| UiProjectFolderSummary {
+            folder_id: resource.resource_id,
+            path: resource.display_path.clone(),
+            working_folder: resource.primary,
+            health: resource.health.clone(),
+            ownership: if resource.active_claim {
+                UiProjectFolderOwnership::Owned
+            } else if !resource.conflicting_projects.is_empty() {
+                UiProjectFolderOwnership::Conflicted
+            } else {
+                UiProjectFolderOwnership::NeedsAttention
+            },
+            conflicting_projects: resource
+                .conflicting_projects
+                .iter()
+                .map(|project_id| {
+                    snapshot
+                        .projects
+                        .iter()
+                        .find(|candidate| candidate.project_id == *project_id)
+                        .map_or_else(
+                            || "Unnamed project".to_owned(),
+                            |candidate| candidate.name.clone(),
+                        )
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    folders.sort_by_key(|folder| !folder.working_folder);
+    let mut recovery = Vec::new();
+    if !project.claimable
+        || folders
+            .iter()
+            .any(|folder| folder.ownership != UiProjectFolderOwnership::Owned)
+    {
+        recovery.push(UiProjectRecoverySummary::FolderOwnership);
+    }
+    if let Some(assignment) = &project.assignment {
+        if assignment.cardinality_conflicted {
+            recovery.push(UiProjectRecoverySummary::AssignedAgentConflict);
+        } else if assignment.blocked.is_some() {
+            recovery.push(UiProjectRecoverySummary::AssignedAgentBlocked);
+        }
+    }
+    let assignment = project.assignment.as_ref();
+    UiProjectSummary {
+        project_id: project.project_id,
+        name: project.name.clone(),
+        lifecycle,
+        conversations,
+        assigned_agent,
+        folders,
+        recovery,
+        technical: UiProjectTechnicalEvidence {
+            project_id: project.project_id,
+            home: project.home,
+            head: project.head,
+            input_sequence: project.input_sequence,
+            assignment_id: assignment.map(|assignment| assignment.assignment_id),
+            provider: assignment.map(|assignment| assignment.provider.clone()),
+            session: assignment.and_then(|assignment| assignment.session.clone()),
+            thread_id: assignment.and_then(|assignment| assignment.thread_id),
+        },
+    }
+}
+
+fn project_conversation_summary(
+    snapshot: &UiSnapshot,
+    project_id: [u8; 32],
+) -> UiProjectConversationSummary {
+    let open_rows = project_conversation_row_ids(&snapshot.inbox_rows, project_id);
+    let archived_rows = project_conversation_row_ids(&snapshot.archived_rows, project_id);
+    UiProjectConversationSummary {
+        open: open_rows.len(),
+        archived: archived_rows.len(),
+        open_rows,
+        archived_rows,
+    }
+}
+
+fn project_conversation_row_ids(rows: &[UiRow], project_id: [u8; 32]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    rows.iter()
+        .filter(|row| {
+            matches!(
+                row.conversation_target,
+                Some(UiConversationTarget::Project {
+                    project_id: candidate,
+                    ..
+                }) if candidate == project_id
+            )
+        })
+        .filter(|row| seen.insert(row.id.clone()))
+        .map(|row| row.id.clone())
+        .collect()
+}
+
+fn project_conversation_rows(snapshot: &UiSnapshot, project_id: [u8; 32]) -> Vec<UiRow> {
+    let mut seen = BTreeSet::new();
+    snapshot
+        .inbox_rows
+        .iter()
+        .chain(snapshot.archived_rows.iter())
+        .filter(|row| {
+            matches!(
+                row.conversation_target,
+                Some(UiConversationTarget::Project {
+                    project_id: candidate,
+                    ..
+                }) if candidate == project_id
+            )
+        })
+        .filter(|row| seen.insert(row.id.clone()))
+        .cloned()
+        .collect()
 }
 
 /// Applies one event without performing I/O or domain mutation.
@@ -2799,6 +3300,12 @@ fn apply_input(
     if model.help_page.is_some() {
         let changed = apply_help_input(model, input, effects);
         if changed {
+            effects.push(UiEffect::RequestRedraw);
+        }
+        return Ok(());
+    }
+    if let Some(changed) = apply_project_workspace_input(model, input, effects)? {
+        if changed || dismissed_completion {
             effects.push(UiEffect::RequestRedraw);
         }
         return Ok(());
@@ -2935,6 +3442,480 @@ fn apply_input(
     Ok(())
 }
 
+fn apply_project_workspace_input(
+    model: &mut UiModel,
+    input: &UiInput,
+    effects: &mut Vec<UiEffect>,
+) -> Result<Option<bool>, UiError> {
+    if model.section == UiSection::Inbox
+        && model.project_filter.is_some()
+        && matches!(input, UiInput::Escape)
+    {
+        model.clear_project_filter();
+        return Ok(Some(true));
+    }
+    let project_content_focused = model.focus == UiFocus::Content
+        || (model.viewport.width < WIDE_WIDTH && model.focus == UiFocus::Navigation);
+    if model.section != UiSection::Projects || !project_content_focused {
+        return Ok(None);
+    }
+    match (model.project_workspace_level, input) {
+        (UiProjectWorkspaceLevel::List, UiInput::MoveCursorRight | UiInput::Character('l')) => {
+            if model.project_summary.is_none() {
+                Ok(Some(false))
+            } else {
+                model.project_workspace_level = UiProjectWorkspaceLevel::Summary;
+                model.project_summary_focus = UiProjectSummaryFocus::Conversation;
+                model.focus = UiFocus::Content;
+                Ok(Some(true))
+            }
+        }
+        (
+            UiProjectWorkspaceLevel::Summary
+            | UiProjectWorkspaceLevel::Manage
+            | UiProjectWorkspaceLevel::Folders,
+            UiInput::MoveCursorLeft | UiInput::Character('h') | UiInput::Escape,
+        ) => {
+            model.project_workspace_level = match model.project_workspace_level {
+                UiProjectWorkspaceLevel::Folders => UiProjectWorkspaceLevel::Manage,
+                UiProjectWorkspaceLevel::Manage => UiProjectWorkspaceLevel::Summary,
+                UiProjectWorkspaceLevel::Summary | UiProjectWorkspaceLevel::List => {
+                    UiProjectWorkspaceLevel::List
+                }
+            };
+            Ok(Some(true))
+        }
+        (UiProjectWorkspaceLevel::Summary, UiInput::NextItem | UiInput::PreviousItem) => {
+            let forward = matches!(input, UiInput::NextItem);
+            Ok(Some(move_project_summary_focus(model, forward)))
+        }
+        (UiProjectWorkspaceLevel::List | UiProjectWorkspaceLevel::Summary, UiInput::Activate)
+            if model.project_workspace_level == UiProjectWorkspaceLevel::List
+                || model.project_summary_focus == UiProjectSummaryFocus::Conversation =>
+        {
+            open_selected_project_conversations(model, effects).map(Some)
+        }
+        (UiProjectWorkspaceLevel::Summary, UiInput::Activate)
+            if model.project_summary_focus == UiProjectSummaryFocus::Manage =>
+        {
+            model.project_workspace_level = UiProjectWorkspaceLevel::Manage;
+            model.project_management_action = selected_project(model)
+                .and_then(|project| project_management_actions(project).first().copied());
+            Ok(Some(true))
+        }
+        (UiProjectWorkspaceLevel::Summary, UiInput::Activate)
+            if model.project_summary_focus == UiProjectSummaryFocus::Folders =>
+        {
+            enter_project_folders(model);
+            Ok(Some(true))
+        }
+        (UiProjectWorkspaceLevel::Summary, UiInput::Activate)
+            if model.project_summary_focus == UiProjectSummaryFocus::AssignedAgent =>
+        {
+            Ok(Some(open_project_agent(model)))
+        }
+        (UiProjectWorkspaceLevel::Summary, UiInput::Activate)
+            if model.project_summary_focus == UiProjectSummaryFocus::Recovery =>
+        {
+            model.project_workspace_level = UiProjectWorkspaceLevel::Manage;
+            model.project_management_action = selected_project(model)
+                .and_then(|project| project_management_actions(project).first().copied());
+            Ok(Some(true))
+        }
+        (UiProjectWorkspaceLevel::Manage, UiInput::NextItem | UiInput::PreviousItem) => Ok(Some(
+            move_project_management_action(model, matches!(input, UiInput::NextItem)),
+        )),
+        (UiProjectWorkspaceLevel::Manage, UiInput::Activate) => {
+            activate_project_management_action(model, effects).map(Some)
+        }
+        (UiProjectWorkspaceLevel::Folders, UiInput::NextItem | UiInput::PreviousItem) => Ok(Some(
+            move_project_folder_action(model, matches!(input, UiInput::NextItem)),
+        )),
+        (UiProjectWorkspaceLevel::Folders, UiInput::NextFocus | UiInput::PreviousFocus) => {
+            Ok(Some(move_project_folder(
+                model,
+                matches!(input, UiInput::NextFocus),
+            )))
+        }
+        (UiProjectWorkspaceLevel::Folders, UiInput::Activate) => {
+            activate_project_folder_action(model, effects).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn project_management_actions(project: &UiProject) -> Vec<UiProjectManagementAction> {
+    let mut actions = vec![UiProjectManagementAction::Folders];
+    if project.lifecycle == "open" && !project.archived {
+        actions.push(if project.assignment.is_some() {
+            UiProjectManagementAction::ChangeAssignedAgent
+        } else {
+            UiProjectManagementAction::AssignAgent
+        });
+        actions.push(UiProjectManagementAction::CloseProject);
+        actions.push(UiProjectManagementAction::ArchiveProject);
+    } else if project.archived {
+        actions.push(UiProjectManagementAction::RestoreArchivedProject);
+    } else if project.lifecycle == "closed" {
+        actions.push(UiProjectManagementAction::ReopenProject);
+        actions.push(UiProjectManagementAction::ArchiveProject);
+    }
+    actions.push(UiProjectManagementAction::TechnicalDetails);
+    actions
+}
+
+fn move_project_management_action(model: &mut UiModel, forward: bool) -> bool {
+    let Some(project) = selected_project(model) else {
+        return false;
+    };
+    let actions = project_management_actions(project);
+    move_selected_value(&actions, &mut model.project_management_action, forward)
+}
+
+fn activate_project_management_action(
+    model: &mut UiModel,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    let Some(project) = selected_project(model).cloned() else {
+        return Ok(false);
+    };
+    let Some(action) = model
+        .project_management_action
+        .filter(|action| project_management_actions(&project).contains(action))
+    else {
+        return Ok(false);
+    };
+    match action {
+        UiProjectManagementAction::Folders => enter_project_folders(model),
+        UiProjectManagementAction::AssignAgent => open_project_activation(model, project, false),
+        UiProjectManagementAction::ChangeAssignedAgent => {
+            open_project_activation(model, project, true);
+        }
+        UiProjectManagementAction::CloseProject => {
+            model.submit_project(
+                UiProjectAction::PreviewClose {
+                    project_id: project.project_id,
+                },
+                effects,
+            )?;
+        }
+        UiProjectManagementAction::ReopenProject => {
+            model.submit_project(
+                UiProjectAction::Open {
+                    project_id: project.project_id,
+                },
+                effects,
+            )?;
+        }
+        UiProjectManagementAction::ArchiveProject
+        | UiProjectManagementAction::RestoreArchivedProject => {
+            model.project_interaction = Some(UiProjectInteraction::ConfirmArchive {
+                archived: matches!(action, UiProjectManagementAction::ArchiveProject),
+                project,
+                submitting: false,
+            });
+        }
+        UiProjectManagementAction::TechnicalDetails => {
+            model.help_page = Some(UiHelpPage::Technical);
+        }
+    }
+    Ok(true)
+}
+
+fn enter_project_folders(model: &mut UiModel) {
+    model.project_workspace_level = UiProjectWorkspaceLevel::Folders;
+    model.project_folder_id = model
+        .project_summary
+        .as_ref()
+        .and_then(|summary| {
+            model.project_folder_id.filter(|folder_id| {
+                summary
+                    .folders
+                    .iter()
+                    .any(|folder| folder.folder_id == *folder_id)
+            })
+        })
+        .or_else(|| {
+            model
+                .project_summary
+                .as_ref()
+                .and_then(|summary| summary.folders.first().map(|folder| folder.folder_id))
+        });
+    model.project_folder_action = project_folder_actions(model)
+        .first()
+        .copied()
+        .unwrap_or(UiProjectFolderAction::AddFolder);
+}
+
+fn project_folder_actions(model: &UiModel) -> Vec<UiProjectFolderAction> {
+    let Some(project) = selected_project(model) else {
+        return Vec::new();
+    };
+    if project.lifecycle != "open" || project.archived {
+        return Vec::new();
+    }
+    let mut actions = vec![UiProjectFolderAction::AddFolder];
+    if let Some(folder_id) = model.project_folder_id
+        && let Some(folder) = project
+            .resources
+            .iter()
+            .find(|folder| folder.resource_id == folder_id)
+    {
+        actions.extend([
+            UiProjectFolderAction::ChangeFolderPath,
+            UiProjectFolderAction::RemoveFolder,
+        ]);
+        if !folder.primary {
+            actions.push(UiProjectFolderAction::UseAsWorkingFolder);
+        }
+        actions.push(UiProjectFolderAction::CheckFolderNow);
+    }
+    if project.resources.len() > 1 {
+        actions.push(UiProjectFolderAction::CheckAllFolders);
+    }
+    actions
+}
+
+fn move_project_folder_action(model: &mut UiModel, forward: bool) -> bool {
+    let actions = project_folder_actions(model);
+    let mut selected = Some(model.project_folder_action);
+    let changed = move_selected_value(&actions, &mut selected, forward);
+    if let Some(selected) = selected {
+        model.project_folder_action = selected;
+    }
+    changed
+}
+
+fn move_project_folder(model: &mut UiModel, forward: bool) -> bool {
+    let Some(summary) = &model.project_summary else {
+        return false;
+    };
+    let folders = summary
+        .folders
+        .iter()
+        .map(|folder| folder.folder_id)
+        .collect::<Vec<_>>();
+    let changed = move_selected_value(&folders, &mut model.project_folder_id, forward);
+    if changed {
+        model.project_folder_action = project_folder_actions(model)
+            .first()
+            .copied()
+            .unwrap_or(UiProjectFolderAction::AddFolder);
+    }
+    changed
+}
+
+fn activate_project_folder_action(
+    model: &mut UiModel,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    let Some(project) = selected_project(model).cloned() else {
+        return Ok(false);
+    };
+    if !project_folder_actions(model).contains(&model.project_folder_action) {
+        return Ok(false);
+    }
+    let folder_id = model.project_folder_id;
+    match model.project_folder_action {
+        UiProjectFolderAction::AddFolder => {
+            model.project_interaction = Some(UiProjectInteraction::AddResource {
+                project,
+                path: String::new(),
+                make_primary: false,
+                submitting: false,
+            });
+        }
+        UiProjectFolderAction::ChangeFolderPath => {
+            let Some(resource_id) = folder_id else {
+                return Ok(false);
+            };
+            model.project_interaction = Some(UiProjectInteraction::ReplaceResource {
+                project,
+                resource_id,
+                path: String::new(),
+                submitting: false,
+            });
+        }
+        UiProjectFolderAction::RemoveFolder => {
+            let Some(resource_id) = folder_id else {
+                return Ok(false);
+            };
+            model.project_interaction = Some(UiProjectInteraction::ConfirmRemoveResource {
+                project,
+                resource_id,
+                force: false,
+                submitting: false,
+            });
+        }
+        UiProjectFolderAction::UseAsWorkingFolder => {
+            let Some(resource_id) = folder_id else {
+                return Ok(false);
+            };
+            model.submit_project(
+                UiProjectAction::SetPrimaryResource {
+                    project_id: project.project_id,
+                    resource_id,
+                },
+                effects,
+            )?;
+        }
+        UiProjectFolderAction::CheckFolderNow => {
+            let Some(resource_id) = folder_id else {
+                return Ok(false);
+            };
+            model.submit_project(
+                UiProjectAction::CheckResources {
+                    project_id: project.project_id,
+                    resource_id: Some(resource_id),
+                },
+                effects,
+            )?;
+        }
+        UiProjectFolderAction::CheckAllFolders => {
+            model.submit_project(
+                UiProjectAction::CheckResources {
+                    project_id: project.project_id,
+                    resource_id: None,
+                },
+                effects,
+            )?;
+        }
+    }
+    Ok(true)
+}
+
+fn move_selected_value<T: Copy + Eq>(
+    values: &[T],
+    selected: &mut Option<T>,
+    forward: bool,
+) -> bool {
+    if values.is_empty() {
+        return false;
+    }
+    let current = selected
+        .and_then(|selected| values.iter().position(|value| *value == selected))
+        .unwrap_or(0);
+    let next = if forward {
+        (current + 1).min(values.len() - 1)
+    } else {
+        current.saturating_sub(1)
+    };
+    let next = values[next];
+    if *selected == Some(next) {
+        false
+    } else {
+        *selected = Some(next);
+        true
+    }
+}
+
+fn open_project_agent(model: &mut UiModel) -> bool {
+    let Some(agent_id) = model
+        .project_summary
+        .as_ref()
+        .and_then(|summary| summary.assigned_agent.agent_id)
+    else {
+        return false;
+    };
+    let Some(agent) = model.snapshot.as_ref().and_then(|snapshot| {
+        snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == agent_id)
+            .cloned()
+    }) else {
+        return false;
+    };
+    model.change_section(UiSection::Agents);
+    model.selected_row = Some(agent_hex(agent_id));
+    model.agent_modal = Some(UiAgentModal::Details {
+        selected_session: default_agent_session(&agent),
+        agent,
+    });
+    true
+}
+
+fn move_project_summary_focus(model: &mut UiModel, forward: bool) -> bool {
+    let Some(summary) = &model.project_summary else {
+        return false;
+    };
+    let available = UiProjectSummaryFocus::ALL
+        .into_iter()
+        .filter(|focus| *focus != UiProjectSummaryFocus::Recovery || !summary.recovery.is_empty())
+        .collect::<Vec<_>>();
+    let current = available
+        .iter()
+        .position(|focus| *focus == model.project_summary_focus)
+        .unwrap_or(0);
+    let next = if forward {
+        (current + 1).min(available.len().saturating_sub(1))
+    } else {
+        current.saturating_sub(1)
+    };
+    let selected = available[next];
+    if selected == model.project_summary_focus {
+        false
+    } else {
+        model.project_summary_focus = selected;
+        true
+    }
+}
+
+fn open_selected_project_conversations(
+    model: &mut UiModel,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    let Some(project) = selected_project(model).cloned() else {
+        return Ok(false);
+    };
+    let conversations = model
+        .project_summary
+        .as_ref()
+        .filter(|summary| summary.project_id == project.project_id)
+        .map_or_else(
+            || {
+                model.snapshot.as_ref().map_or(
+                    UiProjectConversationSummary {
+                        open: 0,
+                        archived: 0,
+                        open_rows: Vec::new(),
+                        archived_rows: Vec::new(),
+                    },
+                    |snapshot| project_conversation_summary(snapshot, project.project_id),
+                )
+            },
+            |summary| summary.conversations.clone(),
+        );
+    model.install_project_filter(&project);
+    model.change_section(UiSection::Inbox);
+    match conversations.open_rows.as_slice() {
+        [] if project.lifecycle == "open" && !project.archived && project.claimable => {
+            model.open_draft(
+                UiMailboxDraftTarget::Project {
+                    project_id: project.project_id,
+                    thread_id: None,
+                },
+                effects,
+            )?;
+        }
+        [row_id] => {
+            model.selected_row = Some(row_id.clone());
+            model.request_conversation(row_id.clone(), None, true, effects)?;
+        }
+        [first, _, ..] => {
+            model.selected_row = Some(first.clone());
+            model.close_conversation();
+            model.focus = UiFocus::Content;
+        }
+        [] => {
+            model.selected_row = conversations.archived_rows.first().cloned();
+            model.close_conversation();
+            model.focus = UiFocus::Content;
+        }
+    }
+    Ok(true)
+}
+
 fn normalize_vim_navigation(model: &UiModel, input: &UiInput) -> UiInput {
     if text_input_is_active(model) {
         return input.clone();
@@ -2950,25 +3931,24 @@ fn text_input_is_active(model: &UiModel) -> bool {
     if model.new_modal.is_some() {
         return false;
     }
-    if let Some(modal) = &model.project_modal {
+    if let Some(modal) = &model.project_interaction {
         return match modal {
-            UiProjectModal::Search { .. }
-            | UiProjectModal::CreateExisting { .. }
-            | UiProjectModal::CreateWorktree { .. }
-            | UiProjectModal::ReplaceResource { .. } => true,
-            UiProjectModal::AddResource { .. } => {
+            UiProjectInteraction::Search { .. }
+            | UiProjectInteraction::CreateExisting { .. }
+            | UiProjectInteraction::CreateWorktree { .. }
+            | UiProjectInteraction::ReplaceResource { .. } => true,
+            UiProjectInteraction::AddResource { .. } => {
                 model.form.focused == Some(UiFormField::Project(UiProjectFormField::Path))
             }
-            UiProjectModal::Activate { field, .. } | UiProjectModal::Handoff { field, .. } => {
+            UiProjectInteraction::Activate { field, .. }
+            | UiProjectInteraction::Handoff { field, .. } => {
                 *field == UiProjectFormField::Directory
             }
-            UiProjectModal::ChooseCreation { .. }
-            | UiProjectModal::Details { .. }
-            | UiProjectModal::ConfirmRemoveResource { .. }
-            | UiProjectModal::ConfirmPrimaryResource { .. }
-            | UiProjectModal::ConfirmClose { .. }
-            | UiProjectModal::ConfirmArchive { .. }
-            | UiProjectModal::Outcome { .. } => false,
+            UiProjectInteraction::ChooseCreation { .. }
+            | UiProjectInteraction::ConfirmRemoveResource { .. }
+            | UiProjectInteraction::ConfirmClose { .. }
+            | UiProjectInteraction::ConfirmArchive { .. }
+            | UiProjectInteraction::Outcome { .. } => false,
         };
     }
     if matches!(
@@ -2995,8 +3975,8 @@ fn apply_open_modal_input(
     if model.new_modal.is_some() {
         return apply_new_modal_input(model, input.clone(), effects).map(Some);
     }
-    if model.project_modal.is_some() {
-        return apply_project_modal_input(model, input.clone(), effects).map(Some);
+    if model.project_interaction.is_some() {
+        return apply_project_interaction_input(model, input.clone(), effects).map(Some);
     }
     if model.agent_modal.is_some() {
         return apply_agent_modal_input(model, input.clone(), effects).map(Some);
@@ -3094,7 +4074,9 @@ fn apply_new_modal_input(
             UiInput::Activate if create_new => {
                 model.new_modal = None;
                 model.guided_pending = Some(UiGuidedPending::ProjectCreation);
-                model.project_modal = Some(UiProjectModal::ChooseCreation {
+                model.change_section(UiSection::Projects);
+                model.focus = UiFocus::Content;
+                model.project_interaction = Some(UiProjectInteraction::ChooseCreation {
                     selected: UiProjectCreationChoice::ExistingFolder,
                 });
                 Ok(true)
@@ -3238,10 +4220,9 @@ fn apply_new_modal_input(
                 model.new_modal = None;
                 model.change_section(UiSection::Projects);
                 model.selected_row = Some(agent_hex(project.project_id));
-                model.project_modal = Some(UiProjectModal::Details {
-                    selected_resource: default_project_resource(&project),
-                    project,
-                });
+                model.project_workspace_level = UiProjectWorkspaceLevel::Summary;
+                model.project_summary_focus = UiProjectSummaryFocus::Conversation;
+                model.refresh_selected_project_summary();
             }
             Ok(true)
         }
@@ -3249,10 +4230,9 @@ fn apply_new_modal_input(
             model.new_modal = None;
             model.change_section(UiSection::Projects);
             model.selected_row = Some(agent_hex(project.project_id));
-            model.project_modal = Some(UiProjectModal::Details {
-                selected_resource: default_project_resource(&project),
-                project,
-            });
+            model.project_workspace_level = UiProjectWorkspaceLevel::Summary;
+            model.project_summary_focus = UiProjectSummaryFocus::Conversation;
+            model.refresh_selected_project_summary();
             Ok(true)
         }
         UiNewModal::ReviewProject { .. }
@@ -3360,7 +4340,7 @@ fn open_project_inbox_draft(
         .and_then(|assignment| assignment.thread_id);
     model.guided_pending = None;
     model.new_modal = None;
-    model.project_modal = None;
+    model.project_interaction = None;
     if let Some(thread_id) = thread_id {
         select_project_conversation(model, project.project_id, thread_id);
     }
@@ -3514,7 +4494,7 @@ fn open_guided_instruction(
         provider,
     }));
     model.new_modal = None;
-    model.project_modal = None;
+    model.project_interaction = None;
     model.open_draft(
         UiMailboxDraftTarget::Project {
             project_id: project.project_id,
@@ -3871,7 +4851,7 @@ fn update_composer(
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-fn apply_project_modal_input(
+fn apply_project_interaction_input(
     model: &mut UiModel,
     input: UiInput,
     effects: &mut Vec<UiEffect>,
@@ -3883,16 +4863,16 @@ fn apply_project_modal_input(
     }
     if matches!(input, UiInput::Escape) {
         if model.pending_project.is_none() {
-            if let Some(UiProjectModal::Outcome {
+            if let Some(UiProjectInteraction::Outcome {
                 result:
                     UiProjectResult {
                         action: UiProjectAction::PreviewCreateExisting { name, brief, path },
                         outcome: UiProjectOutcome::ResourcePreview { .. },
                         ..
                     },
-            }) = model.project_modal.clone()
+            }) = model.project_interaction.clone()
             {
-                model.project_modal = Some(UiProjectModal::CreateExisting {
+                model.project_interaction = Some(UiProjectInteraction::CreateExisting {
                     name,
                     brief: brief.unwrap_or_default(),
                     path,
@@ -3902,7 +4882,7 @@ fn apply_project_modal_input(
                 model.last_failure = None;
                 return Ok(true);
             }
-            if let Some(UiProjectModal::Search { query }) = &model.project_modal {
+            if let Some(UiProjectInteraction::Search { query }) = &model.project_interaction {
                 model.project_search.clone_from(query);
             }
             if matches!(model.guided_pending, Some(UiGuidedPending::ProjectCreation)) {
@@ -3911,14 +4891,14 @@ fn apply_project_modal_input(
                     selected: UiNewChoice::ProjectWork,
                 });
             }
-            model.project_modal = None;
+            model.project_interaction = None;
             return Ok(true);
         }
         return Ok(false);
     }
 
-    match model.project_modal.clone() {
-        Some(UiProjectModal::ChooseCreation { mut selected }) => match input {
+    match model.project_interaction.clone() {
+        Some(UiProjectInteraction::ChooseCreation { mut selected }) => match input {
             UiInput::NextItem | UiInput::PreviousItem => {
                 selected = match selected {
                     UiProjectCreationChoice::ExistingFolder => {
@@ -3928,7 +4908,7 @@ fn apply_project_modal_input(
                         UiProjectCreationChoice::ExistingFolder
                     }
                 };
-                model.project_modal = Some(UiProjectModal::ChooseCreation { selected });
+                model.project_interaction = Some(UiProjectInteraction::ChooseCreation { selected });
                 Ok(true)
             }
             UiInput::Activate => {
@@ -3940,7 +4920,7 @@ fn apply_project_modal_input(
             }
             _ => Ok(false),
         },
-        Some(UiProjectModal::Search { mut query }) => match input {
+        Some(UiProjectInteraction::Search { mut query }) => match input {
             UiInput::Character(_)
             | UiInput::Paste(_)
             | UiInput::Backspace
@@ -3969,156 +4949,22 @@ fn apply_project_modal_input(
             }
             UiInput::Activate => {
                 model.project_search = query;
-                let Some(project) = selected_project(model).cloned() else {
-                    return Ok(false);
-                };
-                let selected_resource = default_project_resource(&project);
-                model.project_modal = Some(UiProjectModal::Details {
-                    project,
-                    selected_resource,
-                });
-                Ok(true)
-            }
-            _ => Ok(false),
-        },
-        Some(UiProjectModal::Details {
-            project,
-            selected_resource,
-        }) => match input {
-            UiInput::NextItem | UiInput::PreviousItem => {
-                let selected_resource = move_project_resource(
-                    &project,
-                    selected_resource,
-                    matches!(input, UiInput::NextItem),
-                );
-                model.project_modal = Some(UiProjectModal::Details {
-                    project,
-                    selected_resource,
-                });
-                Ok(true)
-            }
-            UiInput::Character('a') => {
-                model.project_modal = Some(UiProjectModal::AddResource {
-                    project,
-                    path: String::new(),
-                    make_primary: false,
-                    submitting: false,
-                });
-                Ok(true)
-            }
-            UiInput::Character('e') => {
-                let Some(resource_id) = selected_resource else {
-                    return Ok(false);
-                };
-                model.project_modal = Some(UiProjectModal::ReplaceResource {
-                    project,
-                    resource_id,
-                    path: String::new(),
-                    submitting: false,
-                });
-                Ok(true)
-            }
-            UiInput::Character('x') => {
-                let Some(resource_id) = selected_resource else {
-                    return Ok(false);
-                };
-                model.project_modal = Some(UiProjectModal::ConfirmRemoveResource {
-                    project,
-                    resource_id,
-                    force: false,
-                    submitting: false,
-                });
-                Ok(true)
-            }
-            UiInput::Character('p') => {
-                let Some(resource_id) = selected_resource else {
-                    return Ok(false);
-                };
-                model.project_modal = Some(UiProjectModal::ConfirmPrimaryResource {
-                    project,
-                    resource_id,
-                    submitting: false,
-                });
-                Ok(true)
-            }
-            UiInput::Character(value @ ('r' | 'R')) => {
-                let resource_id = (value == 'r').then_some(selected_resource).flatten();
-                if value == 'r' && resource_id.is_none() {
+                if selected_project(model).is_none() {
                     return Ok(false);
                 }
-                model.submit_project(
-                    UiProjectAction::CheckResources {
-                        project_id: project.project_id,
-                        resource_id,
-                    },
-                    effects,
-                )?;
-                Ok(true)
-            }
-            UiInput::Character('v') => {
-                if project.assignment.is_some() {
-                    model.last_failure = Some(UiFailure {
-                        code: "project_already_assigned".to_owned(),
-                        action: "use handoff for a project with a current assignment".to_owned(),
-                    });
-                    return Ok(true);
-                }
-                open_project_activation(model, project, false);
-                Ok(true)
-            }
-            UiInput::Character('d') => {
-                model.submit_project(
-                    UiProjectAction::DispatchPending {
-                        project_id: project.project_id,
-                    },
-                    effects,
-                )?;
-                Ok(true)
-            }
-            UiInput::Character('h') => {
-                if project.assignment.is_none() {
-                    model.last_failure = Some(UiFailure {
-                        code: "project_unassigned".to_owned(),
-                        action: "activate an agent before requesting a handoff".to_owned(),
-                    });
-                    return Ok(true);
-                }
-                open_project_activation(model, project, true);
-                Ok(true)
-            }
-            UiInput::Character('o') if project.lifecycle == "closed" => {
-                model.submit_project(
-                    UiProjectAction::Open {
-                        project_id: project.project_id,
-                    },
-                    effects,
-                )?;
-                Ok(true)
-            }
-            UiInput::Character('c') if project.lifecycle == "open" => {
-                model.submit_project(
-                    UiProjectAction::PreviewClose {
-                        project_id: project.project_id,
-                    },
-                    effects,
-                )?;
-                Ok(true)
-            }
-            UiInput::Character('z') => {
-                model.project_modal = Some(UiProjectModal::ConfirmArchive {
-                    archived: !project.archived,
-                    project,
-                    submitting: false,
-                });
+                model.project_interaction = None;
+                model.project_workspace_level = UiProjectWorkspaceLevel::Summary;
+                model.project_summary_focus = UiProjectSummaryFocus::Conversation;
+                model.focus = UiFocus::Content;
                 Ok(true)
             }
             _ => Ok(false),
         },
         Some(
-            UiProjectModal::CreateExisting { submitting, .. }
-            | UiProjectModal::CreateWorktree { submitting, .. }
-            | UiProjectModal::AddResource { submitting, .. }
-            | UiProjectModal::ReplaceResource { submitting, .. },
+            UiProjectInteraction::CreateExisting { submitting, .. }
+            | UiProjectInteraction::CreateWorktree { submitting, .. }
+            | UiProjectInteraction::AddResource { submitting, .. }
+            | UiProjectInteraction::ReplaceResource { submitting, .. },
         ) => {
             if submitting {
                 return Ok(false);
@@ -4126,8 +4972,8 @@ fn apply_project_modal_input(
             match input {
                 UiInput::NextFocus | UiInput::PreviousFocus => {
                     if matches!(
-                        model.project_modal,
-                        Some(UiProjectModal::AddResource { .. })
+                        model.project_interaction,
+                        Some(UiProjectInteraction::AddResource { .. })
                     ) {
                         let path = UiFormField::Project(UiProjectFormField::Path);
                         let primary = UiFormField::Project(UiProjectFormField::Primary);
@@ -4143,23 +4989,23 @@ fn apply_project_modal_input(
                 }
                 UiInput::NextItem | UiInput::PreviousItem
                     if matches!(
-                        model.project_modal,
-                        Some(UiProjectModal::AddResource { .. })
+                        model.project_interaction,
+                        Some(UiProjectInteraction::AddResource { .. })
                     ) && model.form.focused
                         == Some(UiFormField::Project(UiProjectFormField::Primary)) =>
                 {
-                    if let Some(UiProjectModal::AddResource { make_primary, .. }) =
-                        &mut model.project_modal
+                    if let Some(UiProjectInteraction::AddResource { make_primary, .. }) =
+                        &mut model.project_interaction
                     {
                         *make_primary = !*make_primary;
                     }
                     Ok(true)
                 }
-                UiInput::Activate => submit_project_modal(model, effects),
+                UiInput::Activate => submit_project_interaction(model, effects),
                 _ => Ok(edit_project_field(model, &input)),
             }
         }
-        Some(UiProjectModal::ConfirmRemoveResource {
+        Some(UiProjectInteraction::ConfirmRemoveResource {
             project,
             resource_id,
             mut force,
@@ -4167,7 +5013,7 @@ fn apply_project_modal_input(
         }) => match input {
             UiInput::Character(value) if value.eq_ignore_ascii_case(&'f') && !submitting => {
                 force = !force;
-                model.project_modal = Some(UiProjectModal::ConfirmRemoveResource {
+                model.project_interaction = Some(UiProjectInteraction::ConfirmRemoveResource {
                     project,
                     resource_id,
                     force,
@@ -4183,7 +5029,7 @@ fn apply_project_modal_input(
                     });
                     return Ok(true);
                 }
-                model.project_modal = Some(UiProjectModal::ConfirmRemoveResource {
+                model.project_interaction = Some(UiProjectInteraction::ConfirmRemoveResource {
                     project: project.clone(),
                     resource_id,
                     force,
@@ -4201,26 +5047,7 @@ fn apply_project_modal_input(
             }
             _ => Ok(false),
         },
-        Some(UiProjectModal::ConfirmPrimaryResource {
-            project,
-            resource_id,
-            submitting,
-        }) if matches!(input, UiInput::Activate) && !submitting => {
-            model.project_modal = Some(UiProjectModal::ConfirmPrimaryResource {
-                project: project.clone(),
-                resource_id,
-                submitting: true,
-            });
-            model.submit_project(
-                UiProjectAction::SetPrimaryResource {
-                    project_id: project.project_id,
-                    resource_id,
-                },
-                effects,
-            )?;
-            Ok(true)
-        }
-        Some(UiProjectModal::ConfirmClose {
+        Some(UiProjectInteraction::ConfirmClose {
             project,
             checks,
             mut confirmed,
@@ -4243,7 +5070,7 @@ fn apply_project_modal_input(
                 } else {
                     confirmed = !confirmed;
                 }
-                model.project_modal = Some(UiProjectModal::ConfirmClose {
+                model.project_interaction = Some(UiProjectInteraction::ConfirmClose {
                     project,
                     checks,
                     confirmed,
@@ -4259,7 +5086,7 @@ fn apply_project_modal_input(
             }
             UiInput::Character('c') if !submitting => {
                 confirmed = !confirmed;
-                model.project_modal = Some(UiProjectModal::ConfirmClose {
+                model.project_interaction = Some(UiProjectInteraction::ConfirmClose {
                     project,
                     checks,
                     confirmed,
@@ -4275,7 +5102,7 @@ fn apply_project_modal_input(
             }
             UiInput::Character('f') if !submitting => {
                 force = !force;
-                model.project_modal = Some(UiProjectModal::ConfirmClose {
+                model.project_interaction = Some(UiProjectInteraction::ConfirmClose {
                     project,
                     checks,
                     confirmed,
@@ -4314,7 +5141,7 @@ fn apply_project_modal_input(
                     model.last_failure = None;
                     return Ok(true);
                 }
-                model.project_modal = Some(UiProjectModal::ConfirmClose {
+                model.project_interaction = Some(UiProjectInteraction::ConfirmClose {
                     project: project.clone(),
                     checks,
                     confirmed,
@@ -4332,12 +5159,12 @@ fn apply_project_modal_input(
             }
             _ => Ok(false),
         },
-        Some(UiProjectModal::ConfirmArchive {
+        Some(UiProjectInteraction::ConfirmArchive {
             project,
             archived,
             submitting,
         }) if matches!(input, UiInput::Activate) && !submitting => {
-            model.project_modal = Some(UiProjectModal::ConfirmArchive {
+            model.project_interaction = Some(UiProjectInteraction::ConfirmArchive {
                 project: project.clone(),
                 archived,
                 submitting: true,
@@ -4352,8 +5179,8 @@ fn apply_project_modal_input(
             Ok(true)
         }
         Some(
-            UiProjectModal::Activate { submitting, .. }
-            | UiProjectModal::Handoff { submitting, .. },
+            UiProjectInteraction::Activate { submitting, .. }
+            | UiProjectInteraction::Handoff { submitting, .. },
         ) => {
             if submitting {
                 return Ok(false);
@@ -4367,17 +5194,14 @@ fn apply_project_modal_input(
                     adjust_activation_selection(model, matches!(input, UiInput::NextItem));
                     Ok(true)
                 }
-                UiInput::Activate => submit_project_modal(model, effects),
+                UiInput::Activate => submit_project_interaction(model, effects),
                 _ => Ok(edit_project_field(model, &input)),
             }
         }
-        Some(UiProjectModal::Outcome { result }) => {
+        Some(UiProjectInteraction::Outcome { result }) => {
             submit_project_preview(model, &result, &input, effects)
         }
-        Some(
-            UiProjectModal::ConfirmPrimaryResource { .. } | UiProjectModal::ConfirmArchive { .. },
-        )
-        | None => Ok(false),
+        Some(UiProjectInteraction::ConfirmArchive { .. }) | None => Ok(false),
     }
 }
 
@@ -4390,21 +5214,19 @@ fn stop_guided_activation(model: &mut UiModel) -> bool {
     };
     model.guided_pending = None;
     model.new_modal = None;
-    if model.project_modal.is_none()
-        && let Some(project) = model.snapshot.as_ref().and_then(|snapshot| {
+    if model.project_interaction.is_none()
+        && model.snapshot.as_ref().is_some_and(|snapshot| {
             snapshot
                 .projects
                 .iter()
-                .find(|project| project.project_id == project_id)
-                .cloned()
+                .any(|project| project.project_id == project_id)
         })
     {
         model.change_section(UiSection::Projects);
         model.selected_row = Some(agent_hex(project_id));
-        model.project_modal = Some(UiProjectModal::Details {
-            selected_resource: default_project_resource(&project),
-            project,
-        });
+        model.project_workspace_level = UiProjectWorkspaceLevel::Summary;
+        model.project_summary_focus = UiProjectSummaryFocus::Conversation;
+        model.refresh_selected_project_summary();
     }
     true
 }
@@ -4492,8 +5314,8 @@ fn open_project_activation(model: &mut UiModel, project: UiProject, handoff: boo
         .or_else(|| project.resources.first())
         .map(|resource| resource.display_path.clone())
         .unwrap_or_default();
-    model.project_modal = Some(if handoff {
-        UiProjectModal::Handoff {
+    model.project_interaction = Some(if handoff {
+        UiProjectInteraction::Handoff {
             project,
             agents,
             providers,
@@ -4508,7 +5330,7 @@ fn open_project_activation(model: &mut UiModel, project: UiProject, handoff: boo
             submitting: false,
         }
     } else {
-        UiProjectModal::Activate {
+        UiProjectInteraction::Activate {
             project,
             agents,
             providers,
@@ -4525,15 +5347,18 @@ fn open_project_activation(model: &mut UiModel, project: UiProject, handoff: boo
 }
 
 fn cycle_activation_field(model: &mut UiModel, forward: bool) {
-    let is_handoff = matches!(&model.project_modal, Some(UiProjectModal::Handoff { .. }));
+    let is_handoff = matches!(
+        &model.project_interaction,
+        Some(UiProjectInteraction::Handoff { .. })
+    );
     let Some(
-        UiProjectModal::Activate {
+        UiProjectInteraction::Activate {
             field, new_session, ..
         }
-        | UiProjectModal::Handoff {
+        | UiProjectInteraction::Handoff {
             field, new_session, ..
         },
-    ) = &mut model.project_modal
+    ) = &mut model.project_interaction
     else {
         return;
     };
@@ -4587,10 +5412,11 @@ fn cycle_activation_field(model: &mut UiModel, forward: bool) {
 }
 
 fn adjust_activation_selection(model: &mut UiModel, forward: bool) {
-    let field = match &model.project_modal {
-        Some(UiProjectModal::Activate { field, .. } | UiProjectModal::Handoff { field, .. }) => {
-            *field
-        }
+    let field = match &model.project_interaction {
+        Some(
+            UiProjectInteraction::Activate { field, .. }
+            | UiProjectInteraction::Handoff { field, .. },
+        ) => *field,
         _ => return,
     };
     match field {
@@ -4599,12 +5425,16 @@ fn adjust_activation_selection(model: &mut UiModel, forward: bool) {
         UiProjectFormField::SessionMode => toggle_activation_mode(model),
         UiProjectFormField::Provider => cycle_activation_provider(model, forward),
         UiProjectFormField::Confirmation => {
-            if let Some(UiProjectModal::Handoff { confirmed, .. }) = &mut model.project_modal {
+            if let Some(UiProjectInteraction::Handoff { confirmed, .. }) =
+                &mut model.project_interaction
+            {
                 *confirmed = !*confirmed;
             }
         }
         UiProjectFormField::Force => {
-            if let Some(UiProjectModal::Handoff { force_takeover, .. }) = &mut model.project_modal {
+            if let Some(UiProjectInteraction::Handoff { force_takeover, .. }) =
+                &mut model.project_interaction
+            {
                 *force_takeover = !*force_takeover;
             }
         }
@@ -4616,19 +5446,19 @@ fn adjust_activation_selection(model: &mut UiModel, forward: bool) {
 
 fn cycle_activation_provider(model: &mut UiModel, forward: bool) {
     let Some(
-        UiProjectModal::Activate {
+        UiProjectInteraction::Activate {
             providers,
             provider,
             new_session: true,
             ..
         }
-        | UiProjectModal::Handoff {
+        | UiProjectInteraction::Handoff {
             providers,
             provider,
             new_session: true,
             ..
         },
-    ) = &mut model.project_modal
+    ) = &mut model.project_interaction
     else {
         return;
     };
@@ -4639,7 +5469,7 @@ fn cycle_activation_provider(model: &mut UiModel, forward: bool) {
 
 fn cycle_activation_agent(model: &mut UiModel) {
     let Some(
-        UiProjectModal::Activate {
+        UiProjectInteraction::Activate {
             project,
             agents,
             providers,
@@ -4649,7 +5479,7 @@ fn cycle_activation_agent(model: &mut UiModel) {
             provider,
             ..
         }
-        | UiProjectModal::Handoff {
+        | UiProjectInteraction::Handoff {
             project,
             agents,
             providers,
@@ -4659,7 +5489,7 @@ fn cycle_activation_agent(model: &mut UiModel) {
             provider,
             ..
         },
-    ) = &mut model.project_modal
+    ) = &mut model.project_interaction
     else {
         return;
     };
@@ -4688,21 +5518,21 @@ fn cycle_activation_agent(model: &mut UiModel) {
 
 fn cycle_activation_thread(model: &mut UiModel) {
     let Some(
-        UiProjectModal::Activate {
+        UiProjectInteraction::Activate {
             project,
             agent_id,
             thread,
             provider,
             ..
         }
-        | UiProjectModal::Handoff {
+        | UiProjectInteraction::Handoff {
             project,
             agent_id,
             thread,
             provider,
             ..
         },
-    ) = &mut model.project_modal
+    ) = &mut model.project_interaction
     else {
         return;
     };
@@ -4732,7 +5562,7 @@ fn cycle_activation_thread(model: &mut UiModel) {
 
 fn toggle_activation_mode(model: &mut UiModel) {
     if let Some(
-        UiProjectModal::Activate {
+        UiProjectInteraction::Activate {
             new_session,
             project,
             providers,
@@ -4741,7 +5571,7 @@ fn toggle_activation_mode(model: &mut UiModel) {
             provider,
             ..
         }
-        | UiProjectModal::Handoff {
+        | UiProjectInteraction::Handoff {
             new_session,
             project,
             providers,
@@ -4750,7 +5580,7 @@ fn toggle_activation_mode(model: &mut UiModel) {
             provider,
             ..
         },
-    ) = &mut model.project_modal
+    ) = &mut model.project_interaction
     {
         *new_session = !*new_session;
         if *new_session {
@@ -4916,27 +5746,27 @@ fn normalize_path_input(value: &str, home: Option<&str>) -> Result<String, &'sta
 
 fn edit_project_field(model: &mut UiModel, input: &UiInput) -> bool {
     if matches!(
-        model.project_modal,
-        Some(UiProjectModal::AddResource { .. })
+        model.project_interaction,
+        Some(UiProjectInteraction::AddResource { .. })
     ) && model.form.focused != Some(UiFormField::Project(UiProjectFormField::Path))
     {
         return false;
     }
-    let field = match &model.project_modal {
+    let field = match &model.project_interaction {
         Some(
-            UiProjectModal::CreateExisting { field, .. }
-            | UiProjectModal::CreateWorktree { field, .. }
-            | UiProjectModal::Activate { field, .. }
-            | UiProjectModal::Handoff { field, .. },
+            UiProjectInteraction::CreateExisting { field, .. }
+            | UiProjectInteraction::CreateWorktree { field, .. }
+            | UiProjectInteraction::Activate { field, .. }
+            | UiProjectInteraction::Handoff { field, .. },
         ) => UiFormField::Project(*field),
-        Some(UiProjectModal::AddResource { .. } | UiProjectModal::ReplaceResource { .. }) => {
-            UiFormField::Project(UiProjectFormField::Path)
-        }
+        Some(
+            UiProjectInteraction::AddResource { .. } | UiProjectInteraction::ReplaceResource { .. },
+        ) => UiFormField::Project(UiProjectFormField::Path),
         _ => return false,
     };
     let form = &mut model.form;
-    let target = match &mut model.project_modal {
-        Some(UiProjectModal::CreateExisting {
+    let target = match &mut model.project_interaction {
+        Some(UiProjectInteraction::CreateExisting {
             name,
             brief,
             path,
@@ -4948,7 +5778,7 @@ fn edit_project_field(model: &mut UiModel, input: &UiInput) -> bool {
             UiProjectFormField::Path => path,
             _ => return false,
         },
-        Some(UiProjectModal::CreateWorktree {
+        Some(UiProjectInteraction::CreateWorktree {
             name,
             brief,
             source,
@@ -4967,13 +5797,14 @@ fn edit_project_field(model: &mut UiModel, input: &UiInput) -> bool {
             _ => return false,
         },
         Some(
-            UiProjectModal::AddResource { path, .. } | UiProjectModal::ReplaceResource { path, .. },
+            UiProjectInteraction::AddResource { path, .. }
+            | UiProjectInteraction::ReplaceResource { path, .. },
         ) => path,
         Some(
-            UiProjectModal::Activate {
+            UiProjectInteraction::Activate {
                 directory, field, ..
             }
-            | UiProjectModal::Handoff {
+            | UiProjectInteraction::Handoff {
                 directory, field, ..
             },
         ) => match field {
@@ -4991,8 +5822,8 @@ fn edit_project_field(model: &mut UiModel, input: &UiInput) -> bool {
 
 fn cycle_project_field(model: &mut UiModel, forward: bool) {
     default_existing_project_name(model);
-    let (fields, selected) = match &model.project_modal {
-        Some(UiProjectModal::CreateExisting { field, .. }) => (
+    let (fields, selected) = match &model.project_interaction {
+        Some(UiProjectInteraction::CreateExisting { field, .. }) => (
             &[
                 UiProjectFormField::Path,
                 UiProjectFormField::Name,
@@ -5000,7 +5831,7 @@ fn cycle_project_field(model: &mut UiModel, forward: bool) {
             ][..],
             *field,
         ),
-        Some(UiProjectModal::CreateWorktree { field, .. }) => (
+        Some(UiProjectInteraction::CreateWorktree { field, .. }) => (
             &[
                 UiProjectFormField::Name,
                 UiProjectFormField::Brief,
@@ -5023,17 +5854,18 @@ fn cycle_project_field(model: &mut UiModel, forward: bool) {
         current.checked_sub(1).unwrap_or(fields.len() - 1)
     };
     if let Some(
-        UiProjectModal::CreateExisting { field, .. } | UiProjectModal::CreateWorktree { field, .. },
-    ) = &mut model.project_modal
+        UiProjectInteraction::CreateExisting { field, .. }
+        | UiProjectInteraction::CreateWorktree { field, .. },
+    ) = &mut model.project_interaction
     {
         *field = fields[next];
     }
 }
 
 fn default_existing_project_name(model: &mut UiModel) {
-    let Some(UiProjectModal::CreateExisting {
+    let Some(UiProjectInteraction::CreateExisting {
         name, path, field, ..
-    }) = &model.project_modal
+    }) = &model.project_interaction
     else {
         return;
     };
@@ -5050,7 +5882,8 @@ fn default_existing_project_name(model: &mut UiModel) {
     else {
         return;
     };
-    if let Some(UiProjectModal::CreateExisting { name, .. }) = &mut model.project_modal {
+    if let Some(UiProjectInteraction::CreateExisting { name, .. }) = &mut model.project_interaction
+    {
         name.clone_from(&candidate);
     }
     model.form.cursors.insert(
@@ -5060,7 +5893,7 @@ fn default_existing_project_name(model: &mut UiModel) {
 }
 
 fn open_existing_project_form(model: &mut UiModel) {
-    model.project_modal = Some(UiProjectModal::CreateExisting {
+    model.project_interaction = Some(UiProjectInteraction::CreateExisting {
         name: String::new(),
         brief: String::new(),
         path: String::new(),
@@ -5071,7 +5904,7 @@ fn open_existing_project_form(model: &mut UiModel) {
 }
 
 fn open_worktree_project_form(model: &mut UiModel) {
-    model.project_modal = Some(UiProjectModal::CreateWorktree {
+    model.project_interaction = Some(UiProjectInteraction::CreateWorktree {
         name: String::new(),
         brief: String::new(),
         source: String::new(),
@@ -5085,22 +5918,25 @@ fn open_worktree_project_form(model: &mut UiModel) {
 }
 
 #[allow(clippy::too_many_lines)]
-fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, UiError> {
+fn submit_project_interaction(
+    model: &mut UiModel,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
     fn reject(model: &mut UiModel, field: UiProjectFormField, message: &str) -> bool {
         if let Some(
-            UiProjectModal::CreateExisting {
+            UiProjectInteraction::CreateExisting {
                 field: selected, ..
             }
-            | UiProjectModal::CreateWorktree {
+            | UiProjectInteraction::CreateWorktree {
                 field: selected, ..
             }
-            | UiProjectModal::Activate {
+            | UiProjectInteraction::Activate {
                 field: selected, ..
             }
-            | UiProjectModal::Handoff {
+            | UiProjectInteraction::Handoff {
                 field: selected, ..
             },
-        ) = &mut model.project_modal
+        ) = &mut model.project_interaction
         {
             *selected = field;
         }
@@ -5127,8 +5963,8 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
     }
 
     default_existing_project_name(model);
-    let action = match model.project_modal.clone() {
-        Some(UiProjectModal::CreateExisting {
+    let action = match model.project_interaction.clone() {
+        Some(UiProjectInteraction::CreateExisting {
             name, brief, path, ..
         }) => {
             let Some(path) = normalized_path(model, UiProjectFormField::Path, &path) else {
@@ -5144,7 +5980,7 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
                 path,
             }
         }
-        Some(UiProjectModal::CreateWorktree {
+        Some(UiProjectInteraction::CreateWorktree {
             name,
             brief,
             source,
@@ -5182,7 +6018,7 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
                 base: (!base.is_empty()).then_some(base),
             }
         }
-        Some(UiProjectModal::AddResource {
+        Some(UiProjectInteraction::AddResource {
             project,
             path,
             make_primary,
@@ -5197,7 +6033,7 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
                 make_primary,
             }
         }
-        Some(UiProjectModal::ReplaceResource {
+        Some(UiProjectInteraction::ReplaceResource {
             project,
             resource_id,
             path,
@@ -5212,7 +6048,7 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
                 path,
             }
         }
-        Some(UiProjectModal::Activate {
+        Some(UiProjectInteraction::Activate {
             project,
             providers,
             agent_id,
@@ -5265,7 +6101,7 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
                 launch_directory: directory,
             }
         }
-        Some(UiProjectModal::Handoff {
+        Some(UiProjectInteraction::Handoff {
             project,
             providers,
             agent_id,
@@ -5333,14 +6169,14 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
         }
         _ => return Ok(false),
     };
-    match &mut model.project_modal {
+    match &mut model.project_interaction {
         Some(
-            UiProjectModal::CreateExisting { submitting, .. }
-            | UiProjectModal::CreateWorktree { submitting, .. }
-            | UiProjectModal::AddResource { submitting, .. }
-            | UiProjectModal::ReplaceResource { submitting, .. }
-            | UiProjectModal::Activate { submitting, .. }
-            | UiProjectModal::Handoff { submitting, .. },
+            UiProjectInteraction::CreateExisting { submitting, .. }
+            | UiProjectInteraction::CreateWorktree { submitting, .. }
+            | UiProjectInteraction::AddResource { submitting, .. }
+            | UiProjectInteraction::ReplaceResource { submitting, .. }
+            | UiProjectInteraction::Activate { submitting, .. }
+            | UiProjectInteraction::Handoff { submitting, .. },
         ) => *submitting = true,
         _ => return Ok(false),
     }
@@ -5379,7 +6215,7 @@ fn submit_project_preview(
             });
             return Ok(true);
         };
-        model.project_modal = Some(UiProjectModal::ConfirmClose {
+        model.project_interaction = Some(UiProjectInteraction::ConfirmClose {
             project,
             checks: checks.clone(),
             confirmed: false,
@@ -5859,7 +6695,7 @@ fn update_agent_search(model: &mut UiModel, query: String) {
 
 fn update_project_search(model: &mut UiModel, query: String) {
     model.project_search.clone_from(&query);
-    model.project_modal = Some(UiProjectModal::Search { query });
+    model.project_interaction = Some(UiProjectInteraction::Search { query });
     model.last_failure = None;
     select_project_search_match(model, false);
 }
@@ -5885,37 +6721,6 @@ fn project_matches(project: &UiProject, query: &str) -> bool {
             resource.display_path.to_lowercase().contains(&query)
                 || resource.canonical_path.to_lowercase().contains(&query)
         })
-}
-
-fn default_project_resource(project: &UiProject) -> Option<[u8; 32]> {
-    project
-        .resources
-        .iter()
-        .find(|resource| resource.primary)
-        .or_else(|| project.resources.first())
-        .map(|resource| resource.resource_id)
-}
-
-fn move_project_resource(
-    project: &UiProject,
-    selected: Option<[u8; 32]>,
-    forward: bool,
-) -> Option<[u8; 32]> {
-    if project.resources.is_empty() {
-        return None;
-    }
-    let current = selected.and_then(|selected| {
-        project
-            .resources
-            .iter()
-            .position(|resource| resource.resource_id == selected)
-    });
-    let next = match (current, forward) {
-        (Some(index), true) => (index + 1).min(project.resources.len() - 1),
-        (Some(index), false) => index.saturating_sub(1),
-        (None, _) => 0,
-    };
-    Some(project.resources[next].resource_id)
 }
 
 fn select_project_search_match(model: &mut UiModel, forward: bool) {
@@ -6144,18 +6949,16 @@ fn refresh_agent_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
 }
 
 #[allow(clippy::too_many_lines)]
-fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
-    let identity = match &model.project_modal {
+fn refresh_project_interaction(model: &mut UiModel, snapshot: &UiSnapshot) {
+    let identity = match &model.project_interaction {
         Some(
-            UiProjectModal::Details { project, .. }
-            | UiProjectModal::AddResource { project, .. }
-            | UiProjectModal::ReplaceResource { project, .. }
-            | UiProjectModal::ConfirmRemoveResource { project, .. }
-            | UiProjectModal::ConfirmPrimaryResource { project, .. }
-            | UiProjectModal::Activate { project, .. }
-            | UiProjectModal::Handoff { project, .. }
-            | UiProjectModal::ConfirmClose { project, .. }
-            | UiProjectModal::ConfirmArchive { project, .. },
+            UiProjectInteraction::AddResource { project, .. }
+            | UiProjectInteraction::ReplaceResource { project, .. }
+            | UiProjectInteraction::ConfirmRemoveResource { project, .. }
+            | UiProjectInteraction::Activate { project, .. }
+            | UiProjectInteraction::Handoff { project, .. }
+            | UiProjectInteraction::ConfirmClose { project, .. }
+            | UiProjectInteraction::ConfirmArchive { project, .. },
         ) => Some(project.project_id),
         _ => None,
     };
@@ -6165,27 +6968,10 @@ fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
         .iter()
         .find(|project| project.project_id == identity)
         .cloned();
-    match (&mut model.project_modal, current) {
-        (
-            Some(UiProjectModal::Details {
-                project,
-                selected_resource,
-            }),
-            Some(current),
-        ) => {
-            *selected_resource = selected_resource
-                .filter(|selected| {
-                    current
-                        .resources
-                        .iter()
-                        .any(|resource| resource.resource_id == *selected)
-                })
-                .or_else(|| default_project_resource(&current));
-            *project = current;
-        }
+    match (&mut model.project_interaction, current) {
         (
             Some(
-                UiProjectModal::Activate {
+                UiProjectInteraction::Activate {
                     project,
                     agents,
                     providers,
@@ -6195,7 +6981,7 @@ fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
                     provider,
                     ..
                 }
-                | UiProjectModal::Handoff {
+                | UiProjectInteraction::Handoff {
                     project,
                     agents,
                     providers,
@@ -6255,12 +7041,11 @@ fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
         }
         (
             Some(
-                UiProjectModal::AddResource { project, .. }
-                | UiProjectModal::ReplaceResource { project, .. }
-                | UiProjectModal::ConfirmRemoveResource { project, .. }
-                | UiProjectModal::ConfirmPrimaryResource { project, .. }
-                | UiProjectModal::ConfirmClose { project, .. }
-                | UiProjectModal::ConfirmArchive { project, .. },
+                UiProjectInteraction::AddResource { project, .. }
+                | UiProjectInteraction::ReplaceResource { project, .. }
+                | UiProjectInteraction::ConfirmRemoveResource { project, .. }
+                | UiProjectInteraction::ConfirmClose { project, .. }
+                | UiProjectInteraction::ConfirmArchive { project, .. },
             ),
             Some(current),
         ) => *project = current,
@@ -6347,13 +7132,13 @@ fn mailbox_shortcut(
             Ok(true)
         }
         '/' if model.section == UiSection::Projects => {
-            model.project_modal = Some(UiProjectModal::Search {
+            model.project_interaction = Some(UiProjectInteraction::Search {
                 query: model.project_search.clone(),
             });
             Ok(true)
         }
         'c' if model.section == UiSection::Projects => {
-            model.project_modal = Some(UiProjectModal::ChooseCreation {
+            model.project_interaction = Some(UiProjectInteraction::ChooseCreation {
                 selected: UiProjectCreationChoice::ExistingFolder,
             });
             Ok(true)
@@ -6541,15 +7326,7 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
         return Ok(true);
     }
     if model.section == UiSection::Projects {
-        let Some(project) = selected_project(model).cloned() else {
-            return Ok(false);
-        };
-        let selected_resource = default_project_resource(&project);
-        model.project_modal = Some(UiProjectModal::Details {
-            project,
-            selected_resource,
-        });
-        return Ok(true);
+        return open_selected_project_conversations(model, effects);
     }
     if !model.selected_row_is_conversation() {
         return Ok(false);
@@ -7154,32 +7931,31 @@ fn apply_completion_context(model: &mut UiModel) {
                 agent,
                 selected_session,
             });
-            model.project_modal = None;
+            model.project_interaction = None;
             model.completion_context = None;
         }
         UiCompletionContext::Project {
             project_id,
             continuation,
         } => {
-            let Some(project) = model.snapshot.as_ref().and_then(|snapshot| {
+            let project_exists = model.snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot
                     .projects
                     .iter()
-                    .find(|project| project.project_id == project_id)
-                    .cloned()
-            }) else {
+                    .any(|project| project.project_id == project_id)
+            });
+            if !project_exists {
                 return;
-            };
+            }
             model.change_section(UiSection::Projects);
             model.selected_row = Some(agent_hex(project_id));
             model.agent_modal = None;
-            model.project_modal = match continuation {
-                UiProjectCompletionContinuation::Select => None,
-                UiProjectCompletionContinuation::Details => Some(UiProjectModal::Details {
-                    selected_resource: default_project_resource(&project),
-                    project,
-                }),
+            model.project_interaction = None;
+            model.project_workspace_level = match continuation {
+                UiProjectCompletionContinuation::Select => UiProjectWorkspaceLevel::List,
+                UiProjectCompletionContinuation::Summary => UiProjectWorkspaceLevel::Summary,
             };
+            model.refresh_selected_project_summary();
             model.completion_context = None;
         }
     }
@@ -7473,25 +8249,25 @@ fn project_command_completed(
                 code: code.clone(),
                 action: "reload and reselect current project state before retrying".to_owned(),
             });
-            model.project_modal = Some(UiProjectModal::Outcome { result });
+            model.project_interaction = Some(UiProjectInteraction::Outcome { result });
         }
         UiProjectOutcome::Reconcilable { code, .. } => {
             model.last_failure = Some(UiFailure {
                 code: code.clone(),
                 action: "inspect retained external state and reconcile this operation".to_owned(),
             });
-            model.project_modal = Some(UiProjectModal::Outcome { result });
+            model.project_interaction = Some(UiProjectInteraction::Outcome { result });
         }
         UiProjectOutcome::Running { .. }
         | UiProjectOutcome::ResourcePreview { .. }
         | UiProjectOutcome::ResourceChecks { .. } => {
             model.last_failure = None;
-            model.project_modal = Some(UiProjectModal::Outcome { result });
+            model.project_interaction = Some(UiProjectInteraction::Outcome { result });
         }
         UiProjectOutcome::Completed { .. } => {
             let (notice, continuation) = project_completion_policy(&result);
             model.last_failure = None;
-            model.project_modal = None;
+            model.project_interaction = None;
             model.completion_context = Some(UiPendingCompletion {
                 target: UiCompletionContext::Project {
                     project_id: result.project_id,
@@ -7522,7 +8298,7 @@ fn guided_project_completed(
             model.guided_pending = Some(UiGuidedPending::ProjectSnapshot {
                 project_id: result.project_id,
             });
-            model.project_modal = None;
+            model.project_interaction = None;
             model.new_modal = Some(UiNewModal::Working {
                 project: "New project".to_owned(),
                 agent: "Not chosen yet".to_owned(),
@@ -7537,7 +8313,7 @@ fn guided_project_completed(
             UiProjectAction::Activate { .. } | UiProjectAction::Handoff { .. },
             UiProjectOutcome::Completed { .. },
         ) => {
-            model.project_modal = None;
+            model.project_interaction = None;
             model.last_failure = None;
             Ok(true)
         }
@@ -7552,7 +8328,7 @@ fn guided_project_completed(
                 code: code.clone(),
                 action: "reload the project state before choosing another action".to_owned(),
             });
-            model.project_modal = Some(UiProjectModal::Outcome {
+            model.project_interaction = Some(UiProjectInteraction::Outcome {
                 result: result.clone(),
             });
             Ok(true)
@@ -7568,7 +8344,7 @@ fn guided_project_completed(
                 code: code.clone(),
                 action: "inspect recovery evidence before choosing another action".to_owned(),
             });
-            model.project_modal = Some(UiProjectModal::Outcome {
+            model.project_interaction = Some(UiProjectInteraction::Outcome {
                 result: result.clone(),
             });
             Ok(true)
@@ -7580,7 +8356,7 @@ fn guided_project_completed(
         ) => {
             model.new_modal = None;
             model.last_failure = None;
-            model.project_modal = Some(UiProjectModal::Outcome {
+            model.project_interaction = Some(UiProjectInteraction::Outcome {
                 result: result.clone(),
             });
             Ok(true)
@@ -7603,7 +8379,7 @@ fn project_completion_policy(
         ),
         _ => (
             UiCompletionNotice::ProjectUpdated,
-            UiProjectCompletionContinuation::Details,
+            UiProjectCompletionContinuation::Summary,
         ),
     }
 }
@@ -7620,17 +8396,16 @@ fn project_command_failed(
     model.pending_project = None;
     stop_guided_activation(model);
     if let Some(
-        UiProjectModal::CreateExisting { submitting, .. }
-        | UiProjectModal::CreateWorktree { submitting, .. }
-        | UiProjectModal::AddResource { submitting, .. }
-        | UiProjectModal::ReplaceResource { submitting, .. }
-        | UiProjectModal::ConfirmRemoveResource { submitting, .. }
-        | UiProjectModal::ConfirmPrimaryResource { submitting, .. }
-        | UiProjectModal::Activate { submitting, .. }
-        | UiProjectModal::Handoff { submitting, .. }
-        | UiProjectModal::ConfirmClose { submitting, .. }
-        | UiProjectModal::ConfirmArchive { submitting, .. },
-    ) = &mut model.project_modal
+        UiProjectInteraction::CreateExisting { submitting, .. }
+        | UiProjectInteraction::CreateWorktree { submitting, .. }
+        | UiProjectInteraction::AddResource { submitting, .. }
+        | UiProjectInteraction::ReplaceResource { submitting, .. }
+        | UiProjectInteraction::ConfirmRemoveResource { submitting, .. }
+        | UiProjectInteraction::Activate { submitting, .. }
+        | UiProjectInteraction::Handoff { submitting, .. }
+        | UiProjectInteraction::ConfirmClose { submitting, .. }
+        | UiProjectInteraction::ConfirmArchive { submitting, .. },
+    ) = &mut model.project_interaction
     {
         *submitting = false;
     }
@@ -7727,9 +8502,9 @@ mod tests {
 
     use super::{
         TextEdit, UiEffect, UiError, UiEvent, UiFormField, UiFormKind, UiFormState, UiHumanState,
-        UiInput, UiModel, UiProject, UiProjectAction, UiProjectModal, UiProjectResourceCheck,
-        UiSize, UiSnapshot, apply_project_modal_input, edit_text, normalize_path_input,
-        refresh_project_modal, update,
+        UiInput, UiModel, UiProject, UiProjectAction, UiProjectInteraction, UiProjectResourceCheck,
+        UiSize, UiSnapshot, apply_project_interaction_input, edit_text, normalize_path_input,
+        refresh_project_interaction, update,
     };
 
     #[test]
@@ -7767,7 +8542,7 @@ mod tests {
             width: 80,
             height: 24,
         });
-        model.project_modal = Some(UiProjectModal::ConfirmClose {
+        model.project_interaction = Some(UiProjectInteraction::ConfirmClose {
             project,
             checks: vec![release_check("accepted", Some("clean"))],
             confirmed: false,
@@ -7776,11 +8551,11 @@ mod tests {
         });
         let mut effects = Vec::new();
         assert!(
-            apply_project_modal_input(&mut model, UiInput::Character('c'), &mut effects)
+            apply_project_interaction_input(&mut model, UiInput::Character('c'), &mut effects)
                 .expect("confirmation toggles")
         );
         assert!(
-            apply_project_modal_input(&mut model, UiInput::Activate, &mut effects)
+            apply_project_interaction_input(&mut model, UiInput::Activate, &mut effects)
                 .expect("clean close submits")
         );
         assert!(effects.iter().any(|effect| matches!(
@@ -7801,14 +8576,14 @@ mod tests {
             width: 80,
             height: 24,
         });
-        model.project_modal = Some(UiProjectModal::ConfirmClose {
+        model.project_interaction = Some(UiProjectInteraction::ConfirmClose {
             project: project("old name"),
             checks: vec![release_check("uncertain", None)],
             confirmed: true,
             force: true,
             submitting: false,
         });
-        refresh_project_modal(
+        refresh_project_interaction(
             &mut model,
             &UiSnapshot {
                 revision: 2,
@@ -7824,9 +8599,12 @@ mod tests {
                 projects: vec![project("new name")],
             },
         );
-        let retained = model.project_modal.expect("close modal retained");
-        assert!(matches!(retained, UiProjectModal::ConfirmClose { .. }));
-        if let UiProjectModal::ConfirmClose {
+        let retained = model.project_interaction.expect("close modal retained");
+        assert!(matches!(
+            retained,
+            UiProjectInteraction::ConfirmClose { .. }
+        ));
+        if let UiProjectInteraction::ConfirmClose {
             project,
             checks,
             confirmed,

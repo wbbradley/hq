@@ -13,9 +13,10 @@ use hq_tui::{
     UiMailboxDraft, UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal,
     UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState,
     UiMessageTarget, UiModel, UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectCreationChoice, UiProjectFormField,
-    UiProjectModal, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
-    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind,
+    UiProjectAction, UiProjectAssignment, UiProjectCreationChoice, UiProjectFolderAction,
+    UiProjectFormField, UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind,
     UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
@@ -127,8 +128,8 @@ fn vim_vertical_keys_navigate_choices_without_stealing_text_input() {
         .expect("j selects the next creation choice")
         .model;
     assert!(matches!(
-        project_model.project_modal(),
-        Some(UiProjectModal::ChooseCreation {
+        project_model.project_interaction(),
+        Some(UiProjectInteraction::ChooseCreation {
             selected: UiProjectCreationChoice::IsolatedWorktree,
         })
     ));
@@ -142,8 +143,8 @@ fn vim_vertical_keys_navigate_choices_without_stealing_text_input() {
         .expect("j remains text in a path field")
         .model;
     assert!(matches!(
-        project_model.project_modal(),
-        Some(UiProjectModal::CreateExisting { path, .. }) if path == "j"
+        project_model.project_interaction(),
+        Some(UiProjectInteraction::CreateExisting { path, .. }) if path == "j"
     ));
 }
 
@@ -208,7 +209,7 @@ fn cancelling_a_guided_first_instruction_returns_to_agent_selection() {
             .iter()
             .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
     );
-    assert!(cancelled.model.project_modal().is_none());
+    assert!(cancelled.model.project_interaction().is_none());
     assert!(matches!(
         cancelled.model.new_modal(),
         Some(UiNewModal::ChooseAgent { project, .. }) if project.project_id == [5; 32]
@@ -521,14 +522,14 @@ fn guided_project_failure_does_not_rearm_the_submission() {
         )
         .expect("typed exceptional result");
         assert!(matches!(
-            result.model.project_modal(),
-            Some(UiProjectModal::Outcome { .. })
+            result.model.project_interaction(),
+            Some(UiProjectInteraction::Outcome { .. })
         ));
         let recovered = update(result.model, UiEvent::Input(UiInput::Escape))
             .expect("close the outcome")
             .model;
         assert!(recovered.new_modal().is_none());
-        assert!(recovered.project_modal().is_none());
+        assert!(recovered.project_interaction().is_none());
         let next = update(recovered, UiEvent::Input(UiInput::Activate))
             .expect("ordinary project navigation resumes");
         assert!(
@@ -550,10 +551,17 @@ fn guided_project_failure_does_not_rearm_the_submission() {
     )
     .expect("transport failure exits guided submission");
     assert!(failed.model.new_modal().is_none());
-    assert!(matches!(
-        failed.model.project_modal(),
-        Some(UiProjectModal::Details { project, .. }) if project.project_id == [5; 32]
-    ));
+    assert_eq!(
+        failed
+            .model
+            .project_summary()
+            .map(|project| project.project_id),
+        Some([5; 32])
+    );
+    assert_eq!(
+        failed.model.project_workspace_level(),
+        UiProjectWorkspaceLevel::Summary
+    );
     assert!(
         update(failed.model, UiEvent::Input(UiInput::Activate))
             .expect("details remain ordinary navigation")
@@ -3049,10 +3057,171 @@ fn project_search_and_details_preserve_stable_identity_across_reload_and_resize(
     )
     .expect("authoritative reorder");
     assert_eq!(loaded.model.selected_row(), Some(agent_row_id(2).as_str()));
-    assert!(matches!(
-        loaded.model.project_modal(),
-        Some(UiProjectModal::Details { project, .. }) if project.name == "beta current"
-    ));
+    assert_eq!(
+        loaded
+            .model
+            .project_summary()
+            .map(|project| project.name.as_str()),
+        Some("beta current")
+    );
+}
+
+#[test]
+fn project_workspace_summary_preserves_typed_focus_across_resize_and_reload() {
+    let mut target = project(2, "beta", "/work/beta");
+    target.assignment = Some(UiProjectAssignment {
+        assignment_id: [20; 32],
+        agent_id: [21; 32],
+        provider: "codex".to_owned(),
+        session: Some("saved-session".to_owned()),
+        phase: "runnable".to_owned(),
+        thread_id: Some([22; 32]),
+        launch_directory: Some("/work/beta".to_owned()),
+        blocked: None,
+        cardinality_conflicted: false,
+        runnable: true,
+    });
+    let mut snapshot = projects_snapshot(4, vec![project(1, "alpha", "/work/alpha"), target]);
+    snapshot.agents = vec![project_agent(21, [9; 32])];
+    snapshot.inbox_rows = vec![project_conversation_row(2, 22, 23, "Alice")];
+    let mut model = loaded_projects_snapshot(snapshot);
+    model = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("select beta")
+        .model;
+
+    let summary = model.project_summary().expect("selected project summary");
+    assert_eq!(summary.name, "beta");
+    assert_eq!(summary.conversations.open, 1);
+    assert_eq!(summary.folders.len(), 1);
+    assert_eq!(summary.assigned_agent.name.as_deref(), Some("agent-21"));
+
+    model = update(model, UiEvent::Input(UiInput::MoveCursorRight))
+        .expect("enter summary")
+        .model;
+    assert_eq!(
+        model.project_workspace_level(),
+        UiProjectWorkspaceLevel::Summary
+    );
+    model = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("focus agent card")
+        .model;
+    assert_eq!(
+        model.project_summary_focus(),
+        Some(UiProjectSummaryFocus::AssignedAgent)
+    );
+    model = update(
+        model,
+        UiEvent::Resized(UiSize {
+            width: 64,
+            height: 18,
+        }),
+    )
+    .expect("compact resize")
+    .model;
+    let invalidated = update(model, UiEvent::Invalidated { revision: 5 }).expect("reload");
+    let effect_id = snapshot_effect(&invalidated.effects);
+    let mut refreshed = projects_snapshot(
+        5,
+        vec![
+            project(2, "beta renamed", "/work/beta"),
+            project(1, "alpha", "/work/alpha"),
+        ],
+    );
+    refreshed.agents = vec![project_agent(21, [9; 32])];
+    refreshed.inbox_rows = vec![project_conversation_row(2, 22, 23, "Alice")];
+    let loaded = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id,
+            snapshot: refreshed,
+        },
+    )
+    .expect("replacement snapshot");
+
+    assert_eq!(loaded.model.selected_row(), Some(agent_row_id(2).as_str()));
+    assert_eq!(
+        loaded.model.project_workspace_level(),
+        UiProjectWorkspaceLevel::Summary
+    );
+    assert_eq!(
+        loaded.model.project_summary_focus(),
+        Some(UiProjectSummaryFocus::AssignedAgent)
+    );
+    assert_eq!(
+        loaded
+            .model
+            .project_summary()
+            .map(|summary| summary.name.as_str()),
+        Some("beta renamed")
+    );
+}
+
+#[test]
+fn project_primary_action_routes_zero_one_and_many_conversations_without_guessing() {
+    let project = project(7, "routing", "/work/routing");
+
+    let zero = update(
+        loaded_projects_model(1, vec![project.clone()]),
+        UiEvent::Input(UiInput::Activate),
+    )
+    .expect("start first conversation");
+    assert_eq!(zero.model.section(), UiSection::Inbox);
+    assert_eq!(
+        zero.model.project_filter().map(|filter| filter.project_id),
+        Some(project.project_id)
+    );
+    assert!(zero.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::OpenDraft {
+            target: UiMailboxDraftTarget::Project {
+                project_id,
+                thread_id: None,
+            },
+            ..
+        } if *project_id == project.project_id
+    )));
+
+    let first = project_conversation_row(7, 31, 41, "Alice");
+    let mut one_snapshot = projects_snapshot(2, vec![project.clone()]);
+    one_snapshot.inbox_rows = vec![first.clone()];
+    let one = update(
+        loaded_projects_snapshot(one_snapshot),
+        UiEvent::Input(UiInput::Activate),
+    )
+    .expect("continue sole conversation");
+    assert_eq!(one.model.section(), UiSection::Inbox);
+    assert_eq!(one.model.selected_row(), Some(first.id.as_str()));
+    assert!(one.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::LoadConversation { row_id, .. } if row_id == &first.id
+    )));
+
+    let second = project_conversation_row(7, 32, 42, "Bob");
+    let mut many_snapshot = projects_snapshot(3, vec![project.clone()]);
+    many_snapshot.inbox_rows = vec![first.clone(), second.clone()];
+    let many = update(
+        loaded_projects_snapshot(many_snapshot),
+        UiEvent::Input(UiInput::Activate),
+    )
+    .expect("open filtered conversation list");
+    assert_eq!(many.model.section(), UiSection::Inbox);
+    assert_eq!(many.model.focus(), UiFocus::Content);
+    assert_eq!(many.model.rows().expect("filtered rows").len(), 2);
+    assert_eq!(
+        many.model
+            .project_filter()
+            .map(|filter| filter.project_name.as_str()),
+        Some("routing")
+    );
+    assert!(
+        many.effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::LoadConversation { .. }))
+    );
+
+    let cleared =
+        update(many.model, UiEvent::Input(UiInput::Escape)).expect("clear project filter");
+    assert!(cleared.model.project_filter().is_none());
 }
 
 #[test]
@@ -3063,8 +3232,8 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
         .expect("creation chooser")
         .model;
     assert!(matches!(
-        model.project_modal(),
-        Some(UiProjectModal::ChooseCreation {
+        model.project_interaction(),
+        Some(UiProjectInteraction::ChooseCreation {
             selected: UiProjectCreationChoice::ExistingFolder
         })
     ));
@@ -3081,8 +3250,8 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
         .expect("derived project name")
         .model;
     assert!(matches!(
-        model.project_modal(),
-        Some(UiProjectModal::CreateExisting { name, .. }) if name == "existing"
+        model.project_interaction(),
+        Some(UiProjectInteraction::CreateExisting { name, .. }) if name == "existing"
     ));
     model = update(model, UiEvent::Input(UiInput::NextFocus))
         .expect("brief")
@@ -3112,12 +3281,12 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
     )
     .expect("recoverable failure");
     assert!(matches!(
-        failed.model.project_modal(),
-        Some(UiProjectModal::CreateExisting { path, submitting: false, .. }) if path == "/repo/existing"
+        failed.model.project_interaction(),
+        Some(UiProjectInteraction::CreateExisting { path, submitting: false, .. }) if path == "/repo/existing"
     ));
     let retry_model = failed.model.clone();
     let cancelled = update(failed.model, UiEvent::Input(UiInput::Escape)).expect("cancel");
-    assert!(cancelled.model.project_modal().is_none());
+    assert!(cancelled.model.project_interaction().is_none());
     assert!(
         cancelled
             .effects
@@ -3154,7 +3323,7 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
     )
     .expect("creation completion");
     let creation_snapshot_id = snapshot_effect(&created.effects);
-    assert!(created.model.project_modal().is_none());
+    assert!(created.model.project_interaction().is_none());
     assert_eq!(created.model.completion_notice(), Some("Project created"));
     let stale_refresh = update(
         created.model,
@@ -3177,7 +3346,7 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
         selected.model.selected_row(),
         Some(agent_row_id(36).as_str())
     );
-    assert!(selected.model.project_modal().is_none());
+    assert!(selected.model.project_interaction().is_none());
 
     let mut model = update(cancelled.model, UiEvent::Input(UiInput::Character('c')))
         .expect("creation chooser")
@@ -3186,8 +3355,8 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
         .expect("advanced worktree choice")
         .model;
     assert!(matches!(
-        model.project_modal(),
-        Some(UiProjectModal::ChooseCreation {
+        model.project_interaction(),
+        Some(UiProjectInteraction::ChooseCreation {
             selected: UiProjectCreationChoice::IsolatedWorktree
         })
     ));
@@ -3287,8 +3456,8 @@ fn forms_use_tab_unicode_safe_cursor_editing_and_current_user_path_expansion() {
         .expect("unicode-safe backspace")
         .model;
     assert!(matches!(
-        model.project_modal(),
-        Some(UiProjectModal::CreateExisting { name, .. }) if name == "é"
+        model.project_interaction(),
+        Some(UiProjectInteraction::CreateExisting { name, .. }) if name == "é"
     ));
     model = update(model, UiEvent::Input(UiInput::MoveCursorHome))
         .expect("cursor home before reconnect")
@@ -3308,8 +3477,8 @@ fn forms_use_tab_unicode_safe_cursor_editing_and_current_user_path_expansion() {
         .expect("insert at retained cursor")
         .model;
     assert!(matches!(
-        model.project_modal(),
-        Some(UiProjectModal::CreateExisting { name, .. }) if name == "xé"
+        model.project_interaction(),
+        Some(UiProjectInteraction::CreateExisting { name, .. }) if name == "xé"
     ));
 
     model = update(model, UiEvent::Input(UiInput::NextFocus))
@@ -3319,8 +3488,8 @@ fn forms_use_tab_unicode_safe_cursor_editing_and_current_user_path_expansion() {
         .expect("name field")
         .model;
     assert!(matches!(
-        model.project_modal(),
-        Some(UiProjectModal::CreateExisting {
+        model.project_interaction(),
+        Some(UiProjectInteraction::CreateExisting {
             field: UiProjectFormField::Name,
             ..
         })
@@ -3346,13 +3515,12 @@ fn forms_use_tab_unicode_safe_cursor_editing_and_current_user_path_expansion() {
 #[test]
 fn resource_add_previews_authoritative_conflicts_before_mutation() {
     let target = project(9, "target", "/target");
-    let mut model = loaded_projects_model(1, vec![target.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('a')))
-        .expect("add form")
-        .model;
+    let mut model = open_project_folder_action(
+        loaded_projects_model(1, vec![target.clone()]),
+        0,
+        UiProjectFolderAction::AddFolder,
+    )
+    .model;
     model = update(model, UiEvent::Input(UiInput::Paste("/shared".to_owned())))
         .expect("path")
         .model;
@@ -3438,16 +3606,12 @@ fn resource_edits_force_gate_selection_and_fresh_checks_use_exact_identities() {
         active_claim: true,
         conflicting_projects: Vec::new(),
     });
-    let mut model = loaded_projects_model(1, vec![target.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::NextItem))
-        .expect("select second resource")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('x')))
-        .expect("remove confirmation")
-        .model;
+    let model = open_project_folder_action(
+        loaded_projects_model(1, vec![target.clone()]),
+        1,
+        UiProjectFolderAction::RemoveFolder,
+    )
+    .model;
     let gated = update(model, UiEvent::Input(UiInput::Activate)).expect("force gate");
     assert_eq!(
         gated
@@ -3470,11 +3634,11 @@ fn resource_edits_force_gate_selection_and_fresh_checks_use_exact_identities() {
         }
     );
 
-    let mut model = loaded_projects_model(2, vec![target.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    let checking = update(model, UiEvent::Input(UiInput::Character('r'))).expect("exact check");
+    let checking = open_project_folder_action(
+        loaded_projects_model(2, vec![target.clone()]),
+        0,
+        UiProjectFolderAction::CheckFolderNow,
+    );
     let (check_id, check_action) = project_effect(&checking.effects);
     assert_eq!(
         check_action,
@@ -3512,8 +3676,8 @@ fn resource_edits_force_gate_selection_and_fresh_checks_use_exact_identities() {
     )
     .expect("fresh check");
     assert!(matches!(
-        checked.model.project_modal(),
-        Some(UiProjectModal::Outcome { result })
+        checked.model.project_interaction(),
+        Some(UiProjectInteraction::Outcome { result })
             if matches!(result.outcome, UiProjectOutcome::ResourceChecks { .. })
     ));
 }
@@ -3527,17 +3691,12 @@ fn project_activation_uses_exact_project_thread_and_retained_directory() {
         session: "durable-session".to_owned(),
         thread_id: [61; 32],
     });
-    let mut model = loaded_projects_model_with_agents(
+    let model = loaded_projects_model_with_agents(
         1,
         vec![target.clone()],
         vec![project_agent(60, target.home)],
     );
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('v')))
-        .expect("activation")
-        .model;
+    let mut model = open_project_management_action(model, UiProjectManagementAction::AssignAgent);
     model = update(model, UiEvent::Input(UiInput::NextFocus))
         .expect("mode field")
         .model;
@@ -3580,18 +3739,13 @@ fn activation_target_and_edited_fields_survive_authoritative_reload() {
         available_provider("alpha", "Alpha", false),
         available_provider("codex", "Codex", true),
     ];
-    let mut model = loaded_projects_model_with_agents_and_providers(
+    let model = loaded_projects_model_with_agents_and_providers(
         1,
         vec![target.clone()],
         vec![agent.clone()],
         providers.clone(),
     );
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('v')))
-        .expect("activation")
-        .model;
+    let mut model = open_project_management_action(model, UiProjectManagementAction::AssignAgent);
     for _ in 0..2 {
         model = update(model, UiEvent::Input(UiInput::NextFocus))
             .expect("provider field")
@@ -3620,13 +3774,13 @@ fn activation_target_and_edited_fields_survive_authoritative_reload() {
     )
     .expect("authoritative reload")
     .model;
-    let Some(UiProjectModal::Activate {
+    let Some(UiProjectInteraction::Activate {
         agent_id,
         thread,
         provider,
         directory,
         ..
-    }) = reloaded.project_modal()
+    }) = reloaded.project_interaction()
     else {
         panic!("activation remains open");
     };
@@ -3644,18 +3798,13 @@ fn project_new_session_provider_is_a_typed_choice_and_empty_catalog_blocks_submi
         available_provider("alpha", "Alpha", false),
         available_provider("codex", "Codex", true),
     ];
-    let mut model = loaded_projects_model_with_agents_and_providers(
+    let model = loaded_projects_model_with_agents_and_providers(
         1,
         vec![target.clone()],
         vec![agent.clone()],
         providers,
     );
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('v')))
-        .expect("activation")
-        .model;
+    let mut model = open_project_management_action(model, UiProjectManagementAction::AssignAgent);
     for _ in 0..2 {
         model = update(model, UiEvent::Input(UiInput::NextFocus))
             .expect("provider field")
@@ -3672,18 +3821,13 @@ fn project_new_session_provider_is_a_typed_choice_and_empty_catalog_blocks_submi
         .expect("choose alpha")
         .model;
     assert!(matches!(
-        selected.project_modal(),
-        Some(UiProjectModal::Activate { provider, .. }) if provider == "alpha"
+        selected.project_interaction(),
+        Some(UiProjectInteraction::Activate { provider, .. }) if provider == "alpha"
     ));
 
-    let mut model =
+    let model =
         loaded_projects_model_with_agents_and_providers(1, vec![target], vec![agent], Vec::new());
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('v')))
-        .expect("activation")
-        .model;
+    let model = open_project_management_action(model, UiProjectManagementAction::AssignAgent);
     let blocked = update(model, UiEvent::Input(UiInput::Activate))
         .expect("missing provider is explained before submission");
     assert!(
@@ -3693,8 +3837,8 @@ fn project_new_session_provider_is_a_typed_choice_and_empty_catalog_blocks_submi
             .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
     );
     assert!(matches!(
-        blocked.model.project_modal(),
-        Some(UiProjectModal::Activate { provider, submitting: false, .. }) if provider.is_empty()
+        blocked.model.project_interaction(),
+        Some(UiProjectInteraction::Activate { provider, submitting: false, .. }) if provider.is_empty()
     ));
 }
 
@@ -3702,13 +3846,10 @@ fn project_new_session_provider_is_a_typed_choice_and_empty_catalog_blocks_submi
 fn successful_project_activation_does_not_open_a_message_dialog() {
     let target = project(53, "activation", "/workspace/activation");
     let agent = project_agent(65, target.home);
-    let mut model = loaded_projects_model_with_agents(1, vec![target.clone()], vec![agent.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('v')))
-        .expect("activation form")
-        .model;
+    let model = open_project_management_action(
+        loaded_projects_model_with_agents(1, vec![target.clone()], vec![agent.clone()]),
+        UiProjectManagementAction::AssignAgent,
+    );
     let pending = update(model, UiEvent::Input(UiInput::Activate)).expect("activate project");
     let (effect_id, action) = project_effect(&pending.effects);
     let completed = update(
@@ -3755,7 +3896,7 @@ fn successful_project_activation_does_not_open_a_message_dialog() {
         },
     )
     .expect("refresh project state");
-    assert!(refreshed.model.project_modal().is_none());
+    assert!(refreshed.model.project_interaction().is_none());
     assert!(refreshed.model.mailbox_draft().is_none());
 }
 
@@ -3780,7 +3921,7 @@ fn handoff_requires_confirmation_and_keeps_force_separate() {
         session: "target-session".to_owned(),
         thread_id: [81; 32],
     });
-    let mut model = loaded_projects_model_with_agents(
+    let model = loaded_projects_model_with_agents(
         1,
         vec![target.clone()],
         vec![
@@ -3788,12 +3929,8 @@ fn handoff_requires_confirmation_and_keeps_force_separate() {
             project_agent(80, target.home),
         ],
     );
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('h')))
-        .expect("handoff")
-        .model;
+    let model =
+        open_project_management_action(model, UiProjectManagementAction::ChangeAssignedAgent);
     let blocked = update(model, UiEvent::Input(UiInput::Activate)).expect("confirmation gate");
     assert!(
         blocked
@@ -3827,32 +3964,28 @@ fn handoff_requires_confirmation_and_keeps_force_separate() {
 }
 
 #[test]
-fn project_dispatch_submits_the_exact_selected_project() {
+fn project_workspace_does_not_offer_manual_dispatch_without_typed_stalled_evidence() {
     let target = project(90, "dispatch", "/workspace/dispatch");
-    let mut model = loaded_projects_model(1, vec![target.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    let submitted = update(model, UiEvent::Input(UiInput::Character('d'))).expect("dispatch");
-    assert!(submitted.effects.iter().any(|effect| matches!(
+    let model = open_project_management(loaded_projects_model(1, vec![target]));
+    let ignored = update(model, UiEvent::Input(UiInput::Character('d'))).expect("ignored shortcut");
+    assert!(ignored.effects.iter().all(|effect| !matches!(
         effect,
         UiEffect::SubmitProjectCommand {
-            action: UiProjectAction::DispatchPending { project_id },
+            action: UiProjectAction::DispatchPending { .. },
             ..
-        } if *project_id == target.project_id
+        }
     )));
 }
 
 #[test]
 fn resource_add_retains_input_across_reload_and_preview_failure() {
     let target = project_with_second_resource();
-    let mut model = loaded_projects_model(1, vec![target.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Character('a')))
-        .expect("add form")
-        .model;
+    let mut model = open_project_folder_action(
+        loaded_projects_model(1, vec![target.clone()]),
+        0,
+        UiProjectFolderAction::AddFolder,
+    )
+    .model;
     model = update(model, UiEvent::Input(UiInput::Paste("/added".to_owned())))
         .expect("add path")
         .model;
@@ -3871,8 +4004,8 @@ fn resource_add_retains_input_across_reload_and_preview_failure() {
     .expect("current project")
     .model;
     assert!(matches!(
-        model.project_modal(),
-        Some(UiProjectModal::AddResource { project, path, .. })
+        model.project_interaction(),
+        Some(UiProjectInteraction::AddResource { project, path, .. })
             if project.name == "resources-current" && path == "/added"
     ));
 
@@ -3891,8 +4024,8 @@ fn resource_add_retains_input_across_reload_and_preview_failure() {
     .expect("preview failure")
     .model;
     assert!(matches!(
-        model.project_modal(),
-        Some(UiProjectModal::AddResource { path, submitting: false, .. }) if path == "/added"
+        model.project_interaction(),
+        Some(UiProjectInteraction::AddResource { path, submitting: false, .. }) if path == "/added"
     ));
     assert_eq!(
         model.last_failure().map(|failure| failure.code.as_str()),
@@ -3936,17 +4069,13 @@ fn resource_add_retains_input_across_reload_and_preview_failure() {
 #[test]
 fn resource_replace_and_primary_are_exact_and_cancelable() {
     let target = project_with_second_resource();
-    let mut model = loaded_projects_model(3, vec![target.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::NextItem))
-        .expect("second resource")
-        .model;
     let cancelled = update(
-        update(model.clone(), UiEvent::Input(UiInput::Character('e')))
-            .expect("replace form")
-            .model,
+        open_project_folder_action(
+            loaded_projects_model(3, vec![target.clone()]),
+            1,
+            UiProjectFolderAction::ChangeFolderPath,
+        )
+        .model,
         UiEvent::Input(UiInput::Escape),
     )
     .expect("cancel replace");
@@ -3956,11 +4085,14 @@ fn resource_replace_and_primary_are_exact_and_cancelable() {
             .iter()
             .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
     );
-    assert!(cancelled.model.project_modal().is_none());
+    assert!(cancelled.model.project_interaction().is_none());
 
-    model = update(model, UiEvent::Input(UiInput::Character('e')))
-        .expect("replace form")
-        .model;
+    let mut model = open_project_folder_action(
+        loaded_projects_model(3, vec![target.clone()]),
+        1,
+        UiProjectFolderAction::ChangeFolderPath,
+    )
+    .model;
     model = update(
         model,
         UiEvent::Input(UiInput::Paste("/replacement".to_owned())),
@@ -3977,27 +4109,11 @@ fn resource_replace_and_primary_are_exact_and_cancelable() {
         }
     );
 
-    let mut model = loaded_projects_model(4, vec![target.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::NextItem))
-        .expect("second resource")
-        .model;
-    let primary_modal = update(model.clone(), UiEvent::Input(UiInput::Character('p')))
-        .expect("primary confirmation");
-    let cancelled =
-        update(primary_modal.model, UiEvent::Input(UiInput::Escape)).expect("cancel primary");
-    assert!(
-        cancelled
-            .effects
-            .iter()
-            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    let primary = open_project_folder_action(
+        loaded_projects_model(4, vec![target.clone()]),
+        1,
+        UiProjectFolderAction::UseAsWorkingFolder,
     );
-    let primary_modal =
-        update(model, UiEvent::Input(UiInput::Character('p'))).expect("primary confirmation");
-    let primary =
-        update(primary_modal.model, UiEvent::Input(UiInput::Activate)).expect("set primary");
     assert_eq!(
         project_effect(&primary.effects).1,
         UiProjectAction::SetPrimaryResource {
@@ -4010,11 +4126,11 @@ fn resource_replace_and_primary_are_exact_and_cancelable() {
 #[test]
 fn resource_check_failure_retains_exact_details_context() {
     let target = project_with_second_resource();
-    let mut model = loaded_projects_model(5, vec![target.clone()]);
-    model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("details")
-        .model;
-    let checking = update(model, UiEvent::Input(UiInput::Character('R'))).expect("check all");
+    let checking = open_project_folder_action(
+        loaded_projects_model(5, vec![target.clone()]),
+        0,
+        UiProjectFolderAction::CheckAllFolders,
+    );
     let (check_id, action) = project_effect(&checking.effects);
     assert_eq!(
         action,
@@ -4034,10 +4150,10 @@ fn resource_check_failure_retains_exact_details_context() {
         },
     )
     .expect("check failure");
-    assert!(matches!(
-        failed.model.project_modal(),
-        Some(UiProjectModal::Details { .. })
-    ));
+    assert_eq!(
+        failed.model.project_workspace_level(),
+        UiProjectWorkspaceLevel::Folders
+    );
     assert_eq!(
         failed
             .model
@@ -4150,7 +4266,11 @@ fn agents_snapshot(revision: u64, agents: Vec<UiAgent>) -> UiSnapshot {
 }
 
 fn loaded_projects_model(revision: u64, projects: Vec<UiProject>) -> UiModel {
-    let mut model = loaded_model(projects_snapshot(revision, projects));
+    loaded_projects_snapshot(projects_snapshot(revision, projects))
+}
+
+fn loaded_projects_snapshot(snapshot: UiSnapshot) -> UiModel {
+    let mut model = loaded_model(snapshot);
     for _ in 0..4 {
         model = update(model, UiEvent::Input(UiInput::Character('l')))
             .expect("next cached section")
@@ -4190,6 +4310,61 @@ fn loaded_projects_model_with_agents_and_providers(
             .model;
     }
     model
+}
+
+fn open_project_management(mut model: UiModel) -> UiModel {
+    model = update(model, UiEvent::Input(UiInput::MoveCursorRight))
+        .expect("open project summary")
+        .model;
+    for _ in 0..5 {
+        if model.project_summary_focus() == Some(UiProjectSummaryFocus::Manage) {
+            break;
+        }
+        model = update(model, UiEvent::Input(UiInput::NextItem))
+            .expect("choose summary card")
+            .model;
+    }
+    update(model, UiEvent::Input(UiInput::Activate))
+        .expect("open project management")
+        .model
+}
+
+fn open_project_management_action(model: UiModel, action: UiProjectManagementAction) -> UiModel {
+    let mut model = open_project_management(model);
+    for _ in 0..8 {
+        if model.project_management_action() == Some(action) {
+            return update(model, UiEvent::Input(UiInput::Activate))
+                .expect("activate labeled project action")
+                .model;
+        }
+        model = update(model, UiEvent::Input(UiInput::NextItem))
+            .expect("choose project action")
+            .model;
+    }
+    panic!("project action was not available: {action:?}");
+}
+
+fn open_project_folder_action(
+    model: UiModel,
+    folder_index: usize,
+    action: UiProjectFolderAction,
+) -> hq_tui::UiTransition {
+    let mut model = open_project_management_action(model, UiProjectManagementAction::Folders);
+    for _ in 0..folder_index {
+        model = update(model, UiEvent::Input(UiInput::NextFocus))
+            .expect("choose folder")
+            .model;
+    }
+    for _ in 0..8 {
+        if model.project_folder_action() == Some(action) {
+            return update(model, UiEvent::Input(UiInput::Activate))
+                .expect("activate labeled folder action");
+        }
+        model = update(model, UiEvent::Input(UiInput::NextItem))
+            .expect("choose folder action")
+            .model;
+    }
+    panic!("folder action was not available: {action:?}");
 }
 
 fn project_agent(byte: u8, home: [u8; 32]) -> UiAgent {
@@ -4239,6 +4414,21 @@ fn projects_snapshot(revision: u64, projects: Vec<UiProject>) -> UiSnapshot {
         providers: vec![available_provider("codex", "Codex", true)],
         agents: Vec::new(),
         projects,
+    }
+}
+
+fn project_conversation_row(project: u8, thread: u8, root_message: u8, title: &str) -> UiRow {
+    UiRow {
+        id: format!("project:{}:{}", agent_row_id(project), agent_row_id(thread)),
+        title: title.to_owned(),
+        detail: "project conversation".to_owned(),
+        state: UiRowState::Open,
+        kind: UiRowKind::Conversation,
+        conversation_target: Some(UiConversationTarget::Project {
+            project_id: [project; 32],
+            thread_id: [thread; 32],
+            root_message: [root_message; 32],
+        }),
     }
 }
 

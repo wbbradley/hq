@@ -433,25 +433,6 @@ fn installed_tui_creates_and_manages_an_existing_tree_project() {
         sent.stderr
     );
 
-    let dispatched = run_in_pty(
-        &state_root,
-        true,
-        PtyInteraction::DispatchProjectInput { name },
-    );
-    assert!(
-        dispatched.status.success(),
-        "TUI dispatch failed: {:?}",
-        dispatched.bytes
-    );
-    assert!(
-        dispatched
-            .bytes
-            .windows(b"HQ could not make this change".len())
-            .any(|window| window == b"HQ could not make this change"),
-        "unassigned dispatch did not retain typed rejection: {:?}",
-        dispatched.bytes
-    );
-
     let added_resource = directory.path().join("added-resource");
     std::fs::create_dir(&added_resource).expect("added resource creates");
     let added = run_in_pty(
@@ -765,9 +746,6 @@ enum PtyInteraction<'content> {
         content: &'content str,
         search_path: &'content str,
     },
-    DispatchProjectInput {
-        name: &'content str,
-    },
     AddProjectResource {
         name: &'content str,
         path: &'content str,
@@ -909,8 +887,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::CreateGuidedProjectWork { .. } => {
                     vec![b"n", b"\r", b"\r", b"\r"]
                 }
-                PtyInteraction::DispatchProjectInput { .. }
-                | PtyInteraction::AddProjectResource { .. }
+                PtyInteraction::AddProjectResource { .. }
                 | PtyInteraction::CloseProject { .. }
                 | PtyInteraction::OpenProject { .. }
                 | PtyInteraction::SetProjectArchived { .. } => {
@@ -1269,19 +1246,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .windows(name.len())
                 .any(|window| window == name.as_bytes())
         {
-            master.write_all(b"\r").expect("project details key writes");
-            master.flush().expect("project details key flushes");
-            content_sent = true;
-            completion_offset = Some(bytes.len());
-        }
-        if let PtyInteraction::DispatchProjectInput { name } = interaction
-            && initial_key_sent
-            && !content_sent
-            && bytes
-                .windows(name.len())
-                .any(|window| window == name.as_bytes())
-        {
-            master.write_all(b"\r").expect("project details key writes");
+            master.write_all(b"l").expect("project summary key writes");
             master.flush().expect("project details key flushes");
             content_sent = true;
             completion_offset = Some(bytes.len());
@@ -1299,7 +1264,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .windows(name.len())
                 .any(|window| window == name.as_bytes())
         {
-            master.write_all(b"\r").expect("project details key writes");
+            master.write_all(b"l").expect("project summary key writes");
             master.flush().expect("project details key flushes");
             content_sent = true;
             completion_offset = Some(bytes.len());
@@ -1307,13 +1272,10 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         if matches!(interaction, PtyInteraction::CloseProject { .. })
             && content_sent
             && !managed_action_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Unassigned".len())
-                    .any(|window| window == b"Unassigned")
-            })
         {
-            master.write_all(b"c").expect("close assessment key writes");
+            master
+                .write_all(b"jjj\rjj\r")
+                .expect("close assessment action writes");
             master.flush().expect("close assessment key flushes");
             managed_action_sent = true;
             completion_offset = Some(bytes.len());
@@ -1323,8 +1285,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !managed_provider_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Assess project".len())
-                    .any(|window| window == b"Assess project")
+                    .windows(b"Esc close".len())
+                    .any(|window| window == b"Esc close")
             })
         {
             master.write_all(b"\r").expect("close assessment accepts");
@@ -1351,27 +1313,41 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         if matches!(interaction, PtyInteraction::OpenProject { .. })
             && content_sent
             && !managed_action_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Unassigned".len())
-                    .any(|window| window == b"Unassigned")
-            })
         {
-            master.write_all(b"o").expect("reopen key writes");
+            master
+                .write_all(b"jjj\r")
+                .expect("open project management writes");
             master.flush().expect("reopen key flushes");
             managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::OpenProject { .. })
+            && managed_action_sent
+            && !managed_provider_sent
+            && completion_offset.is_some_and(|offset| bytes.len() > offset)
+        {
+            master
+                .write_all(b"j\r")
+                .expect("reopen project action writes");
+            master.flush().expect("reopen recovery flushes");
+            managed_provider_sent = true;
             completion_offset = Some(bytes.len());
         }
         if matches!(interaction, PtyInteraction::SetProjectArchived { .. })
             && content_sent
             && !managed_action_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Unassigned".len())
-                    .any(|window| window == b"Unassigned")
-            })
         {
-            master.write_all(b"z").expect("archive choice key writes");
+            let action_keys = if let PtyInteraction::SetProjectArchived { archived, .. } =
+                interaction
+                && archived
+            {
+                b"jjj\rjjj\r".as_slice()
+            } else {
+                b"jjj\rj\r".as_slice()
+            };
+            master
+                .write_all(action_keys)
+                .expect("archive action writes");
             master.flush().expect("archive choice key flushes");
             managed_action_sent = true;
             completion_offset = Some(bytes.len());
@@ -1398,30 +1374,13 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 completion_offset = Some(bytes.len());
             }
         }
-        if matches!(interaction, PtyInteraction::DispatchProjectInput { .. })
-            && content_sent
-            && !managed_action_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Unassigned".len())
-                    .any(|window| window == b"Unassigned")
-            })
-        {
-            master.write_all(b"d").expect("project dispatch key writes");
-            master.flush().expect("project dispatch key flushes");
-            managed_action_sent = true;
-            completion_offset = Some(bytes.len());
-        }
         if matches!(interaction, PtyInteraction::AddProjectResource { .. })
             && content_sent
             && !managed_action_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Assigned agent".len())
-                    .any(|window| window == b"Assigned agent")
-            })
         {
-            master.write_all(b"a").expect("resource add key writes");
+            master
+                .write_all(b"jjj\r\r\r")
+                .expect("resource add action writes");
             master.flush().expect("resource add key flushes");
             managed_action_sent = true;
             completion_offset = Some(bytes.len());
@@ -1550,19 +1509,6 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             master.flush().expect("Ctrl-C flushes");
             exit_sent = true;
         }
-        if matches!(interaction, PtyInteraction::DispatchProjectInput { .. })
-            && managed_action_sent
-            && !exit_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"HQ could not make this change".len())
-                    .any(|window| window == b"HQ could not make this change")
-            })
-        {
-            master.write_all(&[0x03]).expect("Ctrl-C writes");
-            master.flush().expect("Ctrl-C flushes");
-            exit_sent = true;
-        }
         if matches!(interaction, PtyInteraction::AddProjectResource { .. })
             && resource_commit_sent
             && !exit_sent
@@ -1607,9 +1553,12 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 _ => None,
             };
             let guided_project = match interaction {
-                PtyInteraction::CreateGuidedProjectWork { name, .. } => {
-                    Some(project_json(state_root, name))
-                }
+                PtyInteraction::CreateGuidedProjectWork { .. } => Some(
+                    String::from_utf8_lossy(
+                        &hq_output(state_root, &["--output", "json", "project", "list"]).stdout,
+                    )
+                    .into_owned(),
+                ),
                 _ => None,
             };
             panic!(

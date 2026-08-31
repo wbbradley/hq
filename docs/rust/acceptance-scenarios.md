@@ -257,8 +257,17 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   normalization, reduction, schema-v1 persistence, local API conversion, and TUI mapping. Ordinary
   activity is compact and non-actionable; exact content and failure evidence remain available as
   technical detail.
-- Message text is entered only in the modeless Inbox draft pane; project details and guided setup
+- Message text is entered only in the modeless Inbox draft pane; the Projects workspace and guided setup
   contain no message-entry dialog or `send instructions` action.
+- Projects preserve selection by project and folder identity across refresh and resize. Wide layouts
+  keep list and summary together; compact layouts expose one-level Back across summary, Manage
+  project, Folders, and pane-owned forms.
+- Enter on a project routes by typed Inbox conversation cardinality: zero starts a draft under a
+  visible clearable project filter, one opens the exact row, and many shows the filtered list without
+  guessing from display text, assignment, recency, provider, or session.
+- Labeled folder, agent, lifecycle, recovery, and technical actions are state-dependent. Routine
+  message delivery is automatic, and retry is absent without explicit stalled-delivery evidence.
+  Only destructive and force decisions use bounded modal confirmation.
 - A project conversation row retains typed project, thread, and initiating-message identities.
   `r` continues that exact thread, while `c` creates a separate root and selects the row whose
   initiating message matches the committed message ID after authoritative refresh.

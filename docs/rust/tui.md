@@ -368,7 +368,7 @@ automatic, and no service becomes a distinct setup step. Users never type a prov
 The project step recommends recording an existing folder and keeps Git worktree creation behind the
 advanced project option.
 
-The following capture is the first dialog reached from that checklist. Its wording assumes the user
+The following capture is the first bounded launcher reached from that checklist. Its wording assumes the user
 has never seen HQ, and its three intentions remain independent:
 
 ```text
@@ -385,7 +385,7 @@ has never seen HQ, and its three intentions remain independent:
 F1 help · Esc back/cancel · q quit
 ```
 
-F1 replaces any dialog with plain-language help while retaining that dialog and every input. The
+F1 replaces an active decision surface with plain-language help while retaining it and every input. The
 fresh-state installed acceptance scenario creates the account while the TUI remains open, reloads
 the resulting ordinary workspace, restarts and reconnects the node, opens `New…`, and opens F1 help.
 The wider acceptance ledger is deliberately split at stable boundaries: installed pseudoterminal
@@ -416,7 +416,7 @@ One typed presentation policy covers every project and managed-session result. R
 `Completed`, `Ready`, and `Stopped` results close the submitting form immediately,
 request an authoritative snapshot, and show a four-second bounded confirmation in the footer.
 The refreshed snapshot selects the affected object: project creation selects the new project,
-ordinary project changes reopen its details, project activation and handoff select the exact Inbox
+ordinary project changes retain its workspace selection, project activation and handoff select the exact Inbox
 conversation, and manual session administration returns to the agent with the exact saved
 conversation selected when known.
 
@@ -425,11 +425,11 @@ an already in-flight snapshot predates a completion and lacks the target, the mo
 bounded follow-up snapshot; if the target is still absent it reports a typed stale-target recovery
 instead of silently selecting something else. Stale effect identities remain inert.
 
-Dialogs remain for results that still require attention or preserve evidence the user explicitly
-requested: `Running`, `Rejected`, `Reconcilable`, and `Uncertain` outcomes, resource previews, and
-fresh resource checks. Creation and close previews continue to require an explicit commit. Exact
-operation, runtime, warning, and recovery identities stay in these exceptional dialogs and
-technical help; routine success does not make the user dismiss those implementation details.
+The owning Projects pane retains results that still require attention or preserve evidence the user
+explicitly requested: `Running`, `Rejected`, `Reconcilable`, and `Uncertain` outcomes, folder
+previews, and fresh folder checks. Creation previews require an explicit commit. Exact operation,
+runtime, warning, and recovery identities stay in the pane and technical help. Only bounded
+destructive or force decisions use a modal confirmation.
 
 The Inbox always uses a selection-driven master/detail layout: its responsive second pane shows
 the selected conversation and a modeless draft pane occupies the lower portion of that detail pane
@@ -453,8 +453,8 @@ supplements these text markers and is not the sole carrier of state.
 
 ### User-facing vocabulary and progressive disclosure
 
-Ordinary TUI copy starts from the decision a first-time user is making. It uses `folders and
-resources` for project-owned paths, `assigned agent` for who is responsible for project work,
+Ordinary TUI copy starts from the decision a first-time user is making. It uses `folders` for
+project-owned paths, `agent` for who is responsible for project work,
 `saved conversation` for durable provider/session history, `agent service` for a provider choice,
 `working folder` for launch context, and `message` for conversation content. It says that HQ
 is creating, saving, checking, sending, or confirming a change instead of exposing local-API,
@@ -465,17 +465,19 @@ rather than reporting cardinality.
 Mailbox composition is deliberately different from those decision dialogs: it stays modeless in
 the Inbox and never uses a message-entry dialog.
 
-Dialogs lead with what will change and why HQ needs the input. Agent details first show
+Decision panes lead with what will change and why HQ needs the input. Agent details first show
 assignment-aware status and saved conversations; mailbox dialogs say who will receive a message or
 that a personal note is private. Destructive confirmations say what HQ keeps on disk and
 distinguish an explicit safety override from ordinary confirmation. Compact dialogs omit or shorten
 secondary evidence before they hide a required field, warning, action, or recovery instruction.
 
-The proposed modeless Projects workspace, its user-facing nouns and verbs, state-dependent action
-matrix, responsive interaction maps, and migration away from the current Project details dialog are
-specified in [Projects workspace](projects-workspace.md). Its review decisions are approved and its
-implementation is queued; until replacement coverage passes, the current project dialog is legacy
-behavior rather than a product pattern to copy.
+The modeless Projects workspace follows the approved [Projects workspace](projects-workspace.md).
+Wide terminals keep the project list and selected summary visible together. Compact terminals use
+separate Projects, project summary, Manage project, Folders, and form screens with `h`/Left as
+one-level Back. Enter on a project collaborates through Inbox: zero conversations opens a filtered
+Inbox draft, one opens the exact conversation, and many shows the visible project-filtered list.
+Manage project exposes only labeled actions valid for the typed lifecycle and selected object;
+ordinary delivery is automatic and raw provider sessions never stand in for conversations.
 
 Technical evidence is preserved, not translated away. Detail views and the `?` then `t` page label
 project, resource, assignment, message, request, provider/session, thread, revision, frontier,

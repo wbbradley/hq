@@ -18,9 +18,11 @@ use crate::{
     UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanState, UiMailboxAction,
     UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
     UiManagedSessionOutcome, UiMessageState, UiModel, UiNewChoice, UiNewModal, UiProjectAction,
-    UiProjectCreationChoice, UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread,
-    UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, UiTheme, UiThemeRole,
-    model::WIDE_WIDTH,
+    UiProjectAssignedAgentStatus, UiProjectCreationChoice, UiProjectFolderAction,
+    UiProjectFolderOwnership, UiProjectFormField, UiProjectInteraction, UiProjectLifecycle,
+    UiProjectManagementAction, UiProjectOutcome, UiProjectRecoverySummary, UiProjectSummaryFocus,
+    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
+    UiTechnicalSection, UiTheme, UiThemeRole, model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -64,7 +66,7 @@ pub fn render(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme) {
     render_new_modal(frame, model, theme, content);
     render_mailbox_modal(frame, model, theme, content);
     render_agent_modal(frame, model, theme, content);
-    render_project_modal(frame, model, theme, content);
+    render_project_interaction(frame, model, theme, content, true);
     render_help(frame, model, theme, content);
 }
 
@@ -486,7 +488,7 @@ fn dialog_help_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'stati
                 "HQ is waiting for authoritative confirmation before it sends your retained instruction.",
             ),
         }
-    } else if model.project_modal().is_some() {
+    } else if model.project_interaction().is_some() {
         (
             "Help for this project dialog",
             "The dialog explains the pending project or resource change. Nothing material changes until its confirmation step.",
@@ -738,14 +740,21 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
             }));
         }
         UiSection::Projects => {
-            actions.push(Line::from(if model.selected_row_data().is_some() {
-                "n — New… · Enter — inspect · c — create · / — search"
-            } else {
-                "n — New… · c — create project · / — search"
+            actions.push(Line::from(match model.project_workspace_level() {
+                UiProjectWorkspaceLevel::List if model.selected_row_data().is_some() => {
+                    "Enter — collaborate · l/→ — summary · c — create · / — search"
+                }
+                UiProjectWorkspaceLevel::List => "c — create project · / — search",
+                UiProjectWorkspaceLevel::Summary => {
+                    "↑/↓ or j/k — choose · Enter — open · h/← — Projects"
+                }
+                UiProjectWorkspaceLevel::Manage => {
+                    "↑/↓ or j/k — choose action · h/← — project summary"
+                }
+                UiProjectWorkspaceLevel::Folders => {
+                    "↑/↓ or j/k — choose action · Tab — choose folder · h/← — manage"
+                }
             }));
-            actions.push(Line::from(
-                "w — advanced shortcut: create an isolated Git worktree",
-            ));
         }
     }
     actions
@@ -770,26 +779,47 @@ const fn row_kind_label(kind: UiRowKind) -> &'static str {
 }
 
 #[allow(clippy::too_many_lines)]
-fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, available: Rect) {
-    let Some(interaction) = model.project_modal() else {
+fn render_project_interaction(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    available: Rect,
+    overlay: bool,
+) {
+    let Some(interaction) = model.project_interaction() else {
         return;
     };
-    let width = available.width.saturating_sub(4).clamp(1, 88);
-    let height = available.height.clamp(1, 22);
-    let area = Rect {
-        x: available.x + available.width.saturating_sub(width) / 2,
-        y: available.y + available.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::new().style(theme.style(UiThemeRole::ModalSurface)),
-        area,
+    let bounded_confirmation = matches!(
+        interaction,
+        UiProjectInteraction::ConfirmRemoveResource { .. }
+            | UiProjectInteraction::ConfirmClose { .. }
+            | UiProjectInteraction::ConfirmArchive { .. }
     );
+    if overlay != bounded_confirmation {
+        return;
+    }
+    let area = if overlay {
+        let width = available.width.saturating_sub(4).clamp(1, 88);
+        let height = available.height.clamp(1, 22);
+        Rect {
+            x: available.x + available.width.saturating_sub(width) / 2,
+            y: available.y + available.height.saturating_sub(height) / 2,
+            width,
+            height,
+        }
+    } else {
+        available
+    };
+    if overlay {
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Block::new().style(theme.style(UiThemeRole::ModalSurface)),
+            area,
+        );
+    }
     let inner_width = area.width.saturating_sub(2);
     let (title, lines) = match interaction {
-        UiProjectModal::ChooseCreation { selected } => (
+        UiProjectInteraction::ChooseCreation { selected } => (
             " Create project ",
             vec![
                 Line::from("How should this project's first folder be created?"),
@@ -813,7 +843,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                 Line::from("↑/↓ or j/k choose · Enter continue · Esc cancel"),
             ],
         ),
-        UiProjectModal::Search { query } => (
+        UiProjectInteraction::Search { query } => (
             " Search projects ",
             vec![
                 text_field_line(
@@ -830,127 +860,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                 Line::from("↑/↓ cycle matches · Enter inspect · Esc keep query"),
             ],
         ),
-        UiProjectModal::Details {
-            project,
-            selected_resource,
-        } => {
-            let mut lines = vec![
-                Line::styled(project.name.as_str(), theme.style(UiThemeRole::Heading)),
-                Line::from(format!(
-                    "Status: {} · {}",
-                    project_status_label(project),
-                    if project.claimable {
-                        "folders available"
-                    } else {
-                        "folder ownership needs attention"
-                    }
-                )),
-            ];
-            if model.viewport().width >= WIDE_WIDTH {
-                lines.push(Line::styled(
-                    "Technical details",
-                    theme.style(UiThemeRole::TextMuted),
-                ));
-                lines.push(Line::from(format!(
-                    "Project {} · version {} · next message {}",
-                    short_identity(project.project_id),
-                    short_identity(project.head),
-                    project.input_sequence
-                )));
-            } else {
-                lines.push(Line::styled(
-                    format!(
-                        "Technical details: project {}",
-                        short_identity(project.project_id)
-                    ),
-                    theme.style(UiThemeRole::TextMuted),
-                ));
-            }
-            lines.push(Line::default());
-            lines.push(Line::styled(
-                "Folders and resources",
-                theme.style(UiThemeRole::Accent),
-            ));
-            for resource in &project.resources {
-                let selected = *selected_resource == Some(resource.resource_id);
-                lines.push(Line::from(format!(
-                    " {} {}{} · {} · {}",
-                    if selected { '›' } else { ' ' },
-                    if resource.primary { "primary " } else { "" },
-                    resource.display_path,
-                    resource_health_label(&resource.health),
-                    if resource.active_claim {
-                        "owned here"
-                    } else {
-                        "ownership needs attention"
-                    }
-                )));
-                if model.viewport().width >= WIDE_WIDTH {
-                    lines.push(Line::from(format!(
-                        "   Technical: resource {} · canonical {} · conflicts {}",
-                        short_identity(resource.resource_id),
-                        resource.canonical_path,
-                        resource.conflicting_projects.len()
-                    )));
-                }
-            }
-            if project.resources.is_empty() {
-                lines.push(Line::from(" No folders or resources recorded"));
-            }
-            lines.push(Line::default());
-            lines.push(Line::styled(
-                "Assigned agent",
-                theme.style(UiThemeRole::Accent),
-            ));
-            if let Some(assignment) = &project.assignment {
-                lines.push(Line::from(format!(
-                    "{} · agent {}",
-                    project_assignment_status_label(assignment),
-                    short_identity(assignment.agent_id)
-                )));
-                if model.viewport().width >= WIDE_WIDTH {
-                    lines.push(Line::from(format!(
-                        "Technical: assignment {} · service {} · conversation {} · thread {}",
-                        short_identity(assignment.assignment_id),
-                        assignment.provider,
-                        assignment.session.as_deref().unwrap_or("not started"),
-                        assignment
-                            .thread_id
-                            .map_or_else(|| "not started".to_owned(), short_identity)
-                    )));
-                    if let Some(folder) = &assignment.launch_directory {
-                        lines.push(Line::from(format!("Working folder: {folder}")));
-                    }
-                }
-                if let Some(blocked) = &assignment.blocked {
-                    lines.push(Line::styled(
-                        format!("Needs attention: {blocked}"),
-                        theme.style(UiThemeRole::Warning),
-                    ));
-                }
-                if assignment.cardinality_conflicted {
-                    lines.push(Line::styled(
-                        "More than one agent is assigned to this project. HQ will not guess.",
-                        theme.style(UiThemeRole::Error),
-                    ));
-                }
-            } else {
-                lines.push(Line::from("Unassigned"));
-            }
-            lines.push(Line::default());
-            lines.push(Line::from(
-                "↑/↓ or j/k resource · a add · e replace · x remove",
-            ));
-            lines.push(Line::from("p primary · r check selected · R check all"));
-            lines.push(Line::from("v set up work · d send pending · h move agent"));
-            lines.push(Line::from(if project.lifecycle == "closed" {
-                "o reopen · z archive/unarchive"
-            } else {
-                "c assess and close · z archive/unarchive"
-            }));
-            (" Project details ", lines)
-        }
-        UiProjectModal::CreateExisting {
+        UiProjectInteraction::CreateExisting {
             name,
             brief,
             path,
@@ -1014,7 +924,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             }));
             (" Create project from folder ", lines)
         }
-        UiProjectModal::CreateWorktree {
+        UiProjectInteraction::CreateWorktree {
             name,
             brief,
             source,
@@ -1113,7 +1023,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             }));
             (" Create an isolated Git worktree ", lines)
         }
-        UiProjectModal::AddResource {
+        UiProjectInteraction::AddResource {
             project,
             path,
             make_primary,
@@ -1150,7 +1060,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             }));
             (" Add a folder or resource ", lines)
         }
-        UiProjectModal::ReplaceResource {
+        UiProjectInteraction::ReplaceResource {
             project,
             resource_id,
             path,
@@ -1184,7 +1094,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             }));
             (" Change a folder or resource ", lines)
         }
-        UiProjectModal::ConfirmRemoveResource {
+        UiProjectInteraction::ConfirmRemoveResource {
             project,
             resource_id,
             force,
@@ -1209,25 +1119,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                 }),
             ],
         ),
-        UiProjectModal::ConfirmPrimaryResource {
-            project,
-            resource_id,
-            submitting,
-        } => (
-            " Use as the primary project resource? ",
-            vec![
-                Line::from(format!("Project: {}", project.name)),
-                Line::from(format!("Resource: {}", short_identity(*resource_id))),
-                Line::from("The primary resource is the default folder for project work."),
-                Line::default(),
-                Line::from(if *submitting {
-                    "Saving the primary resource…"
-                } else {
-                    "Enter confirm · Esc cancel"
-                }),
-            ],
-        ),
-        UiProjectModal::Activate {
+        UiProjectInteraction::Activate {
             project,
             agents,
             providers,
@@ -1258,7 +1150,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                 model,
             ),
         ),
-        UiProjectModal::Handoff {
+        UiProjectInteraction::Handoff {
             project,
             agents,
             providers,
@@ -1291,7 +1183,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                 model,
             ),
         ),
-        UiProjectModal::ConfirmClose {
+        UiProjectInteraction::ConfirmClose {
             project,
             checks,
             confirmed,
@@ -1368,7 +1260,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             }));
             (" Confirm project close ", lines)
         }
-        UiProjectModal::ConfirmArchive {
+        UiProjectInteraction::ConfirmArchive {
             project,
             archived,
             submitting,
@@ -1394,7 +1286,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                 }),
             ],
         ),
-        UiProjectModal::Outcome { result } => {
+        UiProjectInteraction::Outcome { result } => {
             let mut lines = vec![Line::from(project_action_label(&result.action))];
             match &result.outcome {
                 UiProjectOutcome::Completed { .. } => lines.push(Line::from("Done")),
@@ -1581,7 +1473,8 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
         Paragraph::new(lines)
             .style(theme.style(UiThemeRole::Text))
             .block(
-                Block::bordered()
+                Block::new()
+                    .borders(if overlay { Borders::ALL } else { Borders::NONE })
                     .title(Span::styled(title, theme.style(UiThemeRole::ModalTitle)))
                     .border_style(theme.style(UiThemeRole::ModalBorder)),
             )
@@ -1995,18 +1888,6 @@ fn project_status_label(project: &crate::UiProject) -> &'static str {
     }
 }
 
-fn project_assignment_status_label(assignment: &crate::UiProjectAssignment) -> &'static str {
-    if assignment.cardinality_conflicted {
-        "Needs attention"
-    } else if assignment.blocked.is_some() {
-        "Blocked"
-    } else if assignment.runnable {
-        "Ready to work"
-    } else {
-        "Setting up"
-    }
-}
-
 fn resource_check_summary(check: &crate::UiProjectResourceCheck) -> &'static str {
     if check.status != "accepted" {
         "HQ could not finish checking this resource"
@@ -2022,15 +1903,6 @@ fn resource_check_summary(check: &crate::UiProjectResourceCheck) -> &'static str
             Some("dirty") => "Local changes would be kept",
             Some(_) | None => "Release status needs review",
         }
-    }
-}
-
-fn resource_health_label(health: &str) -> &str {
-    match health {
-        "healthy" => "available",
-        "missing" => "not found",
-        "inaccessible" => "cannot be opened",
-        _ => "needs attention",
     }
 }
 
@@ -2731,7 +2603,9 @@ fn render_compact_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiThem
 }
 
 fn render_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
-    if model.section() == UiSection::Inbox || model.conversation().is_some() {
+    if model.section() == UiSection::Projects {
+        render_projects_workspace(frame, model, theme, area);
+    } else if model.section() == UiSection::Inbox || model.conversation().is_some() {
         if model.viewport().width >= WIDE_WIDTH {
             let [summaries, conversation] = Layout::horizontal([
                 Constraint::Length(inbox_list_width(area.width)),
@@ -2758,6 +2632,332 @@ fn render_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Re
         }
     } else {
         render_summary_rows(frame, model, theme, area);
+    }
+}
+
+fn render_projects_workspace(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
+    if model.viewport().width >= WIDE_WIDTH {
+        let [projects, detail] = Layout::horizontal([
+            Constraint::Length(inbox_list_width(area.width)),
+            Constraint::Min(1),
+        ])
+        .areas(area);
+        render_summary_rows(frame, model, theme, projects);
+        render_project_workspace_detail(frame, model, theme, detail, Borders::LEFT, false);
+    } else if model.project_workspace_level() == UiProjectWorkspaceLevel::List
+        && !project_has_modeless_interaction(model)
+    {
+        render_summary_rows(frame, model, theme, area);
+    } else {
+        render_project_workspace_detail(frame, model, theme, area, Borders::NONE, true);
+    }
+}
+
+fn render_project_workspace_detail(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+    borders: Borders,
+    compact: bool,
+) {
+    if project_has_modeless_interaction(model) {
+        render_project_interaction(frame, model, theme, area, false);
+        return;
+    }
+    let Some(summary) = model.project_summary() else {
+        frame.render_widget(
+            Paragraph::new("Select a project to see its summary.")
+                .style(theme.style(UiThemeRole::TextMuted))
+                .block(Block::new().borders(borders)),
+            area,
+        );
+        return;
+    };
+    let title = if compact {
+        format!("Projects / {} · h/← Projects", summary.name)
+    } else {
+        format!("Project · {}", summary.name)
+    };
+    let mut lines = vec![
+        Line::styled(title, theme.style(UiThemeRole::Heading)),
+        Line::from(project_lifecycle_label(summary.lifecycle)),
+        Line::default(),
+    ];
+    match model.project_workspace_level() {
+        UiProjectWorkspaceLevel::Manage => {
+            lines.extend(project_management_lines(summary, model, theme));
+        }
+        UiProjectWorkspaceLevel::Folders => {
+            lines.extend(project_folder_lines(summary, model, theme));
+        }
+        UiProjectWorkspaceLevel::List | UiProjectWorkspaceLevel::Summary => {
+            lines.extend(project_summary_lines(summary, model, theme));
+        }
+    }
+    if compact {
+        lines.push(Line::default());
+        lines.push(Line::from(match model.project_workspace_level() {
+            UiProjectWorkspaceLevel::Manage => "h/← Project summary",
+            UiProjectWorkspaceLevel::Folders => "Tab choose folder · h/← Manage project",
+            UiProjectWorkspaceLevel::List => "",
+            UiProjectWorkspaceLevel::Summary => "Enter choose · h/← Projects",
+        }));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme.style(UiThemeRole::Text))
+            .block(Block::new().borders(borders).border_style(theme.style(
+                if model.focus() == UiFocus::Content {
+                    UiThemeRole::BorderFocused
+                } else {
+                    UiThemeRole::BorderUnfocused
+                },
+            )))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn project_has_modeless_interaction(model: &UiModel) -> bool {
+    matches!(
+        model.project_interaction(),
+        Some(
+            UiProjectInteraction::ChooseCreation { .. }
+                | UiProjectInteraction::Search { .. }
+                | UiProjectInteraction::CreateExisting { .. }
+                | UiProjectInteraction::CreateWorktree { .. }
+                | UiProjectInteraction::AddResource { .. }
+                | UiProjectInteraction::ReplaceResource { .. }
+                | UiProjectInteraction::Activate { .. }
+                | UiProjectInteraction::Handoff { .. }
+                | UiProjectInteraction::Outcome { .. }
+        )
+    )
+}
+
+fn project_summary_lines(
+    summary: &crate::UiProjectSummary,
+    model: &UiModel,
+    theme: &UiTheme,
+) -> Vec<Line<'static>> {
+    let selected = |focus| {
+        model.project_workspace_level() == UiProjectWorkspaceLevel::Summary
+            && model.project_summary_focus() == Some(focus)
+    };
+    let conversation_label = if summary.conversations.open == 0 {
+        if summary.lifecycle == UiProjectLifecycle::Open {
+            "Start conversation".to_owned()
+        } else {
+            "View conversations in Inbox".to_owned()
+        }
+    } else if summary.conversations.open == 1 {
+        "Continue conversation".to_owned()
+    } else {
+        format!("Open {} conversations in Inbox", summary.conversations.open)
+    };
+    let agent_name = summary.assigned_agent.name.as_deref().unwrap_or(
+        if summary.assigned_agent.agent_id.is_some() {
+            "Unnamed agent"
+        } else {
+            "No agent assigned"
+        },
+    );
+    let mut lines = vec![project_card_line(
+        theme,
+        "Conversation",
+        &conversation_label,
+        selected(UiProjectSummaryFocus::Conversation),
+    )];
+    lines.push(project_card_line(
+        theme,
+        "Agent",
+        &format!(
+            "{agent_name} · {}",
+            assigned_agent_status_label(summary.assigned_agent.status)
+        ),
+        selected(UiProjectSummaryFocus::AssignedAgent),
+    ));
+    lines.push(project_card_line(
+        theme,
+        "Folders",
+        &summary.folders.len().to_string(),
+        selected(UiProjectSummaryFocus::Folders),
+    ));
+    for folder in summary.folders.iter().take(3) {
+        lines.push(Line::from(format!(
+            "    {}{} · {} · {}",
+            if folder.working_folder {
+                "Working · "
+            } else {
+                ""
+            },
+            folder.path,
+            folder.health,
+            folder_ownership_label(folder.ownership)
+        )));
+    }
+    if !summary.recovery.is_empty() {
+        let recovery = summary
+            .recovery
+            .iter()
+            .map(|recovery| match recovery {
+                UiProjectRecoverySummary::FolderOwnership => "folder ownership",
+                UiProjectRecoverySummary::AssignedAgentBlocked => "assigned agent",
+                UiProjectRecoverySummary::AssignedAgentConflict => "agent responsibility",
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(project_card_line(
+            theme,
+            "Needs attention",
+            &recovery,
+            selected(UiProjectSummaryFocus::Recovery),
+        ));
+    }
+    lines.push(project_card_line(
+        theme,
+        "Manage project…",
+        "folders, agent, lifecycle, and technical details",
+        selected(UiProjectSummaryFocus::Manage),
+    ));
+    lines
+}
+
+fn project_management_lines(
+    summary: &crate::UiProjectSummary,
+    model: &UiModel,
+    theme: &UiTheme,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled(
+        "Manage project",
+        theme.style(UiThemeRole::Accent),
+    )];
+    let action = model.project_management_action();
+    let mut push = |candidate, label: &str| {
+        lines.push(project_card_line(
+            theme,
+            label,
+            "",
+            action == Some(candidate),
+        ));
+    };
+    push(UiProjectManagementAction::Folders, "Folders…");
+    if summary.lifecycle == UiProjectLifecycle::Open {
+        push(
+            if summary.assigned_agent.agent_id.is_some() {
+                UiProjectManagementAction::ChangeAssignedAgent
+            } else {
+                UiProjectManagementAction::AssignAgent
+            },
+            if summary.assigned_agent.agent_id.is_some() {
+                "Change assigned agent"
+            } else {
+                "Assign agent"
+            },
+        );
+    }
+    match summary.lifecycle {
+        UiProjectLifecycle::Open => push(UiProjectManagementAction::CloseProject, "Close project"),
+        UiProjectLifecycle::Closed => {
+            push(UiProjectManagementAction::ReopenProject, "Reopen project");
+        }
+        UiProjectLifecycle::Archived => push(
+            UiProjectManagementAction::RestoreArchivedProject,
+            "Restore archived project",
+        ),
+        UiProjectLifecycle::Closing | UiProjectLifecycle::NeedsAttention => {}
+    }
+    if summary.lifecycle != UiProjectLifecycle::Archived {
+        push(UiProjectManagementAction::ArchiveProject, "Archive project");
+    }
+    push(
+        UiProjectManagementAction::TechnicalDetails,
+        "Technical details",
+    );
+    lines
+}
+
+fn project_folder_lines(
+    summary: &crate::UiProjectSummary,
+    model: &UiModel,
+    theme: &UiTheme,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled("Folders", theme.style(UiThemeRole::Accent))];
+    if summary.folders.is_empty() {
+        lines.push(Line::from(" No folders are attached."));
+    }
+    for folder in &summary.folders {
+        lines.push(project_card_line(
+            theme,
+            &folder.path,
+            if folder.working_folder {
+                "Working folder"
+            } else {
+                &folder.health
+            },
+            model.selected_project_folder() == Some(folder.folder_id),
+        ));
+    }
+    lines.push(Line::default());
+    if let Some(action) = model.project_folder_action() {
+        for candidate in [
+            UiProjectFolderAction::AddFolder,
+            UiProjectFolderAction::ChangeFolderPath,
+            UiProjectFolderAction::RemoveFolder,
+            UiProjectFolderAction::UseAsWorkingFolder,
+            UiProjectFolderAction::CheckFolderNow,
+            UiProjectFolderAction::CheckAllFolders,
+        ] {
+            let label = match candidate {
+                UiProjectFolderAction::AddFolder => "Add folder…",
+                UiProjectFolderAction::ChangeFolderPath => "Change folder path…",
+                UiProjectFolderAction::RemoveFolder => "Remove folder…",
+                UiProjectFolderAction::UseAsWorkingFolder => "Use as working folder",
+                UiProjectFolderAction::CheckFolderNow => "Check folder now",
+                UiProjectFolderAction::CheckAllFolders => "Check all folders",
+            };
+            lines.push(project_card_line(theme, label, "", action == candidate));
+        }
+    }
+    lines
+}
+
+fn project_card_line(theme: &UiTheme, label: &str, value: &str, selected: bool) -> Line<'static> {
+    Line::styled(
+        format!(" {}{label} · {value}", if selected { '›' } else { ' ' }),
+        if selected {
+            selected_style(theme, true)
+        } else {
+            theme.style(UiThemeRole::Text)
+        },
+    )
+}
+
+const fn project_lifecycle_label(lifecycle: UiProjectLifecycle) -> &'static str {
+    match lifecycle {
+        UiProjectLifecycle::Open => "Open",
+        UiProjectLifecycle::Closing => "Closing",
+        UiProjectLifecycle::Closed => "Closed",
+        UiProjectLifecycle::Archived => "Archived · Closed",
+        UiProjectLifecycle::NeedsAttention => "Needs attention",
+    }
+}
+
+const fn assigned_agent_status_label(status: UiProjectAssignedAgentStatus) -> &'static str {
+    match status {
+        UiProjectAssignedAgentStatus::Unassigned => "waiting for assignment",
+        UiProjectAssignedAgentStatus::SettingUp => "Setting up",
+        UiProjectAssignedAgentStatus::Ready => "Ready",
+        UiProjectAssignedAgentStatus::NeedsAttention => "Needs attention",
+    }
+}
+
+const fn folder_ownership_label(ownership: UiProjectFolderOwnership) -> &'static str {
+    match ownership {
+        UiProjectFolderOwnership::Owned => "Owned by this project",
+        UiProjectFolderOwnership::Conflicted => "Ownership conflict",
+        UiProjectFolderOwnership::NeedsAttention => "Ownership needs attention",
     }
 }
 
@@ -2909,6 +3109,13 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
         ),
         Line::default(),
     ];
+    if let Some(filter) = model.project_filter() {
+        lines.push(Line::styled(
+            format!(" Project: {} · Esc clear filter", filter.project_name),
+            theme.style(UiThemeRole::Accent),
+        ));
+        lines.push(Line::default());
+    }
     match model.human_state() {
         Some(UiHumanState::NeedsAttention(issue)) => {
             lines.extend(human_issue_lines(issue, theme));
@@ -3588,7 +3795,7 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     } else if model.new_modal().is_some()
         || model.mailbox_modal().is_some()
         || model.agent_modal().is_some()
-        || model.project_modal().is_some()
+        || model.project_interaction().is_some()
     {
         " F1 help · Esc back/cancel · q quit".to_owned()
     } else if let Some(failure) = model.last_failure() {
@@ -3606,7 +3813,25 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         " ↑/↓ or j/k section · Enter content · ? help · q quit".to_owned()
     } else if model.focus() == UiFocus::Navigation {
         " ←/→ section · Enter content · ? help · q quit".to_owned()
-    } else if matches!(model.section(), UiSection::Agents | UiSection::Projects) {
+    } else if model.section() == UiSection::Projects {
+        match model.project_workspace_level() {
+            UiProjectWorkspaceLevel::List if model.selected_row_data().is_some() => {
+                " Enter collaborate · l/→ summary · c create · / search · ? help · q quit"
+                    .to_owned()
+            }
+            UiProjectWorkspaceLevel::List => " c create · / search · ? help · q quit".to_owned(),
+            UiProjectWorkspaceLevel::Summary => {
+                " j/k choose · Enter open · h/← Projects · ? help · q quit".to_owned()
+            }
+            UiProjectWorkspaceLevel::Manage => {
+                " j/k choose action · Enter open · h/← summary · ? help · q quit".to_owned()
+            }
+            UiProjectWorkspaceLevel::Folders => {
+                " j/k choose action · Tab folder · Enter run · h/← manage · ? help · q quit"
+                    .to_owned()
+            }
+        }
+    } else if model.section() == UiSection::Agents {
         if model.selected_row_data().is_some() {
             " Enter inspect · n New… · c create · / search · ? help · q quit".to_owned()
         } else {
