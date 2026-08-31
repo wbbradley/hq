@@ -849,6 +849,82 @@ fn conversation_messages_start_at_the_pane_edge_and_selection_fills_the_row() {
 }
 
 #[test]
+fn markdown_messages_render_safely_across_widths_without_parsing_activity() {
+    let message = concat!(
+        "# Release\n\n",
+        "**Ready** with [notes](https://example.test/release).\n\n",
+        "| Item | Description |\n| --- | --- |\n| build | a deliberately wide value |",
+    );
+    for size in [
+        UiSize {
+            width: 64,
+            height: 28,
+        },
+        UiSize {
+            width: 104,
+            height: 28,
+        },
+        UiSize {
+            width: 120,
+            height: 28,
+        },
+    ] {
+        let model = conversation_model_with_content(
+            size,
+            UiMessageState::Open,
+            None,
+            message,
+            "**Work** `remains raw`",
+        );
+        let theme = UiTheme::terminal();
+        let buffer = render_buffer_with_theme(&model, &theme);
+        let rendered = snapshot_text(&buffer);
+
+        assert!(rendered.contains("# Release"), "{size:?}:\n{rendered}");
+        assert!(rendered.contains("Ready"), "{size:?}:\n{rendered}");
+        assert!(!rendered.contains("**Ready**"), "{size:?}:\n{rendered}");
+        assert!(
+            rendered.contains("notes (https://example.test/release)"),
+            "{size:?}:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("● **Work** `remains raw`"),
+            "{size:?}:\n{rendered}"
+        );
+
+        let (ready_x, ready_y) = find_text_start(&buffer, "Ready");
+        let ready = buffer
+            .cell((ready_x, ready_y))
+            .expect("styled message cell");
+        assert!(ready.modifier.contains(Modifier::BOLD));
+        assert!(ready.modifier.contains(Modifier::REVERSED));
+    }
+
+    let narrow = conversation_model_with_content(
+        UiSize {
+            width: 64,
+            height: 28,
+        },
+        UiMessageState::Open,
+        None,
+        message,
+        "activity",
+    );
+    let anchor = narrow.conversation_anchor().map(str::to_owned);
+    let resized = update(
+        narrow,
+        UiEvent::Resized(UiSize {
+            width: 120,
+            height: 28,
+        }),
+    )
+    .expect("resize conversation")
+    .model;
+    assert_eq!(resized.conversation_anchor(), anchor.as_deref());
+    assert!(render_text(&resized).contains("a deliberately wide value"));
+}
+
+#[test]
 fn technical_details_are_in_pane_and_keep_exact_activity_content() {
     for size in [
         UiSize {
@@ -903,7 +979,7 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
                 draft: UiMailboxDraft {
                     draft_id: [1; 32],
                     target: UiMailboxDraftTarget::SelfNote,
-                    content: "bounded draft text".to_owned(),
+                    content: "bounded **draft** text".to_owned(),
                     version: 2,
                 },
             },
@@ -920,7 +996,7 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
         let rendered = snapshot_text(terminal.backend().buffer());
         assert!(rendered.contains("Self-note · saved"));
         assert!(
-            rendered.contains("bounded draft text"),
+            rendered.contains("bounded **draft** text"),
             "{size:?}:\n{rendered}"
         );
         assert!(rendered.contains('│'));
@@ -2577,6 +2653,16 @@ fn conversation_model_with_state_and_delivery(
     state: UiMessageState,
     delivery: Option<UiMessageDelivery>,
 ) -> UiModel {
+    conversation_model_with_content(size, state, delivery, "Can we ship?", "Work in progress…")
+}
+
+fn conversation_model_with_content(
+    size: UiSize,
+    state: UiMessageState,
+    delivery: Option<UiMessageDelivery>,
+    body: &str,
+    activity_summary: &str,
+) -> UiModel {
     let ready = ready_transition(size);
     let effect_id = ready
         .effects
@@ -2604,7 +2690,7 @@ fn conversation_model_with_state_and_delivery(
                                 || UiConversationAuthor::Participant("Alice".to_owned()),
                                 |_| UiConversationAuthor::You,
                             ),
-                            body: "Can we ship?".to_owned(),
+                            body: body.to_owned(),
                         },
                         message_state: Some(state),
                         delivery,
@@ -2619,7 +2705,7 @@ fn conversation_model_with_state_and_delivery(
                         presentation: UiConversationEntryPresentation::Activity {
                             kind: UiConversationActivityKind::Progress,
                             status: UiActivityStatus::Running,
-                            summary: "Work in progress…".to_owned(),
+                            summary: activity_summary.to_owned(),
                             detail: "compiling".to_owned(),
                             truncated: false,
                         },

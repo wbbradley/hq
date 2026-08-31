@@ -22,7 +22,9 @@ use crate::{
     UiProjectFolderOwnership, UiProjectFormField, UiProjectInteraction, UiProjectLifecycle,
     UiProjectManagementAction, UiProjectOutcome, UiProjectRecoverySummary, UiProjectSummaryFocus,
     UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
-    UiTechnicalSection, UiTheme, UiThemeRole, model::WIDE_WIDTH,
+    UiTechnicalSection, UiTheme, UiThemeRole,
+    message_markdown::{RenderedMessage, render_message},
+    model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -3583,10 +3585,14 @@ fn render_conversation_entries(
     if area.width == 0 || area.height == 0 || conversation.entries.is_empty() {
         return;
     }
-    let heights = conversation
+    let layouts = conversation
         .entries
         .iter()
-        .map(|entry| conversation_entry_height(entry, area.width))
+        .map(|entry| conversation_entry_layout(entry, area.width, theme))
+        .collect::<Vec<_>>();
+    let heights = layouts
+        .iter()
+        .map(|layout| layout.height)
         .collect::<Vec<_>>();
     let selected_index = model
         .conversation_anchor()
@@ -3600,15 +3606,18 @@ fn render_conversation_entries(
     let visible = visible_conversation_entries(&heights, selected_index, area.height);
     let mut y = area.y;
     let bottom = area.y.saturating_add(area.height);
-    for entry in &conversation.entries[visible] {
+    for index in visible {
         if y >= bottom {
             break;
         }
-        let height = conversation_entry_height(entry, area.width).min(bottom - y);
+        let entry = &conversation.entries[index];
+        let layout = &layouts[index];
+        let height = layout.height.min(bottom - y);
         render_conversation_entry(
             frame,
             model,
             entry,
+            layout,
             theme,
             Rect {
                 x: area.x,
@@ -3621,16 +3630,29 @@ fn render_conversation_entries(
     }
 }
 
-fn conversation_entry_height(entry: &UiConversationEntry, width: u16) -> u16 {
+struct ConversationEntryLayout {
+    message: Option<RenderedMessage>,
+    height: u16,
+}
+
+fn conversation_entry_layout(
+    entry: &UiConversationEntry,
+    width: u16,
+    theme: &UiTheme,
+) -> ConversationEntryLayout {
     match &entry.presentation {
         UiConversationEntryPresentation::Message { body, .. } => {
-            let body_height = Paragraph::new(body.as_str())
-                .wrap(Wrap { trim: false })
-                .line_count(width.max(1))
-                .max(1);
-            u16::try_from(body_height.saturating_add(2)).unwrap_or(u16::MAX)
+            let message = render_message(body, width, theme);
+            let height = message.body_height().saturating_add(2);
+            ConversationEntryLayout {
+                message: Some(message),
+                height,
+            }
         }
-        UiConversationEntryPresentation::Activity { .. } => 2,
+        UiConversationEntryPresentation::Activity { .. } => ConversationEntryLayout {
+            message: None,
+            height: 2,
+        },
     }
 }
 
@@ -3667,6 +3689,7 @@ fn render_conversation_entry(
     frame: &mut Frame<'_>,
     model: &UiModel,
     entry: &UiConversationEntry,
+    layout: &ConversationEntryLayout,
     theme: &UiTheme,
     area: Rect,
 ) {
@@ -3683,7 +3706,7 @@ fn render_conversation_entry(
         frame.render_widget(Block::new().style(theme.style(role)), area);
     }
     match &entry.presentation {
-        UiConversationEntryPresentation::Message { author, body } => {
+        UiConversationEntryPresentation::Message { author, .. } => {
             let (author, author_role) = match author {
                 UiConversationAuthor::You => ("You", UiThemeRole::ConversationAuthorSelf),
                 UiConversationAuthor::Participant(label) => {
@@ -3713,11 +3736,11 @@ fn render_conversation_entry(
                     .style(theme.style(author_role)),
                 Rect { height: 1, ..area },
             );
-            if area.height > 1 {
+            if area.height > 1
+                && let Some(message) = &layout.message
+            {
                 frame.render_widget(
-                    Paragraph::new(body.as_str())
-                        .style(theme.style(UiThemeRole::Text))
-                        .wrap(Wrap { trim: false }),
+                    Paragraph::new(message.text().clone()).style(theme.style(UiThemeRole::Text)),
                     Rect {
                         y: area.y + 1,
                         height: area.height.saturating_sub(2),
@@ -4045,7 +4068,7 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
 #[cfg(test)]
 mod tests {
     use super::{
-        conversation_entry_height, display_prefix, display_suffix, inbox_list_width,
+        conversation_entry_layout, display_prefix, display_suffix, inbox_list_width,
         navigation_width, text_field_line, visible_conversation_entries,
     };
     use crate::{
@@ -4099,11 +4122,24 @@ mod tests {
     }
 
     #[test]
-    fn message_height_uses_paragraph_wrapping_for_newlines_words_and_wide_text() {
-        assert_eq!(conversation_entry_height(&message("one\ntwo"), 20), 4);
-        assert_eq!(conversation_entry_height(&message("abcdefgh"), 3), 5);
-        assert_eq!(conversation_entry_height(&message("界界界"), 4), 4);
-        assert_eq!(conversation_entry_height(&message(""), 20), 3);
+    fn message_height_uses_the_width_specific_artifact_for_words_and_wide_text() {
+        let theme = UiTheme::terminal();
+        assert_eq!(
+            conversation_entry_layout(&message("one\ntwo"), 20, &theme).height,
+            3
+        );
+        assert_eq!(
+            conversation_entry_layout(&message("abcdefgh"), 3, &theme).height,
+            5
+        );
+        assert_eq!(
+            conversation_entry_layout(&message("界界界"), 4, &theme).height,
+            4
+        );
+        assert_eq!(
+            conversation_entry_layout(&message(""), 20, &theme).height,
+            3
+        );
     }
 
     #[test]

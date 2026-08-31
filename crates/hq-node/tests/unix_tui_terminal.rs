@@ -232,7 +232,7 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
             .success()
     );
 
-    let content = "installed inbox preview";
+    let content = "[installed inbox](https://example.test/preview)";
     let seeded = run_in_pty(&state_root, true, PtyInteraction::SubmitSelfNote(content));
     assert!(
         seeded.status.success(),
@@ -250,7 +250,15 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
         "Inbox navigation failed: {:?}",
         run.bytes
     );
-    for phrase in ["Personal notes", content, "You", "h/← Inbox", "Enter open"] {
+    for phrase in [
+        "Personal notes",
+        content,
+        "installed inbox",
+        "https://example.test/preview",
+        "You",
+        "h/← Inbox",
+        "Enter open",
+    ] {
         assert!(
             run.bytes
                 .windows(phrase.len())

@@ -4,6 +4,7 @@
 //! capability. A shell feeds [`UiEvent`] values into [`update`], executes returned [`UiEffect`]
 //! values, and borrows the resulting [`UiModel`] for [`render`].
 
+mod message_markdown;
 mod model;
 mod render;
 mod theme;
