@@ -458,6 +458,19 @@ fn guided_project_failure_does_not_rearm_the_submission() {
         sequence: 2,
     }];
     let mut pending_snapshot = projects_snapshot(2, vec![pending_project]);
+    let conversation_row = format!("project:{}:{}", agent_row_id(5), agent_row_id(33));
+    pending_snapshot.inbox_rows.push(UiRow {
+        id: conversation_row.clone(),
+        title: "builder".to_owned(),
+        detail: "Retain this instruction".to_owned(),
+        state: UiRowState::Open,
+        kind: UiRowKind::Conversation,
+        conversation_target: Some(UiConversationTarget::Project {
+            project_id: [5; 32],
+            thread_id: [33; 32],
+            root_message: message_id,
+        }),
+    });
     let agent_source = agents_snapshot(2, vec![agent]);
     pending_snapshot.agents = agent_source.agents;
     pending_snapshot.agent_rows = agent_source.agent_rows;
@@ -469,6 +482,15 @@ fn guided_project_failure_does_not_rearm_the_submission() {
         },
     )
     .expect("activation submitted");
+    assert!(submitting.model.new_modal().is_none());
+    assert_eq!(
+        submitting.model.selected_row(),
+        Some(conversation_row.as_str())
+    );
+    assert!(submitting.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::LoadConversation { row_id, .. } if row_id == &conversation_row
+    )));
     let (effect_id, action) = project_effect(&submitting.effects);
     for outcome in [
         UiProjectOutcome::Rejected {

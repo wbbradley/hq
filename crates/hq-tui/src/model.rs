@@ -7277,6 +7277,8 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
             else {
                 return Ok(());
             };
+            select_project_conversation(model, project.project_id, input.thread_id);
+            model.request_inbox_preview(effects)?;
             submit_guided_project(
                 model,
                 project,
@@ -7286,6 +7288,7 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
                 None,
                 effects,
             )?;
+            model.new_modal = None;
         }
         UiGuidedPending::Activation(submission) => {
             let Some(project) = model

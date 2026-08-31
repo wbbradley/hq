@@ -1,6 +1,11 @@
 //! RAII ownership of the state lock, identity, runtime namespace, and bounded store.
 
-use std::{error::Error, fmt, num::NonZeroUsize, sync::Arc};
+use std::{
+    error::Error,
+    fmt,
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
+};
 
 use hq_application::{
     CommitFacts, FactMutation, FactPlan, MutationAttempt, MutationDecision, MutationOutcome,
@@ -13,7 +18,7 @@ use hq_domain::{
 use hq_protocol::Bip340Signer;
 use hq_reducer::{AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey};
 use hq_relay::RelayConnector;
-use hq_store::{Store, StoreErrorClass, StoreGateway};
+use hq_store::{RevisionInvalidations, Store, StoreErrorClass, StoreGateway};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::{
@@ -124,6 +129,7 @@ impl Error for NodeReadinessError {}
 pub struct NodeFoundation {
     lifecycle: NodeLifecycle,
     store: Option<Store>,
+    store_invalidations: Mutex<Option<RevisionInvalidations>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     local_transport: LocalTransportOwner,
     runtime: RuntimeDirectoryOwner,
@@ -165,12 +171,14 @@ impl NodeFoundation {
             .map_err(|error| diagnostic(StartupComponent::Runtime, runtime_cause(error.class())))?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let local_transport = LocalTransportOwner::new(runtime.paths().clone());
-        let store = Store::open(state.paths().database_file(), config.store_capacity)
-            .map_err(|error| diagnostic(StartupComponent::Store, store_cause(error.class())))?;
+        let (store, store_invalidations) =
+            Store::open_with_invalidations(state.paths().database_file(), config.store_capacity)
+                .map_err(|error| diagnostic(StartupComponent::Store, store_cause(error.class())))?;
 
         Ok(Self {
             lifecycle: NodeLifecycle::new(),
             store: Some(store),
+            store_invalidations: Mutex::new(Some(store_invalidations)),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             local_transport,
             runtime,
@@ -323,6 +331,14 @@ impl NodeFoundation {
         &mut self,
     ) -> Result<BoundLocalListener, RuntimeArtifactError> {
         self.local_transport.take_listener()
+    }
+
+    /// Transfers the sole coalesced post-commit observer into runtime ownership.
+    pub(crate) fn take_store_invalidations(&mut self) -> Option<RevisionInvalidations> {
+        self.store_invalidations
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

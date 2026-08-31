@@ -1,12 +1,14 @@
 //! Fair asynchronous listener and local-session event pumping.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::{error::Error, fmt, num::NonZeroU64, time::Duration};
 
-use hq_application::{Application, ApplicationPorts};
+use hq_application::{Application, ApplicationPorts, SubscriptionTopic};
+use hq_domain::Revision;
 use hq_local_api::{
     LifecycleControl, RevisionHub,
     protocol::v1::{BuildMetadata, Id32},
 };
+use hq_store::RevisionInvalidations;
 use tokio::io::unix::AsyncFd;
 
 use crate::{
@@ -15,6 +17,8 @@ use crate::{
     LocalSessionShutdownReport, NodeFoundation, RuntimeArtifactErrorClass,
     local_transport::BoundLocalListener,
 };
+
+const STORE_INVALIDATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Plain fixed capacities and boot-local identity seed for one listener/session pump.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,6 +38,8 @@ pub enum LocalSessionPumpStartError {
     RuntimeUnavailable,
     /// The process-generation nonce was zero.
     InvalidBootNonce,
+    /// The foundation's sole post-commit observer was already transferred.
+    StoreInvalidationsUnavailable,
 }
 
 impl fmt::Display for LocalSessionPumpStartError {
@@ -85,6 +91,13 @@ pub enum LocalSessionPumpEvent {
         /// Coalesced invalidations attempted at this safe point.
         invalidations: LocalSessionInvalidationReport,
     },
+    /// One or more coalesced store commits were published to active subscribers.
+    StoreInvalidated {
+        /// Newest committed revision represented by the coalesced wake.
+        revision: Revision,
+        /// Invalidation frames accepted by per-session write queues.
+        invalidations: LocalSessionInvalidationReport,
+    },
     /// One accepted peer failed kernel validation without affecting the listener.
     PeerRejected {
         /// Stable credential failure class.
@@ -115,6 +128,8 @@ pub struct LocalSessionPumpShutdownReport {
 pub struct LocalSessionPump {
     listener: Option<AsyncFd<BoundLocalListener>>,
     sessions: LocalSessionRegistry,
+    revisions: RevisionHub,
+    store_invalidations: RevisionInvalidations,
     boot_nonce: Id32,
     next_connection: Option<NonZeroU64>,
     prefer_listener: bool,
@@ -134,12 +149,17 @@ impl LocalSessionPump {
         let listener = foundation
             .take_local_listener()
             .map_err(|error| LocalSessionPumpStartError::Listener(error.class()))?;
+        let store_invalidations = foundation
+            .take_store_invalidations()
+            .ok_or(LocalSessionPumpStartError::StoreInvalidationsUnavailable)?;
         let listener =
             AsyncFd::new(listener).map_err(|_| LocalSessionPumpStartError::RuntimeUnavailable)?;
-        let sessions = LocalSessionRegistry::new(config.registry, hub, build);
+        let sessions = LocalSessionRegistry::new(config.registry, hub.clone(), build);
         Ok(Self {
             listener: Some(listener),
             sessions,
+            revisions: hub,
+            store_invalidations,
             boot_nonce: config.boot_nonce,
             next_connection: NonZeroU64::new(1),
             prefer_listener: true,
@@ -159,60 +179,86 @@ impl LocalSessionPump {
         enum Ready {
             Listener(Result<AcceptedLocalStream, RuntimeArtifactErrorClass>),
             Session(Option<LocalSessionDispatch>),
+            StoreInvalidation,
         }
 
-        let ready = match (self.listener.as_ref(), self.sessions.task_count()) {
-            (None, 0) => return LocalSessionPumpEvent::Idle,
-            (Some(listener), 0) => Ready::Listener(wait_for_peer(listener).await),
-            (None, _) => Ready::Session(self.sessions.dispatch_next(application, lifecycle).await),
-            (Some(listener), _) if self.prefer_listener => {
-                tokio::select! {
+        loop {
+            if let Some(invalidation) = self.forward_store_invalidation() {
+                return invalidation;
+            }
+            let store_poll = tokio::time::sleep(STORE_INVALIDATION_POLL_INTERVAL);
+            tokio::pin!(store_poll);
+            let ready = match (self.listener.as_ref(), self.sessions.task_count()) {
+                (None, 0) => return LocalSessionPumpEvent::Idle,
+                (Some(listener), 0) => tokio::select! {
+                    accepted = wait_for_peer(listener) => Ready::Listener(accepted),
+                    () = &mut store_poll => Ready::StoreInvalidation,
+                },
+                (None, _) => tokio::select! {
+                    dispatch = self.sessions.dispatch_next(application, lifecycle) => {
+                        Ready::Session(dispatch)
+                    }
+                    () = &mut store_poll => Ready::StoreInvalidation,
+                },
+                (Some(listener), _) if self.prefer_listener => tokio::select! {
                     biased;
                     accepted = wait_for_peer(listener) => Ready::Listener(accepted),
                     dispatch = self.sessions.dispatch_next(application, lifecycle) => {
                         Ready::Session(dispatch)
                     }
-                }
-            }
-            (Some(listener), _) => {
-                tokio::select! {
+                    () = &mut store_poll => Ready::StoreInvalidation,
+                },
+                (Some(listener), _) => tokio::select! {
                     biased;
                     dispatch = self.sessions.dispatch_next(application, lifecycle) => {
                         Ready::Session(dispatch)
                     }
                     accepted = wait_for_peer(listener) => Ready::Listener(accepted),
-                }
-            }
-        };
+                    () = &mut store_poll => Ready::StoreInvalidation,
+                },
+            };
 
-        match ready {
-            Ready::Listener(Ok(accepted)) => {
-                self.prefer_listener = false;
-                self.admit(accepted)
-            }
-            Ready::Listener(Err(error))
-                if matches!(
-                    error,
-                    RuntimeArtifactErrorClass::PeerCredentials
-                        | RuntimeArtifactErrorClass::PeerMismatch
-                ) =>
-            {
-                self.prefer_listener = false;
-                LocalSessionPumpEvent::PeerRejected { error }
-            }
-            Ready::Listener(Err(error)) => {
-                self.close_intake();
-                LocalSessionPumpEvent::ListenerFailed { error }
-            }
-            Ready::Session(Some(dispatch)) => {
-                self.prefer_listener = true;
-                LocalSessionPumpEvent::Session {
-                    dispatch,
-                    invalidations: self.sessions.flush_invalidations(),
+            match ready {
+                Ready::Listener(Ok(accepted)) => {
+                    self.prefer_listener = false;
+                    return self.admit(accepted);
                 }
+                Ready::Listener(Err(error))
+                    if matches!(
+                        error,
+                        RuntimeArtifactErrorClass::PeerCredentials
+                            | RuntimeArtifactErrorClass::PeerMismatch
+                    ) =>
+                {
+                    self.prefer_listener = false;
+                    return LocalSessionPumpEvent::PeerRejected { error };
+                }
+                Ready::Listener(Err(error)) => {
+                    self.close_intake();
+                    return LocalSessionPumpEvent::ListenerFailed { error };
+                }
+                Ready::Session(Some(dispatch)) => {
+                    self.prefer_listener = true;
+                    return LocalSessionPumpEvent::Session {
+                        dispatch,
+                        invalidations: self.sessions.flush_invalidations(),
+                    };
+                }
+                Ready::Session(None) => return LocalSessionPumpEvent::Idle,
+                Ready::StoreInvalidation => {}
             }
-            Ready::Session(None) => LocalSessionPumpEvent::Idle,
         }
+    }
+
+    fn forward_store_invalidation(&mut self) -> Option<LocalSessionPumpEvent> {
+        let revision = self.store_invalidations.try_revision()?;
+        let _ = self
+            .revisions
+            .publish(revision, [SubscriptionTopic::All], true);
+        Some(LocalSessionPumpEvent::StoreInvalidated {
+            revision,
+            invalidations: self.sessions.flush_invalidations(),
+        })
     }
 
     /// Drops listener readiness and closes future registry admission without closing live sessions.

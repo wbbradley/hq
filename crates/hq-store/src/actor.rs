@@ -56,6 +56,7 @@ impl IngestOutcome {
 }
 
 /// Capacity-one coalesced post-commit revision observer.
+#[derive(Debug)]
 pub struct RevisionInvalidations {
     wakes: Receiver<()>,
     latest: Arc<AtomicU64>,

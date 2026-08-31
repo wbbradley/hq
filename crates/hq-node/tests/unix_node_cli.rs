@@ -443,6 +443,11 @@ fn subscribed_local_event_client_refreshes_and_reconnects_to_a_real_node() {
             event,
             Some(ClientEvent::Snapshot(ref snapshot)) if snapshot.revision > initial_revision
         ) {
+            assert_eq!(
+                subscriber.connection_state(),
+                initial_connection,
+                "an ordinary commit must invalidate the live subscription without reconnecting"
+            );
             break;
         }
         assert!(
