@@ -31,5 +31,5 @@ pub use model::{
     UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind,
     UiTransition, update,
 };
-pub use render::render;
+pub use render::{UiRenderCache, render, render_with_cache};
 pub use theme::{Base16Palette, UiTheme, UiThemeRole};

@@ -346,6 +346,12 @@ The implementation should add roles rather than hard-code colors in `render.rs`:
 Ordinary body text continues to use `ui.text`; technical detail uses `ui.text.technical`. Existing
 list selection roles may continue for Inbox rows.
 
+Implemented Markdown presentation maps ordinary body text to `ui.text`, headings and table headers
+to `ui.heading`, links and list markers to `ui.accent`, inline and fenced code to
+`ui.text.technical`, and quotes, raw HTML, image fallback text, and table borders to
+`ui.text.muted`. Strong, emphasis, and strikethrough add structural modifiers. The full-row
+conversation selection style remains underneath those span styles, including in no-color themes.
+
 The terminal theme may use distinct ANSI colors for the two author roles, muted activity, and
 status colors. Base16 maps self/participant authors to two distinct accent palette entries,
 selection to `base02`, neutral activity to `base03`, success to `base0B`, warning to `base0A`, and
@@ -398,6 +404,15 @@ detail. `UiConversationEntry` is a closed message-or-activity presentation, so a
 technical evidence remain independent from display prose. The intermediate renderer now removes
 ordinary purpose/ID, `message · open`, `update · information only`, and
 `Conversation · complete` labels and begins transcript entries at column zero.
+
+Participant-authored bodies now pass through an HQ-owned inert Markdown adapter after that node
+normalization boundary. The adapter supports the ordinary CommonMark/GFM structures named above,
+shows link targets and image URLs as text, clips natural-width tables, wraps by terminal grapheme
+width, and provides the same width-specific artifact to measurement and painting. It exposes no
+file, network, image-protocol, OSC-8, or syntax-theme capability. Typed activity bypasses the
+adapter. The composer retains exact raw Markdown source; only its display copy neutralizes controls
+and expands tabs. A terminal-owned, bounded cache keys artifacts by entry identity, exact content,
+width, and semantic theme styles, keeping this optimization outside authoritative model state.
 
 ## Implementation migration and acceptance gates
 

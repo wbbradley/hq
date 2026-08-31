@@ -64,11 +64,20 @@ Semantic and boundedness assertions must pass even when timing is below the ceil
 | Late-parent/high-fanout ingest | Insert one missing authority parent waking 500 durable dependants | 5,000 ms |
 | Long-conversation paging | Load ten indexed later pages from a 1,000-entry conversation | 1,000 ms |
 | Invalidation-to-redraw | Apply an invalidation to a ready model holding 10,000 stable rows | 100 ms |
+| Maximum Markdown-page redraw | Repaint 100 cached 16,384-byte representative Markdown messages | 100 ms |
 | Bounded queue behavior | Drain saturated fixed-capacity local-session queues | 1,000 ms |
 | Idle resident memory | Ready foreground node before client pressure | 128 MiB |
 | Active resident memory | Ready node with admitted local connections and repeated status work | 192 MiB |
 | Release build time | Clean locked optimized build of the single `hq` executable | 900 s |
 | Graceful shutdown | Stop acknowledgement through process exit and artifact cleanup | 5,000 ms |
+
+The Markdown gate uses the TUI's actual 100-entry request size and the domain's 16,384-byte content
+bound. The representative body repeats headings, inline styles, links, Unicode, quotes, nested and
+task lists, fenced code, tables, and image fallbacks. An uncached development-profile redraw on
+2026-08-31 took about 1.86 seconds, which justified a cache rather than a looser ceiling. With the
+terminal-owned 128-entry cache primed, the same redraw took about 3.4 milliseconds on that machine;
+the portable regression ceiling remains 100 milliseconds. Exact content, pane width, or semantic
+theme changes miss the cache, and the cache does not enter the immutable UI model.
 
 The environment file uses fully descriptive variable names and decimal milliseconds, seconds, or
 kibibytes. The runner exports those values to the owning Rust tests. Running a test directly uses

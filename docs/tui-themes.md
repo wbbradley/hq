@@ -140,6 +140,25 @@ Every configurable role is listed below. A resolved theme always has a style for
 | `status.error` | Error inline feedback |
 | `status.attention` | Strong attention feedback |
 
+## Markdown message styling
+
+Conversation Markdown uses the existing closed semantic vocabulary rather than library colors:
+
+| Markdown structure | HQ role or modifier |
+| --- | --- |
+| Body text | `ui.text` |
+| Headings and table headers | `ui.heading` |
+| Links and list markers | `ui.accent` |
+| Inline and fenced code | `ui.text.technical` |
+| Quotes, raw HTML, image fallback text, and table borders | `ui.text.muted` |
+| Strong, emphasis, and strikethrough | Bold, italic, and crossed-out modifiers on the semantic base |
+
+Link destinations and image URLs remain visible text; themes cannot turn them into terminal
+hyperlinks or resource loads. Structural markers, indentation, borders, and destinations keep
+Markdown readable in `no-color`. Markdown spans are patched over the applicable full-row
+conversation selection, so custom foreground choices do not remove focused or unfocused selection
+cues.
+
 ## Base16 import
 
 HQ also reads the current Tinted Theming Base16 YAML shape locally and offline: `system`, `name`,

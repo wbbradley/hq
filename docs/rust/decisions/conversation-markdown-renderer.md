@@ -62,6 +62,9 @@ native, custom, and no-color themes complete without exposing renderer-specific 
   fallback.
 - Width handling is the principal integration risk and must be resolved before ordinary message
   presentation changes.
+- Maximum-page measurement showed parsing on every redraw was material. The installed terminal now
+  owns a bounded 128-entry cache keyed by stable entry identity, exact content, width, and the
+  semantic Markdown styles; the immutable model remains free of presentation cache state.
 - A direct `pulldown-cmark` implementation remains a known fallback without changing callers.
 
 ## Sources

@@ -1,6 +1,6 @@
 //! Borrowed responsive Ratatui renderer.
 
-use std::fmt::Write as _;
+use std::{fmt::Write as _, sync::Arc};
 
 use ratatui::{
     Frame,
@@ -23,7 +23,7 @@ use crate::{
     UiProjectManagementAction, UiProjectOutcome, UiProjectRecoverySummary, UiProjectSummaryFocus,
     UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
     UiTechnicalSection, UiTheme, UiThemeRole,
-    message_markdown::{RenderedMessage, render_message},
+    message_markdown::{MessageRenderCache, RenderedMessage},
     model::WIDE_WIDTH,
 };
 
@@ -62,8 +62,32 @@ fn inbox_list_width(available: u16) -> u16 {
         .min(INBOX_LIST_MAX_WIDTH)
 }
 
+/// Reusable bounded presentation state owned by a terminal renderer.
+#[derive(Default)]
+pub struct UiRenderCache {
+    messages: MessageRenderCache,
+}
+
+impl UiRenderCache {
+    /// Creates an empty bounded render cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Renders the complete model without mutation or I/O.
 pub fn render(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme) {
+    render_with_cache(frame, model, theme, &mut UiRenderCache::new());
+}
+
+/// Renders the complete model while reusing terminal-owned presentation artifacts.
+pub fn render_with_cache(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    cache: &mut UiRenderCache,
+) {
     let area = frame.area();
     frame.render_widget(Block::new().style(theme.style(UiThemeRole::Screen)), area);
     if area.width < MINIMUM_WIDTH || area.height < MINIMUM_HEIGHT {
@@ -79,9 +103,9 @@ pub fn render(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme) {
     .areas(area);
     render_header(frame, model, theme, header);
     if area.width >= WIDE_WIDTH {
-        render_wide_content(frame, model, theme, content);
+        render_wide_content(frame, model, theme, content, cache);
     } else {
-        render_compact_content(frame, model, theme, content);
+        render_compact_content(frame, model, theme, content, cache);
     }
     render_footer(frame, model, theme, footer);
     render_new_modal(frame, model, theme, content);
@@ -2562,7 +2586,13 @@ fn render_header(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     );
 }
 
-fn render_wide_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
+fn render_wide_content(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+    cache: &mut UiRenderCache,
+) {
     let [navigation, rows] =
         Layout::horizontal([Constraint::Length(navigation_width()), Constraint::Min(1)])
             .areas(area);
@@ -2593,10 +2623,16 @@ fn render_wide_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
         )),
         navigation,
     );
-    render_rows(frame, model, theme, rows);
+    render_rows(frame, model, theme, rows, cache);
 }
 
-fn render_compact_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
+fn render_compact_content(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+    cache: &mut UiRenderCache,
+) {
     let [tabs, rows] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
     let tab_line = UiSection::ALL
         .into_iter()
@@ -2625,10 +2661,16 @@ fn render_compact_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiThem
         ),
         tabs,
     );
-    render_rows(frame, model, theme, rows);
+    render_rows(frame, model, theme, rows, cache);
 }
 
-fn render_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
+fn render_rows(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+    cache: &mut UiRenderCache,
+) {
     if model.section() == UiSection::Projects {
         render_projects_workspace(frame, model, theme, area);
     } else if model.section() == UiSection::Inbox || model.conversation().is_some() {
@@ -2639,7 +2681,7 @@ fn render_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Re
             ])
             .areas(area);
             render_summary_rows(frame, model, theme, summaries);
-            render_inbox_detail(frame, model, theme, conversation, Borders::LEFT);
+            render_inbox_detail(frame, model, theme, conversation, Borders::LEFT, cache);
         } else {
             let conversation_owns_space =
                 matches!(model.focus(), UiFocus::Conversation | UiFocus::Draft);
@@ -2654,7 +2696,7 @@ fn render_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Re
             } else {
                 render_summary_rows(frame, model, theme, summaries);
             }
-            render_inbox_detail(frame, model, theme, conversation, Borders::TOP);
+            render_inbox_detail(frame, model, theme, conversation, Borders::TOP, cache);
         }
     } else {
         render_summary_rows(frame, model, theme, area);
@@ -3020,6 +3062,7 @@ fn render_inbox_detail(
     theme: &UiTheme,
     area: Rect,
     outer_border: Borders,
+    cache: &mut UiRenderCache,
 ) {
     if model.mailbox_draft().is_some() {
         let draft_height = (area.height / 3).max(6).min(area.height.saturating_sub(2));
@@ -3028,7 +3071,7 @@ fn render_inbox_detail(
         if model.technical_visible() {
             render_technical_inspector(frame, model, theme, conversation, outer_border);
         } else {
-            render_conversation(frame, model, theme, conversation, outer_border);
+            render_conversation(frame, model, theme, conversation, outer_border, cache);
         }
         render_draft_pane(frame, model, theme, draft, Borders::TOP | outer_border);
     } else if model.technical_visible() && model.viewport().width >= WIDE_WIDTH {
@@ -3038,12 +3081,12 @@ fn render_inbox_detail(
             Constraint::Length(inspector_height.min(area.height.saturating_sub(2))),
         ])
         .areas(area);
-        render_conversation(frame, model, theme, conversation, outer_border);
+        render_conversation(frame, model, theme, conversation, outer_border, cache);
         render_technical_inspector(frame, model, theme, inspector, Borders::TOP | outer_border);
     } else if model.technical_visible() {
         render_technical_inspector(frame, model, theme, area, outer_border);
     } else {
-        render_conversation(frame, model, theme, area, outer_border);
+        render_conversation(frame, model, theme, area, outer_border, cache);
     }
 }
 
@@ -3104,6 +3147,7 @@ fn render_draft_pane(
             if model.focus() == UiFocus::Draft {
                 content.insert(cursor, '│');
             }
+            let content = inert_draft_source(&content);
             frame.render_widget(
                 Paragraph::new(content)
                     .style(theme.style(UiThemeRole::Input))
@@ -3123,6 +3167,19 @@ fn render_draft_pane(
             );
         }
     }
+}
+
+fn inert_draft_source(source: &str) -> String {
+    let mut safe = String::with_capacity(source.len());
+    for character in source.chars() {
+        match character {
+            '\n' => safe.push('\n'),
+            '\t' => safe.push_str("    "),
+            character if character.is_control() => safe.push(' '),
+            character => safe.push(character),
+        }
+    }
+    safe
 }
 
 fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
@@ -3329,6 +3386,7 @@ fn render_conversation(
     theme: &UiTheme,
     area: Rect,
     divider: Borders,
+    cache: &mut UiRenderCache,
 ) {
     let conversation = model.conversation();
     let block =
@@ -3382,7 +3440,7 @@ fn render_conversation(
                 entries_area,
             );
         } else {
-            render_conversation_entries(frame, model, theme, entries_area, conversation);
+            render_conversation_entries(frame, model, theme, entries_area, conversation, cache);
         }
     } else if model.conversation_loading() {
         frame.render_widget(
@@ -3581,6 +3639,7 @@ fn render_conversation_entries(
     theme: &UiTheme,
     area: Rect,
     conversation: &crate::UiConversation,
+    cache: &mut UiRenderCache,
 ) {
     if area.width == 0 || area.height == 0 || conversation.entries.is_empty() {
         return;
@@ -3588,7 +3647,7 @@ fn render_conversation_entries(
     let layouts = conversation
         .entries
         .iter()
-        .map(|entry| conversation_entry_layout(entry, area.width, theme))
+        .map(|entry| conversation_entry_layout(entry, area.width, theme, cache))
         .collect::<Vec<_>>();
     let heights = layouts
         .iter()
@@ -3631,7 +3690,7 @@ fn render_conversation_entries(
 }
 
 struct ConversationEntryLayout {
-    message: Option<RenderedMessage>,
+    message: Option<Arc<RenderedMessage>>,
     height: u16,
 }
 
@@ -3639,10 +3698,11 @@ fn conversation_entry_layout(
     entry: &UiConversationEntry,
     width: u16,
     theme: &UiTheme,
+    cache: &mut UiRenderCache,
 ) -> ConversationEntryLayout {
     match &entry.presentation {
         UiConversationEntryPresentation::Message { body, .. } => {
-            let message = render_message(body, width, theme);
+            let message = cache.messages.render(&entry.id, body, width, theme);
             let height = message.body_height().saturating_add(2);
             ConversationEntryLayout {
                 message: Some(message),
@@ -4069,7 +4129,7 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
 mod tests {
     use super::{
         conversation_entry_layout, display_prefix, display_suffix, inbox_list_width,
-        navigation_width, text_field_line, visible_conversation_entries,
+        inert_draft_source, navigation_width, text_field_line, visible_conversation_entries,
     };
     use crate::{
         UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiMessageState,
@@ -4091,6 +4151,19 @@ mod tests {
         assert_eq!(display_prefix("a界b", 2), "a");
         assert_eq!(display_suffix("a界b", 3), "界b");
         assert_eq!(display_suffix("a界b", 2), "b");
+    }
+
+    #[test]
+    fn raw_draft_source_is_terminal_safe_without_changing_markdown() {
+        let source = "# raw\n\t**bold**\x1b[31m\u{0085}\u{007f}";
+        let rendered = inert_draft_source(source);
+
+        assert_eq!(rendered, "# raw\n    **bold** [31m  ");
+        assert!(
+            rendered
+                .chars()
+                .all(|character| !character.is_control() || character == '\n')
+        );
     }
 
     #[test]
@@ -4124,20 +4197,21 @@ mod tests {
     #[test]
     fn message_height_uses_the_width_specific_artifact_for_words_and_wide_text() {
         let theme = UiTheme::terminal();
+        let mut cache = super::UiRenderCache::new();
         assert_eq!(
-            conversation_entry_layout(&message("one\ntwo"), 20, &theme).height,
+            conversation_entry_layout(&message("one\ntwo"), 20, &theme, &mut cache).height,
             3
         );
         assert_eq!(
-            conversation_entry_layout(&message("abcdefgh"), 3, &theme).height,
+            conversation_entry_layout(&message("abcdefgh"), 3, &theme, &mut cache).height,
             5
         );
         assert_eq!(
-            conversation_entry_layout(&message("界界界"), 4, &theme).height,
+            conversation_entry_layout(&message("界界界"), 4, &theme, &mut cache).height,
             4
         );
         assert_eq!(
-            conversation_entry_layout(&message(""), 20, &theme).height,
+            conversation_entry_layout(&message(""), 20, &theme, &mut cache).height,
             3
         );
     }

@@ -50,6 +50,7 @@ TUI/CLI|crates/hq-tui/tests/model.rs|test:both_project_creation_modes_emit_exact
 TUI/CLI|crates/hq-tui/tests/render_snapshots.rs|test:project_lifecycle_controls_are_responsive_confirmed_and_force_gated|Responsive rendering and confirmation snapshots
 TUI/CLI|crates/hq-node/tests/unix_tui_terminal.rs|test:explicit_and_bare_tui_render_and_restore_the_pseudoterminal|Installed client rendering and terminal restoration
 TUI/CLI|crates/hq-node/tests/unix_tui_terminal.rs|test:installed_tui_self_note_matches_cli_and_survives_restart|Installed mailbox workflow parity and restart durability
+TUI/CLI|crates/hq-node/tests/unix_tui_terminal.rs|test:installed_markdown_content_is_inert_and_resource_free|Installed inert Markdown, control neutralization, and resource-free rendering
 TUI/CLI|crates/hq-node/tests/unix_tui_terminal.rs|test:installed_tui_automatically_uses_the_available_provider_and_renders_typed_failure|Installed automatic provider selection and typed failure
 TUI/CLI|crates/hq-node/tests/unix_tui_terminal.rs|test:installed_tui_project_lifecycle_matches_the_cli|Installed project lifecycle parity
 TUI/CLI|crates/hq-node/tests/unix_tui_terminal.rs|test:installed_tui_provisions_a_recoverable_git_worktree_project|Installed recoverable project worktree workflow
@@ -63,6 +64,7 @@ Security/operations|crates/hq-store/tests/qualification_budgets.rs|test:complete
 Security/operations|crates/hq-store/tests/qualification_budgets.rs|test:one_late_parent_wakes_high_fanout_within_the_declared_budget|Late-parent fanout performance budget
 Security/operations|crates/hq-store/tests/qualification_budgets.rs|test:indexed_later_pages_stay_within_the_declared_budget|Indexed later-page performance budget
 Security/operations|crates/hq-tui/tests/qualification_budgets.rs|test:invalidation_of_a_large_ready_model_requests_redraw_within_the_declared_budget|TUI invalidation redraw budget
+Security/operations|crates/hq-tui/tests/qualification_budgets.rs|test:maximum_markdown_page_renders_within_the_declared_redraw_budget|Maximum-page cached Markdown redraw budget
 Security/operations|crates/hq-node/tests/unix_qualification_budgets.rs|test:native_foreground_node_meets_readiness_memory_and_shutdown_budgets|Native readiness memory and shutdown budgets
 Security/operations|scripts/rehearse-rust-recovery.sh|command|Identity database backup restart repair and replacement drill
 Security/operations|scripts/rehearse-rust-controlled-failure.sh|command|Controlled relay and provider recovery drill

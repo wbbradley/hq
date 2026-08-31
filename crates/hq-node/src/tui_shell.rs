@@ -5,14 +5,14 @@ use std::{fmt, io::Stdout, time::Duration};
 use crossterm::{
     cursor::{Hide, Show},
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use hq_local_api::{InitialView, protocol::v1::BuildMetadata};
-use hq_tui::{UiEvent, UiInput, UiModel, UiSize, UiTheme, update};
+use hq_tui::{UiEvent, UiInput, UiModel, UiRenderCache, UiSize, UiTheme, update};
 use nix::unistd::{Uid, User};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -161,6 +161,7 @@ pub trait TuiTerminalPort {
 pub struct CrosstermTerminal {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     theme: UiTheme,
+    render_cache: UiRenderCache,
     activation: TerminalActivation,
 }
 
@@ -170,6 +171,7 @@ enum TerminalActivation {
     Raw,
     AlternateScreen,
     MouseCapture,
+    BracketedPaste,
     CursorHidden,
 }
 
@@ -181,6 +183,7 @@ impl CrosstermTerminal {
         Ok(Self {
             terminal,
             theme,
+            render_cache: UiRenderCache::new(),
             activation: TerminalActivation::Inactive,
         })
     }
@@ -196,6 +199,9 @@ impl TuiTerminalPort for CrosstermTerminal {
         execute!(self.terminal.backend_mut(), EnableMouseCapture)
             .map_err(|_| TuiTerminalError::Activate)?;
         self.activation = TerminalActivation::MouseCapture;
+        execute!(self.terminal.backend_mut(), EnableBracketedPaste)
+            .map_err(|_| TuiTerminalError::Activate)?;
+        self.activation = TerminalActivation::BracketedPaste;
         execute!(self.terminal.backend_mut(), Hide).map_err(|_| TuiTerminalError::Activate)?;
         self.activation = TerminalActivation::CursorHidden;
         Ok(())
@@ -219,8 +225,10 @@ impl TuiTerminalPort for CrosstermTerminal {
     }
 
     fn draw(&mut self, model: &UiModel) -> Result<(), TuiTerminalError> {
+        let theme = &self.theme;
+        let cache = &mut self.render_cache;
         self.terminal
-            .draw(|frame| hq_tui::render(frame, model, &self.theme))
+            .draw(|frame| hq_tui::render_with_cache(frame, model, theme, cache))
             .map(|_| ())
             .map_err(|_| TuiTerminalError::Draw)
     }
@@ -229,6 +237,9 @@ impl TuiTerminalPort for CrosstermTerminal {
         let mut failed = false;
         if self.activation >= TerminalActivation::CursorHidden {
             failed |= execute!(self.terminal.backend_mut(), Show).is_err();
+        }
+        if self.activation >= TerminalActivation::BracketedPaste {
+            failed |= execute!(self.terminal.backend_mut(), DisableBracketedPaste).is_err();
         }
         if self.activation >= TerminalActivation::MouseCapture {
             failed |= execute!(self.terminal.backend_mut(), DisableMouseCapture).is_err();

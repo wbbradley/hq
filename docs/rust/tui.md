@@ -295,11 +295,23 @@ Left/Right and `h`/`l` move one visible level at a time: top-level navigation, I
 selected conversation. In compact layouts, horizontal keys move through top-level sections only
 while navigation owns focus; once inside Inbox, `h`/Left returns from conversation to its list
 before returning to top-level navigation. The conversation region is always present and renders
-its loading, empty, unavailable, or selected state without a surrounding box. Messages use
-column-zero author/body blocks and Ratatui's wrapped display-cell measurement around a stable fact
-anchor. A focused item receives a full-row semantic selection surface without a marker or text
-shift. Compact activity uses status-specific semantic roles. Older-page loading or failure retains
-the transcript and advertises only the actionable PageDown state.
+its loading, empty, unavailable, or selected state without a surrounding box. Participant-authored
+message bodies render Markdown in column-zero author/body blocks. Paragraphs, breaks, headings,
+emphasis, code, quotes, ordered/unordered/task lists, links, images, and GFM tables use one
+width-specific Ratatui text artifact for both display-cell measurement and painting around a stable
+fact anchor. Wide tables clip inside the pane; wrapped nested-list lines retain their structural
+indentation. A focused item receives a full-row semantic selection surface without a marker or text
+shift. Compact typed activity is not parsed as Markdown and uses status-specific semantic roles.
+Older-page loading or failure retains the transcript and advertises only the actionable PageDown
+state.
+
+The node presentation boundary normalizes message line endings, expands tabs, and neutralizes
+terminal controls before Markdown parsing. Rendering exposes link destinations and image URLs as
+ordinary inert text; it never emits OSC-8 links, loads files or images, opens a network resource, or
+loads a syntax theme. Raw HTML remains readable text. Drafts continue to store and edit their exact
+raw Markdown source; the draft pane neutralizes controls and expands tabs only in its display copy.
+Bracketed paste preserves multiline source. These are presentation rules only and do not change
+canonical content, routing, reply targets, or activity semantics.
 
 The header reports the selected section and plain device state (`Connected`, `Connecting…`,
 `Reconnecting…`, `Offline`, `Update required`, or `Updating…`) without hiding retained rows.
@@ -436,9 +448,13 @@ the selected conversation and a modeless draft pane occupies the lower portion o
 while composing. Project rows expose `r continue` for the exact selected thread and `c new
 conversation` for a separate root. A newly committed root is selected by its returned message ID,
 never by display text. An activated conversation centers rendering around the stable fact anchor,
-and rendering shows participant-oriented headings, measured column-zero author/body blocks, and
-compact typed activity. Enter opens a conversation or toggles its selected entry's details;
-PageDown requests the opaque next page. Wide details occupy a bounded lower inspector; compact
+and rendering shows participant-oriented headings, measured themed Markdown message bodies, and
+compact typed non-Markdown activity. The terminal owns a bounded 128-entry artifact cache keyed by
+stable entry identity, exact body, pane width, and the five semantic Markdown styles. Content,
+resize, or theme changes therefore rebuild the artifact without adding presentation state to the
+model; ordinary redraws reuse exact measured lines. Enter opens a conversation or toggles its
+selected entry's details; PageDown requests the opaque next page. Wide details occupy a bounded
+lower inspector; compact
 details, or details beside an open draft, use a secondary pane. `h`/Left/Escape closes details
 before leaving the selected anchor, and another `h`/Left returns to the Inbox list. The inspector
 shows exact routing, semantics, evidence, activity state, and raw detail without inserting records

@@ -5,6 +5,8 @@
 //! `TextTechnical`, and quotes plus table borders use `TextMuted`. Inline strong, emphasis, and
 //! strikethrough retain their structural modifiers. Images and links are visible text only.
 
+use std::{collections::VecDeque, sync::Arc};
+
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span, Text},
@@ -13,6 +15,61 @@ use tui_markdown::{AlertKind, ImageFallback, Options, StyleSheet, from_str_with_
 use unicode_width::UnicodeWidthStr;
 
 use crate::{UiTheme, UiThemeRole};
+
+const MESSAGE_CACHE_CAPACITY: usize = 128;
+
+/// Bounded terminal-owned cache for width- and theme-specific message artifacts.
+#[derive(Default)]
+pub(crate) struct MessageRenderCache {
+    entries: VecDeque<CachedMessage>,
+}
+
+struct CachedMessage {
+    entry_id: String,
+    body: String,
+    width: u16,
+    styles: MessageStyleSheet,
+    rendered: Arc<RenderedMessage>,
+}
+
+impl MessageRenderCache {
+    pub(crate) fn render(
+        &mut self,
+        entry_id: &str,
+        body: &str,
+        width: u16,
+        theme: &UiTheme,
+    ) -> Arc<RenderedMessage> {
+        let styles = MessageStyleSheet::from_theme(theme);
+        if let Some(entry) = self.entries.iter().find(|entry| {
+            entry.entry_id == entry_id
+                && entry.width == width
+                && entry.styles == styles
+                && entry.body == body
+        }) {
+            return Arc::clone(&entry.rendered);
+        }
+
+        self.entries.retain(|entry| entry.entry_id != entry_id);
+        let rendered = Arc::new(render_message_with_styles(body, width, styles));
+        self.entries.push_back(CachedMessage {
+            entry_id: entry_id.to_owned(),
+            body: body.to_owned(),
+            width,
+            styles,
+            rendered: Arc::clone(&rendered),
+        });
+        while self.entries.len() > MESSAGE_CACHE_CAPACITY {
+            self.entries.pop_front();
+        }
+        rendered
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
 
 /// One width-specific message artifact shared by measurement and painting.
 pub(crate) struct RenderedMessage {
@@ -32,7 +89,7 @@ impl RenderedMessage {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MessageStyleSheet {
     heading: Style,
     accent: Style,
@@ -132,8 +189,17 @@ impl StyleSheet for MessageStyleSheet {
 }
 
 /// Builds the message artifact used for both layout and painting.
+#[cfg(test)]
 pub(crate) fn render_message(body: &str, width: u16, theme: &UiTheme) -> RenderedMessage {
     let styles = MessageStyleSheet::from_theme(theme);
+    render_message_with_styles(body, width, styles)
+}
+
+fn render_message_with_styles(
+    body: &str,
+    width: u16,
+    styles: MessageStyleSheet,
+) -> RenderedMessage {
     let options = Options::new(styles).image_fallback(ImageFallback::AltTextAndUrl);
     let mut text = from_str_with_options(body, &options);
     let width = usize::from(width.max(1));
@@ -387,10 +453,12 @@ fn clip_line(line: &mut Line<'_>, width: usize, ellipsis_style: Style) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use ratatui::style::{Color, Modifier, Style};
     use unicode_width::UnicodeWidthStr;
 
-    use super::render_message;
+    use super::{MESSAGE_CACHE_CAPACITY, MessageRenderCache, render_message};
     use crate::{UiTheme, UiThemeRole};
 
     #[test]
@@ -558,5 +626,28 @@ mod tests {
                 assert_eq!(UnicodeWidthStr::width(span.content.as_ref()), span.width());
             }
         }
+    }
+
+    #[test]
+    fn cache_keys_every_presentation_input_and_remains_bounded() {
+        let terminal = UiTheme::terminal();
+        let no_color = UiTheme::no_color();
+        let mut cache = MessageRenderCache::default();
+
+        let original = cache.render("entry", "**body**", 40, &terminal);
+        let hit = cache.render("entry", "**body**", 40, &terminal);
+        assert!(Arc::ptr_eq(&original, &hit));
+
+        let changed_body = cache.render("entry", "*body*", 40, &terminal);
+        assert!(!Arc::ptr_eq(&hit, &changed_body));
+        let changed_width = cache.render("entry", "*body*", 20, &terminal);
+        assert!(!Arc::ptr_eq(&changed_body, &changed_width));
+        let changed_theme = cache.render("entry", "*body*", 20, &no_color);
+        assert!(!Arc::ptr_eq(&changed_width, &changed_theme));
+
+        for index in 0..=MESSAGE_CACHE_CAPACITY {
+            let _ = cache.render(&format!("entry-{index}"), "body", 40, &terminal);
+        }
+        assert_eq!(cache.len(), MESSAGE_CACHE_CAPACITY);
     }
 }

@@ -284,6 +284,100 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
 }
 
 #[test]
+fn installed_markdown_content_is_inert_and_resource_free() {
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let absent_image = directory.path().join("renderer-must-not-read-this.png");
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+    assert!(
+        hq_output(&state_root, &["human", "create"])
+            .status
+            .success()
+    );
+
+    let wide_cell = "x".repeat(240);
+    let content = format!(
+        concat!(
+            "# Adversarial Markdown\n\n",
+            "\x1b[999zCSI_MARKER \x1b]777;OSC_MARKER\x07 C1\u{0085} DEL\u{007f}\n\n",
+            "<span>raw HTML</span> [safe link](https://example.test/inert) ",
+            "![remote image](https://192.0.2.1/never-load.png)\n\n",
+            "```text\n\x1b[888zCODE_MARKER\n```\n\n",
+            "- outer item\n  - nested item with continuation words\n\n",
+            "| Name | Oversized value |\n| --- | --- |\n| bounded | {} |\n\n",
+            "![absent local image](file://{})",
+        ),
+        wide_cell,
+        absent_image.display()
+    );
+    let seeded = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::SubmitPastedSelfNote {
+            content: &content,
+            marker: "Adversarial Markdown",
+        },
+    );
+    assert!(
+        seeded.status.success(),
+        "adversarial note setup failed: {:?}",
+        seeded.bytes
+    );
+    assert!(!absent_image.exists());
+
+    let run = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::NavigateInboxConversation("Adversarial Markdown"),
+    );
+    assert!(
+        run.status.success(),
+        "adversarial Inbox navigation failed: {:?}",
+        run.bytes
+    );
+    for phrase in [
+        "Adversarial Markdown",
+        "CSI_MARKER",
+        "OSC_MARKER",
+        "raw HTML",
+        "https://example.test/inert",
+        "https://192.0.2.1/never-load.png",
+        "CODE_MARKER",
+        "nested item",
+        "h/← Inbox",
+    ] {
+        assert!(
+            run.bytes
+                .windows(phrase.len())
+                .any(|window| window == phrase.as_bytes()),
+            "installed Markdown omitted {phrase:?}: {:?}",
+            run.bytes
+        );
+    }
+    for injection in [
+        b"\x1b[999zCSI_MARKER".as_slice(),
+        b"\x1b]777;OSC_MARKER\x07".as_slice(),
+        b"\x1b[888zCODE_MARKER".as_slice(),
+    ] {
+        assert!(
+            !seeded
+                .bytes
+                .windows(injection.len())
+                .any(|window| window == injection)
+        );
+        assert!(
+            !run.bytes
+                .windows(injection.len())
+                .any(|window| window == injection)
+        );
+    }
+    assert!(!absent_image.exists());
+    assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+}
+
+#[test]
 fn installed_tui_new_launcher_explains_all_three_intents() {
     let _scenario = serial_scenario();
     let directory = TestDirectory::new();
@@ -735,6 +829,10 @@ enum PtyInteraction<'content> {
     OpenNewLauncher,
     CompleteFreshSetupAndReconnect,
     SubmitSelfNote(&'content str),
+    SubmitPastedSelfNote {
+        content: &'content str,
+        marker: &'content str,
+    },
     NavigateInboxConversation(&'content str),
     ReplyToProjectConversation {
         name: &'content str,
@@ -884,7 +982,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::QuitOnStart | PtyInteraction::QuitAfterSetup => vec![b"q"],
                 PtyInteraction::OpenNewLauncher => vec![b"n"],
                 PtyInteraction::CompleteFreshSetupAndReconnect => unreachable!(),
-                PtyInteraction::SubmitSelfNote(_) => vec![b"N"],
+                PtyInteraction::SubmitSelfNote(_) | PtyInteraction::SubmitPastedSelfNote { .. } => {
+                    vec![b"N"]
+                }
                 PtyInteraction::NavigateInboxConversation(_)
                 | PtyInteraction::ReplyToProjectConversation { .. } => Vec::new(),
                 PtyInteraction::CreateAgent(_) => vec![b"l", b"l", b"l", b"c"],
@@ -994,6 +1094,19 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .write_all(format!("{content}\r").as_bytes())
                 .expect("self-note text writes");
             master.flush().expect("self-note text flushes");
+            content_sent = true;
+        }
+        if let PtyInteraction::SubmitPastedSelfNote { content, .. } = interaction
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(b"0/16384 bytes".len())
+                .any(|window| window == b"0/16384 bytes")
+        {
+            master
+                .write_all(format!("\x1b[200~{content}\x1b[201~\r").as_bytes())
+                .expect("bracketed self-note paste writes");
+            master.flush().expect("bracketed self-note paste flushes");
             content_sent = true;
         }
         if let PtyInteraction::NavigateInboxConversation(content) = interaction
@@ -1445,6 +1558,18 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         {
             next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
             if mailbox_contains(state_root, content) {
+                master.write_all(&[0x03]).expect("Ctrl-C writes");
+                master.flush().expect("Ctrl-C flushes");
+                exit_sent = true;
+            }
+        }
+        if let PtyInteraction::SubmitPastedSelfNote { marker, .. } = interaction
+            && content_sent
+            && !exit_sent
+            && Instant::now() >= next_state_probe_at
+        {
+            next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
+            if mailbox_contains(state_root, marker) {
                 master.write_all(&[0x03]).expect("Ctrl-C writes");
                 master.flush().expect("Ctrl-C flushes");
                 exit_sent = true;
