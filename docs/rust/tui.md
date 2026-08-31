@@ -439,12 +439,16 @@ rather than reporting cardinality.
 Mailbox composition is deliberately different from those decision dialogs: it stays modeless in
 the Inbox and never uses a message-entry dialog.
 
-Dialogs lead with what will change and why HQ needs the input. Project details first show status,
-folder ownership, and the assigned agent; agent details first show assignment-aware status and
-saved conversations; mailbox dialogs say who will receive a message or that a personal note is
-private. Destructive confirmations say what HQ keeps on disk and distinguish an explicit safety
-override from ordinary confirmation. Compact dialogs omit or shorten secondary evidence before
-they hide a required field, warning, action, or recovery instruction.
+Dialogs lead with what will change and why HQ needs the input. Agent details first show
+assignment-aware status and saved conversations; mailbox dialogs say who will receive a message or
+that a personal note is private. Destructive confirmations say what HQ keeps on disk and
+distinguish an explicit safety override from ordinary confirmation. Compact dialogs omit or shorten
+secondary evidence before they hide a required field, warning, action, or recovery instruction.
+
+The proposed modeless Projects workspace, its user-facing nouns and verbs, state-dependent action
+matrix, responsive interaction maps, and migration away from the current Project details dialog are
+specified for review in `docs/rust/projects-workspace.md`. Until that specification is approved and
+implemented, the current project dialog is legacy behavior rather than a product pattern to copy.
 
 Technical evidence is preserved, not translated away. Detail views and the `?` then `t` page label
 project, resource, assignment, message, request, provider/session, thread, revision, frontier,
