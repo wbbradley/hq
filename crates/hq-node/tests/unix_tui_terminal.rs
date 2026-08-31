@@ -1098,6 +1098,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 bytes[offset..]
                     .windows(b"New project conversation".len())
                     .any(|window| window == b"New project conversation")
+                    && bytes[offset..]
+                        .windows(b"0/16384 bytes".len())
+                        .any(|window| window == b"0/16384 bytes")
             })
         {
             master
@@ -1380,8 +1383,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && Instant::now() >= next_state_probe_at
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"New project conversation".len())
-                    .any(|window| window == b"New project conversation")
+                    .windows(b"new conversation".len())
+                    .any(|window| window == b"new conversation")
             })
         {
             next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
