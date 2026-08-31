@@ -10823,3 +10823,82 @@ subtask intentionally leaves the old percentage split and fixed-height viewport 
 stack layer while removing their most confusing visible labels.
 
 <!-- End of archived plan entry. -->
+
+## 2026-08-30 — Automatic project follow-up delivery
+
+Implemented project-owned post-commit reconciliation that accepts typed human project messages and
+automatically submits stable `DispatchPending` commands through the existing durable project saga.
+Runnable project follow-ups now reach the assigned agent and refresh the open Inbox conversation
+without a restart or manual dispatch. Closed, unassigned, blocked, busy, and reconcilable projects
+retain pending input for bounded startup, drain, and post-commit repair.
+
+Centralized the human-input purpose boundary across selection, acceptance planning, conversation
+classification, and project reduction so agent status and final output cannot advance the project
+input sequence or replay into the provider. Added reducer, planner, component, retry, full installed
+two-turn TUI, and malformed/reordered-evidence coverage; updated the normative architecture and
+acceptance docs. The full locked workspace formatting, Clippy, and all-target/all-feature test gates
+pass. Rebuilt and installed commit `89cc6e8`, discarded the previous local state, and created a new
+installation identity and human account with `scripts/hq-bootstrap`.
+
+### Original plan entry
+
+### Deliver project follow-ups automatically without replaying agent output
+
+Make every committed human message to a runnable project flow through the existing durable project
+input and dispatch workflow, including messages sent from Inbox with `r`, while ensuring agent
+status and final-output messages can never become project inputs.
+
+- Write failing tests that reproduce the observed path: deliver an initial instruction during
+  activation, then commit a second project message through `ControlMailbox`. Prove the follow-up is
+  accepted exactly once, automatically enters the pending-dispatch workflow, produces one harness
+  delivery and one `ProjectInputDispatched` fact, exposes agent activity, and reaches the open
+  conversation without a restart or explicit project command.
+- Define one project-owned post-commit operation that sequences eligible messages and schedules
+  bounded dispatch. Keep mailbox composition decoupled from provider details and reuse the existing
+  project saga, ordered pending-input drain, stable delivery identity, and harness ledger rather
+  than adding another queue or direct provider-submission path. Preserve deterministic retries
+  across uncertain acceptance, dispatch, and response loss.
+- Centralize project-input eligibility and enforce it both when the home reconciler selects a
+  candidate and when canonical acceptance is planned or reduced. Accept only the human-authored
+  project message purposes defined by the project model; reject `ProjectOutput` status/final
+  messages even when they carry the same project ID and mailbox recipient. Add reordered-fact and
+  malformed-acceptance tests proving agent output cannot advance the input sequence or enter the
+  pending queue.
+- Preserve lifecycle and concurrency behavior: closed, unassigned, blocked, or otherwise
+  non-runnable projects retain accepted input without treating submission as failed; runnable
+  assignments dispatch in sequence; simultaneous submissions remain at-most-once at the provider
+  boundary; and a busy or reconcilable workflow retains a durable automatic-dispatch trigger for
+  bounded repair instead of stranding work.
+- Add node-level coverage for mailbox commit → input reconciliation → dispatch, plus an installed
+  TUI regression that sends a real follow-up with `r`, observes working activity, and receives the
+  response in the already-open conversation. Cover startup/drain recovery and prove agent output is
+  not re-ingested when its conversation facts arrive before or after input acceptance.
+- Treat contaminated local stores as disposable pre-release data: add no migration or in-place
+  canonical repair. After the fix is built, use `scripts/hq-bootstrap` to reset the current local
+  installation and verify the fresh onboarding, initial delivery, and follow-up-delivery journey.
+- Update the project model, application-service architecture, and acceptance-scenario documentation
+  so automatic delivery is normative and manual dispatch is only typed stalled-delivery recovery.
+  Keep protocol/schema shapes unchanged unless the implementation proves a change is necessary.
+
+Implementation map:
+
+- `crates/hq-domain/src/semantic_fact.rs`: expose the shared typed distinction between project
+  input purposes and project output.
+- `crates/hq-projects/src/input.rs` and `crates/hq-projects/src/lib.rs`: apply the eligibility rule
+  during candidate selection and acceptance planning, and derive bounded, stable automatic
+  dispatch requests from authoritative pending-input state.
+- `crates/hq-reducer/src/conversation.rs`, `crates/hq-reducer/src/project.rs`, and
+  `crates/hq-testkit/tests/project_reduction.rs`: enforce payload/purpose and referenced-input
+  invariants under arbitrary fact arrival order.
+- `crates/hq-node/src/project_component.rs`, `crates/hq-node/src/components.rs`,
+  `crates/hq-node/src/foreground.rs`, and `crates/hq-node/src/graceful_runtime.rs`: compose input
+  reconciliation with project-owned automatic dispatch at mailbox commit, project-command,
+  startup, and drain boundaries.
+- `crates/hq-node/tests/project_node_component.rs`, `crates/hq-node/tests/node_components.rs`,
+  `crates/hq-node/tests/support/mod.rs`, and `crates/hq-node/tests/unix_tui_terminal.rs`: cover the
+  component contract and the installed follow-up journey.
+- `docs/projects.md`, `docs/rust/application-services.md`, `docs/rust/acceptance-scenarios.md`, and
+  `docs/rust/tui.md`: document automatic delivery, typed eligibility, durable recovery, and the
+  exceptional-only manual retry path.
+
+<!-- End of archived plan entry. -->
