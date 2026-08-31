@@ -3,10 +3,9 @@
 Status: Active pure-client contract
 
 Focused interaction specifications extend this contract. The approved
-[Inbox conversation surface](inbox-conversation-surface.md) has its typed presentation boundary in
-production; its responsive viewport, dedicated theme roles, and inspector remain queued. The
-approved [Projects workspace](projects-workspace.md) is also queued for implementation. Until each
-remaining production acceptance gate passes, descriptions below that name current rendering remain
+[Inbox conversation surface](inbox-conversation-surface.md) is implemented. The approved
+[Projects workspace](projects-workspace.md) remains queued for implementation. Until that
+production acceptance gate passes, descriptions below that name current Projects rendering remain
 implementation truth, not patterns to preserve.
 
 `hq-tui` owns deterministic presentation state and borrowed Ratatui rendering. It does not own a
@@ -197,9 +196,10 @@ state. Invalidation and periodic repair load a replacement bundle in the backgro
 previous complete bundle remains visible. Conversation summaries carry store-derived open,
 archived, and local-human-authored counts, the exact reserved local-human mailbox, a typed
 project/participant presentation context, and one sanitized bounded message preview. The node uses
-the typed context for list titles such as `Release · Alice`, `Me and Alice`, and `Personal notes`;
-unresolved names use an honest fallback rather than an internal identifier. Mailbox filters do not
-scan or reorder message bodies.
+the typed context for participant-first list titles such as `Alice`, `Project agent`, `Other
+participant`, and `Personal notes`; optional project context and a bounded preview occupy the
+second line. Unresolved names use an honest fallback rather than an internal identifier. Mailbox
+filters do not scan or reorder message bodies.
 Selecting a summary issues the ordinary `ConversationPage` request with an opaque cursor, and a
 newer selection supersedes the pending preview without allowing a stale completion to replace it.
 Returned message/activity unions remain in reducer order. The page mapper classifies an author as
@@ -277,7 +277,8 @@ role and file-format reference is in [TUI themes](../tui-themes.md).
 The first responsive layouts are semantic Rust-era layouts, not Bubble Tea compatibility:
 
 - at least 96 columns: persistent left section navigation plus adjacent Inbox-list and conversation
-  panes separated by single vertical dividers;
+  panes separated by single vertical dividers; the Inbox list prefers 32 columns, stays within
+  24–36 columns, and preserves a 48-column Conversation target whenever space permits;
 - 40 through 95 columns: compact horizontal section navigation above a persistent stacked
   Inbox-list/conversation workspace with one separator;
 - below 40 columns or 10 rows: a bounded resize message that retains the quit hint.
@@ -287,7 +288,11 @@ Left/Right and `h`/`l` move one visible level at a time: top-level navigation, I
 selected conversation. In compact layouts, horizontal keys move through top-level sections only
 while navigation owns focus; once inside Inbox, `h`/Left returns from conversation to its list
 before returning to top-level navigation. The conversation region is always present and renders
-its loading, empty, unavailable, or selected-diagnostic state without a surrounding box.
+its loading, empty, unavailable, or selected state without a surrounding box. Messages use
+column-zero author/body blocks and Ratatui's wrapped display-cell measurement around a stable fact
+anchor. A focused item receives a full-row semantic selection surface without a marker or text
+shift. Compact activity uses status-specific semantic roles. Older-page loading or failure retains
+the transcript and advertises only the actionable PageDown state.
 
 The header reports the selected section and plain device state (`Connected`, `Connecting…`,
 `Reconnecting…`, `Offline`, `Update required`, or `Updating…`) without hiding retained rows.
@@ -349,7 +354,8 @@ Press n New… and choose “Work with an agent on a project.”
 ```
 
 The checklist advances from project/resource ownership to agent creation, agent-service readiness,
-and the first project instruction. It shows only the current action plus completed prerequisites.
+and opening the first project conversation and Inbox draft. It shows only the current action plus
+completed prerequisites.
 When more than one service is available, the guided workflow presents typed choices; one service is
 automatic, and no service becomes a distinct setup step. Users never type a provider namespace.
 The project step recommends recording an existing folder and keeps Git worktree creation behind the
@@ -423,13 +429,13 @@ the selected conversation and a modeless draft pane occupies the lower portion o
 while composing. Project rows expose `r continue` for the exact selected thread and `c new
 conversation` for a separate root. A newly committed root is selected by its returned message ID,
 never by display text. An activated conversation centers rendering around the stable fact anchor,
-and the current intermediate renderer shows participant-oriented headings, column-zero author/body
-blocks, and compact typed activity. It still expands typed routing, semantics, evidence, or
-activity sections inline and uses a fixed-height viewport. The remaining replacement is specified
-in [Inbox conversation surface](inbox-conversation-surface.md): measured wrapped heights,
-dedicated semantic styles, and an in-pane technical inspector. Enter
-opens a conversation or toggles its selected entry's details; PageDown requests the opaque next
-page; Escape collapses details and then the conversation. The conversation footer spells out the
+and rendering shows participant-oriented headings, measured column-zero author/body blocks, and
+compact typed activity. Enter opens a conversation or toggles its selected entry's details;
+PageDown requests the opaque next page. Wide details occupy a bounded lower inspector; compact
+details, or details beside an open draft, use a secondary pane. `h`/Left/Escape closes details
+before leaving the selected anchor, and another `h`/Left returns to the Inbox list. The inspector
+shows exact routing, semantics, evidence, activity state, and raw detail without inserting records
+into the transcript. The conversation footer spells out the
 applicable `a archive` or `u restore` control for the selected exact message; contextual help carries
 the wider reply, direct-message, note, navigation, and quit reference. Stable failures replace the
 ordinary footer with a plain failure statement and recovery action; their stable code remains in

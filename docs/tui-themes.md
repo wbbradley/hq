@@ -105,6 +105,14 @@ Every configurable role is listed below. A resolved theme always has a style for
 | `ui.text.technical` | IDs and technical evidence |
 | `ui.heading` | Section headings |
 | `ui.accent` | Primary interactive accent |
+| `conversation.author.self` | Explicit `You` author label |
+| `conversation.author.participant` | Named or fallback participant author label |
+| `conversation.activity` | Neutral or running compact transcript activity |
+| `conversation.activity.success` | Successful compact transcript activity |
+| `conversation.activity.warning` | Interrupted or cautionary compact transcript activity |
+| `conversation.activity.error` | Failed compact transcript activity |
+| `conversation.selection.focused` | Full-row transcript item selected with Conversation focus |
+| `conversation.selection.unfocused` | Full-row transcript selection retained behind details or a draft |
 | `ui.selection.focused` | Selected item in the focused control |
 | `ui.selection.unfocused` | Selected item outside the focused control |
 | `ui.border.focused` | Focused control border |
@@ -142,12 +150,13 @@ complete HQ theme using this mapping:
 | --- | --- |
 | `base00` | Screen background |
 | `base05` | Ordinary text |
-| `base03` | Muted text |
+| `base03` | Muted text and neutral conversation activity |
 | `base02` | Selections and secondary surfaces |
-| `base08` | Errors |
-| `base0A` | Warnings |
-| `base0B` | Success |
-| `base0D` | Accents and focus |
+| `base08` | Errors and failed conversation activity |
+| `base0A` | Warnings and interrupted conversation activity |
+| `base0B` | Success and successful conversation activity |
+| `base0D` | Accents, focus, and the local-human author |
+| `base0E` | Conversation participant author |
 
 A native TOML theme may `inherits` a Base16 filename stem and then override individual semantic
 roles. Base16 is palette interchange, not HQ's semantic role schema.

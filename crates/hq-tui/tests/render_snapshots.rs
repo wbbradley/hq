@@ -292,9 +292,18 @@ fn identity_only_state_renders_setup_and_recovery_actions() {
         },
     );
     let rendered = render_text(&model);
-    assert!(rendered.contains("No human account is selected"));
-    assert!(rendered.contains("hq human create"));
-    assert!(rendered.contains("press F5 to continue"));
+    assert!(contains_visible_words_in_order(
+        &rendered,
+        "No human account is selected"
+    ));
+    assert!(contains_visible_words_in_order(
+        &rendered,
+        "hq human create"
+    ));
+    assert!(
+        contains_visible_words_in_order(&rendered, "press F5 to continue"),
+        "{rendered}"
+    );
     assert!(!rendered.contains("hq human show"));
 
     let help = update(model, UiEvent::Input(UiInput::Help))
@@ -341,7 +350,7 @@ fn fresh_workspace_renders_one_ordered_onboarding_step_at_a_time() {
     let project_only = render_text(&loaded_snapshot_model(size, project_only));
     assert!(project_only.contains("Project ready"), "{project_only}");
     assert!(
-        project_only.contains("Current: create an agent to do the work"),
+        contains_visible_words_in_order(&project_only, "Current: create an agent to do the work"),
         "{project_only}"
     );
 
@@ -351,7 +360,7 @@ fn fresh_workspace_renders_one_ordered_onboarding_step_at_a_time() {
     let agent_only = render_text(&loaded_snapshot_model(size, agent_only));
     assert!(agent_only.contains("Agent ready"), "{agent_only}");
     assert!(
-        agent_only.contains("Current: connect an agent service"),
+        contains_visible_words_in_order(&agent_only, "Current: connect an agent service"),
         "{agent_only}"
     );
 
@@ -367,7 +376,7 @@ fn fresh_workspace_renders_one_ordered_onboarding_step_at_a_time() {
     let ready = render_text(&loaded_snapshot_model(size, ready));
     assert!(ready.contains("Agent service ready"), "{ready}");
     assert!(
-        ready.contains("Current: send the first project instruction"),
+        contains_visible_words_in_order(&ready, "Current: open the first project conversation"),
         "{ready}"
     );
     assert!(
@@ -715,6 +724,81 @@ fn conversation_layout_preserves_reducer_order_and_typed_activity_state() {
         "update · information only",
     ] {
         assert!(!rendered.contains(obsolete), "obsolete label: {obsolete}");
+    }
+}
+
+#[test]
+fn compact_conversation_focus_keeps_only_the_selected_inbox_summary() {
+    let rendered = render_text(&conversation_model(UiSize {
+        width: 72,
+        height: 20,
+    }));
+    assert!(rendered.contains("Deploy production"), "{rendered}");
+    assert!(rendered.contains("waiting for approval"), "{rendered}");
+    assert!(!rendered.contains("Build release"), "{rendered}");
+}
+
+#[test]
+fn conversation_messages_start_at_the_pane_edge_and_selection_fills_the_row() {
+    let model = conversation_model(UiSize {
+        width: 120,
+        height: 24,
+    });
+    let theme = UiTheme::terminal();
+    let buffer = render_buffer_with_theme(&model, &theme);
+    let (body_x, body_y) = find_text_start(&buffer, "Can we ship?");
+    let divider_x = (0..body_x)
+        .rev()
+        .find(|x| {
+            buffer
+                .cell((*x, body_y))
+                .is_some_and(|cell| cell.symbol() == "│")
+        })
+        .expect("Conversation divider");
+    assert_eq!(body_x, divider_x + 1, "message body has no renderer indent");
+
+    let selected = theme.style(UiThemeRole::ConversationSelectionFocused);
+    for y in [body_y - 1, body_y, body_y + 1] {
+        let final_cell = buffer.cell((119, y)).expect("full selected row");
+        assert!(
+            final_cell.modifier.contains(Modifier::REVERSED),
+            "selection reaches the last pane cell at row {y}"
+        );
+        assert!(
+            final_cell.modifier.contains(selected.add_modifier),
+            "selection uses the focused conversation role"
+        );
+    }
+    let author = buffer.cell((body_x, body_y - 1)).expect("author cell");
+    assert_eq!(
+        Some(author.fg),
+        theme.style(UiThemeRole::ConversationAuthorParticipant).fg
+    );
+}
+
+#[test]
+fn technical_details_are_in_pane_and_keep_exact_activity_content() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 20,
+        },
+    ] {
+        let activity = update(conversation_model(size), UiEvent::Input(UiInput::NextItem))
+            .expect("select activity");
+        let details = update(activity.model, UiEvent::Input(UiInput::Activate))
+            .expect("open technical details")
+            .model;
+        let rendered = render_text(&details);
+        assert!(rendered.contains("Activity details"), "{rendered}");
+        assert!(rendered.contains("compiling"), "{rendered}");
+        assert!(rendered.contains("sequence: 2"), "{rendered}");
+        assert!(rendered.contains("h/← close details"), "{rendered}");
+        assert!(!rendered.contains("activity sequence="), "{rendered}");
     }
 }
 
@@ -1590,7 +1674,10 @@ fn ordinary_surfaces_use_user_intentions_and_label_technical_evidence() {
             },
         );
         let human = render_text(&human);
-        assert!(human.contains("This device is not allowed to use the selected account"));
+        assert!(contains_visible_words_in_order(
+            &human,
+            "This device is not allowed to use the selected account"
+        ));
         assert!(!human.contains("authority"));
     }
 }

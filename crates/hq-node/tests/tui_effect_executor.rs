@@ -679,7 +679,7 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
         UiHumanState::NeedsAttention(UiHumanIssue::NoAccountSelected)
     );
     assert_eq!(snapshot.inbox_rows.len(), 2);
-    assert_eq!(snapshot.inbox_rows[0].title, "Me and builder");
+    assert_eq!(snapshot.inbox_rows[0].title, "builder");
     assert_eq!(snapshot.inbox_rows[0].detail, "Can we ship?");
     assert_eq!(snapshot.inbox_rows[1].state, hq_tui::UiRowState::Attention);
     assert_eq!(snapshot.direct_targets.len(), 1);
@@ -759,8 +759,11 @@ fn authoritative_snapshot_preserves_project_thread_conversation_identity() {
         snapshot.inbox_rows[0].id,
         format!("project:{}:{}", "31".repeat(32), "42".repeat(32))
     );
-    assert_eq!(snapshot.inbox_rows[0].title, "release · alice");
-    assert_eq!(snapshot.inbox_rows[0].detail, "Let's have a conversation.");
+    assert_eq!(snapshot.inbox_rows[0].title, "alice");
+    assert_eq!(
+        snapshot.inbox_rows[0].detail,
+        "release · Let's have a conversation."
+    );
 }
 
 #[test]

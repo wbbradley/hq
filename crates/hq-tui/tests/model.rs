@@ -1592,6 +1592,76 @@ fn inbox_left_and_right_navigation_moves_one_visible_level_at_a_time() {
 }
 
 #[test]
+fn inbox_back_closes_technical_details_before_leaving_the_conversation() {
+    let model = opened_conversation(vec![entry("message-1", false)]);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("open details");
+    assert!(details.model.technical_visible());
+
+    let closed =
+        update(details.model, UiEvent::Input(UiInput::Character('h'))).expect("close details");
+    assert!(!closed.model.technical_visible());
+    assert_eq!(closed.model.focus(), UiFocus::Conversation);
+
+    let back = update(closed.model, UiEvent::Input(UiInput::MoveCursorLeft))
+        .expect("return to Inbox list");
+    assert_eq!(back.model.focus(), UiFocus::Content);
+}
+
+#[test]
+fn older_page_failure_preserves_transcript_anchor_and_retry_cursor() {
+    let loaded = loaded_transition(snapshot(1, &["thread-a"]));
+    let (first_page_id, _, _) = conversation_effect(&loaded.effects);
+    let opened = update(
+        loaded.model,
+        UiEvent::ConversationLoaded {
+            effect_id: first_page_id,
+            page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
+                row_id: "thread-a".to_owned(),
+                entries: vec![entry("message-1", false), entry("message-2", false)],
+                next_cursor: Some("older-2".to_owned()),
+            },
+        },
+    )
+    .expect("first page");
+    let focused =
+        update(opened.model, UiEvent::Input(UiInput::Activate)).expect("focus conversation");
+    let anchored =
+        update(focused.model, UiEvent::Input(UiInput::NextItem)).expect("select second message");
+    let loading =
+        update(anchored.model, UiEvent::Input(UiInput::LoadMore)).expect("load older page");
+    assert!(loading.model.conversation_older_loading());
+    let (older_page_id, _, cursor) = conversation_effect(&loading.effects);
+    assert_eq!(cursor, Some("older-2"));
+
+    let failed = update(
+        loading.model,
+        UiEvent::ConversationFailed {
+            effect_id: older_page_id,
+            failure: UiFailure {
+                code: "offline".to_owned(),
+                action: "try again when connected".to_owned(),
+            },
+        },
+    )
+    .expect("older page failure");
+    assert!(failed.model.conversation_failure_is_older());
+    assert_eq!(failed.model.conversation_anchor(), Some("message-2"));
+    assert_eq!(
+        failed
+            .model
+            .conversation()
+            .map(|conversation| conversation.entries.len()),
+        Some(2)
+    );
+
+    let retry = update(failed.model, UiEvent::Input(UiInput::LoadMore)).expect("retry older page");
+    let (_, _, retry_cursor) = conversation_effect(&retry.effects);
+    assert_eq!(retry_cursor, Some("older-2"));
+}
+
+#[test]
 fn invalidation_reloads_an_open_conversation_and_ignores_its_stale_page() {
     let started = started_model();
     let snapshot_id = snapshot_effect(&started.effects);

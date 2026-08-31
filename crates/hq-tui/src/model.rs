@@ -1806,6 +1806,13 @@ struct PendingConversation {
     enter_on_load: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConversationFailure {
+    row_id: String,
+    cursor: Option<String>,
+    failure: UiFailure,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PendingMailboxKind {
     OpenDraft,
@@ -1826,7 +1833,7 @@ struct UiSectionWorkspace {
     conversation_anchor: Option<String>,
     technical_visible: bool,
     focus: UiFocus,
-    conversation_failure: Option<(String, UiFailure)>,
+    conversation_failure: Option<ConversationFailure>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1861,7 +1868,7 @@ pub struct UiModel {
     required_revision: Option<u64>,
     pending_snapshot: Option<PendingSnapshot>,
     pending_conversation: Option<PendingConversation>,
-    conversation_failure: Option<(String, UiFailure)>,
+    conversation_failure: Option<ConversationFailure>,
     pending_mailbox: Option<PendingMailbox>,
     pending_agent: Option<EffectId>,
     pending_managed_session: Option<EffectId>,
@@ -2241,12 +2248,26 @@ impl UiModel {
         })
     }
 
+    /// Returns whether an older page is loading for the selected conversation.
+    pub fn conversation_older_loading(&self) -> bool {
+        self.pending_conversation.as_ref().is_some_and(|pending| {
+            pending.cursor.is_some() && self.selected_row.as_ref() == Some(&pending.row_id)
+        })
+    }
+
     /// Borrows a failure scoped to the currently selected conversation row.
     pub fn conversation_failure(&self) -> Option<&UiFailure> {
         self.conversation_failure
             .as_ref()
-            .filter(|(row_id, _)| self.selected_row.as_ref() == Some(row_id))
-            .map(|(_, failure)| failure)
+            .filter(|failure| self.selected_row.as_ref() == Some(&failure.row_id))
+            .map(|failure| &failure.failure)
+    }
+
+    /// Returns whether the visible conversation failure came from an older-page request.
+    pub fn conversation_failure_is_older(&self) -> bool {
+        self.conversation_failure.as_ref().is_some_and(|failure| {
+            failure.cursor.is_some() && self.selected_row.as_ref() == Some(&failure.row_id)
+        })
     }
 
     /// Returns transient prerequisite guidance produced by the latest input.
@@ -2850,7 +2871,11 @@ fn apply_input(
         }
         UiInput::MoveCursorLeft => match model.focus {
             UiFocus::Conversation => {
-                model.focus = UiFocus::Content;
+                if model.technical_visible {
+                    model.technical_visible = false;
+                } else {
+                    model.focus = UiFocus::Content;
+                }
                 true
             }
             UiFocus::Content => {
@@ -6354,6 +6379,9 @@ fn mailbox_shortcut(
         }
         'h' => {
             match model.focus {
+                UiFocus::Conversation if model.technical_visible => {
+                    model.technical_visible = false;
+                }
                 UiFocus::Conversation => model.focus = UiFocus::Content,
                 UiFocus::Content => model.focus = UiFocus::Navigation,
                 UiFocus::Navigation if model.viewport.width < WIDE_WIDTH => {
@@ -6725,13 +6753,14 @@ fn conversation_failed(
     {
         return;
     }
-    let row_id = model
-        .pending_conversation
-        .as_ref()
-        .map(|pending| pending.row_id.clone())
-        .unwrap_or_default();
-    model.pending_conversation = None;
-    model.conversation_failure = Some((row_id, failure.clone()));
+    let Some(pending) = model.pending_conversation.take() else {
+        return;
+    };
+    model.conversation_failure = Some(ConversationFailure {
+        row_id: pending.row_id,
+        cursor: pending.cursor,
+        failure: failure.clone(),
+    });
     model.last_failure = Some(failure);
     effects.push(UiEffect::RequestRedraw);
 }

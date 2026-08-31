@@ -2000,17 +2000,17 @@ fn conversation_row(
         ConversationKeyDto::Thread { .. } | ConversationKeyDto::ProviderSession { .. } => None,
     };
     let id = conversation_identity(key);
-    let title = conversation_title(context);
     let (count, label, state) = match section {
         UiSection::Inbox => (counts.open, "open messages", UiRowState::Open),
         UiSection::Sent => (counts.sent, "sent messages", UiRowState::Waiting),
         UiSection::Archived => (counts.archived, "archived messages", UiRowState::Archived),
         UiSection::Agents | UiSection::Projects => return None,
     };
+    let fallback = format!("{count} {label}");
     Some(UiRow {
         id,
-        title,
-        detail: preview.map_or_else(|| format!("{count} {label}"), terminal_text),
+        title: conversation_title(context),
+        detail: conversation_list_detail(context, preview, &fallback),
         state,
         kind: UiRowKind::Conversation,
         conversation_target,
@@ -2336,24 +2336,30 @@ fn conversation_identity(key: ConversationKeyDto) -> String {
 fn conversation_title(context: &ConversationContextDto) -> String {
     match context {
         ConversationContextDto::Personal => "Personal notes".to_owned(),
-        ConversationContextDto::Direct { participant } => format!(
-            "Me and {}",
-            participant
-                .name
-                .as_deref()
-                .map_or_else(|| "unnamed participant".to_owned(), terminal_text)
-        ),
-        ConversationContextDto::Project {
-            name, participant, ..
-        } => format!(
-            "{} · {}",
+        ConversationContextDto::Direct { participant } => participant
+            .name
+            .as_deref()
+            .map_or_else(|| "Other participant".to_owned(), terminal_text),
+        ConversationContextDto::Project { participant, .. } => participant
+            .as_ref()
+            .and_then(|participant| participant.name.as_deref())
+            .map_or_else(|| "Project agent".to_owned(), terminal_text),
+    }
+}
+
+fn conversation_list_detail(
+    context: &ConversationContextDto,
+    preview: Option<&str>,
+    fallback: &str,
+) -> String {
+    let message = preview.map_or_else(|| fallback.to_owned(), terminal_text);
+    match context {
+        ConversationContextDto::Project { name, .. } => format!(
+            "{} · {message}",
             name.as_deref()
                 .map_or_else(|| "Unnamed project".to_owned(), terminal_text),
-            participant
-                .as_ref()
-                .and_then(|participant| participant.name.as_deref())
-                .map_or_else(|| "unnamed participant".to_owned(), terminal_text)
         ),
+        ConversationContextDto::Personal | ConversationContextDto::Direct { .. } => message,
     }
 }
 
@@ -2504,7 +2510,7 @@ mod tests {
             conversation_title(&ConversationContextDto::Direct {
                 participant: participant.clone(),
             }),
-            "Me and Alice"
+            "Alice"
         );
         assert_eq!(
             conversation_title(&ConversationContextDto::Project {
@@ -2512,7 +2518,7 @@ mod tests {
                 name: Some("Release".to_owned()),
                 participant: Some(participant),
             }),
-            "Release · Alice"
+            "Alice"
         );
 
         let unnamed = conversation_title(&ConversationContextDto::Direct {
@@ -2523,7 +2529,7 @@ mod tests {
                 name: None,
             },
         });
-        assert_eq!(unnamed, "Me and unnamed participant");
+        assert_eq!(unnamed, "Other participant");
         assert!(!unnamed.contains(&"ee".repeat(32)));
         assert!(!unnamed.contains(&"ff".repeat(32)));
     }

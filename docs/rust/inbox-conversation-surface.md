@@ -1,8 +1,7 @@
 # Inbox conversation surface specification
 
-Status: approved, implementation in progress. The typed conversation voices and activity boundary
-are implemented. Responsive pane sizing, measured scrolling, dedicated theme roles, and the
-technical inspector remain acceptance work.
+Status: implemented. Typed conversation voices, compact activity, responsive pane sizing, measured
+scrolling, dedicated theme roles, and the in-pane technical inspector are production behavior.
 
 ## Product intent
 
@@ -239,9 +238,9 @@ message 8b1c… · conversation e751…
 h/← close details · ? help
 ```
 
-The abbreviated values above illustrate ordinary inspector scanning. Selecting a technical section
-reveals its exact unabridged value; copying or machine-oriented inspection must never receive the
-abbreviation. The inspector divider is not a box around either message or transcript.
+The abbreviated values above only keep the wireframe readable. Production inspector values are
+exact and unabridged; long values wrap or clip at the bounded viewport rather than being rewritten.
+The inspector divider is not a box around either message or transcript.
 
 ### Compact terminals
 

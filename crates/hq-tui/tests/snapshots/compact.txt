@@ -3,11 +3,11 @@
 ────────────────────────────────────────────────────────────────────────
 Inbox · Sent · Archived · Agents · Projects
 ────────────────────────────────────────────────────────────────────────
- Inbox · 3 conversations
+Inbox · 3 conversations
 
-   Build release
-     open · agent-1
- › Deploy production
+Build release
+agent-1
+Deploy production
 ────────────────────────────────────────────────────────────────────────
 Loading messages…
 

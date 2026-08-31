@@ -263,6 +263,15 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   its authoritative project thread, activated exactly once, and left selected in the Inbox.
 - One available agent service is chosen automatically without a `Start project work` confirmation;
   multiple services still require an explicit service choice and a real handoff remains reviewed.
+- Wide Inbox layout keeps a bounded 24–36-column list and gives later width to Conversation;
+  compact layout keeps both list and transcript visible. Authors and bodies start at the pane edge,
+  and full-row focus does not add a marker or reflow text.
+- Transcript capacity is measured from wrapped display cells around the stable fact anchor. An
+  older-page load or failure retains existing entries and exposes only its actionable PageDown
+  state; resize and an open draft do not replace the anchor.
+- Technical disclosure uses a bounded wide inspector or compact secondary pane, retains exact
+  typed routing/semantics/evidence/activity values and raw detail, and closes before Back leaves the
+  conversation. It never replaces an open draft.
 - Server-session contracts require a written hello before requests, only one unconfirmed response,
   session-owned single-use write tickets, post-write subscription activation, and idempotent cleanup
   after lost responses or stale disconnects. Every typed request family routes through application

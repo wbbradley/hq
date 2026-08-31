@@ -2,7 +2,7 @@
 
 use ratatui::style::{Color, Style};
 
-const ROLE_COUNT: usize = 32;
+const ROLE_COUNT: usize = 40;
 
 /// Every independently configurable visual role in the HQ terminal interface.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -20,6 +20,22 @@ pub enum UiThemeRole {
     Heading,
     /// Primary interactive accent.
     Accent,
+    /// Reserved local-human author label in a conversation.
+    ConversationAuthorSelf,
+    /// Named or fallback counterparty author label in a conversation.
+    ConversationAuthorParticipant,
+    /// Neutral or running compact conversation activity.
+    ConversationActivity,
+    /// Successful compact conversation activity.
+    ConversationActivitySuccess,
+    /// Interrupted or cautionary compact conversation activity.
+    ConversationActivityWarning,
+    /// Failed compact conversation activity.
+    ConversationActivityError,
+    /// Full-row transcript selection while Conversation owns focus.
+    ConversationSelectionFocused,
+    /// Full-row transcript selection retained behind details or a draft.
+    ConversationSelectionUnfocused,
     /// Selected item while its control owns focus.
     SelectionFocused,
     /// Selected item while another control owns focus.
@@ -83,6 +99,14 @@ impl UiThemeRole {
         Self::TextTechnical,
         Self::Heading,
         Self::Accent,
+        Self::ConversationAuthorSelf,
+        Self::ConversationAuthorParticipant,
+        Self::ConversationActivity,
+        Self::ConversationActivitySuccess,
+        Self::ConversationActivityWarning,
+        Self::ConversationActivityError,
+        Self::ConversationSelectionFocused,
+        Self::ConversationSelectionUnfocused,
         Self::SelectionFocused,
         Self::SelectionUnfocused,
         Self::BorderFocused,
@@ -120,6 +144,14 @@ impl UiThemeRole {
             Self::TextTechnical => "ui.text.technical",
             Self::Heading => "ui.heading",
             Self::Accent => "ui.accent",
+            Self::ConversationAuthorSelf => "conversation.author.self",
+            Self::ConversationAuthorParticipant => "conversation.author.participant",
+            Self::ConversationActivity => "conversation.activity",
+            Self::ConversationActivitySuccess => "conversation.activity.success",
+            Self::ConversationActivityWarning => "conversation.activity.warning",
+            Self::ConversationActivityError => "conversation.activity.error",
+            Self::ConversationSelectionFocused => "conversation.selection.focused",
+            Self::ConversationSelectionUnfocused => "conversation.selection.unfocused",
             Self::SelectionFocused => "ui.selection.focused",
             Self::SelectionUnfocused => "ui.selection.unfocused",
             Self::BorderFocused => "ui.border.focused",
@@ -212,6 +244,46 @@ impl UiTheme {
             &mut styles,
             UiThemeRole::Accent,
             Style::new().fg(Color::Cyan),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationAuthorSelf,
+            Style::new().fg(Color::Cyan).bold(),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationAuthorParticipant,
+            Style::new().fg(Color::Magenta).bold(),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationActivity,
+            Style::new().fg(Color::DarkGray),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationActivitySuccess,
+            Style::new().fg(Color::Green),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationActivityWarning,
+            Style::new().fg(Color::Yellow),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationActivityError,
+            Style::new().fg(Color::Red),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationSelectionFocused,
+            Style::new().bold().reversed(),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationSelectionUnfocused,
+            Style::new().bold(),
         );
         set(
             &mut styles,
@@ -352,6 +424,38 @@ impl UiTheme {
         set(&mut styles, UiThemeRole::Accent, Style::new().bold());
         set(
             &mut styles,
+            UiThemeRole::ConversationAuthorSelf,
+            Style::new().bold(),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationAuthorParticipant,
+            Style::new().bold(),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationActivity,
+            Style::new().dim(),
+        );
+        for role in [
+            UiThemeRole::ConversationActivitySuccess,
+            UiThemeRole::ConversationActivityWarning,
+            UiThemeRole::ConversationActivityError,
+        ] {
+            set(&mut styles, role, Style::new().bold());
+        }
+        set(
+            &mut styles,
+            UiThemeRole::ConversationSelectionFocused,
+            Style::new().bold().reversed(),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationSelectionUnfocused,
+            Style::new().bold(),
+        );
+        set(
+            &mut styles,
             UiThemeRole::SelectionFocused,
             Style::new().bold().reversed(),
         );
@@ -413,6 +517,7 @@ impl UiTheme {
         let warning = palette.color(0x0A);
         let success = palette.color(0x0B);
         let accent = palette.color(0x0D);
+        let participant = palette.color(0x0E);
         let mut theme = Self::terminal();
         theme.name = name;
         theme.author = author;
@@ -424,6 +529,35 @@ impl UiTheme {
             .with_style(UiThemeRole::TextTechnical, Style::new().fg(muted).dim())
             .with_style(UiThemeRole::Heading, Style::new().fg(accent).bold())
             .with_style(UiThemeRole::Accent, Style::new().fg(accent))
+            .with_style(
+                UiThemeRole::ConversationAuthorSelf,
+                Style::new().fg(accent).bold(),
+            )
+            .with_style(
+                UiThemeRole::ConversationAuthorParticipant,
+                Style::new().fg(participant).bold(),
+            )
+            .with_style(UiThemeRole::ConversationActivity, Style::new().fg(muted))
+            .with_style(
+                UiThemeRole::ConversationActivitySuccess,
+                Style::new().fg(success),
+            )
+            .with_style(
+                UiThemeRole::ConversationActivityWarning,
+                Style::new().fg(warning),
+            )
+            .with_style(
+                UiThemeRole::ConversationActivityError,
+                Style::new().fg(error),
+            )
+            .with_style(
+                UiThemeRole::ConversationSelectionFocused,
+                Style::new().fg(text).bg(selection).bold(),
+            )
+            .with_style(
+                UiThemeRole::ConversationSelectionUnfocused,
+                Style::new().fg(text).bg(surface),
+            )
             .with_style(
                 UiThemeRole::SelectionFocused,
                 Style::new().fg(text).bg(selection).bold(),
@@ -558,6 +692,48 @@ mod tests {
         assert_eq!(
             theme.style(UiThemeRole::Accent).fg,
             Some(Color::Indexed(13))
+        );
+        assert_eq!(
+            theme.style(UiThemeRole::ConversationAuthorSelf).fg,
+            Some(Color::Indexed(13))
+        );
+        assert_eq!(
+            theme.style(UiThemeRole::ConversationAuthorParticipant).fg,
+            Some(Color::Indexed(14))
+        );
+        assert_eq!(
+            theme.style(UiThemeRole::ConversationActivity).fg,
+            Some(Color::Indexed(3))
+        );
+        assert_eq!(
+            theme.style(UiThemeRole::ConversationSelectionFocused).bg,
+            Some(Color::Indexed(2))
+        );
+    }
+
+    #[test]
+    fn no_color_conversation_roles_retain_text_and_focus_cues() {
+        let theme = UiTheme::no_color();
+        for role in [
+            UiThemeRole::ConversationAuthorSelf,
+            UiThemeRole::ConversationAuthorParticipant,
+            UiThemeRole::ConversationActivitySuccess,
+            UiThemeRole::ConversationActivityWarning,
+            UiThemeRole::ConversationActivityError,
+        ] {
+            assert!(theme.style(role).add_modifier.contains(Modifier::BOLD));
+        }
+        assert!(
+            theme
+                .style(UiThemeRole::ConversationActivity)
+                .add_modifier
+                .contains(Modifier::DIM)
+        );
+        assert!(
+            theme
+                .style(UiThemeRole::ConversationSelectionFocused)
+                .add_modifier
+                .contains(Modifier::REVERSED | Modifier::BOLD)
         );
     }
 

@@ -26,6 +26,18 @@ use crate::{
 const MINIMUM_WIDTH: u16 = 40;
 const MINIMUM_HEIGHT: u16 = 10;
 const NAVIGATION_WIDTH: u16 = 24;
+const INBOX_LIST_MIN_WIDTH: u16 = 24;
+const INBOX_LIST_PREFERRED_WIDTH: u16 = 32;
+const INBOX_LIST_MAX_WIDTH: u16 = 36;
+const CONVERSATION_PREFERRED_MIN_WIDTH: u16 = 48;
+
+fn inbox_list_width(available: u16) -> u16 {
+    let width_preserving_conversation =
+        available.saturating_sub(CONVERSATION_PREFERRED_MIN_WIDTH + 1);
+    width_preserving_conversation
+        .clamp(INBOX_LIST_MIN_WIDTH, INBOX_LIST_PREFERRED_WIDTH)
+        .min(INBOX_LIST_MAX_WIDTH)
+}
 
 /// Renders the complete model without mutation or I/O.
 pub fn render(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme) {
@@ -2721,24 +2733,56 @@ fn render_compact_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiThem
 fn render_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
     if model.section() == UiSection::Inbox || model.conversation().is_some() {
         if model.viewport().width >= WIDE_WIDTH {
-            let [summaries, conversation] =
-                Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-                    .areas(area);
+            let [summaries, conversation] = Layout::horizontal([
+                Constraint::Length(inbox_list_width(area.width)),
+                Constraint::Min(1),
+            ])
+            .areas(area);
             render_summary_rows(frame, model, theme, summaries);
             render_inbox_detail(frame, model, theme, conversation, Borders::LEFT);
         } else {
-            let constraints = if model.focus() == UiFocus::Conversation {
-                [Constraint::Percentage(35), Constraint::Percentage(65)]
+            let conversation_owns_space =
+                matches!(model.focus(), UiFocus::Conversation | UiFocus::Draft);
+            let constraints = if conversation_owns_space {
+                [Constraint::Length(4), Constraint::Min(1)]
             } else {
                 [Constraint::Min(1), Constraint::Length(4)]
             };
             let [summaries, conversation] = Layout::vertical(constraints).areas(area);
-            render_summary_rows(frame, model, theme, summaries);
+            if conversation_owns_space {
+                render_compact_selected_summary(frame, model, theme, summaries);
+            } else {
+                render_summary_rows(frame, model, theme, summaries);
+            }
             render_inbox_detail(frame, model, theme, conversation, Borders::TOP);
         }
     } else {
         render_summary_rows(frame, model, theme, area);
     }
+}
+
+fn render_compact_selected_summary(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+) {
+    let count = model.rows().map_or(0, <[UiRow]>::len);
+    let mut lines = vec![
+        Line::styled(
+            format!(
+                "{} · {count} {}",
+                section_label(model.section()),
+                section_item_label(model.section(), count)
+            ),
+            theme.style(UiThemeRole::Heading),
+        ),
+        Line::default(),
+    ];
+    if let Some(row) = model.selected_row_data() {
+        lines.extend(render_row(model, row, theme, area.width));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_inbox_detail(
@@ -2752,8 +2796,23 @@ fn render_inbox_detail(
         let draft_height = (area.height / 3).max(6).min(area.height.saturating_sub(2));
         let [conversation, draft] =
             Layout::vertical([Constraint::Min(2), Constraint::Length(draft_height)]).areas(area);
-        render_conversation(frame, model, theme, conversation, outer_border);
+        if model.technical_visible() {
+            render_technical_inspector(frame, model, theme, conversation, outer_border);
+        } else {
+            render_conversation(frame, model, theme, conversation, outer_border);
+        }
         render_draft_pane(frame, model, theme, draft, Borders::TOP | outer_border);
+    } else if model.technical_visible() && model.viewport().width >= WIDE_WIDTH {
+        let inspector_height = (area.height / 3).clamp(7, 12);
+        let [conversation, inspector] = Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(inspector_height.min(area.height.saturating_sub(2))),
+        ])
+        .areas(area);
+        render_conversation(frame, model, theme, conversation, outer_border);
+        render_technical_inspector(frame, model, theme, inspector, Borders::TOP | outer_border);
+    } else if model.technical_visible() {
+        render_technical_inspector(frame, model, theme, area, outer_border);
     } else {
         render_conversation(frame, model, theme, area, outer_border);
     }
@@ -2842,7 +2901,7 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
     let mut lines = vec![
         Line::styled(
             format!(
-                " {} · {count} {}",
+                "{} · {count} {}",
                 section_label(model.section()),
                 section_item_label(model.section(), count)
             ),
@@ -2865,7 +2924,7 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
         Some([]) => lines.extend(empty_section_lines(model.section(), theme)),
         Some(rows) => {
             for row in rows {
-                lines.extend(render_row(model, row, theme));
+                lines.extend(render_row(model, row, theme, area.width));
             }
         }
         None => lines.push(Line::styled(
@@ -2931,11 +2990,11 @@ fn onboarding_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'static
     }
     lines.push(Line::from(" ✓ Agent service ready"));
     lines.push(Line::styled(
-        " › Current: send the first project instruction",
+        " › Current: open the first project conversation",
         theme.style(UiThemeRole::Attention),
     ));
     lines.push(Line::from(
-        " Press n New…. HQ will ask you to choose only if more than one service is available.",
+        " Press n New…. HQ will ask you to choose only if more than one service is available, then open the Inbox draft.",
     ));
     Some(lines)
 }
@@ -3036,124 +3095,391 @@ fn render_conversation(
     divider: Borders,
 ) {
     let conversation = model.conversation();
-    let selected = model.conversation_anchor();
-    let entry_height = if model.technical_visible() { 6 } else { 3 };
-    let capacity = usize::from(area.height.saturating_sub(3))
-        .checked_div(entry_height)
-        .unwrap_or(0)
-        .max(1);
-    let selected_index = selected
+    let block =
+        Block::new()
+            .borders(divider)
+            .border_style(if model.focus() == UiFocus::Conversation {
+                theme.style(UiThemeRole::BorderFocused)
+            } else {
+                theme.style(UiThemeRole::BorderUnfocused)
+            });
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if let Some(conversation) = conversation {
+        let mut header = vec![Line::styled(
+            conversation.title.as_str(),
+            theme.style(UiThemeRole::Heading),
+        )];
+        if let Some(context) = &conversation.context {
+            header.push(Line::styled(
+                context.as_str(),
+                theme.style(UiThemeRole::TextMuted),
+            ));
+        }
+        if model.conversation_older_loading() {
+            header.push(Line::styled(
+                "Loading older messages…",
+                theme.style(UiThemeRole::Warning),
+            ));
+        } else if model.conversation_failure_is_older() {
+            header.push(Line::styled(
+                "Older messages could not be loaded · PageDown retry",
+                theme.style(UiThemeRole::Attention),
+            ));
+        } else if conversation.next_cursor.is_some() {
+            header.push(Line::styled(
+                "Older messages available · PageDown",
+                theme.style(UiThemeRole::TextMuted),
+            ));
+        }
+        header.push(Line::default());
+        let header_height = u16::try_from(header.len())
+            .unwrap_or(u16::MAX)
+            .min(inner.height);
+        let [header_area, entries_area] =
+            Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).areas(inner);
+        frame.render_widget(Paragraph::new(header), header_area);
+        if conversation.entries.is_empty() {
+            frame.render_widget(
+                Paragraph::new("No messages yet.").style(theme.style(UiThemeRole::TextMuted)),
+                entries_area,
+            );
+        } else {
+            render_conversation_entries(frame, model, theme, entries_area, conversation);
+        }
+    } else if model.conversation_loading() {
+        frame.render_widget(
+            Paragraph::new("Loading messages…").style(theme.style(UiThemeRole::Warning)),
+            inner,
+        );
+    } else if let Some(failure) = model.conversation_failure() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    "Messages could not be loaded.",
+                    theme.style(UiThemeRole::Attention),
+                ),
+                Line::from(failure.action.clone()),
+            ])
+            .wrap(Wrap { trim: false }),
+            inner,
+        );
+    } else if let Some(row) = model
+        .selected_row_data()
+        .filter(|row| row.kind != UiRowKind::Conversation)
+    {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(row.title.clone(), theme.style(UiThemeRole::Heading)),
+                Line::from(row.detail.clone()),
+            ])
+            .wrap(Wrap { trim: false }),
+            inner,
+        );
+    } else if model.selected_row_data().is_some() {
+        frame.render_widget(
+            Paragraph::new("Loading messages…").style(theme.style(UiThemeRole::TextMuted)),
+            inner,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new("No conversation is selected.")
+                .style(theme.style(UiThemeRole::TextMuted)),
+            inner,
+        );
+    }
+}
+
+fn render_technical_inspector(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+    borders: Borders,
+) {
+    let block =
+        Block::new()
+            .borders(borders)
+            .border_style(theme.style(if model.technical_visible() {
+                UiThemeRole::BorderFocused
+            } else {
+                UiThemeRole::BorderUnfocused
+            }));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(entry) = model.conversation().and_then(|conversation| {
+        let anchor = model.conversation_anchor()?;
+        conversation.entries.iter().find(|entry| entry.id == anchor)
+    }) else {
+        frame.render_widget(
+            Paragraph::new("No message details are available.")
+                .style(theme.style(UiThemeRole::TextMuted)),
+            inner,
+        );
+        return;
+    };
+
+    let heading = match entry.presentation {
+        UiConversationEntryPresentation::Message { .. } => "Message details",
+        UiConversationEntryPresentation::Activity { .. } => "Activity details",
+    };
+    let mut lines = vec![Line::styled(heading, theme.style(UiThemeRole::Heading))];
+    if let UiConversationEntryPresentation::Activity { detail, .. } = &entry.presentation {
+        lines.push(Line::from(detail.clone()));
+    }
+    for section in &entry.technical {
+        append_technical_section(&mut lines, section, theme);
+    }
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        "h/← close details · ? help",
+        theme.style(UiThemeRole::TextMuted),
+    ));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn append_technical_section(
+    lines: &mut Vec<Line<'static>>,
+    section: &UiTechnicalSection,
+    theme: &UiTheme,
+) {
+    let section_style = theme.style(UiThemeRole::Accent);
+    match section {
+        UiTechnicalSection::Routing { sender, recipient } => {
+            lines.push(Line::styled("Routing", section_style));
+            lines.push(Line::from(format!("sender: {sender}")));
+            lines.push(Line::from(format!(
+                "recipient: {}",
+                recipient.as_deref().unwrap_or("account")
+            )));
+        }
+        UiTechnicalSection::Semantics {
+            purpose,
+            presentation,
+            provider,
+            session,
+            operation,
+            project,
+        } => {
+            lines.push(Line::styled("Semantics", section_style));
+            lines.push(Line::from(format!("purpose: {purpose}")));
+            lines.push(Line::from(format!("presentation: {presentation}")));
+            lines.push(Line::from(format!(
+                "provider: {}",
+                provider.as_deref().unwrap_or("none")
+            )));
+            lines.push(Line::from(format!(
+                "session: {}",
+                session.as_deref().unwrap_or("none")
+            )));
+            lines.push(Line::from(format!(
+                "operation: {}",
+                operation.as_deref().unwrap_or("none")
+            )));
+            lines.push(Line::from(format!(
+                "project: {}",
+                project.as_deref().unwrap_or("none")
+            )));
+        }
+        UiTechnicalSection::Evidence {
+            message_id,
+            thread_id,
+            state_frontier,
+            peer_received_by,
+            root_fact,
+            root_message,
+            ready_answer,
+            thread_cancelled,
+        } => {
+            lines.push(Line::styled("Evidence", section_style));
+            lines.push(Line::from(format!("message: {message_id}")));
+            lines.push(Line::from(format!("thread: {thread_id}")));
+            lines.push(Line::from(format!(
+                "state frontier: {}",
+                technical_values(state_frontier)
+            )));
+            lines.push(Line::from(format!(
+                "received by: {}",
+                technical_values(peer_received_by)
+            )));
+            lines.push(Line::from(format!(
+                "root fact: {}",
+                root_fact.as_deref().unwrap_or("none")
+            )));
+            lines.push(Line::from(format!(
+                "root message: {}",
+                root_message.as_deref().unwrap_or("none")
+            )));
+            lines.push(Line::from(format!("ready answer: {ready_answer}")));
+            lines.push(Line::from(format!("thread cancelled: {thread_cancelled}")));
+        }
+        UiTechnicalSection::Activity {
+            sequence,
+            status,
+            truncated,
+        } => {
+            lines.push(Line::styled("Activity", section_style));
+            lines.push(Line::from(format!("sequence: {sequence}")));
+            lines.push(Line::from(format!(
+                "status: {}",
+                activity_status_label(status)
+            )));
+            lines.push(Line::from(format!("truncated: {truncated}")));
+        }
+    }
+}
+
+fn technical_values(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_owned()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn render_conversation_entries(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+    conversation: &crate::UiConversation,
+) {
+    if area.width == 0 || area.height == 0 || conversation.entries.is_empty() {
+        return;
+    }
+    let heights = conversation
+        .entries
+        .iter()
+        .map(|entry| conversation_entry_height(entry, area.width))
+        .collect::<Vec<_>>();
+    let selected_index = model
+        .conversation_anchor()
         .and_then(|anchor| {
-            conversation?
+            conversation
                 .entries
                 .iter()
                 .position(|entry| entry.id == anchor)
         })
         .unwrap_or(0);
-    let start = selected_index
-        .saturating_sub(capacity / 2)
-        .min(conversation.map_or(0, |value| value.entries.len().saturating_sub(capacity)));
-    let mut lines = Vec::new();
-    if let Some(conversation) = conversation {
-        lines.push(Line::styled(
-            conversation.title.as_str(),
-            theme.style(UiThemeRole::Heading),
-        ));
-        if let Some(context) = &conversation.context {
-            lines.push(Line::styled(
-                context.as_str(),
-                theme.style(UiThemeRole::TextMuted),
-            ));
+    let visible = visible_conversation_entries(&heights, selected_index, area.height);
+    let mut y = area.y;
+    let bottom = area.y.saturating_add(area.height);
+    for entry in &conversation.entries[visible] {
+        if y >= bottom {
+            break;
         }
-        if conversation.next_cursor.is_some() {
-            lines.push(Line::styled(
-                "Older messages available · PageDown",
-                theme.style(UiThemeRole::TextMuted),
-            ));
-        }
-        lines.push(Line::default());
-        for entry in conversation.entries.iter().skip(start).take(capacity) {
-            lines.extend(render_conversation_entry(model, entry, theme));
-        }
-        if conversation.entries.is_empty() {
-            lines.push(Line::styled(
-                "No messages yet.",
-                theme.style(UiThemeRole::TextMuted),
-            ));
-        }
-    } else if model.conversation_loading() {
-        lines.push(Line::styled(
-            "Loading messages…",
-            theme.style(UiThemeRole::Warning),
-        ));
-    } else if let Some(failure) = model.conversation_failure() {
-        lines.push(Line::styled(
-            "Messages could not be loaded.",
-            theme.style(UiThemeRole::Attention),
-        ));
-        lines.push(Line::from(failure.action.clone()));
-    } else if let Some(row) = model
-        .selected_row_data()
-        .filter(|row| row.kind != UiRowKind::Conversation)
-    {
-        lines.push(Line::styled(
-            row.title.clone(),
-            theme.style(UiThemeRole::Heading),
-        ));
-        lines.push(Line::from(row.detail.clone()));
-    } else if model.selected_row_data().is_some() {
-        lines.push(Line::styled(
-            "Loading messages…",
-            theme.style(UiThemeRole::TextMuted),
-        ));
-    } else {
-        lines.push(Line::styled(
-            "No conversation is selected.",
-            theme.style(UiThemeRole::TextMuted),
-        ));
+        let height = conversation_entry_height(entry, area.width).min(bottom - y);
+        render_conversation_entry(
+            frame,
+            model,
+            entry,
+            theme,
+            Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height,
+            },
+        );
+        y = y.saturating_add(height);
     }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::new().borders(divider).border_style(
-                if model.focus() == UiFocus::Conversation {
-                    theme.style(UiThemeRole::BorderFocused)
-                } else {
-                    theme.style(UiThemeRole::BorderUnfocused)
-                },
-            ))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
 }
 
-fn render_conversation_entry<'entry>(
+fn conversation_entry_height(entry: &UiConversationEntry, width: u16) -> u16 {
+    match &entry.presentation {
+        UiConversationEntryPresentation::Message { body, .. } => {
+            let body_height = Paragraph::new(body.as_str())
+                .wrap(Wrap { trim: false })
+                .line_count(width.max(1))
+                .max(1);
+            u16::try_from(body_height.saturating_add(2)).unwrap_or(u16::MAX)
+        }
+        UiConversationEntryPresentation::Activity { .. } => 2,
+    }
+}
+
+fn visible_conversation_entries(
+    heights: &[u16],
+    selected_index: usize,
+    available_height: u16,
+) -> std::ops::Range<usize> {
+    if heights.is_empty() || available_height == 0 {
+        return 0..0;
+    }
+    let selected_index = selected_index.min(heights.len() - 1);
+    let mut start = selected_index;
+    let mut end = selected_index + 1;
+    let mut used = heights[selected_index].min(available_height);
+    let mut above_budget = available_height.saturating_sub(used) / 2;
+    while start > 0 && heights[start - 1] <= above_budget {
+        start -= 1;
+        used = used.saturating_add(heights[start]);
+        above_budget = above_budget.saturating_sub(heights[start]);
+    }
+    while end < heights.len() && heights[end] <= available_height.saturating_sub(used) {
+        used = used.saturating_add(heights[end]);
+        end += 1;
+    }
+    while start > 0 && heights[start - 1] <= available_height.saturating_sub(used) {
+        start -= 1;
+        used = used.saturating_add(heights[start]);
+    }
+    start..end
+}
+
+fn render_conversation_entry(
+    frame: &mut Frame<'_>,
     model: &UiModel,
-    entry: &'entry UiConversationEntry,
+    entry: &UiConversationEntry,
     theme: &UiTheme,
-) -> Vec<Line<'entry>> {
+    area: Rect,
+) {
+    if area.is_empty() {
+        return;
+    }
     let selected = model.conversation_anchor() == Some(entry.id.as_str());
-    let style = if selected {
-        selected_style(theme, model.focus() == UiFocus::Conversation)
-    } else {
-        theme.style(UiThemeRole::Text)
-    };
-    let mut lines = match &entry.presentation {
+    if selected && matches!(model.focus(), UiFocus::Conversation | UiFocus::Draft) {
+        let role = if model.focus() == UiFocus::Conversation && !model.technical_visible() {
+            UiThemeRole::ConversationSelectionFocused
+        } else {
+            UiThemeRole::ConversationSelectionUnfocused
+        };
+        frame.render_widget(Block::new().style(theme.style(role)), area);
+    }
+    match &entry.presentation {
         UiConversationEntryPresentation::Message { author, body } => {
-            let author = match author {
-                UiConversationAuthor::You => "You",
-                UiConversationAuthor::Participant(label) => label,
-                UiConversationAuthor::Unknown => "Unknown sender",
+            let (author, author_role) = match author {
+                UiConversationAuthor::You => ("You", UiThemeRole::ConversationAuthorSelf),
+                UiConversationAuthor::Participant(label) => {
+                    (label.as_str(), UiThemeRole::ConversationAuthorParticipant)
+                }
+                UiConversationAuthor::Unknown => {
+                    ("Unknown sender", UiThemeRole::ConversationAuthorParticipant)
+                }
             };
             let exceptional = match entry.message_state {
                 Some(UiMessageState::Archived) => " · Archived",
                 Some(UiMessageState::Rejected) => " · Could not be delivered",
                 Some(UiMessageState::Open) | None => "",
             };
-            vec![
-                Line::styled(format!("{author}{exceptional}"), style),
-                Line::styled(body.as_str(), style),
-                Line::default(),
-            ]
+            frame.render_widget(
+                Paragraph::new(format!("{author}{exceptional}")).style(theme.style(author_role)),
+                Rect { height: 1, ..area },
+            );
+            if area.height > 1 {
+                frame.render_widget(
+                    Paragraph::new(body.as_str())
+                        .style(theme.style(UiThemeRole::Text))
+                        .wrap(Wrap { trim: false }),
+                    Rect {
+                        y: area.y + 1,
+                        height: area.height.saturating_sub(2),
+                        ..area
+                    },
+                );
+            }
         }
         UiConversationEntryPresentation::Activity {
             status, summary, ..
@@ -3165,95 +3491,19 @@ fn render_conversation_entry<'entry>(
                 UiActivityStatus::Failed { .. } => "!",
                 UiActivityStatus::Interrupted => "×",
             };
-            let activity_style = if selected {
-                style
-            } else {
-                match status {
-                    UiActivityStatus::Snapshot | UiActivityStatus::Running => {
-                        theme.style(UiThemeRole::TextMuted)
-                    }
-                    UiActivityStatus::Succeeded => theme.style(UiThemeRole::Success),
-                    UiActivityStatus::Failed { .. } => theme.style(UiThemeRole::Error),
-                    UiActivityStatus::Interrupted => theme.style(UiThemeRole::Warning),
+            let role = match status {
+                UiActivityStatus::Snapshot | UiActivityStatus::Running => {
+                    UiThemeRole::ConversationActivity
                 }
+                UiActivityStatus::Succeeded => UiThemeRole::ConversationActivitySuccess,
+                UiActivityStatus::Failed { .. } => UiThemeRole::ConversationActivityError,
+                UiActivityStatus::Interrupted => UiThemeRole::ConversationActivityWarning,
             };
-            vec![
-                Line::styled(format!("{symbol} {summary}"), activity_style),
-                Line::default(),
-            ]
+            frame.render_widget(
+                Paragraph::new(format!("{symbol} {summary}")).style(theme.style(role)),
+                Rect { height: 1, ..area },
+            );
         }
-    };
-    if selected && model.technical_visible() {
-        if let UiConversationEntryPresentation::Activity { detail, .. } = &entry.presentation {
-            lines.push(Line::styled(
-                format!("activity detail: {detail}"),
-                theme.style(UiThemeRole::TextTechnical),
-            ));
-        }
-        for section in &entry.technical {
-            lines.push(Line::styled(
-                technical_summary(section),
-                theme.style(UiThemeRole::TextTechnical),
-            ));
-        }
-    }
-    lines
-}
-
-fn technical_summary(section: &UiTechnicalSection) -> String {
-    match section {
-        UiTechnicalSection::Routing { sender, recipient } => format!(
-            "routing sender={} recipient={}",
-            short_technical(sender),
-            recipient.as_deref().map_or("account", short_technical)
-        ),
-        UiTechnicalSection::Semantics {
-            purpose,
-            presentation,
-            provider,
-            session,
-            operation,
-            project,
-        } => {
-            format!(
-                "semantics purpose={purpose} presentation={presentation} operation={} project={}",
-                operation.as_deref().map_or("none", short_technical),
-                project.as_deref().map_or("none", short_technical)
-            ) + &provider
-                .as_ref()
-                .zip(session.as_ref())
-                .map_or_else(String::new, |(provider, session)| {
-                    format!(" provider={provider}/{session}")
-                })
-        }
-        UiTechnicalSection::Evidence {
-            message_id,
-            thread_id,
-            state_frontier,
-            peer_received_by,
-            root_fact,
-            root_message,
-            ready_answer,
-            thread_cancelled,
-        } => format!(
-            "evidence message={} thread={} frontier={} receipts={} root_fact={} root={} ready={} cancelled={}",
-            short_technical(message_id),
-            short_technical(thread_id),
-            state_frontier.len(),
-            peer_received_by.len(),
-            root_fact.as_deref().map_or("none", short_technical),
-            root_message.as_deref().map_or("none", short_technical),
-            ready_answer,
-            thread_cancelled
-        ),
-        UiTechnicalSection::Activity {
-            sequence,
-            status,
-            truncated,
-        } => format!(
-            "activity sequence={sequence} status={} truncated={truncated}",
-            activity_status_label(status)
-        ),
     }
 }
 
@@ -3267,12 +3517,29 @@ fn activity_status_label(status: &UiActivityStatus) -> String {
     }
 }
 
-fn short_technical(value: &str) -> &str {
-    value.get(..12).unwrap_or(value)
-}
-
-fn render_row<'row>(model: &UiModel, row: &'row UiRow, theme: &UiTheme) -> [Line<'row>; 2] {
+fn render_row<'row>(
+    model: &UiModel,
+    row: &'row UiRow,
+    theme: &UiTheme,
+    width: u16,
+) -> [Line<'row>; 2] {
     let selected = model.selected_row() == Some(row.id.as_str());
+    if row.kind == UiRowKind::Conversation {
+        let title_style = if selected {
+            selected_style(theme, model.focus() == UiFocus::Content)
+        } else {
+            theme.style(UiThemeRole::Text)
+        };
+        let detail_style = if selected {
+            title_style
+        } else {
+            theme.style(UiThemeRole::TextMuted)
+        };
+        return [
+            Line::styled(padded_display_text(&row.title, width), title_style),
+            Line::styled(padded_display_text(&row.detail, width), detail_style),
+        ];
+    }
     let marker = if selected { " › " } else { "   " };
     let title_style = if selected {
         selected_style(theme, model.focus() == UiFocus::Content)
@@ -3302,6 +3569,14 @@ fn render_row<'row>(model: &UiModel, row: &'row UiRow, theme: &UiTheme) -> [Line
         ]),
         detail,
     ]
+}
+
+fn padded_display_text(value: &str, width: u16) -> String {
+    let width = usize::from(width);
+    let mut visible = display_prefix(value, width).to_owned();
+    let padding = width.saturating_sub(UnicodeWidthStr::width(visible.as_str()));
+    visible.extend(std::iter::repeat_n(' ', padding));
+    visible
 }
 
 fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
@@ -3368,6 +3643,9 @@ fn conversation_footer(model: &UiModel) -> String {
         let anchor = model.conversation_anchor()?;
         conversation.entries.iter().find(|entry| entry.id == anchor)
     });
+    if model.technical_visible() {
+        return " h/← close details · ? help".to_owned();
+    }
     let mut controls = vec![if model.viewport().width >= WIDE_WIDTH {
         "↑/↓ or j/k message"
     } else {
@@ -3484,8 +3762,14 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{display_prefix, display_suffix, text_field_line};
-    use crate::UiTheme;
+    use super::{
+        conversation_entry_height, display_prefix, display_suffix, inbox_list_width,
+        text_field_line, visible_conversation_entries,
+    };
+    use crate::{
+        UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiMessageState,
+        UiTheme,
+    };
     use unicode_width::UnicodeWidthStr;
 
     #[test]
@@ -3506,5 +3790,51 @@ mod tests {
             .sum::<usize>();
 
         assert_eq!(width, 10);
+    }
+
+    #[test]
+    fn inbox_list_width_is_bounded_and_gives_growth_to_conversation() {
+        assert_eq!(inbox_list_width(72), 24);
+        assert_eq!(inbox_list_width(80), 31);
+        assert_eq!(inbox_list_width(81), 32);
+        assert_eq!(inbox_list_width(120), 32);
+
+        for available in 72..=240 {
+            let list = inbox_list_width(available);
+            assert!((24..=36).contains(&list));
+            if available >= 73 {
+                assert!(available - list > 48);
+            }
+        }
+    }
+
+    #[test]
+    fn message_height_uses_paragraph_wrapping_for_newlines_words_and_wide_text() {
+        assert_eq!(conversation_entry_height(&message("one\ntwo"), 20), 4);
+        assert_eq!(conversation_entry_height(&message("abcdefgh"), 3), 5);
+        assert_eq!(conversation_entry_height(&message("界界界"), 4), 4);
+        assert_eq!(conversation_entry_height(&message(""), 20), 3);
+    }
+
+    #[test]
+    fn measured_viewport_keeps_the_stable_anchor_visible() {
+        let heights = [3, 3, 3, 3, 3];
+        assert_eq!(visible_conversation_entries(&heights, 2, 10), 1..4);
+        assert_eq!(visible_conversation_entries(&heights, 4, 7), 3..5);
+        assert_eq!(visible_conversation_entries(&[12, 3], 0, 5), 0..1);
+        assert_eq!(visible_conversation_entries(&heights, 2, 0), 0..0);
+    }
+
+    fn message(body: &str) -> UiConversationEntry {
+        UiConversationEntry {
+            id: "message".to_owned(),
+            presentation: UiConversationEntryPresentation::Message {
+                author: UiConversationAuthor::You,
+                body: body.to_owned(),
+            },
+            message_state: Some(UiMessageState::Open),
+            message_target: None,
+            technical: Vec::new(),
+        }
     }
 }
