@@ -29,9 +29,9 @@ use hq_tui::{
     UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence,
     UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft,
     UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
-    UiMessageState, UiModel, UiProjectAction, UiProjectExternalWarning, UiProjectOutcome,
-    UiProjectResourceCheck, UiProjectResult, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
-    UiTechnicalSection, UiTimerKind, update,
+    UiMessageDelivery, UiMessageState, UiModel, UiProjectAction, UiProjectExternalWarning,
+    UiProjectOutcome, UiProjectResourceCheck, UiProjectResult, UiRow, UiRowKind, UiRowState,
+    UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
@@ -1289,6 +1289,10 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
         mapped.entries[0].message_state,
         Some(UiMessageState::Archived)
     );
+    assert_eq!(
+        mapped.entries[0].delivery,
+        Some(UiMessageDelivery::Received)
+    );
     assert!(matches!(
         mapped.entries[0].message_target,
         Some(hq_tui::UiMessageTarget { message_id, reply_allowed: true })
@@ -1313,6 +1317,26 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
         mapped.entries[1].technical.as_slice(),
         [UiTechnicalSection::Activity { sequence: 4, .. }]
     ));
+}
+
+#[test]
+fn local_message_without_peer_receipt_is_presented_as_sent() {
+    let local_human = MailboxAddressDto {
+        installation_id: Id32::new([4; 32]),
+        mailbox_id: Id32::new([5; 32]),
+    };
+    let page = ConversationPageDto::new(
+        vec![ConversationEntryDto::Message(Box::new(
+            conversation_message(local_human.installation_id, local_human.mailbox_id),
+        ))],
+        None,
+    )
+    .expect("valid message page");
+
+    let mapped =
+        tui_conversation_page("row", &ConversationContextDto::Personal, &local_human, page);
+
+    assert_eq!(mapped.entries[0].delivery, Some(UiMessageDelivery::Sent));
 }
 
 #[test]

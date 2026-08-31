@@ -1,18 +1,18 @@
  HQ   Inbox
  this device Connected
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
- › Inbox               │Inbox · 3 conversations        │Loading messages…
-   Sent                │                               │
-   Archived            │Build release                  │
-   Agents              │agent-1                        │
-   Projects            │Deploy production              │
-                       │waiting for approval           │
-                       │Investigate timeout            │
-                       │relay needs attention          │
-                       │                               │
-                       │                               │
-                       │                               │
-                       │                               │
-                       │                               │
+ › Inbox    │Inbox · 3 conversations         │Loading messages…
+   Sent     │                                │
+   Archived │Build release                   │
+   Agents   │agent-1                         │
+   Projects │Deploy production               │
+            │waiting for approval            │
+            │Investigate timeout             │
+            │relay needs attention           │
+            │                                │
+            │                                │
+            │                                │
+            │                                │
+            │                                │
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
  Enter open · n New… · d message · N note · ? help · q quit

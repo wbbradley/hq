@@ -11,13 +11,14 @@ use hq_tui::{
     UiConversationEntryPresentation, UiConversationPage, UiConversationTarget, UiDirectTarget,
     UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput, UiMailboxAction,
     UiMailboxDraft, UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState,
-    UiMessageTarget, UiModel, UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectCreationChoice, UiProjectFolderAction,
-    UiProjectFormField, UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind,
-    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageDelivery,
+    UiMessageState, UiMessageTarget, UiModel, UiNewChoice, UiNewModal, UiPendingProjectInput,
+    UiProject, UiProjectAction, UiProjectAssignment, UiProjectCreationChoice,
+    UiProjectFolderAction, UiProjectFormField, UiProjectInteraction, UiProjectManagementAction,
+    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
+    UiProjectResult, UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider,
+    UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    update,
 };
 
 #[test]
@@ -1429,7 +1430,7 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
     )
     .expect("page applies");
     assert_eq!(opened.model.focus(), UiFocus::Conversation);
-    assert_eq!(opened.model.conversation_anchor(), Some("message-1"));
+    assert_eq!(opened.model.conversation_anchor(), Some("activity-2"));
     let conversation = opened.model.conversation().expect("conversation");
     assert_eq!(conversation.title, "Alice");
     assert_eq!(conversation.context.as_deref(), Some("Project · Release"));
@@ -1442,7 +1443,10 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
         ["message-1", "activity-2"]
     );
 
-    let moved = update(opened.model, UiEvent::Input(UiInput::NextItem)).expect("move anchor");
+    let earlier =
+        update(opened.model, UiEvent::Input(UiInput::PreviousItem)).expect("move earlier");
+    assert_eq!(earlier.model.conversation_anchor(), Some("message-1"));
+    let moved = update(earlier.model, UiEvent::Input(UiInput::NextItem)).expect("return to tail");
     assert_eq!(moved.model.conversation_anchor(), Some("activity-2"));
     let technical = update(moved.model, UiEvent::Input(UiInput::Activate)).expect("show details");
     assert!(technical.model.technical_visible());
@@ -2060,6 +2064,185 @@ fn dirty_reply_saves_before_submit_and_stale_rejection_preserves_text() {
             .map(|failure| failure.code.as_str()),
         Some("mailbox_target_stale")
     );
+}
+
+#[test]
+fn committed_reply_dismisses_the_editor_and_appears_as_sent_at_the_conversation_tail() {
+    let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
+    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let (open_id, _) = open_draft_effect(&opening.effects);
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target: UiMailboxDraftTarget::Reply {
+                    message_id: [3; 32],
+                },
+                content: "answer text".to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("draft");
+    let submitting = update(loaded.model, UiEvent::Input(UiInput::Activate)).expect("submit reply");
+    let command_id = submitting
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitMailboxCommand { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("mailbox command");
+
+    let committed = update(
+        submitting.model,
+        UiEvent::MailboxCommandCommitted {
+            effect_id: command_id,
+            revision: 2,
+            message_id: Some([5; 32]),
+        },
+    )
+    .expect("committed reply");
+
+    assert!(committed.model.mailbox_draft().is_none());
+    let sent = committed
+        .model
+        .conversation()
+        .and_then(|conversation| conversation.entries.last())
+        .expect("sent reply in conversation");
+    assert!(matches!(
+        &sent.presentation,
+        UiConversationEntryPresentation::Message {
+            author: UiConversationAuthor::You,
+            body,
+        } if body == "answer text"
+    ));
+    assert_eq!(sent.delivery, Some(UiMessageDelivery::Sent));
+    assert_eq!(
+        committed.model.conversation_anchor(),
+        Some(sent.id.as_str())
+    );
+}
+
+#[test]
+fn accepted_undispatched_project_reply_is_presented_as_pending() {
+    let project_id = [5; 32];
+    let thread_id = [6; 32];
+    let message_id = [7; 32];
+    let mut target = project(5, "hq", "/workspace/hq");
+    target.pending_inputs.push(UiPendingProjectInput {
+        message_id,
+        thread_id,
+        sequence: 1,
+    });
+    let mut snapshot = projects_snapshot(1, vec![target]);
+    snapshot.inbox_rows.push(UiRow {
+        id: "project-thread".to_owned(),
+        title: "Alice".to_owned(),
+        detail: "pending reply".to_owned(),
+        state: UiRowState::Open,
+        kind: UiRowKind::Conversation,
+        conversation_target: Some(UiConversationTarget::Project {
+            project_id,
+            thread_id,
+            root_message: [8; 32],
+        }),
+    });
+    let loaded = loaded_transition(snapshot);
+    let (conversation_id, _, _) = conversation_effect(&loaded.effects);
+    let opening = update(loaded.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let mut pending_reply = entry("pending-reply", false);
+    pending_reply.delivery = Some(UiMessageDelivery::Sent);
+    pending_reply.message_target = Some(UiMessageTarget {
+        message_id,
+        reply_allowed: false,
+    });
+
+    let opened = update(
+        opening.model,
+        UiEvent::ConversationLoaded {
+            effect_id: conversation_id,
+            page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: Some("hq".to_owned()),
+                row_id: "project-thread".to_owned(),
+                entries: vec![pending_reply],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("conversation");
+
+    assert_eq!(
+        opened.model.conversation().and_then(|conversation| {
+            conversation
+                .entries
+                .first()
+                .and_then(|entry| entry.delivery)
+        }),
+        Some(UiMessageDelivery::Pending)
+    );
+}
+
+#[test]
+fn live_agent_status_stays_at_the_presentation_tail_after_new_authoritative_output() {
+    let mut working = entry("working", true);
+    working.presentation = UiConversationEntryPresentation::Activity {
+        kind: UiConversationActivityKind::AgentTurn,
+        status: UiActivityStatus::Running,
+        summary: "Agent is working…".to_owned(),
+        detail: "turn running".to_owned(),
+        truncated: false,
+    };
+    let opened = opened_conversation(vec![entry("question", false), working.clone()]);
+    assert_eq!(opened.conversation_anchor(), Some("working"));
+
+    let invalidated = update(opened, UiEvent::Invalidated { revision: 2 }).expect("invalidate");
+    let snapshot_id = snapshot_effect(&invalidated.effects);
+    let refreshed = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: snapshot(2, &["thread-a"]),
+        },
+    )
+    .expect("snapshot");
+    let (conversation_id, _, _) = conversation_effect(&refreshed.effects);
+    let completed = update(
+        refreshed.model,
+        UiEvent::ConversationLoaded {
+            effect_id: conversation_id,
+            page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
+                row_id: "thread-a".to_owned(),
+                entries: vec![
+                    entry("question", false),
+                    working,
+                    entry("alice-reply", false),
+                    entry("completed-item", true),
+                ],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("refreshed conversation");
+
+    let entry_ids = completed
+        .model
+        .conversation()
+        .expect("conversation")
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entry_ids,
+        ["question", "alice-reply", "completed-item", "working"]
+    );
+    assert_eq!(completed.model.conversation_anchor(), Some("working"));
 }
 
 #[test]
@@ -4664,6 +4847,7 @@ fn entry(id: &str, activity: bool) -> UiConversationEntry {
             }
         },
         message_state: (!activity).then_some(UiMessageState::Open),
+        delivery: None,
         message_target: None,
         technical: if activity {
             vec![UiTechnicalSection::Activity {

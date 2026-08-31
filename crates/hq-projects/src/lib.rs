@@ -30,9 +30,9 @@ pub use command_codec::{
 };
 pub use git_worktree::{GitWorktreeAdapter, GitWorktreeAdapterConfig};
 pub use input::{
-    ApplicationProjectInputReconciler, AutomaticProjectDispatchPlan,
-    PlanAutomaticProjectDispatches, ProjectInputAcceptanceRequest, ProjectInputReconciliation,
-    ReconcileProjectInputs, plan_automatic_project_dispatches, plan_project_input_acceptance,
+    ApplicationProjectInputReconciler, AutomaticProjectCommandPlan, PlanAutomaticProjectCommands,
+    ProjectInputAcceptanceRequest, ProjectInputReconciliation, ReconcileProjectInputs,
+    plan_automatic_project_commands, plan_project_input_acceptance,
 };
 pub use remote::*;
 pub use remote_canonical::ApplicationRemoteProjectCommandPort;

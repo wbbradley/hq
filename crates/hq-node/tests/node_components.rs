@@ -63,7 +63,7 @@ impl ReconcileProjectMessages for FakeComponent {
                 accepted: 0,
                 truncated: false,
             },
-            dispatch_commands: 0,
+            automatic_commands: 0,
             truncated: false,
         })
     }

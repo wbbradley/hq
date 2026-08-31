@@ -223,7 +223,7 @@ fn workflow_snapshot(
     })
 }
 
-fn agent_available_to_project(
+pub(crate) fn agent_available_to_project(
     snapshot: &DomainSnapshot,
     project_id: ProjectId,
     home: InstallationId,

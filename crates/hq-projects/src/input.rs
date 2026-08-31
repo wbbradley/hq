@@ -8,9 +8,10 @@ use hq_application::{
     ProjectCommandRequest, QueryDomain,
 };
 use hq_domain::{
-    AccountId, AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, CommandDigest,
-    CommandId, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
-    MessageId, OperationId, ProjectId, SemanticPayload,
+    AccountId, AssignmentBinding, AuthorityReference, AuthorityRole, BoundedSet, CausalReferences,
+    CommandDigest, CommandId, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES,
+    MAX_FACT_PARENTS, MessageId, OperationId, ProjectId, ResourceLocator, ResourceScheme,
+    SemanticPayload,
 };
 use hq_reducer::{
     AuthorityProjection, AuthorityProjectionKey, ConversationProjection, ProjectAssignmentPhase,
@@ -44,22 +45,22 @@ pub struct ProjectInputReconciliation {
     pub truncated: bool,
 }
 
-/// Bounded deterministic automatic-dispatch requests derived from authoritative pending input.
+/// Bounded deterministic automatic commands derived from authoritative pending input.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AutomaticProjectDispatchPlan {
-    /// At most one request per runnable project, ordered by stable project identity.
+pub struct AutomaticProjectCommandPlan {
+    /// At most one request per actionable project, ordered by stable project identity.
     pub requests: Vec<ProjectCommandRequest>,
-    /// Whether additional runnable projects with pending input remain beyond the requested bound.
+    /// Whether additional actionable projects with pending input remain beyond the requested bound.
     pub truncated: bool,
 }
 
-/// Read-only capability for deriving durable automatic dispatch commands from canonical state.
-pub trait PlanAutomaticProjectDispatches {
-    /// Plans at most `limit` runnable projects without submitting provider work directly.
-    fn plan_automatic_project_dispatches(
+/// Read-only capability for deriving durable automatic project commands from canonical state.
+pub trait PlanAutomaticProjectCommands {
+    /// Plans at most `limit` actionable projects without submitting provider work directly.
+    fn plan_automatic_project_commands(
         &self,
         limit: usize,
-    ) -> Result<AutomaticProjectDispatchPlan, ApplicationError>;
+    ) -> Result<AutomaticProjectCommandPlan, ApplicationError>;
 }
 
 /// Home-side capability for sequencing ordinary project-addressed messages.
@@ -134,22 +135,22 @@ impl<P: QueryDomain + CommitFacts> ReconcileProjectInputs for ApplicationProject
     }
 }
 
-impl<P: QueryDomain> PlanAutomaticProjectDispatches for ApplicationProjectInputReconciler<P> {
-    fn plan_automatic_project_dispatches(
+impl<P: QueryDomain> PlanAutomaticProjectCommands for ApplicationProjectInputReconciler<P> {
+    fn plan_automatic_project_commands(
         &self,
         limit: usize,
-    ) -> Result<AutomaticProjectDispatchPlan, ApplicationError> {
+    ) -> Result<AutomaticProjectCommandPlan, ApplicationError> {
         let snapshot = self.ports.authoritative_snapshot()?;
-        plan_automatic_project_dispatches(snapshot.domain(), self.home, limit)
+        plan_automatic_project_commands(snapshot.domain(), self.home, limit)
     }
 }
 
-/// Derives stable dispatch commands for a bounded set of runnable projects with pending input.
-pub fn plan_automatic_project_dispatches(
+/// Derives stable resume or dispatch commands for actionable projects with pending input.
+pub fn plan_automatic_project_commands(
     snapshot: &DomainSnapshot,
     home: InstallationId,
     limit: usize,
-) -> Result<AutomaticProjectDispatchPlan, ApplicationError> {
+) -> Result<AutomaticProjectCommandPlan, ApplicationError> {
     if limit == 0 {
         return Err(invalid());
     }
@@ -170,7 +171,7 @@ pub fn plan_automatic_project_dispatches(
         .iter()
         .filter_map(|(key, projection)| match (key, projection) {
             (ProjectProjectionKey::Project(project_id), ProjectProjection::Project(project))
-                if automatic_dispatch_runnable(project, home)
+                if automatic_command_candidate(project, home)
                     && active_human_authority(snapshot, project.account_id, home).is_some() =>
             {
                 Some((*project_id, project.as_ref()))
@@ -216,18 +217,31 @@ pub fn plan_automatic_project_dispatches(
             std::collections::btree_map::Entry::Occupied(_) => {}
         }
     }
-    let truncated = pending.len() > limit;
-    let requests = pending
+    let mut requests = pending
         .into_iter()
-        .take(limit)
-        .map(|(project_id, (input, message))| {
-            automatic_dispatch_request(project_id, projects[&project_id], input, message)
+        .filter_map(|(project_id, (input, message))| {
+            automatic_project_request(snapshot, project_id, projects[&project_id], input, message)
+                .transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(AutomaticProjectDispatchPlan {
+    let truncated = requests.len() > limit;
+    requests.truncate(limit);
+    Ok(AutomaticProjectCommandPlan {
         requests,
         truncated,
     })
+}
+
+fn automatic_command_candidate(project: &ProjectView, home: InstallationId) -> bool {
+    automatic_dispatch_runnable(project, home)
+        || (project.home == home
+            && project.lifecycle != hq_reducer::ProjectLifecycle::Closing
+            && !project.archived
+            && project.claimable
+            && project.assignment.is_none()
+            && project
+                .primary
+                .is_some_and(|primary| project.resources.contains_key(&primary)))
 }
 
 fn automatic_dispatch_runnable(project: &ProjectView, home: InstallationId) -> bool {
@@ -267,6 +281,125 @@ fn automatic_dispatch_request(
     Ok(request)
 }
 
+fn automatic_project_request(
+    snapshot: &DomainSnapshot,
+    project_id: ProjectId,
+    project: &ProjectView,
+    input: &ProjectInputView,
+    message: &hq_reducer::MessageView,
+) -> Result<Option<ProjectCommandRequest>, ApplicationError> {
+    if automatic_dispatch_runnable(project, project.home) {
+        return automatic_dispatch_request(project_id, project, input, message).map(Some);
+    }
+    automatic_resume_request(snapshot, project_id, project, input, message)
+}
+
+fn automatic_resume_request(
+    snapshot: &DomainSnapshot,
+    project_id: ProjectId,
+    project: &ProjectView,
+    input: &ProjectInputView,
+    message: &hq_reducer::MessageView,
+) -> Result<Option<ProjectCommandRequest>, ApplicationError> {
+    let Some(binding) = historical_thread_binding(snapshot, project_id, message.thread_id) else {
+        return Ok(None);
+    };
+    if !crate::canonical::agent_available_to_project(
+        snapshot,
+        project_id,
+        project.home,
+        binding.agent_id,
+    ) {
+        return Ok(None);
+    }
+    let Some(launch_directory) = project
+        .primary
+        .and_then(|primary| project.resources.get(&primary))
+        .map(|resource| resource.canonical_locator.clone())
+    else {
+        return Ok(None);
+    };
+    let command_id = CommandId::from_bytes(automatic_resume_identity(
+        b"command",
+        project,
+        input,
+        &binding,
+        message.thread_id,
+        &launch_directory,
+    ));
+    let operation_id = OperationId::from_bytes(automatic_resume_identity(
+        b"operation",
+        project,
+        input,
+        &binding,
+        message.thread_id,
+        &launch_directory,
+    ));
+    let mut request = ProjectCommandRequest {
+        command_id,
+        operation_id,
+        request_digest: CommandDigest::from_bytes([0; 32]),
+        account_id: project.account_id,
+        project_id,
+        home: project.home,
+        expected_head: Some(project.head),
+        issued_at: message.authored_at,
+        action: ProjectCommandAction::Activate {
+            agent_id: binding.agent_id,
+            provider: binding.provider,
+            resume_session: Some(binding.session),
+            resume_thread: Some(message.thread_id),
+            launch_directory,
+        },
+    };
+    request.request_digest =
+        crate::command_codec::project_command_request_digest(&request).map_err(|_| invalid())?;
+    Ok(Some(request))
+}
+
+fn historical_thread_binding(
+    snapshot: &DomainSnapshot,
+    project_id: ProjectId,
+    thread_id: hq_domain::ThreadId,
+) -> Option<AssignmentBinding> {
+    let mut selected = None::<(u64, AssignmentBinding)>;
+    for projection in snapshot.project().projections().values() {
+        let ProjectProjection::Dispatch(dispatch) = projection else {
+            continue;
+        };
+        if dispatch.conflicted || dispatch.thread_id != thread_id {
+            continue;
+        }
+        let belongs_to_project = matches!(
+            snapshot
+                .project()
+                .projection(ProjectProjectionKey::Input(dispatch.message_id)),
+            Some(ProjectProjection::Input(input)) if input.project_id == project_id
+        );
+        if !belongs_to_project {
+            continue;
+        }
+        match &selected {
+            Some((sequence, _)) if *sequence > dispatch.sequence => {}
+            Some((sequence, binding)) if *sequence == dispatch.sequence => {
+                if !same_resume_binding(binding, &dispatch.binding) {
+                    return None;
+                }
+            }
+            Some(_) | None => {
+                selected = Some((dispatch.sequence, dispatch.binding.clone()));
+            }
+        }
+    }
+    selected.map(|(_, binding)| binding)
+}
+
+fn same_resume_binding(left: &AssignmentBinding, right: &AssignmentBinding) -> bool {
+    left.agent_id == right.agent_id
+        && left.provider == right.provider
+        && left.session == right.session
+}
+
 fn automatic_dispatch_identity(
     kind: &[u8],
     project: &ProjectView,
@@ -281,6 +414,40 @@ fn automatic_dispatch_identity(
     digest.update(input.message_id.as_bytes());
     digest.update(input.accepted_fact.as_bytes());
     digest.finalize().into()
+}
+
+fn automatic_resume_identity(
+    kind: &[u8],
+    project: &ProjectView,
+    input: &ProjectInputView,
+    binding: &AssignmentBinding,
+    thread_id: hq_domain::ThreadId,
+    launch_directory: &ResourceLocator,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"hq.project.automatic-resume.v1");
+    digest.update(kind);
+    digest.update(project.home.as_bytes());
+    digest.update(input.project_id.as_bytes());
+    digest.update(project.head.as_bytes());
+    digest.update(input.message_id.as_bytes());
+    digest.update(input.accepted_fact.as_bytes());
+    digest.update(binding.agent_id.as_bytes());
+    digest.update(binding.provider.as_str().as_bytes());
+    digest.update(binding.session.as_str().as_bytes());
+    digest.update(thread_id.as_bytes());
+    digest.update([resource_scheme_tag(launch_directory.scheme())]);
+    digest.update(launch_directory.value().as_bytes());
+    digest.finalize().into()
+}
+
+const fn resource_scheme_tag(scheme: ResourceScheme) -> u8 {
+    match scheme {
+        ResourceScheme::GitRepository => 0,
+        ResourceScheme::WorkingTree => 1,
+        ResourceScheme::Container => 2,
+        ResourceScheme::Opaque => 3,
+    }
 }
 
 fn eligible_project_message(
@@ -515,20 +682,21 @@ mod tests {
     };
 
     use hq_application::{
-        AuthoritativeSnapshot, CommitFacts, DomainSnapshot, MutationReceipt,
-        ProjectProjectionSnapshot, ProjectionSnapshot, QueryDomain,
+        AgentProjectionSnapshot, AuthoritativeSnapshot, CommitFacts, DomainSnapshot,
+        MutationReceipt, ProjectProjectionSnapshot, ProjectionSnapshot, QueryDomain,
     };
     use hq_domain::{
         AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText, ContentText,
-        EncryptionPublicKey, InstallationAddress, MailboxAddress, MailboxId, MessageContent,
-        MessagePurpose, Page, PageCursor, PresentationKind, ProviderId, ProviderSessionId,
-        ResourceLocator, ResourceScheme, Revision, ShortText, SigningPublicKey, ThreadId,
-        Timestamp,
+        DispatchId, EncryptionPublicKey, InstallationAddress, MailboxAddress, MailboxId,
+        MessageContent, MessagePurpose, Page, PageCursor, PresentationKind, ProjectResource,
+        ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator, ResourceScheme,
+        Revision, ShortText, SigningPublicKey, ThreadId, Timestamp,
     };
     use hq_reducer::{
-        AuthorityProjection, AuthorityProjectionKey, ConversationProjection,
-        ConversationProjectionKey, InstallationView, MessageView, ProjectAssignmentPhase,
-        ProjectAssignmentView, ProjectInputView, ProjectLifecycle, ProjectProjection,
+        AgentLifecycle, AgentProjection, AgentProjectionKey, AgentView, AuthorityProjection,
+        AuthorityProjectionKey, ConversationProjection, ConversationProjectionKey,
+        InstallationView, MessageView, ProjectAssignmentPhase, ProjectAssignmentView,
+        ProjectDispatchView, ProjectInputView, ProjectLifecycle, ProjectProjection,
         ProjectProjectionKey, ProjectView,
     };
 
@@ -536,10 +704,20 @@ mod tests {
 
     use super::*;
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Default)]
     struct ProjectFixtureState {
         accepted: bool,
-        runnable: bool,
+        mode: ProjectFixtureMode,
+        agent_assigned_elsewhere: bool,
+        unclaimable: bool,
+    }
+
+    #[derive(Clone, Copy, Default, Eq, PartialEq)]
+    enum ProjectFixtureMode {
+        #[default]
+        Dormant,
+        Runnable,
+        Resumable,
     }
 
     fn snapshot(
@@ -609,7 +787,7 @@ mod tests {
                 )]),
                 BTreeMap::new(),
             ),
-            ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+            agent_snapshot(home, state),
             project_snapshot(
                 home,
                 account_id,
@@ -619,6 +797,33 @@ mod tests {
                 message_fact,
                 state,
             ),
+        )
+    }
+
+    fn agent_snapshot(home: InstallationId, state: ProjectFixtureState) -> AgentProjectionSnapshot {
+        if state.mode != ProjectFixtureMode::Resumable {
+            return ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
+        }
+        let agent_id = AgentId::from_bytes([17; 32]);
+        ProjectionSnapshot::new(
+            BTreeMap::new(),
+            BTreeMap::from([(
+                AgentProjectionKey::Agent(agent_id),
+                AgentProjection::Agent(Box::new(AgentView {
+                    claims: BTreeSet::from([FactId::from_bytes([31; 32])]),
+                    names: BTreeSet::from([ShortText::new("alice").expect("name")]),
+                    mailboxes: BTreeSet::from([MailboxAddress::new(
+                        home,
+                        MailboxId::from_bytes([32; 32]),
+                    )]),
+                    retirements: BTreeSet::new(),
+                    lifecycle: AgentLifecycle::Active,
+                    runnable: true,
+                    selected_session: None,
+                    name_reserved: true,
+                })),
+            )]),
+            BTreeMap::new(),
         )
     }
 
@@ -634,29 +839,36 @@ mod tests {
         let agent_id = AgentId::from_bytes([17; 32]);
         let assignment_id = AssignmentId::from_bytes([18; 32]);
         let provider = ProviderId::new("codex").expect("provider");
-        let assignment = state.runnable.then(|| ProjectAssignmentView {
-            intent: AssignmentIntent {
-                assignment_id,
-                agent_id,
-                provider: provider.clone(),
-            },
-            binding: Some(AssignmentBinding {
-                assignment_id,
-                agent_id,
-                provider,
-                session: ProviderSessionId::new("session").expect("session"),
-            }),
-            phase: ProjectAssignmentPhase::Runnable {
-                thread_id: ThreadId::from_bytes(*input_fact_id.as_bytes()),
-                launch_directory: ResourceLocator::new(
-                    ResourceScheme::WorkingTree,
-                    BoundedText::new("/work/project").expect("locator"),
-                ),
-            },
-            cardinality_conflicted: false,
-            runnable: true,
-            support: BTreeSet::new(),
-        });
+        let binding = AssignmentBinding {
+            assignment_id,
+            agent_id,
+            provider: provider.clone(),
+            session: ProviderSessionId::new("session").expect("session"),
+        };
+        let assignment =
+            (state.mode == ProjectFixtureMode::Runnable).then(|| ProjectAssignmentView {
+                intent: AssignmentIntent {
+                    assignment_id,
+                    agent_id,
+                    provider: provider.clone(),
+                },
+                binding: Some(binding.clone()),
+                phase: ProjectAssignmentPhase::Runnable {
+                    thread_id: ThreadId::from_bytes(*input_fact_id.as_bytes()),
+                    launch_directory: ResourceLocator::new(
+                        ResourceScheme::WorkingTree,
+                        BoundedText::new("/work/project").expect("locator"),
+                    ),
+                },
+                cardinality_conflicted: false,
+                runnable: true,
+                support: BTreeSet::new(),
+            });
+        let resource_id = ResourceId::from_bytes([19; 32]);
+        let launch_directory = ResourceLocator::new(
+            ResourceScheme::WorkingTree,
+            BoundedText::new("/work/project").expect("locator"),
+        );
         let mut projections = BTreeMap::from([(
             ProjectProjectionKey::Project(project_id),
             ProjectProjection::Project(Box::new(ProjectView {
@@ -669,17 +881,29 @@ mod tests {
                 predecessor: None,
                 name: ShortText::new("project").expect("name"),
                 brief: None,
-                resources: BTreeMap::new(),
-                primary: None,
-                lifecycle: if state.runnable {
+                resources: if state.mode == ProjectFixtureMode::Resumable {
+                    BTreeMap::from([(
+                        resource_id,
+                        ProjectResource {
+                            resource_id,
+                            display_locator: launch_directory.clone(),
+                            canonical_locator: launch_directory.clone(),
+                            health: ResourceHealth::Healthy,
+                        },
+                    )])
+                } else {
+                    BTreeMap::new()
+                },
+                primary: (state.mode == ProjectFixtureMode::Resumable).then_some(resource_id),
+                lifecycle: if state.mode == ProjectFixtureMode::Runnable {
                     ProjectLifecycle::Open
                 } else {
                     ProjectLifecycle::Closed
                 },
-                archived: !state.runnable,
+                archived: state.mode == ProjectFixtureMode::Dormant,
                 active_claims: BTreeSet::new(),
                 claim_conflicts: BTreeMap::new(),
-                claimable: true,
+                claimable: !state.unclaimable,
                 assignment,
                 input_sequence: 7,
             })),
@@ -696,7 +920,116 @@ mod tests {
                 })),
             );
         }
+        if state.mode == ProjectFixtureMode::Resumable {
+            insert_historical_dispatch(&mut projections, project_id, input_fact_id, &binding);
+        }
+        if state.agent_assigned_elsewhere {
+            insert_other_assignment(&mut projections, home, account_id, provider, binding);
+        }
         ProjectionSnapshot::new(BTreeMap::new(), projections, BTreeMap::new())
+    }
+
+    fn insert_historical_dispatch(
+        projections: &mut BTreeMap<ProjectProjectionKey, ProjectProjection>,
+        project_id: ProjectId,
+        thread_fact: FactId,
+        binding: &AssignmentBinding,
+    ) {
+        let older_message = MessageId::from_bytes([42; 32]);
+        projections.insert(
+            ProjectProjectionKey::Input(older_message),
+            ProjectProjection::Input(Box::new(ProjectInputView {
+                project_id,
+                message_id: older_message,
+                input_fact_id: FactId::from_bytes([43; 32]),
+                sequence: 5,
+                accepted_fact: FactId::from_bytes([44; 32]),
+            })),
+        );
+        projections.insert(
+            ProjectProjectionKey::Dispatch(DispatchId::from_bytes([45; 32])),
+            ProjectProjection::Dispatch(Box::new(ProjectDispatchView {
+                dispatch_id: DispatchId::from_bytes([45; 32]),
+                message_id: older_message,
+                sequence: 5,
+                binding: AssignmentBinding {
+                    assignment_id: AssignmentId::from_bytes([46; 32]),
+                    agent_id: AgentId::from_bytes([47; 32]),
+                    provider: ProviderId::new("codex").expect("provider"),
+                    session: ProviderSessionId::new("older-session").expect("session"),
+                },
+                thread_id: ThreadId::from_bytes(*thread_fact.as_bytes()),
+                fact_id: FactId::from_bytes([48; 32]),
+                conflicted: false,
+            })),
+        );
+        let historical_message = MessageId::from_bytes([30; 32]);
+        projections.insert(
+            ProjectProjectionKey::Input(historical_message),
+            ProjectProjection::Input(Box::new(ProjectInputView {
+                project_id,
+                message_id: historical_message,
+                input_fact_id: FactId::from_bytes([34; 32]),
+                sequence: 6,
+                accepted_fact: FactId::from_bytes([35; 32]),
+            })),
+        );
+        projections.insert(
+            ProjectProjectionKey::Dispatch(DispatchId::from_bytes([36; 32])),
+            ProjectProjection::Dispatch(Box::new(ProjectDispatchView {
+                dispatch_id: DispatchId::from_bytes([36; 32]),
+                message_id: historical_message,
+                sequence: 6,
+                binding: binding.clone(),
+                thread_id: ThreadId::from_bytes(*thread_fact.as_bytes()),
+                fact_id: FactId::from_bytes([37; 32]),
+                conflicted: false,
+            })),
+        );
+    }
+
+    fn insert_other_assignment(
+        projections: &mut BTreeMap<ProjectProjectionKey, ProjectProjection>,
+        home: InstallationId,
+        account_id: AccountId,
+        provider: ProviderId,
+        binding: AssignmentBinding,
+    ) {
+        let other_project_id = ProjectId::from_bytes([38; 32]);
+        projections.insert(
+            ProjectProjectionKey::Project(other_project_id),
+            ProjectProjection::Project(Box::new(ProjectView {
+                root: FactId::from_bytes([39; 32]),
+                head: FactId::from_bytes([40; 32]),
+                fork_participants: BTreeSet::new(),
+                home,
+                account_id,
+                mailbox: MailboxAddress::new(home, MailboxId::from_bytes([41; 32])),
+                predecessor: None,
+                name: ShortText::new("other").expect("name"),
+                brief: None,
+                resources: BTreeMap::new(),
+                primary: None,
+                lifecycle: ProjectLifecycle::Open,
+                archived: false,
+                active_claims: BTreeSet::new(),
+                claim_conflicts: BTreeMap::new(),
+                claimable: true,
+                assignment: Some(ProjectAssignmentView {
+                    intent: AssignmentIntent {
+                        assignment_id: binding.assignment_id,
+                        agent_id: binding.agent_id,
+                        provider,
+                    },
+                    binding: Some(binding),
+                    phase: ProjectAssignmentPhase::Configuring,
+                    cardinality_conflicted: false,
+                    runnable: false,
+                    support: BTreeSet::new(),
+                }),
+                input_sequence: 0,
+            })),
+        );
     }
 
     #[test]
@@ -711,7 +1044,7 @@ mod tests {
             MessagePurpose::Asynchronous,
             ProjectFixtureState {
                 accepted: false,
-                runnable: false,
+                ..ProjectFixtureState::default()
             },
         );
         let request = ProjectInputAcceptanceRequest {
@@ -759,7 +1092,7 @@ mod tests {
             MessagePurpose::Asynchronous,
             ProjectFixtureState {
                 accepted: false,
-                runnable: false,
+                ..ProjectFixtureState::default()
             },
         );
         assert!(
@@ -792,7 +1125,7 @@ mod tests {
             MessagePurpose::Asynchronous,
             ProjectFixtureState {
                 accepted: false,
-                runnable: false,
+                ..ProjectFixtureState::default()
             },
         );
         assert!(
@@ -826,7 +1159,7 @@ mod tests {
             MessagePurpose::ProjectOutput,
             ProjectFixtureState {
                 accepted: false,
-                runnable: false,
+                ..ProjectFixtureState::default()
             },
         );
         assert_eq!(next_input(&snapshot, home), None);
@@ -860,13 +1193,14 @@ mod tests {
             MessagePurpose::Asynchronous,
             ProjectFixtureState {
                 accepted: true,
-                runnable: true,
+                mode: ProjectFixtureMode::Runnable,
+                ..ProjectFixtureState::default()
             },
         );
 
         let first =
-            plan_automatic_project_dispatches(&snapshot, home, 1).expect("automatic dispatch plan");
-        let second = plan_automatic_project_dispatches(&snapshot, home, 1)
+            plan_automatic_project_commands(&snapshot, home, 1).expect("automatic dispatch plan");
+        let second = plan_automatic_project_commands(&snapshot, home, 1)
             .expect("stable automatic dispatch plan");
         assert_eq!(first, second);
         assert!(!first.truncated);
@@ -895,12 +1229,12 @@ mod tests {
             MessagePurpose::Asynchronous,
             ProjectFixtureState {
                 accepted: true,
-                runnable: false,
+                ..ProjectFixtureState::default()
             },
         );
 
         let plan =
-            plan_automatic_project_dispatches(&snapshot, home, 1).expect("automatic dispatch plan");
+            plan_automatic_project_commands(&snapshot, home, 1).expect("automatic dispatch plan");
 
         assert!(plan.requests.is_empty());
         assert!(!plan.truncated);
@@ -910,6 +1244,81 @@ mod tests {
                 .projection(ProjectProjectionKey::Input(MessageId::from_bytes([4; 32])))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn accepted_reply_resumes_its_available_historical_agent_when_project_is_claimable() {
+        let home = InstallationId::from_bytes([1; 32]);
+        let account_id = AccountId::from_bytes([13; 32]);
+        let snapshot = snapshot(
+            MailboxAddress::new(home, MailboxId::from_bytes([6; 32])),
+            account_id,
+            account_id,
+            MessagePurpose::Asynchronous,
+            ProjectFixtureState {
+                accepted: true,
+                mode: ProjectFixtureMode::Resumable,
+                ..ProjectFixtureState::default()
+            },
+        );
+
+        let first =
+            plan_automatic_project_commands(&snapshot, home, 1).expect("automatic resume plan");
+        let second = plan_automatic_project_commands(&snapshot, home, 1)
+            .expect("stable automatic resume plan");
+
+        assert_eq!(first, second);
+        assert_eq!(first.requests.len(), 1);
+        assert_eq!(
+            first.requests[0].action,
+            ProjectCommandAction::Activate {
+                agent_id: AgentId::from_bytes([17; 32]),
+                provider: ProviderId::new("codex").expect("provider"),
+                resume_session: Some(ProviderSessionId::new("session").expect("session")),
+                resume_thread: Some(ThreadId::from_bytes([5; 32])),
+                launch_directory: ResourceLocator::new(
+                    ResourceScheme::WorkingTree,
+                    BoundedText::new("/work/project").expect("locator"),
+                ),
+            }
+        );
+        assert_eq!(
+            project_command_request_digest(&first.requests[0]).expect("request digest"),
+            first.requests[0].request_digest
+        );
+    }
+
+    #[test]
+    fn accepted_reply_waits_when_historical_agent_is_busy_or_project_is_unclaimable() {
+        let home = InstallationId::from_bytes([1; 32]);
+        let account_id = AccountId::from_bytes([13; 32]);
+        for state in [
+            ProjectFixtureState {
+                accepted: true,
+                mode: ProjectFixtureMode::Resumable,
+                agent_assigned_elsewhere: true,
+                ..ProjectFixtureState::default()
+            },
+            ProjectFixtureState {
+                accepted: true,
+                mode: ProjectFixtureMode::Resumable,
+                unclaimable: true,
+                ..ProjectFixtureState::default()
+            },
+        ] {
+            let snapshot = snapshot(
+                MailboxAddress::new(home, MailboxId::from_bytes([6; 32])),
+                account_id,
+                account_id,
+                MessagePurpose::Asynchronous,
+                state,
+            );
+
+            let plan =
+                plan_automatic_project_commands(&snapshot, home, 1).expect("automatic resume plan");
+
+            assert!(plan.requests.is_empty());
+        }
     }
 
     #[derive(Clone)]
@@ -936,7 +1345,7 @@ mod tests {
                     MessagePurpose::Asynchronous,
                     ProjectFixtureState {
                         accepted: state.accepted,
-                        runnable: false,
+                        ..ProjectFixtureState::default()
                     },
                 ),
             ))
@@ -967,7 +1376,7 @@ mod tests {
                     MessagePurpose::Asynchronous,
                     ProjectFixtureState {
                         accepted: state.accepted,
-                        runnable: false,
+                        ..ProjectFixtureState::default()
                     },
                 )
             };

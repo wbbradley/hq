@@ -24,7 +24,7 @@ use hq_node::{
     ReconcileProjectMessages,
 };
 use hq_projects::{
-    AutomaticProjectDispatchPlan, PlanAutomaticProjectDispatches, ProjectInputReconciliation,
+    AutomaticProjectCommandPlan, PlanAutomaticProjectCommands, ProjectInputReconciliation,
     ProjectWorkerPort, ReconcileProjectInputs,
 };
 
@@ -96,13 +96,13 @@ impl ReconcileProjectInputs for FakeInputs {
     }
 }
 
-impl PlanAutomaticProjectDispatches for FakeInputs {
-    fn plan_automatic_project_dispatches(
+impl PlanAutomaticProjectCommands for FakeInputs {
+    fn plan_automatic_project_commands(
         &self,
         _limit: usize,
-    ) -> Result<AutomaticProjectDispatchPlan, ApplicationError> {
+    ) -> Result<AutomaticProjectCommandPlan, ApplicationError> {
         self.trace.lock().expect("trace").push("plan");
-        Ok(AutomaticProjectDispatchPlan {
+        Ok(AutomaticProjectCommandPlan {
             requests: self.planned.lock().expect("planned").clone(),
             truncated: false,
         })
@@ -218,7 +218,7 @@ fn message_reconciliation_submits_the_planned_durable_dispatch_command() {
         .expect("message reconciliation succeeds");
 
     assert_eq!(reconciliation.inputs.accepted, 0);
-    assert_eq!(reconciliation.dispatch_commands, 1);
+    assert_eq!(reconciliation.automatic_commands, 1);
     assert!(!reconciliation.truncated);
     assert_eq!(
         trace.lock().expect("trace").as_slice(),
@@ -258,8 +258,8 @@ fn rejected_automatic_dispatch_remains_stably_retryable() {
         .reconcile_project_messages(16)
         .expect("retry reconciliation succeeds");
 
-    assert_eq!(first.dispatch_commands, 0);
-    assert_eq!(second.dispatch_commands, 0);
+    assert_eq!(first.automatic_commands, 0);
+    assert_eq!(second.automatic_commands, 0);
     assert_eq!(
         submitted.lock().expect("submitted").as_slice(),
         [dispatch_request(), dispatch_request()]

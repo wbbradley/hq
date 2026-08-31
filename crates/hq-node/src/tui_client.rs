@@ -31,11 +31,11 @@ use hq_tui::{
     UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanIssue,
     UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState,
     UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState,
-    UiMessageTarget, UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning,
-    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
-    UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
-    UiSnapshot, UiTechnicalSection, UiTimerKind,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageDelivery,
+    UiMessageState, UiMessageTarget, UiProject, UiProjectAction, UiProjectAssignment,
+    UiProjectExternalWarning, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
+    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind,
+    UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
 };
 
 use crate::{
@@ -2074,6 +2074,7 @@ fn tui_conversation_entry(
                     truncated,
                 },
                 message_state: None,
+                delivery: None,
                 message_target: None,
                 technical: vec![UiTechnicalSection::Activity {
                     sequence,
@@ -2165,13 +2166,22 @@ fn tui_message_entry(
         .recipient_installation
         .zip(message.recipient_mailbox)
         .map(|(installation, mailbox)| mailbox_address(installation, mailbox));
+    let author = conversation_author(&message, local_human, participant);
+    let delivery = matches!(author, UiConversationAuthor::You).then_some(
+        if message.peer_received_by.is_empty() {
+            UiMessageDelivery::Sent
+        } else {
+            UiMessageDelivery::Received
+        },
+    );
     UiConversationEntry {
         id: full_id(message.fact_id),
         presentation: UiConversationEntryPresentation::Message {
-            author: conversation_author(&message, local_human, participant),
+            author,
             body: terminal_text(&message.content),
         },
         message_state: Some(state),
+        delivery,
         message_target: Some(UiMessageTarget {
             message_id: message.message_id.bytes(),
             reply_allowed: message.purpose == MessagePurposeDto::Question,

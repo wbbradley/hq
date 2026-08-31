@@ -7,7 +7,7 @@ use hq_tui::{
     UiAgentProjectAssignment, UiAgentSession, UiAgentStatus, UiConversationActivityKind,
     UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
     UiEffect, UiEvent, UiFailure, UiHumanState, UiInput, UiMailboxDraft, UiMailboxDraftTarget,
-    UiMessageState, UiModel, UiProject, UiProjectAction, UiProjectAssignment,
+    UiMessageDelivery, UiMessageState, UiModel, UiProject, UiProjectAction, UiProjectAssignment,
     UiProjectExternalWarning, UiProjectFolderAction, UiProjectManagementAction, UiProjectOutcome,
     UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
     UiProjectSummaryFocus, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
@@ -84,6 +84,24 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
     assert!(confirmation.contains("Archive the selected message?"));
     assert!(confirmation.contains("Only this message changes state"));
     assert!(confirmation.contains("conversation history stays intact"));
+}
+
+#[test]
+fn locally_authored_messages_show_pending_sent_and_received_progress() {
+    for (delivery, label) in [
+        (UiMessageDelivery::Pending, "You · Pending"),
+        (UiMessageDelivery::Sent, "You · Sent"),
+        (UiMessageDelivery::Received, "You · Received"),
+    ] {
+        let rendered = render_text(&conversation_model_with_delivery(
+            UiSize {
+                width: 104,
+                height: 18,
+            },
+            delivery,
+        ));
+        assert!(rendered.contains(label), "{rendered}");
+    }
 }
 
 #[test]
@@ -698,7 +716,7 @@ fn contextual_help_covers_every_section_with_and_without_a_selection() {
 }
 
 #[test]
-fn conversation_layout_preserves_reducer_order_and_typed_activity_state() {
+fn conversation_layout_renders_typed_activity_after_its_earlier_message() {
     let model = conversation_model(UiSize {
         width: 120,
         height: 24,
@@ -715,7 +733,7 @@ fn conversation_layout_preserves_reducer_order_and_typed_activity_state() {
     let activity = rendered
         .find("● Work in progress…")
         .expect("activity rendered");
-    assert!(message < activity, "reducer page order is retained");
+    assert!(message < activity, "earlier message precedes its activity");
     assert!(rendered.contains("Can we ship?"));
     for obsolete in [
         "Conversation · complete",
@@ -1160,9 +1178,13 @@ fn project_creation_chooser_leads_with_folder_ownership_and_discloses_worktrees(
     assert!(rendered.contains("Name: customer-api"), "{rendered}");
     assert!(!rendered.contains("customer-api (required)"), "{rendered}");
     assert!(!rendered.contains("customer-api│"), "{rendered}");
-    assert!(rendered.contains("claim this"), "{rendered}");
-    assert!(rendered.contains("folder in HQ"), "{rendered}");
-    assert!(rendered.contains("overlapping folders"), "{rendered}");
+    assert!(
+        rendered.contains("this project will claim this folder"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("in HQ."), "{rendered}");
+    assert!(rendered.contains("or overlapping"), "{rendered}");
+    assert!(rendered.contains("folders."), "{rendered}");
 }
 
 #[test]
@@ -2489,6 +2511,18 @@ fn conversation_model(size: UiSize) -> UiModel {
 }
 
 fn conversation_model_with_state(size: UiSize, state: UiMessageState) -> UiModel {
+    conversation_model_with_state_and_delivery(size, state, None)
+}
+
+fn conversation_model_with_delivery(size: UiSize, delivery: UiMessageDelivery) -> UiModel {
+    conversation_model_with_state_and_delivery(size, UiMessageState::Open, Some(delivery))
+}
+
+fn conversation_model_with_state_and_delivery(
+    size: UiSize,
+    state: UiMessageState,
+    delivery: Option<UiMessageDelivery>,
+) -> UiModel {
     let ready = ready_transition(size);
     let effect_id = ready
         .effects
@@ -2500,7 +2534,7 @@ fn conversation_model_with_state(size: UiSize, state: UiMessageState) -> UiModel
         .expect("conversation request");
     let opening =
         update(ready.model, UiEvent::Input(UiInput::Activate)).expect("open conversation");
-    update(
+    let opened = update(
         opening.model,
         UiEvent::ConversationLoaded {
             effect_id,
@@ -2512,10 +2546,14 @@ fn conversation_model_with_state(size: UiSize, state: UiMessageState) -> UiModel
                     UiConversationEntry {
                         id: "message-1".to_owned(),
                         presentation: UiConversationEntryPresentation::Message {
-                            author: UiConversationAuthor::Participant("Alice".to_owned()),
+                            author: delivery.map_or_else(
+                                || UiConversationAuthor::Participant("Alice".to_owned()),
+                                |_| UiConversationAuthor::You,
+                            ),
                             body: "Can we ship?".to_owned(),
                         },
                         message_state: Some(state),
+                        delivery,
                         message_target: Some(hq_tui::UiMessageTarget {
                             message_id: [1; 32],
                             reply_allowed: true,
@@ -2532,6 +2570,7 @@ fn conversation_model_with_state(size: UiSize, state: UiMessageState) -> UiModel
                             truncated: false,
                         },
                         message_state: None,
+                        delivery: None,
                         message_target: None,
                         technical: vec![UiTechnicalSection::Activity {
                             sequence: 2,
@@ -2544,6 +2583,8 @@ fn conversation_model_with_state(size: UiSize, state: UiMessageState) -> UiModel
             },
         },
     )
-    .expect("conversation page")
-    .model
+    .expect("conversation page");
+    update(opened.model, UiEvent::Input(UiInput::PreviousItem))
+        .expect("select message")
+        .model
 }

@@ -17,8 +17,8 @@ use crate::{
     UiConversationEntry, UiConversationEntryPresentation, UiFocus, UiHelpPage, UiHumanIssue,
     UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanState, UiMailboxAction,
     UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
-    UiManagedSessionOutcome, UiMessageState, UiModel, UiNewChoice, UiNewModal, UiProjectAction,
-    UiProjectAssignedAgentStatus, UiProjectCreationChoice, UiProjectFolderAction,
+    UiManagedSessionOutcome, UiMessageDelivery, UiMessageState, UiModel, UiNewChoice, UiNewModal,
+    UiProjectAction, UiProjectAssignedAgentStatus, UiProjectCreationChoice, UiProjectFolderAction,
     UiProjectFolderOwnership, UiProjectFormField, UiProjectInteraction, UiProjectLifecycle,
     UiProjectManagementAction, UiProjectOutcome, UiProjectRecoverySummary, UiProjectSummaryFocus,
     UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
@@ -27,11 +27,30 @@ use crate::{
 
 const MINIMUM_WIDTH: u16 = 40;
 const MINIMUM_HEIGHT: u16 = 10;
-const NAVIGATION_WIDTH: u16 = 24;
+const NAVIGATION_SELECTED_MARKER: &str = " › ";
+const NAVIGATION_UNSELECTED_MARKER: &str = "   ";
+const NAVIGATION_TRAILING_PADDING: usize = 1;
+const NAVIGATION_BORDER_WIDTH: usize = 1;
 const INBOX_LIST_MIN_WIDTH: u16 = 24;
 const INBOX_LIST_PREFERRED_WIDTH: u16 = 32;
 const INBOX_LIST_MAX_WIDTH: u16 = 36;
 const CONVERSATION_PREFERRED_MIN_WIDTH: u16 = 48;
+
+fn navigation_width() -> u16 {
+    let marker_width = NAVIGATION_SELECTED_MARKER
+        .width()
+        .max(NAVIGATION_UNSELECTED_MARKER.width());
+    let label_width = UiSection::ALL
+        .into_iter()
+        .map(|section| section_label(section).width())
+        .max()
+        .unwrap_or_default();
+    let width = marker_width
+        .saturating_add(label_width)
+        .saturating_add(NAVIGATION_TRAILING_PADDING)
+        .saturating_add(NAVIGATION_BORDER_WIDTH);
+    u16::try_from(width).unwrap_or(u16::MAX)
+}
 
 fn inbox_list_width(available: u16) -> u16 {
     let width_preserving_conversation =
@@ -2543,12 +2562,17 @@ fn render_header(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
 
 fn render_wide_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
     let [navigation, rows] =
-        Layout::horizontal([Constraint::Length(NAVIGATION_WIDTH), Constraint::Min(1)]).areas(area);
+        Layout::horizontal([Constraint::Length(navigation_width()), Constraint::Min(1)])
+            .areas(area);
     let navigation_lines = UiSection::ALL
         .into_iter()
         .map(|section| {
             let selected = section == model.section();
-            let marker = if selected { " › " } else { "   " };
+            let marker = if selected {
+                NAVIGATION_SELECTED_MARKER
+            } else {
+                NAVIGATION_UNSELECTED_MARKER
+            };
             let style = if selected {
                 selected_style(theme, model.focus() == UiFocus::Navigation)
             } else {
@@ -3666,13 +3690,24 @@ fn render_conversation_entry(
                     ("Unknown sender", UiThemeRole::ConversationAuthorParticipant)
                 }
             };
+            let delivery = if entry.message_state == Some(UiMessageState::Rejected) {
+                ""
+            } else {
+                match entry.delivery {
+                    Some(UiMessageDelivery::Pending) => " · Pending",
+                    Some(UiMessageDelivery::Sent) => " · Sent",
+                    Some(UiMessageDelivery::Received) => " · Received",
+                    None => "",
+                }
+            };
             let exceptional = match entry.message_state {
                 Some(UiMessageState::Archived) => " · Archived",
                 Some(UiMessageState::Rejected) => " · Could not be delivered",
                 Some(UiMessageState::Open) | None => "",
             };
             frame.render_widget(
-                Paragraph::new(format!("{author}{exceptional}")).style(theme.style(author_role)),
+                Paragraph::new(format!("{author}{delivery}{exceptional}"))
+                    .style(theme.style(author_role)),
                 Rect { height: 1, ..area },
             );
             if area.height > 1 {
@@ -3989,13 +4024,21 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
 mod tests {
     use super::{
         conversation_entry_height, display_prefix, display_suffix, inbox_list_width,
-        text_field_line, visible_conversation_entries,
+        navigation_width, text_field_line, visible_conversation_entries,
     };
     use crate::{
         UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiMessageState,
         UiTheme,
     };
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn navigation_width_leaves_one_cell_after_the_longest_label() {
+        let longest_row = " › Archived";
+        let longest_row_width = u16::try_from(longest_row.width()).unwrap_or(u16::MAX);
+
+        assert_eq!(navigation_width(), longest_row_width + 2);
+    }
 
     #[test]
     fn display_clipping_keeps_unicode_scalar_boundaries_and_cell_budgets() {
@@ -4058,6 +4101,7 @@ mod tests {
                 body: body.to_owned(),
             },
             message_state: Some(UiMessageState::Open),
+            delivery: None,
             message_target: None,
             technical: Vec::new(),
         }

@@ -9,7 +9,7 @@ use hq_domain::{
 };
 use hq_reducer::{
     AuthorityProjection, AuthorityProjectionKey, ConversationProjection, ConversationProjectionKey,
-    MembershipState, ProjectLifecycle, ProjectProjection, ProjectProjectionKey,
+    MembershipState, ProjectProjection, ProjectProjectionKey,
 };
 
 use crate::{
@@ -406,13 +406,7 @@ fn project_authority(
         .project()
         .projection(ProjectProjectionKey::Project(project_id))
         .and_then(|projection| match projection {
-            ProjectProjection::Project(project)
-                if project.lifecycle == ProjectLifecycle::Open
-                    && !project.archived
-                    && project.claimable =>
-            {
-                Some(project.as_ref())
-            }
+            ProjectProjection::Project(project) => Some(project.as_ref()),
             _ => None,
         })
         .ok_or_else(stale_target)?;
@@ -484,4 +478,152 @@ fn domain_error(category: ErrorCategory, code: &str) -> DomainError {
         unreachable!("static mailbox error code is bounded")
     };
     DomainError::new(category, code)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use hq_domain::{
+        AccountId, EncryptionPublicKey, FactId, InstallationAddress, MailboxId, ShortText,
+        SigningPublicKey,
+    };
+    use hq_reducer::{
+        AuthorityAggregateKey, AuthorityProjection, AuthorityProjectionKey, InstallationView,
+        MailboxView, ProjectAggregateKey, ProjectLifecycle, ProjectProjection,
+        ProjectProjectionKey, ProjectView,
+    };
+
+    use super::*;
+    use crate::ProjectionSnapshot;
+
+    #[test]
+    fn project_messages_are_accepted_independent_of_runtime_readiness() {
+        let cases = [
+            (ProjectLifecycle::Open, false, true),
+            (ProjectLifecycle::Closing, false, true),
+            (ProjectLifecycle::Closed, false, true),
+            (ProjectLifecycle::Closed, true, true),
+            (ProjectLifecycle::Open, false, false),
+        ];
+
+        for (lifecycle, archived, claimable) in cases {
+            let (snapshot, installation, human, project_id) =
+                project_snapshot(lifecycle, archived, claimable);
+            let decision = plan_mailbox_command(
+                &snapshot,
+                installation,
+                human,
+                &MailboxCommandRequest {
+                    command_id: CommandId::from_bytes([11; 32]),
+                    request_digest: CommandDigest::from_bytes([12; 32]),
+                    draft_id: None,
+                    action: MailboxCommandAction::Project {
+                        project_id,
+                        thread_id: None,
+                        message_id: MessageId::from_bytes([13; 32]),
+                    },
+                    content: Some("queued follow-up".to_owned()),
+                    authored_at: Timestamp::from_unix_millis(1),
+                    auxiliary_randomness: [14; 32],
+                },
+                None,
+            );
+
+            assert!(
+                matches!(decision, MutationDecision::Commit(_)),
+                "project messaging unexpectedly followed runtime state: lifecycle={lifecycle:?}, archived={archived}, claimable={claimable}"
+            );
+        }
+    }
+
+    fn project_snapshot(
+        lifecycle: ProjectLifecycle,
+        archived: bool,
+        claimable: bool,
+    ) -> (DomainSnapshot, InstallationId, MailboxAddress, ProjectId) {
+        let installation = InstallationId::from_bytes([1; 32]);
+        let human = MailboxAddress::new(installation, MailboxId::from_bytes([2; 32]));
+        let account = AccountId::from_bytes([3; 32]);
+        let project_id = ProjectId::from_bytes([4; 32]);
+        let account_fact = FactId::from_bytes([5; 32]);
+        let mailbox_fact = FactId::from_bytes([6; 32]);
+        let project_mailbox = MailboxAddress::new(installation, MailboxId::from_bytes([7; 32]));
+        let installation_fact = FactId::from_bytes([8; 32]);
+        let signing_key = SigningPublicKey::from_bytes([8; 32]);
+
+        let authority = BTreeMap::from([
+            (
+                AuthorityProjectionKey::Installation(installation),
+                AuthorityProjection::Installation(InstallationView {
+                    root_fact: installation_fact,
+                    signing_key,
+                    encryption_key: EncryptionPublicKey::from_bytes([9; 32]),
+                    label: None,
+                }),
+            ),
+            (
+                AuthorityProjectionKey::Account(account),
+                AuthorityProjection::Account {
+                    root_fact: account_fact,
+                    creator: InstallationAddress::new(installation, signing_key),
+                    label: None,
+                },
+            ),
+            (
+                AuthorityProjectionKey::AccountSelection(installation),
+                AuthorityProjection::AccountSelection {
+                    candidates: BTreeSet::from([account]),
+                    active: Some(account),
+                },
+            ),
+            (
+                AuthorityProjectionKey::Mailbox(human),
+                AuthorityProjection::Mailbox(MailboxView {
+                    create_fact: mailbox_fact,
+                    kind: MailboxKind::Human,
+                    label: None,
+                }),
+            ),
+        ]);
+        let projects = BTreeMap::from([(
+            ProjectProjectionKey::Project(project_id),
+            ProjectProjection::Project(Box::new(ProjectView {
+                root: FactId::from_bytes([9; 32]),
+                head: FactId::from_bytes([10; 32]),
+                fork_participants: BTreeSet::new(),
+                home: installation,
+                account_id: account,
+                mailbox: project_mailbox,
+                predecessor: None,
+                name: ShortText::new("project").expect("bounded project name"),
+                brief: None,
+                resources: BTreeMap::new(),
+                primary: None,
+                lifecycle,
+                archived,
+                active_claims: BTreeSet::new(),
+                claim_conflicts: BTreeMap::new(),
+                claimable,
+                assignment: None,
+                input_sequence: 1,
+            })),
+        )]);
+        let snapshot = DomainSnapshot::new(
+            ProjectionSnapshot::new(
+                BTreeMap::<AuthorityAggregateKey, _>::new(),
+                authority,
+                BTreeMap::new(),
+            ),
+            ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+            ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+            ProjectionSnapshot::new(
+                BTreeMap::<ProjectAggregateKey, _>::new(),
+                projects,
+                BTreeMap::new(),
+            ),
+        );
+        (snapshot, installation, human, project_id)
+    }
 }

@@ -308,6 +308,17 @@ pub enum UiMessageState {
     Rejected,
 }
 
+/// User-facing progress of one locally authored message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiMessageDelivery {
+    /// Project work has accepted the message but has not dispatched it yet.
+    Pending,
+    /// The message is durably authored but has no receipt evidence yet.
+    Sent,
+    /// Canonical evidence proves that the remote peer received the message.
+    Received,
+}
+
 /// One human-facing message author resolved from exact conversation context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiConversationAuthor {
@@ -443,6 +454,8 @@ pub struct UiConversationEntry {
     pub presentation: UiConversationEntryPresentation,
     /// Typed message state; absent for non-actionable activity.
     pub message_state: Option<UiMessageState>,
+    /// Delivery progress for a locally authored message; absent for incoming messages and activity.
+    pub delivery: Option<UiMessageDelivery>,
     /// Typed canonical action target; absent for activity and diagnostic entries.
     pub message_target: Option<UiMessageTarget>,
     /// Namespaced technical sections, already bounded by the local protocol.
@@ -7464,7 +7477,7 @@ fn snapshot_loaded(
 fn conversation_loaded(
     model: &mut UiModel,
     effect_id: EffectId,
-    page: UiConversationPage,
+    mut page: UiConversationPage,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
     let Some(pending) = model
@@ -7485,6 +7498,25 @@ fn conversation_loaded(
         return Ok(());
     }
     let previous_anchor = model.conversation_anchor.clone();
+    let previous_message = previous_anchor.as_deref().and_then(|anchor| {
+        model
+            .conversation
+            .as_ref()?
+            .entries
+            .iter()
+            .find(|entry| entry.id == anchor)?
+            .message_target
+            .map(|target| target.message_id)
+    });
+    let followed_tail = pending.cursor.is_none()
+        && previous_anchor.as_ref().is_some_and(|anchor| {
+            model
+                .conversation
+                .as_ref()
+                .and_then(|conversation| conversation.entries.last())
+                .is_some_and(|entry| &entry.id == anchor)
+        });
+    apply_pending_project_delivery(model.snapshot.as_ref(), &mut page.entries);
     if pending.cursor.is_some()
         && let Some(conversation) = &mut model.conversation
         && conversation.row_id == page.row_id
@@ -7502,10 +7534,29 @@ fn conversation_loaded(
             next_cursor: page.next_cursor,
         });
     }
+    if let Some(conversation) = &mut model.conversation {
+        move_running_agent_turns_to_tail(&mut conversation.entries);
+    }
     model.conversation_anchor = model.conversation.as_ref().and_then(|conversation| {
+        if followed_tail || previous_anchor.is_none() {
+            return conversation.entries.last().map(|entry| entry.id.clone());
+        }
         previous_anchor
             .filter(|anchor| conversation.entries.iter().any(|entry| &entry.id == anchor))
-            .or_else(|| conversation.entries.first().map(|entry| entry.id.clone()))
+            .or_else(|| {
+                previous_message.and_then(|message_id| {
+                    conversation
+                        .entries
+                        .iter()
+                        .find(|entry| {
+                            entry
+                                .message_target
+                                .is_some_and(|target| target.message_id == message_id)
+                        })
+                        .map(|entry| entry.id.clone())
+                })
+            })
+            .or_else(|| conversation.entries.last().map(|entry| entry.id.clone()))
     });
     if pending.enter_on_load {
         model.focus = UiFocus::Conversation;
@@ -7514,6 +7565,53 @@ fn conversation_loaded(
     model.last_failure = None;
     effects.push(UiEffect::RequestRedraw);
     Ok(())
+}
+
+fn move_running_agent_turns_to_tail(entries: &mut Vec<UiConversationEntry>) {
+    let (mut settled, running): (Vec<_>, Vec<_>) =
+        std::mem::take(entries).into_iter().partition(|entry| {
+            !matches!(
+                entry.presentation,
+                UiConversationEntryPresentation::Activity {
+                    kind: UiConversationActivityKind::AgentTurn,
+                    status: UiActivityStatus::Running,
+                    ..
+                }
+            )
+        });
+    settled.extend(running);
+    *entries = settled;
+}
+
+fn apply_pending_project_delivery(
+    snapshot: Option<&UiSnapshot>,
+    entries: &mut [UiConversationEntry],
+) {
+    let Some(snapshot) = snapshot else {
+        return;
+    };
+    for entry in entries {
+        let Some(target) = entry.message_target else {
+            continue;
+        };
+        let locally_authored = matches!(
+            entry.presentation,
+            UiConversationEntryPresentation::Message {
+                author: UiConversationAuthor::You,
+                ..
+            }
+        );
+        if locally_authored
+            && snapshot.projects.iter().any(|project| {
+                project
+                    .pending_inputs
+                    .iter()
+                    .any(|input| input.message_id == target.message_id)
+            })
+        {
+            entry.delivery = Some(UiMessageDelivery::Pending);
+        }
+    }
 }
 
 fn conversation_failed(
@@ -7689,21 +7787,27 @@ fn mailbox_command_committed(
     {
         return Ok(());
     }
-    let project_target = model.mailbox_draft.as_ref().and_then(|pane| match pane {
-        UiMailboxDraftPane::Editing { draft, .. } => match draft.target {
+    let committed_draft = model.mailbox_draft.as_ref().and_then(|pane| match pane {
+        UiMailboxDraftPane::Editing { draft, .. } => Some(draft.clone()),
+        UiMailboxDraftPane::Loading { .. } => None,
+    });
+    let project_target = committed_draft
+        .as_ref()
+        .and_then(|draft| match draft.target {
             UiMailboxDraftTarget::Project {
                 project_id,
                 thread_id,
             } => Some((project_id, thread_id)),
             _ => None,
-        },
-        UiMailboxDraftPane::Loading { .. } => None,
-    });
+        });
     model.pending_mailbox = None;
     model.mailbox_modal = None;
     model.mailbox_draft = None;
     model.autosave_timer = None;
     model.last_failure = None;
+    if let (Some(draft), Some(message_id)) = (committed_draft.as_ref(), message_id) {
+        append_committed_message(model, draft, message_id);
+    }
     if let (Some(UiGuidedPending::Instruction(submission)), Some(message_id)) =
         (model.guided_pending.clone(), message_id)
     {
@@ -7721,6 +7825,61 @@ fn mailbox_command_committed(
     invalidated(model, revision, effects)?;
     effects.push(UiEffect::RequestRedraw);
     Ok(())
+}
+
+fn append_committed_message(model: &mut UiModel, draft: &UiMailboxDraft, message_id: [u8; 32]) {
+    let targets_open_conversation = match draft.target {
+        UiMailboxDraftTarget::Reply { message_id } => {
+            model.conversation.as_ref().is_some_and(|conversation| {
+                conversation.entries.iter().any(|entry| {
+                    entry
+                        .message_target
+                        .is_some_and(|target| target.message_id == message_id)
+                })
+            })
+        }
+        UiMailboxDraftTarget::Project {
+            project_id,
+            thread_id: Some(thread_id),
+        } => matches!(
+            selected_conversation_target(model),
+            Some(UiConversationTarget::Project {
+                project_id: selected_project,
+                thread_id: selected_thread,
+                ..
+            }) if selected_project == project_id && selected_thread == thread_id
+        ),
+        UiMailboxDraftTarget::Direct { .. }
+        | UiMailboxDraftTarget::SelfNote
+        | UiMailboxDraftTarget::Project {
+            thread_id: None, ..
+        } => false,
+    };
+    if !targets_open_conversation {
+        return;
+    }
+    let id = format!("committed-message:{message_id:?}");
+    let Some(conversation) = &mut model.conversation else {
+        return;
+    };
+    conversation.entries.push(UiConversationEntry {
+        id: id.clone(),
+        presentation: UiConversationEntryPresentation::Message {
+            author: UiConversationAuthor::You,
+            body: draft.content.clone(),
+        },
+        message_state: Some(UiMessageState::Open),
+        delivery: Some(UiMessageDelivery::Sent),
+        message_target: Some(UiMessageTarget {
+            message_id,
+            reply_allowed: false,
+        }),
+        technical: Vec::new(),
+    });
+    move_running_agent_turns_to_tail(&mut conversation.entries);
+    model.conversation_anchor = Some(id);
+    model.focus = UiFocus::Conversation;
+    model.technical_visible = false;
 }
 
 fn mailbox_command_failed(
