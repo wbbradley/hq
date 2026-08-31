@@ -1283,7 +1283,7 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
         UiConversationEntryPresentation::Message {
             author: UiConversationAuthor::You,
             body,
-        } if body == "hello world"
+        } if body == "hello\nworld"
     ));
     assert_eq!(
         mapped.entries[0].message_state,
@@ -1317,6 +1317,48 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
         mapped.entries[1].technical.as_slice(),
         [UiTechnicalSection::Activity { sequence: 4, .. }]
     ));
+}
+
+#[test]
+fn conversation_message_mapping_preserves_safe_multiline_text() {
+    let local_human = MailboxAddressDto {
+        installation_id: Id32::new([4; 32]),
+        mailbox_id: Id32::new([5; 32]),
+    };
+    let mut message = conversation_message(local_human.installation_id, local_human.mailbox_id);
+    message.content = concat!(
+        "paragraph 1\r\nparagraph 2\rlone\n",
+        "\t`code\x1b[31m`\n",
+        "[link](\x1b]8;;https://example.test\x07target\x1b]8;;\x07)\n",
+        "C0:\0 C1:\u{0085} DEL:\u{007f}\n",
+        "emoji: 👩‍💻 cafe\u{301} CJK: 界",
+    )
+    .to_owned();
+    let page =
+        ConversationPageDto::new(vec![ConversationEntryDto::Message(Box::new(message))], None)
+            .expect("valid message page");
+
+    let mapped =
+        tui_conversation_page("row", &ConversationContextDto::Personal, &local_human, page);
+    let UiConversationEntryPresentation::Message { body, .. } = &mapped.entries[0].presentation
+    else {
+        panic!("message remains typed")
+    };
+
+    assert_eq!(
+        body,
+        concat!(
+            "paragraph 1\nparagraph 2\nlone\n",
+            "    `code [31m`\n",
+            "[link]( ]8;;https://example.test target ]8;; )\n",
+            "C0:  C1:  DEL: \n",
+            "emoji: 👩‍💻 cafe\u{301} CJK: 界",
+        )
+    );
+    assert!(
+        body.chars()
+            .all(|character| { character == '\n' || !character.is_control() })
+    );
 }
 
 #[test]

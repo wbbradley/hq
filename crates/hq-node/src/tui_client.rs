@@ -2178,7 +2178,7 @@ fn tui_message_entry(
         id: full_id(message.fact_id),
         presentation: UiConversationEntryPresentation::Message {
             author,
-            body: terminal_text(&message.content),
+            body: terminal_message_body(&message.content),
         },
         message_state: Some(state),
         delivery,
@@ -2384,6 +2384,28 @@ fn terminal_text(value: &str) -> String {
             }
         })
         .collect()
+}
+
+fn terminal_message_body(value: &str) -> String {
+    const TAB_REPLACEMENT: &str = "    ";
+
+    let mut output = String::with_capacity(value.len());
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                output.push('\n');
+            }
+            '\n' => output.push('\n'),
+            '\t' => output.push_str(TAB_REPLACEMENT),
+            character if character.is_control() => output.push(' '),
+            character => output.push(character),
+        }
+    }
+    output
 }
 
 fn full_id(id: Id32) -> String {
