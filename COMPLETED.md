@@ -11068,3 +11068,47 @@ activity as typed non-Markdown presentation.
   layout, and no content can trigger terminal commands or resource access.
 
 <!-- End of archived plan entry. -->
+
+## 2026-08-31 — Qualified Markdown conversation rendering
+
+Measured the real 100-entry TUI page at the 16,384-byte message bound. An uncached redraw took
+about 1.86 seconds locally, so added a terminal-owned 128-entry cache keyed by stable identity,
+exact content, width, and semantic theme styles; repeat redraw measured about 3.4 ms and is guarded
+by a 100 ms qualification budget without mutating the UI model.
+
+Added bracketed-paste lifecycle support, presentation-only terminal neutralization for raw draft
+source, and installed adversarial coverage for controls, raw HTML, links/images, code, lists, and
+oversized tables, proving resource references remain inert. Updated TUI, conversation, theme,
+qualification, acceptance, and evidence documentation. Strict locked workspace checks, Clippy,
+build, complete tests, all installed PTY tests, license/feature checks, and the full qualification
+harness including a 45-second isolated release build pass.
+
+### Original plan entry
+
+### Qualify Markdown conversation rendering
+
+Measure and document the completed Markdown presentation under realistic conversation load, closing
+any performance, installed-terminal, or documentation gaps before treating it as complete.
+
+#### Implementation and verification
+
+- Exercise a maximum conversation page and bounded message size. Add a focused regression budget for
+  100 representative long Markdown entries; introduce caching keyed by stable entry identity,
+  content, width, and theme only if measurement shows parsing materially harms redraw latency.
+- Add adversarial installed-terminal coverage for Markdown containing ANSI/OSC/CSI lookalikes,
+  controls, raw HTML, links, images, code, nested lists, and oversized tables. Prove emitted cells
+  stay within the assigned pane and rendering performs no I/O.
+- Update the conversation-surface and theme documentation for Markdown display, raw draft editing,
+  safe links/images, structural indentation, normalization, semantic roles, and the
+  presentation-only trust boundary.
+- Run formatting, strict workspace Clippy/build checks, focused node/TUI tests, installed-terminal
+  regression tests, dependency/license checks, qualification budgets, and the full workspace suite.
+
+#### Acceptance criteria
+
+- Representative maximum-page Markdown rendering stays within the recorded redraw budget without
+  speculative caching, or uses a bounded cache proven necessary by measurement.
+- Installed terminal behavior, documentation, theme behavior, and security tests cover the complete
+  Markdown surface, and all workspace qualification gates pass.
+
+<!-- End of archived plan entry. -->

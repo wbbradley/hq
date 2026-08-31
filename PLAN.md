@@ -27,32 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Qualify Markdown conversation rendering
-
-Measure and document the completed Markdown presentation under realistic conversation load, closing
-any performance, installed-terminal, or documentation gaps before treating it as complete.
-
-#### Implementation and verification
-
-- Exercise a maximum conversation page and bounded message size. Add a focused regression budget for
-  100 representative long Markdown entries; introduce caching keyed by stable entry identity,
-  content, width, and theme only if measurement shows parsing materially harms redraw latency.
-- Add adversarial installed-terminal coverage for Markdown containing ANSI/OSC/CSI lookalikes,
-  controls, raw HTML, links, images, code, nested lists, and oversized tables. Prove emitted cells
-  stay within the assigned pane and rendering performs no I/O.
-- Update the conversation-surface and theme documentation for Markdown display, raw draft editing,
-  safe links/images, structural indentation, normalization, semantic roles, and the
-  presentation-only trust boundary.
-- Run formatting, strict workspace Clippy/build checks, focused node/TUI tests, installed-terminal
-  regression tests, dependency/license checks, qualification budgets, and the full workspace suite.
-
-#### Acceptance criteria
-
-- Representative maximum-page Markdown rendering stays within the recorded redraw budget without
-  speculative caching, or uses a bounded cache proven necessary by measurement.
-- Installed terminal behavior, documentation, theme behavior, and security tests cover the complete
-  Markdown surface, and all workspace qualification gates pass.
-
 ### Present live and completed agent work clearly
 
 Replace duplicate lifecycle/progress chrome with one informative live row at the bottom of an
