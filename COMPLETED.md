@@ -11007,3 +11007,64 @@ renderer so the later presentation change rests on a reviewed, replaceable bound
   dependency or changing ordinary conversation presentation yet.
 
 <!-- End of archived plan entry. -->
+
+## 2026-08-31 — Themed Markdown conversation messages
+
+Added an HQ-owned, inert `tui-markdown` adapter with syntax highlighting and ANSI conversion
+disabled. Participant messages now render Markdown through existing semantic theme roles, visible
+link destinations, text-only image fallbacks, terminal-control neutralization, grapheme-safe word
+wrapping, nested-list continuation indentation, and clipped wide tables. Drafts remain raw source;
+typed activity remains ordered non-Markdown presentation.
+
+Conversation rendering now creates one width-specific artifact per entry and uses its exact lines
+for both viewport measurement and painting, preserving selection and logical anchors across compact,
+narrow, wide, and resized layouts. Adapter, render, no-color/custom-theme, installed-terminal, and
+raw-composer regressions pass alongside locked full-workspace check, strict Clippy, build, complete
+tests, and dependency/license gates. The renderer decision records both the chosen safety boundary
+and the upstream production dependency tradeoff.
+
+### Original plan entry
+
+### Render conversation message bodies as themed Markdown
+
+Render only participant-authored message bodies as Markdown while keeping drafts as raw source and
+activity as typed non-Markdown presentation.
+
+#### Implementation
+
+- Add the selected renderer dependency with default syntax-highlighting/ANSI features disabled and
+  encapsulate it in an HQ-owned `hq-tui` message-body adapter. The adapter must return inert Ratatui
+  text, expose no file/network/image loading or OSC-8 behavior, show link destinations as visible
+  text, and use text-only image fallbacks.
+- Support paragraphs, soft/hard breaks, headings, emphasis, strong text, strikethrough, inline and
+  fenced code, ordered/unordered/task lists, blockquotes, links, and GFM tables. Malformed Markdown
+  must degrade to safe readable text.
+- Define Markdown semantic theme roles, or a documented mapping onto existing roles, for body text,
+  headings, emphasis, links, code, quotes, list markers, and tables. Avoid library default colors,
+  keep no-color structure legible, and ensure span styles do not erase focused/unfocused row
+  selection.
+- Build one width-specific rendered artifact per message in each render pass and use that same
+  artifact for entry-height measurement and painting. Keep author/delivery badges and the external
+  transcript separator row unchanged. Preserve logical anchors through resize, paging, and tail
+  following.
+
+#### Tests and verification
+
+- Add adapter tests for every supported structure, empty/malformed input, long tokens, Unicode, raw
+  HTML, inert links/images, nested-list continuation indentation, and narrow/wide tables.
+- Add model/render snapshots proving exact measured/painted height at compact, narrow, and wide
+  widths; full-row selection; resize and anchor stability; no-color/custom themes; and typed
+  activity remaining unparsed and ordered.
+- Run strict workspace Clippy/build checks, focused node/TUI tests, installed-terminal regressions,
+  dependency/license checks, and the complete workspace test suite.
+
+#### Acceptance criteria
+
+- Conversation messages render useful, terminal-safe Markdown with HQ semantic styling while the
+  composer continues to edit raw source.
+- Measurement and painting use the same artifact, keeping selection, scrolling, pagination, resize,
+  and follow-tail behavior deterministic.
+- Supported structures remain readable at every supported width; wide tables cannot corrupt pane
+  layout, and no content can trigger terminal commands or resource access.
+
+<!-- End of archived plan entry. -->

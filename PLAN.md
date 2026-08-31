@@ -27,48 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Render conversation message bodies as themed Markdown
-
-Render only participant-authored message bodies as Markdown while keeping drafts as raw source and
-activity as typed non-Markdown presentation.
-
-#### Implementation
-
-- Add the selected renderer dependency with default syntax-highlighting/ANSI features disabled and
-  encapsulate it in an HQ-owned `hq-tui` message-body adapter. The adapter must return inert Ratatui
-  text, expose no file/network/image loading or OSC-8 behavior, show link destinations as visible
-  text, and use text-only image fallbacks.
-- Support paragraphs, soft/hard breaks, headings, emphasis, strong text, strikethrough, inline and
-  fenced code, ordered/unordered/task lists, blockquotes, links, and GFM tables. Malformed Markdown
-  must degrade to safe readable text.
-- Define Markdown semantic theme roles, or a documented mapping onto existing roles, for body text,
-  headings, emphasis, links, code, quotes, list markers, and tables. Avoid library default colors,
-  keep no-color structure legible, and ensure span styles do not erase focused/unfocused row
-  selection.
-- Build one width-specific rendered artifact per message in each render pass and use that same
-  artifact for entry-height measurement and painting. Keep author/delivery badges and the external
-  transcript separator row unchanged. Preserve logical anchors through resize, paging, and tail
-  following.
-
-#### Tests and verification
-
-- Add adapter tests for every supported structure, empty/malformed input, long tokens, Unicode, raw
-  HTML, inert links/images, nested-list continuation indentation, and narrow/wide tables.
-- Add model/render snapshots proving exact measured/painted height at compact, narrow, and wide
-  widths; full-row selection; resize and anchor stability; no-color/custom themes; and typed
-  activity remaining unparsed and ordered.
-- Run strict workspace Clippy/build checks, focused node/TUI tests, installed-terminal regressions,
-  dependency/license checks, and the complete workspace test suite.
-
-#### Acceptance criteria
-
-- Conversation messages render useful, terminal-safe Markdown with HQ semantic styling while the
-  composer continues to edit raw source.
-- Measurement and painting use the same artifact, keeping selection, scrolling, pagination, resize,
-  and follow-tail behavior deterministic.
-- Supported structures remain readable at every supported width; wide tables cannot corrupt pane
-  layout, and no content can trigger terminal commands or resource access.
-
 ### Qualify Markdown conversation rendering
 
 Measure and document the completed Markdown presentation under realistic conversation load, closing
