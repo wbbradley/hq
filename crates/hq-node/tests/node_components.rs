@@ -20,9 +20,9 @@ use hq_domain::{MailboxId, OperationId, Revision};
 use hq_node::{
     CancellationToken, ComponentDrain, ComponentError, ComponentKind, MailboxSendError,
     NodeAdmission, NodeComponent, NodeComponents, NodeFoundation, NodeFoundationConfig, NodeOwner,
-    ProjectMessageReconciliation, ReconcileProjectMessages, RuntimePaths, ShutdownIssue,
-    ShutdownStage, StateDirectoryOwner, StatePaths, TaskError, TaskFailureKind, TaskTracker,
-    TaskTrackerError, bounded_mailbox,
+    ProjectMessageReconciliation, ReconcileProjectMessages, RuntimePaths,
+    ScheduleProjectReconciliation, ShutdownIssue, ShutdownStage, StateDirectoryOwner, StatePaths,
+    TaskError, TaskFailureKind, TaskTracker, TaskTrackerError, bounded_mailbox,
 };
 use hq_projects::{ProjectInputReconciliation, ReconcileProjectInputs};
 use hq_reducer::AuthorityPolicy;
@@ -66,6 +66,12 @@ impl ReconcileProjectMessages for FakeComponent {
             automatic_commands: 0,
             truncated: false,
         })
+    }
+}
+
+impl ScheduleProjectReconciliation for FakeComponent {
+    fn schedule_project_reconciliation(&self) {
+        self.record("schedule_messages");
     }
 }
 

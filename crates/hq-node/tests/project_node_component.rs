@@ -5,9 +5,10 @@
 use std::{
     num::NonZeroUsize,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use hq_application::{
@@ -21,7 +22,7 @@ use hq_domain::{
 };
 use hq_node::{
     CancellationToken, ComponentDrain, NodeComponent, ProjectNodeComponent, ProjectNodeConfig,
-    ReconcileProjectMessages,
+    ReconcileProjectMessages, ScheduleProjectReconciliation,
 };
 use hq_projects::{
     AutomaticProjectCommandPlan, PlanAutomaticProjectCommands, ProjectInputReconciliation,
@@ -109,6 +110,90 @@ impl PlanAutomaticProjectCommands for FakeInputs {
     }
 }
 
+#[derive(Clone, Default)]
+struct BlockingInputs {
+    state: Arc<(Mutex<BlockingInputState>, Condvar)>,
+}
+
+#[derive(Default)]
+struct BlockingInputState {
+    blocked: bool,
+    calls: usize,
+    fail: bool,
+}
+
+impl BlockingInputs {
+    fn block(&self) {
+        self.state.0.lock().expect("blocking inputs").blocked = true;
+    }
+
+    fn release(&self) {
+        let mut state = self.state.0.lock().expect("blocking inputs");
+        state.blocked = false;
+        self.state.1.notify_all();
+    }
+
+    fn fail(&self, fail: bool) {
+        self.state.0.lock().expect("blocking inputs").fail = fail;
+    }
+
+    fn wait_for_calls(&self, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut state = self.state.0.lock().expect("blocking inputs");
+        while state.calls < expected {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("reconciliation call before deadline");
+            let waited = self
+                .state
+                .1
+                .wait_timeout(state, remaining)
+                .expect("blocking inputs wait");
+            state = waited.0;
+            assert!(!waited.1.timed_out(), "reconciliation call timed out");
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.state.0.lock().expect("blocking inputs").calls
+    }
+}
+
+impl ReconcileProjectInputs for BlockingInputs {
+    fn reconcile_project_inputs(
+        &self,
+        _limit: usize,
+    ) -> Result<ProjectInputReconciliation, ApplicationError> {
+        let mut state = self.state.0.lock().expect("blocking inputs");
+        state.calls += 1;
+        self.state.1.notify_all();
+        while state.blocked {
+            state = self.state.1.wait(state).expect("blocking inputs wait");
+        }
+        if state.fail {
+            return Err(ApplicationError::new(
+                hq_application::ApplicationErrorCode::AdapterUnavailable,
+            ));
+        }
+        Ok(ProjectInputReconciliation {
+            accepted: 0,
+            truncated: false,
+        })
+    }
+}
+
+impl PlanAutomaticProjectCommands for BlockingInputs {
+    fn plan_automatic_project_commands(
+        &self,
+        _limit: usize,
+    ) -> Result<AutomaticProjectCommandPlan, ApplicationError> {
+        Ok(AutomaticProjectCommandPlan {
+            requests: Vec::new(),
+            truncated: false,
+        })
+    }
+}
+
 impl InspectResource for FakeResources {
     fn inspect_resource(
         &self,
@@ -184,7 +269,7 @@ fn startup_repairs_before_admission_and_drain_checkpoints_after_intake_closes() 
     assert_eq!(
         trace.lock().expect("trace").as_slice(),
         [
-            "inputs", "repair", "plan", "control", "inputs", "plan", "inputs", "repair", "plan"
+            "inputs", "repair", "plan", "control", "repair", "inputs", "plan", "inputs", "plan"
         ]
     );
 }
@@ -264,4 +349,82 @@ fn rejected_automatic_dispatch_remains_stably_retryable() {
         submitted.lock().expect("submitted").as_slice(),
         [dispatch_request(), dispatch_request()]
     );
+}
+
+#[test]
+fn project_commands_return_before_blocked_reconciliation_and_wakes_coalesce() {
+    let worker = FakeWorker::default();
+    let inputs = BlockingInputs::default();
+    let mut component = ProjectNodeComponent::new(
+        ProjectNodeConfig {
+            recovery_limit: NonZeroUsize::new(16).expect("nonzero"),
+            recovery_time: Timestamp::from_unix_millis(10),
+        },
+        worker,
+        FakeResources,
+        inputs.clone(),
+    );
+    component
+        .start(CancellationToken::new())
+        .expect("startup repair succeeds");
+    assert_eq!(inputs.calls(), 1);
+    inputs.block();
+
+    std::thread::scope(|scope| {
+        let (returned, receipt) = std::sync::mpsc::sync_channel(1);
+        let project = &component;
+        scope.spawn(move || {
+            returned
+                .send(project.control_project(request()))
+                .expect("receipt receiver");
+        });
+        assert!(matches!(
+            receipt
+                .recv_timeout(Duration::from_millis(250))
+                .expect("project receipt is not blocked by reconciliation")
+                .expect("project command accepted"),
+            ProjectCommandOutcome::Accepted { .. }
+        ));
+        inputs.wait_for_calls(2);
+        component.schedule_project_reconciliation();
+        component.schedule_project_reconciliation();
+        component.schedule_project_reconciliation();
+        inputs.release();
+        inputs.wait_for_calls(5);
+    });
+
+    std::thread::sleep(Duration::from_millis(25));
+    assert_eq!(
+        inputs.calls(),
+        5,
+        "replaceable wakes produce one follow-up cycle"
+    );
+    component.stop_intake().expect("intake closes");
+    assert_eq!(component.drain(), Ok(ComponentDrain::Complete));
+}
+
+#[test]
+fn failed_background_reconciliation_retries_from_durable_state_on_the_next_wake() {
+    let inputs = BlockingInputs::default();
+    let mut component = ProjectNodeComponent::new(
+        ProjectNodeConfig {
+            recovery_limit: NonZeroUsize::new(16).expect("nonzero"),
+            recovery_time: Timestamp::from_unix_millis(10),
+        },
+        FakeWorker::default(),
+        FakeResources,
+        inputs.clone(),
+    );
+    component
+        .start(CancellationToken::new())
+        .expect("startup repair succeeds");
+    inputs.fail(true);
+    component.schedule_project_reconciliation();
+    inputs.wait_for_calls(2);
+    inputs.fail(false);
+    component.schedule_project_reconciliation();
+    inputs.wait_for_calls(3);
+
+    component.stop_intake().expect("intake closes");
+    assert_eq!(component.drain(), Ok(ComponentDrain::Complete));
 }

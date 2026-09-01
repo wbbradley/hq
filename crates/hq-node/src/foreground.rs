@@ -371,6 +371,10 @@ impl crate::ReconcileProjectMessages for DormantNodeComponent {
     }
 }
 
+impl crate::ScheduleProjectReconciliation for DormantNodeComponent {
+    fn schedule_project_reconciliation(&self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{LocalCodexConfiguration, LocalConfiguration};

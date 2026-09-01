@@ -299,6 +299,12 @@ response-loss replay returns the retained receipt without replanning; changed co
 one identity conflicts before another effect. The reconnecting client retains and replays the
 byte-identical encoded mailbox frame just like an ordinary mutation.
 
+The installed TUI uses the random draft identity as the authored message identity, so its pure model
+can correlate an optimistic row with an authoritative subscribed page without parsing content. The
+row has no message action authority before that exact identity appears canonically. A committed
+project mailbox response covers only the durable transaction; project-input acceptance, dispatch,
+runtime submission, and provider output remain later independent evidence and never delay it.
+
 Because HQ has not shipped and has no standing installations, these request/result families and
 the draft table were added directly to local API v1 and the current clean-sheet schema. There is no
 protocol/storage version bump, migration, compatibility reader, or parallel stored draft type.

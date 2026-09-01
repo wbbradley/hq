@@ -115,8 +115,8 @@ pub use node_coordinator::{
 };
 pub use project_component::{
     ProjectMessageReconciliation, ProjectNodeComponent, ProjectNodeConfig,
-    ReconcileProjectMessages, StandardProjectNodeComponent, StandardProjectWorker,
-    WakingApplicationStore, compose_standard_project_component,
+    ReconcileProjectMessages, ScheduleProjectReconciliation, StandardProjectNodeComponent,
+    StandardProjectWorker, WakingApplicationStore, compose_standard_project_component,
 };
 pub use project_resource::ProjectResourceAdapter;
 pub use project_store::ProjectSagaStoreAdapter;

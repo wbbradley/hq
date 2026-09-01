@@ -1212,6 +1212,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 bytes[offset..]
                     .windows(b"Agent is working".len())
                     .any(|window| window == b"Agent is working")
+                    && bytes[offset..]
+                        .windows("You · Pending".len())
+                        .any(|window| window == "You · Pending".as_bytes())
             })
         {
             resource_commit_sent = true;

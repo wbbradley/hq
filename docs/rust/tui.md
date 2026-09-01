@@ -130,6 +130,15 @@ activity and refreshes with status and final output in place. Those agent-author
 eligible for project input. Ordinary messaging exposes no manual dispatch step; retry appears only
 as a typed recovery action when canonical stalled-delivery evidence exists.
 
+The same transition that emits a message command closes composition focus onto one local-human
+`Pending` row anchored by the effect identity. The exact draft, target, action, and random draft/message
+identity remain retained until a definite result. A durable ordinary-message receipt upgrades that
+row to `Sent`; a project receipt keeps it `Pending` until the project catalog no longer reports the
+input as queued. A definite rejection removes only the optimistic row and restores the exact draft;
+response uncertainty retains one row and one command identity. Subscribed canonical pages reconcile
+the row by message identity, never by its label or body, so receipt/invalidation races cannot flicker
+or duplicate it.
+
 One available agent service is selected automatically without a confirmation dialog. Several
 available services open a service chooser; none leave that screen open with actionable setup
 guidance. A real assignment move

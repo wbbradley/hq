@@ -2629,7 +2629,7 @@ impl TuiClientPort for MailboxTuiClient {
             .push("submit:self_note".to_owned());
         Ok(UiMailboxCommandResult {
             revision: 9,
-            message_id: Some([9; 32]),
+            message_id: Some([7; 32]),
         })
     }
 }

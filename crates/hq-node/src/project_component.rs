@@ -3,9 +3,11 @@
 use std::{
     num::NonZeroUsize,
     sync::{
-        Arc,
+        Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use hq_application::{
@@ -119,6 +121,12 @@ pub trait ReconcileProjectMessages {
     ) -> Result<ProjectMessageReconciliation, ApplicationError>;
 }
 
+/// Project-owned nonblocking signal that schedules reconciliation from durable state.
+pub trait ScheduleProjectReconciliation {
+    /// Coalesces one request for a background reconciliation pass.
+    fn schedule_project_reconciliation(&self);
+}
+
 /// Composes the complete standard project worker without taking store or signer ownership.
 pub fn compose_standard_project_component<R: ProjectRuntimePort>(
     config: ProjectNodeConfig,
@@ -159,21 +167,40 @@ pub struct ProjectNodeConfig {
 /// Owns project command admission and bounded durable recovery around injected capabilities.
 pub struct ProjectNodeComponent<W, F, I> {
     config: ProjectNodeConfig,
-    worker: W,
+    worker: Arc<Mutex<W>>,
     resources: F,
-    inputs: I,
+    inputs: Arc<Mutex<I>>,
     accepting: AtomicBool,
+    reconciliation: Arc<ProjectReconciliationControl>,
+    reconciliation_task: Option<JoinHandle<Result<(), ComponentError>>>,
 }
+
+#[derive(Debug, Default)]
+struct ProjectReconciliationState {
+    pending: bool,
+    stopping: bool,
+    force_stop: bool,
+}
+
+#[derive(Debug, Default)]
+struct ProjectReconciliationControl {
+    state: Mutex<ProjectReconciliationState>,
+    changed: Condvar,
+}
+
+const PROJECT_REPAIR_INTERVAL: Duration = Duration::from_secs(300);
 
 impl<W, F, I> ProjectNodeComponent<W, F, I> {
     /// Owns one complete project worker and its local inspection capability.
-    pub const fn new(config: ProjectNodeConfig, worker: W, resources: F, inputs: I) -> Self {
+    pub fn new(config: ProjectNodeConfig, worker: W, resources: F, inputs: I) -> Self {
         Self {
             config,
-            worker,
+            worker: Arc::new(Mutex::new(worker)),
             resources,
-            inputs,
+            inputs: Arc::new(Mutex::new(inputs)),
             accepting: AtomicBool::new(false),
+            reconciliation: Arc::new(ProjectReconciliationControl::default()),
+            reconciliation_task: None,
         }
     }
 
@@ -192,10 +219,12 @@ impl<W, F, I> ProjectNodeComponent<W, F, I> {
         W: ProjectWorkerPort,
         I: ReconcileProjectInputs + PlanAutomaticProjectCommands,
     {
-        self.inputs
+        lock_capability(&self.inputs)
+            .map_err(|_| ComponentError::unavailable())?
             .reconcile_project_inputs(self.config.recovery_limit.get())
             .map_err(|_| ComponentError::unavailable())?;
-        self.worker
+        lock_capability(&self.worker)
+            .map_err(|_| ComponentError::unavailable())?
             .repair_pending(self.config.recovery_time, self.config.recovery_limit.get())
             .map_err(|_| ComponentError::unavailable())?;
         self.submit_automatic(self.config.recovery_limit.get())
@@ -208,10 +237,10 @@ impl<W, F, I> ProjectNodeComponent<W, F, I> {
         W: ControlProjects,
         I: PlanAutomaticProjectCommands,
     {
-        let plan = self.inputs.plan_automatic_project_commands(limit)?;
+        let plan = lock_capability(&self.inputs)?.plan_automatic_project_commands(limit)?;
         let mut admitted = 0;
         for request in plan.requests {
-            let outcome = self.worker.control_project(request)?;
+            let outcome = lock_capability(&self.worker)?.control_project(request)?;
             if !matches!(outcome, ProjectCommandOutcome::Rejected { .. }) {
                 admitted += 1;
             }
@@ -227,13 +256,129 @@ impl<W, F, I> ProjectNodeComponent<W, F, I> {
         W: ControlProjects,
         I: ReconcileProjectInputs + PlanAutomaticProjectCommands,
     {
-        let inputs = self.inputs.reconcile_project_inputs(limit)?;
+        let inputs = lock_capability(&self.inputs)?.reconcile_project_inputs(limit)?;
         let (automatic_commands, commands_truncated) = self.submit_automatic(limit)?;
         Ok(ProjectMessageReconciliation {
             truncated: inputs.truncated || commands_truncated,
             inputs,
             automatic_commands,
         })
+    }
+
+    fn stop_reconciliation(&mut self, force_stop: bool) -> Result<(), ComponentError> {
+        {
+            let mut state = self
+                .reconciliation
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.stopping = true;
+            state.force_stop = force_stop;
+            state.pending |= !force_stop;
+            self.reconciliation.changed.notify_all();
+        }
+        let Some(task) = self.reconciliation_task.take() else {
+            return Ok(());
+        };
+        task.join().map_err(|_| ComponentError::unavailable())?
+    }
+}
+
+fn lock_capability<T>(capability: &Mutex<T>) -> Result<MutexGuard<'_, T>, ApplicationError> {
+    capability
+        .lock()
+        .map_err(|_| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))
+}
+
+fn reconcile_shared<W, I>(
+    worker: &Mutex<W>,
+    inputs: &Mutex<I>,
+    limit: usize,
+) -> Result<ProjectMessageReconciliation, ApplicationError>
+where
+    W: ControlProjects,
+    I: ReconcileProjectInputs + PlanAutomaticProjectCommands,
+{
+    let inputs_outcome = lock_capability(inputs)?.reconcile_project_inputs(limit)?;
+    let plan = lock_capability(inputs)?.plan_automatic_project_commands(limit)?;
+    let mut admitted = 0;
+    for request in plan.requests {
+        let outcome = lock_capability(worker)?.control_project(request)?;
+        if !matches!(outcome, ProjectCommandOutcome::Rejected { .. }) {
+            admitted += 1;
+        }
+    }
+    Ok(ProjectMessageReconciliation {
+        truncated: inputs_outcome.truncated || plan.truncated,
+        inputs: inputs_outcome,
+        automatic_commands: admitted,
+    })
+}
+
+fn run_project_reconciliation<W, I>(
+    worker: &Mutex<W>,
+    inputs: &Mutex<I>,
+    control: &ProjectReconciliationControl,
+    limit: usize,
+    recovery_time: Timestamp,
+) -> Result<(), ComponentError>
+where
+    W: ProjectWorkerPort,
+    I: ReconcileProjectInputs + PlanAutomaticProjectCommands,
+{
+    loop {
+        let (stopping, force_stop) = {
+            let mut state = control
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !state.pending && !state.stopping {
+                let waited = control
+                    .changed
+                    .wait_timeout(state, PROJECT_REPAIR_INTERVAL)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state = waited.0;
+                if waited.1.timed_out() {
+                    state.pending = true;
+                }
+            }
+            let stopping = state.stopping;
+            let force_stop = state.force_stop;
+            state.pending = false;
+            (stopping, force_stop)
+        };
+        if force_stop {
+            return Ok(());
+        }
+        let reconciliation = lock_capability(worker)
+            .and_then(|worker| worker.repair_pending(recovery_time, limit))
+            .and_then(|_| reconcile_shared(worker, inputs, limit))
+            .and_then(|first| {
+                if first.inputs.accepted == 0 && !first.truncated {
+                    // The durable mailbox receipt can become visible just ahead of its projection.
+                    // One immediate bounded reread crosses that actor handoff without retrying the
+                    // mutation or carrying message data in the wake.
+                    reconcile_shared(worker, inputs, limit)
+                } else {
+                    Ok(first)
+                }
+            });
+        match reconciliation {
+            Ok(outcome) if outcome.truncated => {
+                let mut state = control
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.pending = true;
+                control.changed.notify_one();
+            }
+            outcome if stopping => {
+                return outcome
+                    .map(|_| ())
+                    .map_err(|_| ComponentError::unavailable());
+            }
+            Ok(_) | Err(_) => {}
+        }
     }
 }
 
@@ -249,9 +394,33 @@ impl<W, F, I> std::fmt::Debug for ProjectNodeComponent<W, F, I> {
 
 impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs + PlanAutomaticProjectCommands>
     NodeComponent for ProjectNodeComponent<W, F, I>
+where
+    W: Send + 'static,
+    I: Send + 'static,
 {
     fn start(&mut self, _cancellation: CancellationToken) -> Result<(), ComponentError> {
         self.repair()?;
+        {
+            let mut state = self
+                .reconciliation
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *state = ProjectReconciliationState::default();
+        }
+        let worker = Arc::clone(&self.worker);
+        let inputs = Arc::clone(&self.inputs);
+        let control = Arc::clone(&self.reconciliation);
+        let limit = self.config.recovery_limit.get();
+        let recovery_time = self.config.recovery_time;
+        self.reconciliation_task = Some(
+            thread::Builder::new()
+                .name("hq-project-reconciliation".to_owned())
+                .spawn(move || {
+                    run_project_reconciliation(&worker, &inputs, &control, limit, recovery_time)
+                })
+                .map_err(|_| ComponentError::unavailable())?,
+        );
         self.accepting.store(true, Ordering::Release);
         Ok(())
     }
@@ -262,13 +431,13 @@ impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs + PlanAutomaticProjectCo
     }
 
     fn drain(&mut self) -> Result<ComponentDrain, ComponentError> {
-        self.repair()?;
+        self.stop_reconciliation(false)?;
         Ok(ComponentDrain::Complete)
     }
 
     fn force_stop(&mut self) -> Result<(), ComponentError> {
         self.accepting.store(false, Ordering::Release);
-        Ok(())
+        self.stop_reconciliation(true)
     }
 }
 
@@ -280,8 +449,8 @@ impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs + PlanAutomaticProjectCo
         request: ProjectCommandRequest,
     ) -> Result<ProjectCommandOutcome, ApplicationError> {
         self.ensure_accepting()?;
-        let outcome = self.worker.control_project(request)?;
-        self.reconcile_messages(self.config.recovery_limit.get())?;
+        let outcome = lock_capability(&self.worker)?.control_project(request)?;
+        self.schedule_project_reconciliation();
         Ok(outcome)
     }
 }
@@ -292,7 +461,7 @@ impl<W: ProjectWorkerPort + RetireAgents, F, I> RetireAgents for ProjectNodeComp
         request: AgentRetirementRequest,
     ) -> Result<AgentRetirementOutcome, ApplicationError> {
         self.ensure_accepting()?;
-        self.worker.retire_agent(request)
+        lock_capability(&self.worker)?.retire_agent(request)
     }
 }
 
@@ -312,7 +481,7 @@ impl<W, F, I: ReconcileProjectInputs> ReconcileProjectInputs for ProjectNodeComp
         limit: usize,
     ) -> Result<hq_projects::ProjectInputReconciliation, ApplicationError> {
         self.ensure_accepting()?;
-        self.inputs.reconcile_project_inputs(limit)
+        lock_capability(&self.inputs)?.reconcile_project_inputs(limit)
     }
 }
 
@@ -325,5 +494,22 @@ impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs + PlanAutomaticProjectCo
     ) -> Result<ProjectMessageReconciliation, ApplicationError> {
         self.ensure_accepting()?;
         self.reconcile_messages(limit)
+    }
+}
+
+impl<W, F, I> ScheduleProjectReconciliation for ProjectNodeComponent<W, F, I> {
+    fn schedule_project_reconciliation(&self) {
+        if !self.accepting.load(Ordering::Acquire) {
+            return;
+        }
+        let mut state = self
+            .reconciliation
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.stopping {
+            state.pending = true;
+            self.reconciliation.changed.notify_one();
+        }
     }
 }

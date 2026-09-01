@@ -870,7 +870,6 @@ impl TuiClientPort for LocalTuiClient {
         action: UiMailboxAction,
     ) -> Result<UiMailboxCommandResult, UiFailure> {
         let command_id = Id32::new(random_identity()?);
-        let message_id = Id32::new(random_identity()?);
         let authors_message = matches!(
             action,
             UiMailboxAction::Reply { .. }
@@ -878,6 +877,19 @@ impl TuiClientPort for LocalTuiClient {
                 | UiMailboxAction::SelfNote
                 | UiMailboxAction::Project { .. }
         );
+        let message_id = if authors_message {
+            Id32::new(
+                draft
+                    .as_ref()
+                    .ok_or_else(|| UiFailure {
+                        code: "mailbox_draft_missing".to_owned(),
+                        action: "reopen the message editor and try again".to_owned(),
+                    })?
+                    .draft_id,
+            )
+        } else {
+            Id32::new([0; 32])
+        };
         let action = match action {
             UiMailboxAction::Reply { target_message } => MailboxCommandActionDto::Reply {
                 target_message: Id32::new(target_message),

@@ -16,7 +16,7 @@ use tokio::{signal::unix::Signal, time::Instant};
 use crate::{
     LocalSessionPump, LocalSessionPumpConfig, LocalSessionPumpEvent, LocalSessionPumpOpenError,
     LocalSessionPumpShutdownReport, NodeComponent, NodeLifecycleError, NodeOwner,
-    NodeShutdownReport, ReadinessRecord, ReconcileProjectMessages, ShutdownIntent,
+    NodeShutdownReport, ReadinessRecord, ScheduleProjectReconciliation, ShutdownIntent,
 };
 
 /// Explicit immutable inputs for one local node runtime generation.
@@ -99,7 +99,11 @@ where
     L: NodeComponent,
     R: NodeComponent + PublishWake + ConfigureRelays,
     H: NodeComponent + ControlHarness + hq_application::QueryProviders,
-    P: NodeComponent + InspectResource + ControlProjects + RetireAgents + ReconcileProjectMessages,
+    P: NodeComponent
+        + InspectResource
+        + ControlProjects
+        + RetireAgents
+        + ScheduleProjectReconciliation,
 {
     /// Opens runtime artifacts for one already-ready node owner.
     pub fn start(

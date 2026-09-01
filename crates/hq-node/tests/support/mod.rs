@@ -124,6 +124,10 @@ impl hq_node::ReconcileProjectMessages for UnavailableNodeComponent {
     }
 }
 
+impl hq_node::ScheduleProjectReconciliation for UnavailableNodeComponent {
+    fn schedule_project_reconciliation(&self) {}
+}
+
 impl PublishWake for UnavailableNodeComponent {
     fn publish_wake(&self, _revision: Revision) -> Result<WakeDisposition, ApplicationError> {
         unavailable()

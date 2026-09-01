@@ -156,6 +156,7 @@ outcome without specifying those representations.
 | PRJ-024 | project-follow-up-auto-dispatch | Commit a second human message to a runnable project's mailbox while its conversation is open | Installed TUI / node integration | Input is accepted once, working activity appears, one durable dispatch reaches the existing thread, and final output appears without restart or manual dispatch | Automatic delivery |
 | PRJ-025 | project-output-never-input | Project status/final output arrives before or after input acceptance, including a malformed acceptance that cites output | Reduce all orders / reconcile | Output never advances the project input sequence, enters pending delivery, or replays to the provider | Typed input boundary |
 | PRJ-026 | pending-input-repair | An accepted input belongs to a closed, unassigned, blocked, busy, or reconcilable project workflow | Plan / component repair | Input remains pending; once runnable, bounded post-commit/startup/drain repair retries one stable automatic command | Durable recovery |
+| PRJ-027 | mailbox-receipt-before-runtime | Submit a project draft while reconciliation or provider acceptance is blocked | Pure model / component / installed TUI | `You · Pending` paints with the command effect; the durable mailbox receipt returns before sequencing/runtime delivery, and background recovery converges once without duplicate text | Submission/delivery separation |
 | CTL-001 | remote-command-queued-only | Active device authors valid remote request while home offline | Reduce | Command accepted/queued; project state unchanged | Remote-control isolation |
 | CTL-002 | remote-command-receipt | Home signs receipt for exact request and observed head | Reduce | Stage received with head; project state unchanged | Remote-control stages |
 | CTL-003 | remote-command-committed | Home emits canonical transition then signed committed outcome citing it | Reduce | Project advances only through canonical fact; command terminal view cites new head | Home authority |
@@ -277,6 +278,10 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   initiating message matches the committed message ID after authoritative refresh.
 - A guided first message is committed through the same mailbox draft/action boundary, correlated to
   its authoritative project thread, activated exactly once, and left selected in the Inbox.
+- Sending in an open conversation immediately inserts one non-actionable local-human `Pending` row.
+  Definite commit replaces it by exact canonical identity, project delivery stays queued until typed
+  dispatch evidence, definite rejection restores the exact draft, and response loss never creates a
+  second authored row.
 - One available agent service is chosen automatically without a `Start project work` confirmation;
   multiple services still require an explicit service choice and a real handoff remains reviewed.
 - Wide Inbox layout keeps a bounded 24–36-column list and gives later width to Conversation;

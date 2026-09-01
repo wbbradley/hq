@@ -11555,3 +11555,70 @@ must remain panic-safe; and command completion ordering must remain serial even 
 events can now interleave independently.
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-01 — Mailbox acknowledgement before project delivery
+
+Sending in an open conversation now inserts one non-actionable `You · Pending` row in the same pure
+transition as the mailbox effect. Pending submission state retains the exact draft, typed action,
+effect anchor, and draft-derived canonical message identity. Durable receipts reconcile that row in
+place, ordinary messages become `Sent`, project messages remain queued, canonical observations win
+receipt races without duplicates, definite rejection restores the exact editor contents, and
+uncertainty retains one stable submission.
+
+Project mailbox commits now return before sequencing or runtime delivery. They schedule a
+component-owned, serialized reconciliation worker through a coalesced payload-free wake. The worker
+rereads durable state, repairs pending sagas, crosses projection lag with one bounded follow-up,
+continues truncated work, retries failures on later wakes or its five-minute repair interval, and
+performs a final pass before drain. Focused component tests block reconciliation to prove early
+return and wake coalescing; the installed guided PTY proves `Pending` paints while provider output is
+delayed. Documentation distinguishes optimistic submission, durable commit, accepted input,
+dispatch, and provider evidence.
+
+### Original plan entry
+
+### Acknowledge mailbox messages before project delivery
+
+Give immediate, truthful send feedback and move project sequencing/runtime delivery out of the
+mailbox command response path. A human message is first shown locally as pending; its durable commit
+is acknowledged independently of later project reconciliation and provider submission.
+
+- Enrich pending mailbox state in `crates/hq-tui/src/model.rs` so submitting a draft immediately
+  places an optimistic local-human entry in the open conversation, anchored by the effect identity
+  and labeled `Pending` before any daemon response. Preserve the exact draft body, target, and
+  action until a definite outcome.
+- Reconcile a committed receipt to the canonical message identity. Ordinary direct, reply, and
+  self-note messages become `Sent`; project messages remain visibly queued until authoritative
+  dispatch evidence appears. Use typed submission/delivery state rather than labels as evidence.
+- On definite rejection, restore the exact editable draft with actionable failure context. On an
+  uncertain response, retain the pending text and stable command identity so receipt reconciliation
+  cannot duplicate the message.
+- Refactor `NodeApplicationPorts::control_mailbox` in `crates/hq-node/src/components.rs` to return
+  the durable store receipt without synchronously calling `reconcile_project_messages` or waiting
+  for `HarnessSupervisor::deliver`.
+- Give `ProjectNodeComponent` a coalesced asynchronous reconciliation trigger. A committed project
+  message schedules work and returns; one serialized worker reconciles input and dispatches from
+  durable state. Concurrent wakes coalesce, failures remain retryable, and startup, periodic repair,
+  receipt replay, drain, and later relevant invalidations recover idempotently.
+- Keep canonical message commit, project-input acceptance, dispatch records, and provider
+  submission as distinct evidence. A background failure must not rewrite a committed mailbox
+  receipt as failure or lose work after a crash between commit and wake.
+- Add pure-model tests for immediate pending insertion, commit identity replacement,
+  rejection/draft restoration, uncertainty, duplicate completions, focus/anchor preservation, and
+  project queued-to-sent transitions. Add node/component tests with a blocked reconciler for early
+  receipt, wake coalescing, unrunnable projects, delayed provider acceptance, failure/retry, and
+  crash/startup recovery.
+- Extend installed PTY coverage so Send paints the human message before a delayed fake Codex
+  response, remains responsive during delivery, and converges without duplicate transcript rows.
+- Update `docs/projects.md`, `docs/protocol/local-api-v1.md`, and
+  `docs/rust/{tui,acceptance-scenarios,behavior-ledger}.md` with the submission, durable commit,
+  queued delivery, and runtime-dispatch meanings.
+
+Acceptance criteria:
+
+- The TUI shows submitted text as pending in the same render cycle that emits the mailbox effect.
+- A project mailbox response waits only for the durable mailbox mutation, not reconciliation,
+  runtime start/resume, `turn/start`, or `turn/steer`.
+- Background dispatch is serialized, idempotent, recoverable after restart, and cannot lose a
+  committed input.
+- Definite rejection preserves editable text; response loss and duplicate invalidations never
+  author the message twice.

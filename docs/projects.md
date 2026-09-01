@@ -68,6 +68,11 @@ External unobserved moves leave the old resource degraded until the human reconc
 A project mailbox is the durable address and queue for project work. The currently assigned agent
 serves it. The mailbox survives closing, archival, agent reassignment, and thread replacement.
 
+Committing a human project message and delivering it to a runtime are separate boundaries. The
+mailbox command returns as soon as the canonical message and receipt are durable. A component-owned
+latest-value wake then sequences accepted input and plans dispatch from durable state on one
+serialized worker; the client never waits for runtime start, resume, steer, or provider acceptance.
+
 The mailbox is an application authorization and routing boundary, not a cryptographic principal.
 Nostr wrappers are encrypted to installation root keys. The home daemon decrypts them, stores local
 state in plaintext SQLite, and enforces mailbox authorization. V1 assumes honest actors inside that
@@ -326,6 +331,11 @@ non-runnable projects retain accepted input until they become runnable. Stable c
 identities make post-commit, startup, drain, and busy-workflow retries converge without submitting
 the same input twice. Manual dispatch is not an ordinary messaging step; it is a typed recovery
 action exposed only when stalled-delivery evidence requires intervention.
+
+Post-commit wakes contain no message or project payload and may coalesce. The worker rereads durable
+state, crosses the mailbox/projection handoff with one bounded follow-up pass, continues truncated
+work, retries failures on the next wake or five-minute repair, and performs a final pass during
+drain. A lost process-local wake therefore delays work but cannot lose a committed input.
 
 Agent output retains immutable agent, thread, and assignment-epoch provenance. The project mailbox
 remains the conversation address and reply target. UIs present dual attribution such as

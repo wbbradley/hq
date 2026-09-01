@@ -312,7 +312,7 @@ pub enum UiMessageState {
 /// User-facing progress of one locally authored message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiMessageDelivery {
-    /// Project work has accepted the message but has not dispatched it yet.
+    /// The local submission is awaiting a durable receipt, or committed project work is queued.
     Pending,
     /// The message is durably authored but has no receipt evidence yet.
     Sent,
@@ -2131,14 +2131,21 @@ struct ConversationFailure {
     failure: UiFailure,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum PendingMailboxKind {
     OpenDraft,
     SaveDraft,
-    SubmitCommand,
+    SubmitCommand(Box<PendingMailboxSubmission>),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingMailboxSubmission {
+    draft: Option<UiMailboxDraft>,
+    action: UiMailboxAction,
+    optimistic_entry: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingMailbox {
     id: EffectId,
     kind: PendingMailboxKind,
@@ -2673,7 +2680,7 @@ impl UiModel {
 
     /// Returns the current draft or mailbox-command effect identity.
     pub const fn pending_mailbox(&self) -> Option<EffectId> {
-        match self.pending_mailbox {
+        match &self.pending_mailbox {
             Some(pending) => Some(pending.id),
             None => None,
         }
@@ -2885,9 +2892,16 @@ impl UiModel {
             return Ok(());
         }
         let id = self.allocate_effect()?;
+        let optimistic_entry = draft
+            .as_ref()
+            .and_then(|draft| append_pending_message(self, draft, id));
         self.pending_mailbox = Some(PendingMailbox {
             id,
-            kind: PendingMailboxKind::SubmitCommand,
+            kind: PendingMailboxKind::SubmitCommand(Box::new(PendingMailboxSubmission {
+                draft: draft.clone(),
+                action: action.clone(),
+                optimistic_entry,
+            })),
         });
         effects.push(UiEffect::SubmitMailboxCommand { id, draft, action });
         Ok(())
@@ -3661,6 +3675,7 @@ fn materialized_view_observed(
     } else {
         model.request_inbox_preview(effects);
     }
+    reconcile_pending_mailbox_view(model, revision, effects)?;
     if model
         .required_revision
         .is_some_and(|required| revision >= required)
@@ -3669,6 +3684,54 @@ fn materialized_view_observed(
     }
     apply_completion_context(model);
     effects.push(UiEffect::RequestRedraw);
+    Ok(())
+}
+
+fn reconcile_pending_mailbox_view(
+    model: &mut UiModel,
+    revision: u64,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    let Some(pending) = model.pending_mailbox.as_ref() else {
+        return Ok(());
+    };
+    let PendingMailboxKind::SubmitCommand(submission) = &pending.kind else {
+        return Ok(());
+    };
+    let Some(draft) = submission.draft.as_ref() else {
+        return Ok(());
+    };
+    let effect_id = pending.id;
+    let draft = draft.clone();
+    let optimistic_entry = submission.optimistic_entry.clone();
+    let expected_message = draft.draft_id;
+    let canonical_entry = model.conversation.as_ref().and_then(|conversation| {
+        conversation.entries.iter().find(|entry| {
+            entry
+                .message_target
+                .is_some_and(|target| target.message_id == expected_message)
+        })
+    });
+    if canonical_entry.is_some() {
+        return mailbox_command_committed(
+            model,
+            effect_id,
+            revision,
+            Some(expected_message),
+            effects,
+        );
+    }
+    if optimistic_entry.as_deref().is_some_and(|entry_id| {
+        model.conversation.as_ref().is_some_and(|conversation| {
+            conversation
+                .entries
+                .iter()
+                .any(|entry| entry.id == entry_id)
+        })
+    }) {
+        return Ok(());
+    }
+    let _ = append_pending_message(model, &draft, effect_id);
     Ok(())
 }
 
@@ -8133,12 +8196,14 @@ fn draft_failed(
 ) {
     let Some(pending) = model
         .pending_mailbox
+        .as_ref()
         .filter(|pending| pending.id == effect_id)
     else {
         return;
     };
+    let pending_kind = pending.kind.clone();
     if !matches!(
-        pending.kind,
+        pending_kind,
         PendingMailboxKind::OpenDraft | PendingMailboxKind::SaveDraft
     ) {
         return;
@@ -8153,7 +8218,7 @@ fn draft_failed(
             closing,
         }),
         Some(server),
-    ) = (pending.kind, &mut model.mailbox_draft, current)
+    ) = (pending_kind, &mut model.mailbox_draft, current)
         && draft.draft_id == server.draft_id
         && draft.target == server.target
     {
@@ -8172,18 +8237,18 @@ fn mailbox_command_committed(
     message_id: Option<[u8; 32]>,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
-    if model.pending_mailbox
-        != Some(PendingMailbox {
-            id: effect_id,
-            kind: PendingMailboxKind::SubmitCommand,
-        })
-    {
+    let Some(pending) = model.pending_mailbox.as_ref() else {
+        return Ok(());
+    };
+    let PendingMailboxKind::SubmitCommand(submission) = &pending.kind else {
+        return Ok(());
+    };
+    if pending.id != effect_id {
         return Ok(());
     }
-    let committed_draft = model.mailbox_draft.as_ref().and_then(|pane| match pane {
-        UiMailboxDraftPane::Editing { draft, .. } => Some(draft.clone()),
-        UiMailboxDraftPane::Loading { .. } => None,
-    });
+    let committed_draft = submission.draft.clone();
+    let action = submission.action.clone();
+    let optimistic_entry = submission.optimistic_entry.clone();
     let project_target = committed_draft
         .as_ref()
         .and_then(|draft| match draft.target {
@@ -8199,7 +8264,13 @@ fn mailbox_command_committed(
     model.autosave_timer = None;
     model.last_failure = None;
     if let (Some(draft), Some(message_id)) = (committed_draft.as_ref(), message_id) {
-        append_committed_message(model, draft, message_id);
+        reconcile_committed_message(
+            model,
+            draft,
+            message_id,
+            optimistic_entry.as_deref(),
+            matches!(action, UiMailboxAction::Project { .. }),
+        );
     }
     if let (Some(UiGuidedPending::Instruction(submission)), Some(message_id)) =
         (model.guided_pending.clone(), message_id)
@@ -8220,8 +8291,8 @@ fn mailbox_command_committed(
     Ok(())
 }
 
-fn append_committed_message(model: &mut UiModel, draft: &UiMailboxDraft, message_id: [u8; 32]) {
-    let targets_open_conversation = match draft.target {
+fn draft_targets_open_conversation(model: &UiModel, draft: &UiMailboxDraft) -> bool {
+    match draft.target {
         UiMailboxDraftTarget::Reply { message_id } => {
             model.conversation.as_ref().is_some_and(|conversation| {
                 conversation.entries.iter().any(|entry| {
@@ -8250,8 +8321,46 @@ fn append_committed_message(model: &mut UiModel, draft: &UiMailboxDraft, message
                 && model.selected_row.as_ref() == Some(&conversation.row_id)
         }),
         UiMailboxDraftTarget::Direct { .. } | UiMailboxDraftTarget::SelfNote => false,
-    };
-    if !targets_open_conversation {
+    }
+}
+
+fn append_pending_message(
+    model: &mut UiModel,
+    draft: &UiMailboxDraft,
+    effect_id: EffectId,
+) -> Option<String> {
+    if !draft_targets_open_conversation(model, draft) {
+        return None;
+    }
+    let id = format!("pending-mailbox-message:{}", effect_id.0.get());
+    let conversation = model.conversation.as_mut()?;
+    conversation.entries.retain(|entry| entry.id != id);
+    conversation.entries.push(UiConversationEntry {
+        id: id.clone(),
+        presentation: UiConversationEntryPresentation::Message {
+            author: UiConversationAuthor::You,
+            body: draft.content.clone(),
+        },
+        message_state: Some(UiMessageState::Open),
+        delivery: Some(UiMessageDelivery::Pending),
+        message_target: None,
+        technical: Vec::new(),
+    });
+    place_live_activity_at_tail(&mut conversation.entries);
+    model.conversation_anchor = Some(id.clone());
+    model.focus = UiFocus::Conversation;
+    model.technical_visible = false;
+    Some(id)
+}
+
+fn reconcile_committed_message(
+    model: &mut UiModel,
+    draft: &UiMailboxDraft,
+    message_id: [u8; 32],
+    optimistic_entry: Option<&str>,
+    project_message: bool,
+) {
+    if !draft_targets_open_conversation(model, draft) {
         return;
     }
     if let Some(existing_id) = model.conversation.as_ref().and_then(|conversation| {
@@ -8262,6 +8371,14 @@ fn append_committed_message(model: &mut UiModel, draft: &UiMailboxDraft, message
                 .map(|_| entry.id.clone())
         })
     }) {
+        if let Some(optimistic_entry) = optimistic_entry
+            && optimistic_entry != existing_id
+            && let Some(conversation) = &mut model.conversation
+        {
+            conversation
+                .entries
+                .retain(|entry| entry.id != optimistic_entry);
+        }
         model.conversation_anchor = Some(existing_id);
         model.focus = UiFocus::Conversation;
         model.technical_visible = false;
@@ -8271,6 +8388,27 @@ fn append_committed_message(model: &mut UiModel, draft: &UiMailboxDraft, message
     let Some(conversation) = &mut model.conversation else {
         return;
     };
+    if let Some(optimistic_entry) = optimistic_entry
+        && let Some(entry) = conversation
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == optimistic_entry)
+    {
+        entry.id.clone_from(&id);
+        entry.delivery = Some(if project_message {
+            UiMessageDelivery::Pending
+        } else {
+            UiMessageDelivery::Sent
+        });
+        entry.message_target = Some(UiMessageTarget {
+            message_id,
+            reply_allowed: false,
+        });
+        model.conversation_anchor = Some(id);
+        model.focus = UiFocus::Conversation;
+        model.technical_visible = false;
+        return;
+    }
     conversation.entries.push(UiConversationEntry {
         id: id.clone(),
         presentation: UiConversationEntryPresentation::Message {
@@ -8278,7 +8416,11 @@ fn append_committed_message(model: &mut UiModel, draft: &UiMailboxDraft, message
             body: draft.content.clone(),
         },
         message_state: Some(UiMessageState::Open),
-        delivery: Some(UiMessageDelivery::Sent),
+        delivery: Some(if project_message {
+            UiMessageDelivery::Pending
+        } else {
+            UiMessageDelivery::Sent
+        }),
         message_target: Some(UiMessageTarget {
             message_id,
             reply_allowed: false,
@@ -8297,16 +8439,39 @@ fn mailbox_command_failed(
     failure: UiFailure,
     effects: &mut Vec<UiEffect>,
 ) {
-    if model.pending_mailbox
-        != Some(PendingMailbox {
-            id: effect_id,
-            kind: PendingMailboxKind::SubmitCommand,
-        })
-    {
+    let Some(pending) = model.pending_mailbox.as_ref() else {
+        return;
+    };
+    let PendingMailboxKind::SubmitCommand(submission) = &pending.kind else {
+        return;
+    };
+    if pending.id != effect_id {
         return;
     }
+    if failure.code == "mailbox_command_uncertain" {
+        model.last_failure = Some(failure);
+        effects.push(UiEffect::RequestRedraw);
+        return;
+    }
+    let draft = submission.draft.clone();
+    let optimistic_entry = submission.optimistic_entry.clone();
     model.pending_mailbox = None;
-    if let Some(UiMailboxDraftPane::Editing {
+    if let Some(optimistic_entry) = optimistic_entry
+        && let Some(conversation) = &mut model.conversation
+    {
+        conversation
+            .entries
+            .retain(|entry| entry.id != optimistic_entry);
+    }
+    if let Some(draft) = draft {
+        model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
+            draft,
+            dirty: false,
+            submitting: false,
+            closing: false,
+        });
+        model.focus = UiFocus::Draft;
+    } else if let Some(UiMailboxDraftPane::Editing {
         submitting,
         closing,
         ..

@@ -2170,6 +2170,25 @@ fn committed_reply_dismisses_the_editor_and_appears_as_sent_at_the_conversation_
         })
         .expect("mailbox command");
 
+    let pending = submitting
+        .model
+        .conversation()
+        .and_then(|conversation| conversation.entries.last())
+        .expect("optimistic reply appears with the command effect");
+    assert!(matches!(
+        &pending.presentation,
+        UiConversationEntryPresentation::Message {
+            author: UiConversationAuthor::You,
+            body,
+        } if body == "answer text"
+    ));
+    assert_eq!(pending.delivery, Some(UiMessageDelivery::Pending));
+    assert!(pending.message_target.is_none());
+    assert_eq!(
+        submitting.model.conversation_anchor(),
+        Some(pending.id.as_str())
+    );
+
     let committed = update(
         submitting.model,
         UiEvent::MailboxCommandCommitted {
@@ -2195,9 +2214,143 @@ fn committed_reply_dismisses_the_editor_and_appears_as_sent_at_the_conversation_
     ));
     assert_eq!(sent.delivery, Some(UiMessageDelivery::Sent));
     assert_eq!(
+        sent.message_target.map(|target| target.message_id),
+        Some([5; 32])
+    );
+    assert_eq!(
         committed.model.conversation_anchor(),
         Some(sent.id.as_str())
     );
+}
+
+#[test]
+fn definite_mailbox_rejection_removes_optimistic_reply_and_restores_exact_draft() {
+    let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
+    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let (open_id, _) = open_draft_effect(&opening.effects);
+    let draft = UiMailboxDraft {
+        draft_id: [4; 32],
+        target: UiMailboxDraftTarget::Reply {
+            message_id: [3; 32],
+        },
+        content: "exact answer".to_owned(),
+        version: 7,
+    };
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: draft.clone(),
+        },
+    )
+    .expect("draft");
+    let submitting = update(loaded.model, UiEvent::Input(UiInput::Activate)).expect("submit");
+    let command_id = submitting
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitMailboxCommand { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("command");
+    assert_eq!(
+        submitting
+            .model
+            .conversation()
+            .expect("conversation")
+            .entries
+            .len(),
+        2
+    );
+
+    let rejected = update(
+        submitting.model,
+        UiEvent::MailboxCommandFailed {
+            effect_id: command_id,
+            failure: UiFailure {
+                code: "mailbox_target_stale".to_owned(),
+                action: "reselect and retry".to_owned(),
+            },
+        },
+    )
+    .expect("rejected");
+
+    assert_eq!(
+        rejected
+            .model
+            .conversation()
+            .expect("conversation")
+            .entries
+            .len(),
+        1
+    );
+    assert!(matches!(
+        rejected.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Editing {
+            draft: restored,
+            dirty: false,
+            submitting: false,
+            closing: false,
+        }) if restored == &draft
+    ));
+    assert_eq!(rejected.model.focus(), UiFocus::Draft);
+}
+
+#[test]
+fn uncertain_mailbox_response_retains_one_optimistic_reply_and_command_identity() {
+    let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
+    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let (open_id, _) = open_draft_effect(&opening.effects);
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target: UiMailboxDraftTarget::Reply {
+                    message_id: [3; 32],
+                },
+                content: "possibly sent".to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("draft");
+    let submitting = update(loaded.model, UiEvent::Input(UiInput::Activate)).expect("submit");
+    let command_id = submitting
+        .model
+        .pending_mailbox()
+        .expect("command identity");
+    let uncertain = update(
+        submitting.model,
+        UiEvent::MailboxCommandFailed {
+            effect_id: command_id,
+            failure: UiFailure {
+                code: "mailbox_command_uncertain".to_owned(),
+                action: "HQ is reconciling the receipt".to_owned(),
+            },
+        },
+    )
+    .expect("uncertain");
+
+    assert_eq!(uncertain.model.pending_mailbox(), Some(command_id));
+    let authored = uncertain
+        .model
+        .conversation()
+        .expect("conversation")
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.presentation,
+                UiConversationEntryPresentation::Message {
+                    author: UiConversationAuthor::You,
+                    body,
+                } if body == "possibly sent"
+            )
+        })
+        .count();
+    assert_eq!(authored, 1);
 }
 
 #[test]
@@ -2210,7 +2363,7 @@ fn committed_reply_does_not_duplicate_a_message_loaded_by_an_earlier_invalidatio
         UiEvent::DraftLoaded {
             effect_id: open_id,
             draft: UiMailboxDraft {
-                draft_id: [4; 32],
+                draft_id: [5; 32],
                 target: UiMailboxDraftTarget::Reply {
                     message_id: [3; 32],
                 },
