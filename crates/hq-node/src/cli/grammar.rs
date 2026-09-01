@@ -426,6 +426,14 @@ fn config_command() -> Command {
                             .required(true)
                             .value_name("NAME|ABSOLUTE_PATH|none"),
                     ),
+                Command::new("codex.yolo")
+                    .about("Run managed Codex sessions without approvals or sandboxing")
+                    .arg(
+                        Arg::new("enabled")
+                            .required(true)
+                            .value_parser(["true", "false"])
+                            .value_name("true|false"),
+                    ),
             ]),
         ])
 }
@@ -1018,6 +1026,9 @@ fn map_config(matches: &ArgMatches) -> Result<ConfigurationCommand, CliError> {
                     Some(ThemeSelection::new(value.to_owned()).map_err(|_| CliError::Arguments)?)
                 }
             },
+        },
+        "codex.yolo" => ConfigurationCommand::SetCodexYolo {
+            enabled: text(args, "enabled")? == "true",
         },
         _ => return Err(CliError::Arguments),
     })

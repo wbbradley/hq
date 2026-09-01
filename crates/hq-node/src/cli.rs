@@ -143,6 +143,11 @@ pub enum ConfigurationCommand {
         /// Replacement named or absolute-file selection, or `None` for automatic selection.
         theme: Option<ThemeSelection>,
     },
+    /// Enable or disable unrestricted Codex execution for managed sessions.
+    SetCodexYolo {
+        /// Whether managed Codex sessions run without approvals or sandboxing.
+        enabled: bool,
+    },
 }
 
 /// Closed local human-account administration behavior.
@@ -3994,6 +3999,7 @@ fn run_configuration(
                 configuration.relays,
                 configuration.default_provider,
                 configuration.theme,
+                configuration.codex,
             )?;
             owner.store_configuration(&configuration)?;
             Ok(CliResult::Configuration(Box::new(configuration)))
@@ -4004,6 +4010,7 @@ fn run_configuration(
                 configuration.relays,
                 configuration.default_provider,
                 configuration.theme,
+                configuration.codex,
             )?;
             owner.store_configuration(&configuration)?;
             Ok(CliResult::Configuration(Box::new(configuration)))
@@ -4025,6 +4032,18 @@ fn run_configuration(
                 configuration.relays,
                 configuration.default_provider,
                 theme.clone(),
+                configuration.codex,
+            )?;
+            owner.store_configuration(&configuration)?;
+            Ok(CliResult::Configuration(Box::new(configuration)))
+        }
+        ConfigurationCommand::SetCodexYolo { enabled } => {
+            configuration.codex.yolo = *enabled;
+            let configuration = LocalConfiguration::from_parts(
+                configuration.relays,
+                configuration.default_provider,
+                configuration.theme,
+                configuration.codex,
             )?;
             owner.store_configuration(&configuration)?;
             Ok(CliResult::Configuration(Box::new(configuration)))
@@ -7734,7 +7753,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             identity.fingerprint,
         )),
         (CliOutputFormat::Human, CliResult::Configuration(configuration)) => Ok(format!(
-            "default_provider={} relays={} theme={}\n",
+            "default_provider={} relays={} theme={} codex.yolo={}\n",
             configuration
                 .default_provider
                 .as_ref()
@@ -7749,6 +7768,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 .theme
                 .as_ref()
                 .map_or("automatic", ThemeSelection::as_str),
+            configuration.codex.yolo,
         )),
         (CliOutputFormat::Human, CliResult::ThemeCatalog(entries)) => {
             Ok(render_theme_catalog(entries))
@@ -7784,6 +7804,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 "default_provider": configuration.default_provider.as_ref().map(ProviderId::as_str),
                 "relays": configuration.relays.iter().map(RelayEndpoint::as_str).collect::<Vec<_>>(),
                 "theme": configuration.theme.as_ref().map(ThemeSelection::as_str),
+                "codex": { "yolo": configuration.codex.yolo },
             }),
         ),
         (CliOutputFormat::Json, CliResult::ThemeCatalog(entries)) => machine_record(
@@ -11080,6 +11101,33 @@ mod tests {
                 true,
             ),
             HumanDeviceState::Incomplete
+        );
+    }
+
+    #[test]
+    fn parser_accepts_only_boolean_codex_yolo_configuration() {
+        let codex_yolo = parse_cli([
+            OsString::from("config"),
+            OsString::from("set"),
+            OsString::from("codex.yolo"),
+            OsString::from("true"),
+        ])
+        .expect("Codex YOLO selection parses");
+        assert!(matches!(
+            codex_yolo.command,
+            CliCommand::Configuration {
+                action: ConfigurationCommand::SetCodexYolo { enabled: true },
+                ..
+            }
+        ));
+        assert_eq!(
+            parse_cli([
+                OsString::from("config"),
+                OsString::from("set"),
+                OsString::from("codex.yolo"),
+                OsString::from("sometimes"),
+            ]),
+            Err(CliError::Arguments)
         );
     }
 

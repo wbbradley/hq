@@ -63,6 +63,15 @@ pub struct LocalConfiguration {
     pub default_provider: Option<ProviderId>,
     /// Optional startup theme name or absolute file.
     pub theme: Option<ThemeSelection>,
+    /// Provider-private Codex defaults.
+    pub codex: LocalCodexConfiguration,
+}
+
+/// Installation-local Codex defaults.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LocalCodexConfiguration {
+    /// Disable Codex approvals and sandboxing for managed sessions.
+    pub yolo: bool,
 }
 
 impl LocalConfiguration {
@@ -71,7 +80,12 @@ impl LocalConfiguration {
         relays: impl IntoIterator<Item = RelayUrl>,
         default_provider: Option<ProviderId>,
     ) -> Result<Self, IdentityError> {
-        Self::from_parts(relays, default_provider, None)
+        Self::from_parts(
+            relays,
+            default_provider,
+            None,
+            LocalCodexConfiguration::default(),
+        )
     }
 
     /// Validates and owns every installation-local default.
@@ -79,6 +93,7 @@ impl LocalConfiguration {
         relays: impl IntoIterator<Item = RelayUrl>,
         default_provider: Option<ProviderId>,
         theme: Option<ThemeSelection>,
+        codex: LocalCodexConfiguration,
     ) -> Result<Self, IdentityError> {
         let relays = relays.into_iter().collect::<Vec<_>>();
         if relays.len() > MAX_RELAYS {
@@ -92,7 +107,20 @@ impl LocalConfiguration {
             relays: unique.into_iter().collect(),
             default_provider,
             theme,
+            codex,
         })
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexConfigurationDto {
+    yolo: bool,
+}
+
+impl CodexConfigurationDto {
+    const fn is_default(&self) -> bool {
+        !self.yolo
     }
 }
 
@@ -104,6 +132,8 @@ struct ConfigurationDto {
     default_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<String>,
+    #[serde(default, skip_serializing_if = "CodexConfigurationDto::is_default")]
+    codex: CodexConfigurationDto,
 }
 
 pub(super) fn encode(value: &LocalConfiguration) -> Result<Vec<u8>, IdentityError> {
@@ -119,6 +149,9 @@ pub(super) fn encode(value: &LocalConfiguration) -> Result<Vec<u8>, IdentityErro
             .as_ref()
             .map(|provider| provider.as_str().to_owned()),
         theme: value.theme.as_ref().map(|theme| theme.as_str().to_owned()),
+        codex: CodexConfigurationDto {
+            yolo: value.codex.yolo,
+        },
     };
     serde_json::to_vec(&dto)
         .map_err(|_| IdentityError::new(IdentityErrorClass::ConfigurationMalformed))
@@ -146,7 +179,14 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LocalConfiguration, IdentityError> 
         .transpose()
         .map_err(|_| IdentityError::new(IdentityErrorClass::ConfigurationInvalid))?;
     let theme = dto.theme.map(ThemeSelection::new).transpose()?;
-    let configuration = LocalConfiguration::from_parts(relays, provider, theme)?;
+    let configuration = LocalConfiguration::from_parts(
+        relays,
+        provider,
+        theme,
+        LocalCodexConfiguration {
+            yolo: dto.codex.yolo,
+        },
+    )?;
     if encode(&configuration)?.as_slice() != bytes {
         return Err(IdentityError::new(
             IdentityErrorClass::ConfigurationMalformed,

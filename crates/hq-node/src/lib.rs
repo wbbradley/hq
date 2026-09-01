@@ -84,8 +84,9 @@ pub use harness_component::HarnessNodeComponent;
 pub use harness_persistence::CanonicalHarnessPersistence;
 pub use harness_store::HarnessStoreAdapter;
 pub use identity::{
-    BackupPassword, IdentityError, IdentityErrorClass, InstallationIdentity, LocalConfiguration,
-    PublicIdentity, RelayEndpoint, StateDirectoryOwner, StatePaths, ThemeSelection,
+    BackupPassword, IdentityError, IdentityErrorClass, InstallationIdentity,
+    LocalCodexConfiguration, LocalConfiguration, PublicIdentity, RelayEndpoint,
+    StateDirectoryOwner, StatePaths, ThemeSelection,
 };
 pub use lifecycle::{
     NodeAdmission, NodeLifecycle, NodeLifecycleError, NodePhase, NodeTransitionOutcome,

@@ -13,7 +13,7 @@ use hq_protocol::Bip340Signer;
 use zeroize::Zeroizing;
 
 pub use backup::BackupPassword;
-pub use config::{LocalConfiguration, ThemeSelection};
+pub use config::{LocalCodexConfiguration, LocalConfiguration, ThemeSelection};
 pub use error::{IdentityError, IdentityErrorClass};
 pub use hq_relay::RelayUrl as RelayEndpoint;
 pub use paths::{StateDirectoryOwner, StatePaths};
@@ -162,6 +162,7 @@ impl StateDirectoryOwner {
             configuration.relays.clone(),
             configuration.default_provider.clone(),
             configuration.theme.clone(),
+            configuration.codex,
         )?;
         let bytes = config::encode(&validated)?;
         atomic_write(self.paths.configuration_file(), &bytes, WriteMode::Replace)

@@ -14,13 +14,14 @@ use hq_reducer::AuthorityPolicy;
 
 use crate::{
     ApplicationAgentSessionCanonicalPort, CancellationToken, CanonicalHarnessPersistence,
-    ComponentDrain, ComponentError, ForegroundCodexConfig, HarnessNodeComponent, LocalNodeRuntime,
-    LocalNodeRuntimeConfig, LocalNodeRuntimeError, LocalNodeRuntimeReport,
-    LocalNodeRuntimeStartError, LocalSessionPumpConfig, LocalSessionRegistryConfig, NodeComponent,
-    NodeComponents, NodeFoundation, NodeFoundationConfig, NodeOwner, NodeOwnerStartError,
-    NodeStartupError, ProjectNodeConfig, RelayNodeComponent, RelayNodeConfig, RuntimePaths,
-    ShutdownIntent, StandardProjectNodeComponent, StatePaths, WakingApplicationStore,
-    compose_codex_registry, compose_standard_project_component,
+    ComponentDrain, ComponentError, ForegroundCodexConfig, HarnessNodeComponent,
+    LocalConfiguration, LocalNodeRuntime, LocalNodeRuntimeConfig, LocalNodeRuntimeError,
+    LocalNodeRuntimeReport, LocalNodeRuntimeStartError, LocalSessionPumpConfig,
+    LocalSessionRegistryConfig, NodeComponent, NodeComponents, NodeFoundation,
+    NodeFoundationConfig, NodeOwner, NodeOwnerStartError, NodeStartupError, ProjectNodeConfig,
+    RelayNodeComponent, RelayNodeConfig, RuntimePaths, ShutdownIntent,
+    StandardProjectNodeComponent, StatePaths, WakingApplicationStore, compose_codex_registry,
+    compose_standard_project_component,
 };
 
 /// Explicit capacities and paths for one foreground node process.
@@ -165,9 +166,10 @@ fn open_generation(
         application.clone(),
         foundation.public_identity().installation_id,
     ));
+    let codex = foreground_codex_config(foundation.configuration());
     let registry = compose_codex_registry(
         gateway,
-        ForegroundCodexConfig::default(),
+        codex,
         Arc::new(hq_codex::ExecCodexProcessStarter),
         Arc::new(hq_codex::DiscardCodexDiagnostics),
     )
@@ -221,6 +223,13 @@ fn open_generation(
     )?
     .0;
     Ok(runtime)
+}
+
+fn foreground_codex_config(configuration: &LocalConfiguration) -> ForegroundCodexConfig {
+    ForegroundCodexConfig {
+        permissive: configuration.codex.yolo,
+        ..ForegroundCodexConfig::default()
+    }
 }
 
 fn current_timestamp() -> Timestamp {
@@ -359,5 +368,25 @@ impl crate::ReconcileProjectMessages for DormantNodeComponent {
         _limit: usize,
     ) -> Result<crate::ProjectMessageReconciliation, ApplicationError> {
         unavailable()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{LocalCodexConfiguration, LocalConfiguration};
+
+    use super::foreground_codex_config;
+
+    #[test]
+    fn foreground_codex_policy_uses_the_typed_local_default() {
+        let restricted = foreground_codex_config(&LocalConfiguration::default());
+        assert!(!restricted.permissive);
+
+        let configuration = LocalConfiguration {
+            codex: LocalCodexConfiguration { yolo: true },
+            ..LocalConfiguration::default()
+        };
+        let permissive = foreground_codex_config(&configuration);
+        assert!(permissive.permissive);
     }
 }

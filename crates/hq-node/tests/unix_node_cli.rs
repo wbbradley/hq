@@ -2330,6 +2330,21 @@ fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
         None,
     );
     assert!(theme.status.success(), "theme stderr: {:?}", theme.stderr);
+    let codex_yolo = offline_output(
+        &state_root,
+        [
+            OsString::from("config"),
+            OsString::from("set"),
+            OsString::from("codex.yolo"),
+            OsString::from("true"),
+        ],
+        None,
+    );
+    assert!(
+        codex_yolo.status.success(),
+        "Codex YOLO stderr: {:?}",
+        codex_yolo.stderr
+    );
     let relays = offline_output(
         &state_root,
         [
@@ -2351,6 +2366,7 @@ fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
     assert_eq!(relays["kind"], "configuration");
     assert_eq!(relays["data"]["default_provider"], "codex");
     assert_eq!(relays["data"]["theme"], "gruvbox-dark-hard");
+    assert_eq!(relays["data"]["codex"]["yolo"], true);
     assert_eq!(
         relays["data"]["relays"],
         serde_json::json!(["wss://a.example", "wss://z.example"])

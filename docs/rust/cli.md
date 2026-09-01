@@ -78,6 +78,12 @@ mode or the alternate screen, so a missing or invalid selected file produces an 
 terminal diagnostic. See [TUI themes](../tui-themes.md) for built-ins, Base16 import, and the native
 role schema.
 
+`config set codex.yolo true` makes newly launched managed Codex sessions use approval policy
+`never` and sandbox mode `danger-full-access`; set it to `false` to restore Codex defaults. Because
+configuration changes are offline operations, stop the HQ daemon before changing it. Start or
+restart the daemon after changing it so the foreground generation loads the new value. Only enable
+this setting inside an externally secured environment.
+
 `human create [LABEL]` starts or connects to the node, reconciles the reserved human mailbox,
 authors the installation's deterministic but separately namespaced creator-account identity when
 absent, and selects it. Repeating the command, racing an identical creator command, losing a

@@ -9,8 +9,8 @@ use std::{
 
 use hq_domain::ProviderId;
 use hq_node::{
-    BackupPassword, IdentityErrorClass, LocalConfiguration, RelayEndpoint, StateDirectoryOwner,
-    StatePaths, ThemeSelection,
+    BackupPassword, IdentityErrorClass, LocalCodexConfiguration, LocalConfiguration, RelayEndpoint,
+    StateDirectoryOwner, StatePaths, ThemeSelection,
 };
 
 mod support;
@@ -179,6 +179,7 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
         configuration.relays.clone(),
         configuration.default_provider.clone(),
         Some(ThemeSelection::new("gruvbox-dark-hard".to_owned()).expect("theme selector")),
+        configuration.codex,
     )
     .expect("themed configuration is valid");
     owner
@@ -190,6 +191,24 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
             .expect("configuration is UTF-8")
             .ends_with("\"theme\":\"gruvbox-dark-hard\"}"),
         "theme selection is persisted canonically"
+    );
+
+    let yolo = LocalConfiguration::from_parts(
+        themed.relays.clone(),
+        themed.default_provider.clone(),
+        themed.theme.clone(),
+        LocalCodexConfiguration { yolo: true },
+    )
+    .expect("Codex configuration is valid");
+    owner
+        .store_configuration(&yolo)
+        .expect("Codex configuration stores");
+    assert_eq!(paths.load_configuration().expect("read-only load"), yolo);
+    assert!(
+        String::from_utf8(fs::read(paths.configuration_file()).expect("configuration bytes"))
+            .expect("configuration is UTF-8")
+            .ends_with("\"codex\":{\"yolo\":true}}"),
+        "Codex YOLO is persisted canonically"
     );
 
     let replacement = LocalConfiguration::new(
@@ -211,6 +230,7 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
         relays: vec![duplicate.clone(), duplicate],
         default_provider: None,
         theme: None,
+        codex: LocalCodexConfiguration::default(),
     };
     assert_eq!(
         owner

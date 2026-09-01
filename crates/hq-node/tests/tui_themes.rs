@@ -267,8 +267,13 @@ fn installed_resolution_reports_selected_file_before_terminal_composition() {
     let paths = StatePaths::new(directory.path().join("state")).expect("state paths");
     let owner = StateDirectoryOwner::acquire(paths.clone()).expect("state owner");
     let missing = ThemeSelection::new("missing-theme".to_owned()).expect("selection");
-    let configuration =
-        LocalConfiguration::from_parts([], None, Some(missing)).expect("configuration is valid");
+    let configuration = LocalConfiguration::from_parts(
+        [],
+        None,
+        Some(missing),
+        hq_node::LocalCodexConfiguration::default(),
+    )
+    .expect("configuration is valid");
     owner
         .store_configuration(&configuration)
         .expect("configuration stores");
