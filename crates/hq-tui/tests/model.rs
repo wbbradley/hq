@@ -2153,6 +2153,100 @@ fn committed_reply_dismisses_the_editor_and_appears_as_sent_at_the_conversation_
 }
 
 #[test]
+fn committed_reply_does_not_duplicate_a_message_loaded_by_an_earlier_invalidation() {
+    let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
+    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let (open_id, _) = open_draft_effect(&opening.effects);
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target: UiMailboxDraftTarget::Reply {
+                    message_id: [3; 32],
+                },
+                content: "answer text".to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("draft");
+    let submitting = update(loaded.model, UiEvent::Input(UiInput::Activate)).expect("submit reply");
+    let command_id = submitting
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitMailboxCommand { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("mailbox command");
+
+    let invalidated = update(submitting.model, UiEvent::Invalidated { revision: 2 })
+        .expect("invalidation may precede command receipt");
+    let snapshot_id = snapshot_effect(&invalidated.effects);
+    let refreshed = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: snapshot(2, &["thread-a"]),
+        },
+    )
+    .expect("snapshot");
+    let (conversation_id, _, _) = conversation_effect(&refreshed.effects);
+    let mut authoritative = entry("authoritative-fact", false);
+    authoritative.presentation = UiConversationEntryPresentation::Message {
+        author: UiConversationAuthor::You,
+        body: "answer text".to_owned(),
+    };
+    authoritative.message_target = Some(UiMessageTarget {
+        message_id: [5; 32],
+        reply_allowed: false,
+    });
+    authoritative.delivery = Some(UiMessageDelivery::Sent);
+    let reloaded = update(
+        refreshed.model,
+        UiEvent::ConversationLoaded {
+            effect_id: conversation_id,
+            page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
+                row_id: "thread-a".to_owned(),
+                entries: vec![actionable_entry("question", [3; 32]), authoritative],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("authoritative conversation");
+
+    let committed = update(
+        reloaded.model,
+        UiEvent::MailboxCommandCommitted {
+            effect_id: command_id,
+            revision: 2,
+            message_id: Some([5; 32]),
+        },
+    )
+    .expect("committed reply");
+
+    let conversation = committed.model.conversation().expect("conversation");
+    let authored = conversation
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .message_target
+                .is_some_and(|target| target.message_id == [5; 32])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(authored.len(), 1);
+    assert_eq!(
+        committed.model.conversation_anchor(),
+        Some("authoritative-fact")
+    );
+}
+
+#[test]
 fn accepted_undispatched_project_reply_is_presented_as_pending() {
     let project_id = [5; 32];
     let thread_id = [6; 32];

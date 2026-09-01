@@ -8078,6 +8078,19 @@ fn append_committed_message(model: &mut UiModel, draft: &UiMailboxDraft, message
     if !targets_open_conversation {
         return;
     }
+    if let Some(existing_id) = model.conversation.as_ref().and_then(|conversation| {
+        conversation.entries.iter().find_map(|entry| {
+            entry
+                .message_target
+                .filter(|target| target.message_id == message_id)
+                .map(|_| entry.id.clone())
+        })
+    }) {
+        model.conversation_anchor = Some(existing_id);
+        model.focus = UiFocus::Conversation;
+        model.technical_visible = false;
+        return;
+    }
     let id = format!("committed-message:{message_id:?}");
     let Some(conversation) = &mut model.conversation else {
         return;
