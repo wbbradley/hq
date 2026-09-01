@@ -108,10 +108,10 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
 }
 
 #[test]
-fn locally_authored_messages_show_pending_sent_and_received_progress() {
+fn locally_authored_messages_only_show_delivery_state_while_it_is_useful() {
     for (delivery, label) in [
         (UiMessageDelivery::Pending, "You · Pending"),
-        (UiMessageDelivery::Sent, "You · Sent"),
+        (UiMessageDelivery::Sent, "You"),
         (UiMessageDelivery::Received, "You · Received"),
     ] {
         let rendered = render_text(&conversation_model_with_delivery(
@@ -122,6 +122,9 @@ fn locally_authored_messages_show_pending_sent_and_received_progress() {
             delivery,
         ));
         assert!(rendered.contains(label), "{rendered}");
+        if delivery == UiMessageDelivery::Sent {
+            assert!(!rendered.contains("You · Sent"), "{rendered}");
+        }
     }
 }
 

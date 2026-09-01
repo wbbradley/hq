@@ -2245,6 +2245,105 @@ fn committed_reply_dismisses_the_editor_and_appears_as_sent_at_the_conversation_
 }
 
 #[test]
+fn sent_agent_message_follows_the_live_tail_through_automatic_followup() {
+    let opened = opened_conversation(vec![
+        actionable_entry("question", [3; 32]),
+        agent_turn_entry("turn-running", UiActivityStatus::Running),
+    ]);
+    let question = update(opened, UiEvent::Input(UiInput::PreviousItem)).expect("select question");
+    let opening = update(question.model, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let (open_id, _) = open_draft_effect(&opening.effects);
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target: UiMailboxDraftTarget::Reply {
+                    message_id: [3; 32],
+                },
+                content: "answer text".to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("draft");
+    let submitting = update(loaded.model, UiEvent::Input(UiInput::Activate)).expect("send reply");
+    let command_id = submitting
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitMailboxCommand { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("mailbox command");
+
+    assert_eq!(
+        submitting.model.conversation_anchor(),
+        Some("turn-running"),
+        "sending leaves the conversation following the visible tail"
+    );
+
+    let committed = update(
+        submitting.model,
+        UiEvent::MailboxCommandCommitted {
+            effect_id: command_id,
+            revision: 2,
+            message_id: Some([5; 32]),
+        },
+    )
+    .expect("committed reply");
+    assert_eq!(committed.model.conversation_anchor(), Some("turn-running"));
+
+    let sent = committed
+        .model
+        .conversation()
+        .and_then(|conversation| {
+            conversation.entries.iter().find(|entry| {
+                entry
+                    .message_target
+                    .is_some_and(|target| target.message_id == [5; 32])
+            })
+        })
+        .cloned()
+        .expect("committed message");
+    let finished = update(
+        committed.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a"]),
+                conversation: Some(UiConversationPage {
+                    title: "Alice".to_owned(),
+                    context: None,
+                    row_id: "thread-a".to_owned(),
+                    entries: vec![
+                        actionable_entry("question", [3; 32]),
+                        sent,
+                        actionable_entry("agent-response", [6; 32]),
+                        agent_turn_entry("turn-finished", UiActivityStatus::Succeeded),
+                    ],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("terminal turn observed");
+
+    assert_eq!(finished.model.focus(), UiFocus::Draft);
+    assert_eq!(
+        finished.model.conversation_anchor(),
+        Some("turn-finished"),
+        "the automatic composer opens with every latest message visible"
+    );
+    assert!(matches!(
+        finished.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::Reply { message_id },
+        }) if *message_id == [6; 32]
+    ));
+}
+
+#[test]
 fn definite_mailbox_rejection_removes_optimistic_reply_and_restores_exact_draft() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
     let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");

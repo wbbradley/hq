@@ -2280,6 +2280,7 @@ struct UiSectionWorkspace {
     selected_row: Option<String>,
     conversation: Option<UiConversation>,
     conversation_anchor: Option<String>,
+    conversation_scroll_mode: ConversationScrollMode,
     technical_visible: bool,
     technical_scroll: u16,
     focus: UiFocus,
@@ -2304,6 +2305,12 @@ enum UiObservationMode {
     Materialized,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConversationScrollMode {
+    Anchored,
+    FollowTail,
+}
+
 /// Complete invariant-bearing TUI application state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiModel {
@@ -2321,6 +2328,7 @@ pub struct UiModel {
     requested_conversation: Option<String>,
     observation_mode: UiObservationMode,
     conversation_anchor: Option<String>,
+    conversation_scroll_mode: ConversationScrollMode,
     technical_visible: bool,
     technical_scroll: u16,
     mailbox_modal: Option<UiMailboxModal>,
@@ -2386,6 +2394,7 @@ impl UiModel {
             requested_conversation: None,
             observation_mode: UiObservationMode::SnapshotFallback,
             conversation_anchor: None,
+            conversation_scroll_mode: ConversationScrollMode::Anchored,
             technical_visible: false,
             technical_scroll: 0,
             mailbox_modal: None,
@@ -3198,6 +3207,7 @@ impl UiModel {
             selected_row: self.selected_row.clone(),
             conversation: self.conversation.clone(),
             conversation_anchor: self.conversation_anchor.clone(),
+            conversation_scroll_mode: self.conversation_scroll_mode,
             technical_visible: self.technical_visible,
             technical_scroll: self.technical_scroll,
             focus: self.focus,
@@ -3211,6 +3221,7 @@ impl UiModel {
             self.selected_row = workspace.selected_row;
             self.conversation = workspace.conversation;
             self.conversation_anchor = workspace.conversation_anchor;
+            self.conversation_scroll_mode = workspace.conversation_scroll_mode;
             self.technical_visible = workspace.technical_visible;
             self.technical_scroll = workspace.technical_scroll;
             self.focus = workspace.focus;
@@ -3219,6 +3230,7 @@ impl UiModel {
             self.selected_row = None;
             self.conversation = None;
             self.conversation_anchor = None;
+            self.conversation_scroll_mode = ConversationScrollMode::Anchored;
             self.technical_visible = false;
             self.technical_scroll = 0;
             self.focus = UiFocus::Navigation;
@@ -3317,6 +3329,7 @@ impl UiModel {
             false
         } else {
             self.conversation_anchor = Some(selected);
+            self.conversation_scroll_mode = ConversationScrollMode::Anchored;
             self.technical_visible = false;
             self.technical_scroll = 0;
             true
@@ -3366,6 +3379,7 @@ impl UiModel {
     fn close_conversation(&mut self) {
         self.conversation = None;
         self.conversation_anchor = None;
+        self.conversation_scroll_mode = ConversationScrollMode::Anchored;
         self.close_technical_details();
         self.pending_conversation = None;
         if self.focus == UiFocus::Conversation {
@@ -3452,6 +3466,11 @@ impl UiModel {
 
     fn install_first_conversation_page(&mut self, mut page: UiConversationPage) {
         let previous_anchor = self.conversation_anchor.clone();
+        let follow_tail = self.conversation_scroll_mode == ConversationScrollMode::FollowTail
+            && self
+                .conversation
+                .as_ref()
+                .is_some_and(|conversation| conversation.row_id == page.row_id);
         apply_pending_project_delivery(self.snapshot.as_ref(), &mut page.entries);
         self.conversation = Some(UiConversation {
             row_id: page.row_id,
@@ -3464,10 +3483,18 @@ impl UiModel {
             place_live_activity_at_tail(&mut conversation.entries);
         }
         self.conversation_anchor = self.conversation.as_ref().and_then(|conversation| {
+            if follow_tail {
+                return conversation.entries.last().map(|entry| entry.id.clone());
+            }
             previous_anchor
                 .filter(|anchor| conversation.entries.iter().any(|entry| &entry.id == anchor))
                 .or_else(|| conversation.entries.last().map(|entry| entry.id.clone()))
         });
+        self.conversation_scroll_mode = if follow_tail && self.conversation_anchor.is_some() {
+            ConversationScrollMode::FollowTail
+        } else {
+            ConversationScrollMode::Anchored
+        };
         self.conversation_failure = None;
         self.last_failure = None;
     }
@@ -3550,6 +3577,7 @@ impl UiModel {
             next_cursor: None,
         });
         self.conversation_anchor = None;
+        self.conversation_scroll_mode = ConversationScrollMode::Anchored;
         self.close_technical_details();
     }
 
@@ -8448,13 +8476,14 @@ fn conversation_loaded(
             .map(|target| target.message_id)
     });
     let followed_tail = pending.cursor.is_none()
-        && previous_anchor.as_ref().is_some_and(|anchor| {
-            model
-                .conversation
-                .as_ref()
-                .and_then(|conversation| conversation.entries.last())
-                .is_some_and(|entry| &entry.id == anchor)
-        });
+        && (model.conversation_scroll_mode == ConversationScrollMode::FollowTail
+            || previous_anchor.as_ref().is_some_and(|anchor| {
+                model
+                    .conversation
+                    .as_ref()
+                    .and_then(|conversation| conversation.entries.last())
+                    .is_some_and(|entry| &entry.id == anchor)
+            }));
     apply_pending_project_delivery(model.snapshot.as_ref(), &mut page.entries);
     if pending.cursor.is_some()
         && let Some(conversation) = &mut model.conversation
@@ -8497,6 +8526,9 @@ fn conversation_loaded(
             })
             .or_else(|| conversation.entries.last().map(|entry| entry.id.clone()))
     });
+    if model.conversation_anchor.is_none() {
+        model.conversation_scroll_mode = ConversationScrollMode::Anchored;
+    }
     if pending.enter_on_load {
         model.focus = UiFocus::Conversation;
     }
@@ -8907,7 +8939,12 @@ fn append_pending_message(
         technical: Vec::new(),
     });
     place_live_activity_at_tail(&mut conversation.entries);
-    model.conversation_anchor = Some(id.clone());
+    model.conversation_anchor = conversation.entries.last().map(|entry| entry.id.clone());
+    model.conversation_scroll_mode = if model.conversation_anchor.is_some() {
+        ConversationScrollMode::FollowTail
+    } else {
+        ConversationScrollMode::Anchored
+    };
     model.focus = UiFocus::Conversation;
     model.close_technical_details();
     Some(id)
@@ -8939,9 +8976,7 @@ fn reconcile_committed_message(
                 .entries
                 .retain(|entry| entry.id != optimistic_entry);
         }
-        model.conversation_anchor = Some(existing_id);
-        model.focus = UiFocus::Conversation;
-        model.close_technical_details();
+        retain_sent_message_anchor(model, existing_id);
         return;
     }
     let id = format!("committed-message:{message_id:?}");
@@ -8964,9 +8999,7 @@ fn reconcile_committed_message(
             message_id,
             reply_allowed: false,
         });
-        model.conversation_anchor = Some(id);
-        model.focus = UiFocus::Conversation;
-        model.close_technical_details();
+        retain_sent_message_anchor(model, id);
         return;
     }
     conversation.entries.push(UiConversationEntry {
@@ -8988,7 +9021,23 @@ fn reconcile_committed_message(
         technical: Vec::new(),
     });
     place_live_activity_at_tail(&mut conversation.entries);
-    model.conversation_anchor = Some(id);
+    retain_sent_message_anchor(model, id);
+}
+
+fn retain_sent_message_anchor(model: &mut UiModel, sent_entry: String) {
+    model.conversation_anchor =
+        if model.conversation_scroll_mode == ConversationScrollMode::FollowTail {
+            model
+                .conversation
+                .as_ref()
+                .and_then(|conversation| conversation.entries.last())
+                .map(|entry| entry.id.clone())
+        } else {
+            Some(sent_entry)
+        };
+    if model.conversation_anchor.is_none() {
+        model.conversation_scroll_mode = ConversationScrollMode::Anchored;
+    }
     model.focus = UiFocus::Conversation;
     model.close_technical_details();
 }

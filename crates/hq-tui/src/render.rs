@@ -4160,9 +4160,8 @@ fn render_conversation_entry(
             } else {
                 match entry.delivery {
                     Some(UiMessageDelivery::Pending) => " · Pending",
-                    Some(UiMessageDelivery::Sent) => " · Sent",
+                    Some(UiMessageDelivery::Sent) | None => "",
                     Some(UiMessageDelivery::Received) => " · Received",
-                    None => "",
                 }
             };
             let exceptional = match entry.message_state {
