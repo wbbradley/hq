@@ -10468,6 +10468,94 @@ If upcoming plan items need modifications due to a change during this implementa
 
 <!-- End of archived plan entry. -->
 
+## 2026-08-31 — Revision-coherent subscribed conversation views
+
+Added an application-owned materialized conversation view and one serialized store-actor query that
+loads the authoritative snapshot plus an optional bounded first page without an intervening commit.
+Local API v1 now carries typed selections on subscription registration and refresh, validates the
+200-entry embedded-page bound in both directions, and activates registrations only after their
+coherent acknowledgement is confirmed written. The reconnecting client retains one desired and one
+in-flight selection, suppresses stale responses, coalesces invalidations, repairs acknowledgement
+races, and preserves the latest interest across reconnect while unselected clients retain ordinary
+snapshot events. Node production delegates, test capabilities, and bounded session-event storage
+were updated, and the design, protocol, lifecycle, and qualification evidence now describe the new
+boundary.
+
+Architecture and qualification validation, focused store/local-API/installed-node tests, strict
+workspace Clippy, and the complete locked all-target/all-feature suite were exercised. One unrelated
+installed guided-work PTY run timed out after visibly completing both turns; its exact isolated
+rerun and the complete installed PTY test binary both passed.
+
+### Original plan entry
+
+### Serve revision-coherent subscribed conversation views
+
+Give subscribed clients one bounded materialized view containing an authoritative snapshot and an
+optional selected conversation page read at the same serialized store revision. This is the daemon
+and protocol foundation for removing the TUI's invalidation-to-snapshot-to-page request chain.
+
+- Add an application/store query that reads the complete authoritative snapshot and one optional
+  first conversation page inside a single store-actor request. Preserve ordinary snapshot and
+  explicit page queries for CLI and older-history callers.
+- Extend local API v1 subscription registration and refresh with an optional typed
+  `ConversationKeyDto` selection and bounded page limit. Acknowledgements and later materialized-view
+  responses carry the snapshot, selected key, page, and exact shared revision.
+- Let `ReconnectingClient` update the selected conversation on its subscribed connection. Coalesce
+  rapid changes and invalidations to the latest interest, ignore stale responses, retain the latest
+  interest across reconnect, and keep revision invalidation frames free of projection rows.
+- Test protocol bounds and round trips, server activation-before-write behavior, exact store
+  coherence, selection replacement, invalidation races, response loss, reconnect, and cancellation.
+- Document the typed materialized subscription view in `docs/design.md`,
+  `docs/protocol/local-api-v1.md`, and `docs/rust/node-lifecycle.md`.
+
+Acceptance criteria:
+
+- Snapshot and selected first-page detail in one materialized view are read at one serialized store
+  revision and identify the conversation by typed key.
+- Initial subscription, automatic invalidation repair, and explicit selection replacement all
+  return the same bounded view type without a snapshot-then-page race.
+- Rapid selection, duplicate invalidations, stale responses, response loss, and reconnect converge
+  to the newest revision and selected key without unbounded queued work.
+- Existing command isolation, body-free invalidations, CLI snapshot queries, and explicit older-page
+  pagination remain intact.
+
+#### Implementation plan
+
+1. Add failing application/store contracts in
+   `crates/hq-store/tests/application_gateway_contract.rs` for a new
+   `AuthoritativeConversationView` value and `QueryDomain::authoritative_conversation_view` port.
+   Extend `crates/hq-application/src/{ports,snapshot,lib}.rs` and
+   `crates/hq-store/src/{actor,database,gateway}.rs` so one actor request loads the snapshot plus an
+   optional bounded page without an interleaving mutation; reject an invalid limit before entering
+   storage and prove the returned revision/page survive reverse ingestion and an empty selection.
+2. Add protocol round-trip and bound tests first in `crates/hq-local-api/tests/protocol_v1.rs` for
+   `AuthoritativeConversationViewDto` and the optional selection carried by
+   `SubscriptionRequestDto`. Update `crates/hq-local-api/src/protocol/v1.rs` and
+   `crates/hq-local-api/src/conversion.rs`; keep `RevisionInvalidation` revision/topic-only and leave
+   the existing snapshot and conversation-page request families available.
+3. Add server-session tests in `crates/hq-local-api/tests/server_sessions.rs` proving registration is
+   pending while the coherent view is read, becomes active only after its acknowledgement is
+   confirmed written, returns exact selected keys/pages, and cancels on conversion/query/write or
+   disconnect failure. Update `crates/hq-local-api/src/server.rs` to use the new atomic application
+   port for subscription acknowledgement and materialized refresh requests.
+4. Add reconnecting-client tests in `crates/hq-local-api/tests/reconnecting_client.rs` before changing
+   `crates/hq-local-api/src/client.rs`. Cover initial selected interest, latest-value selection
+   replacement during an in-flight refresh, invalidation coalescing, stale response suppression,
+   response loss/reconnect, generation-specific subscription identity, cancellation, and ordinary
+   non-subscribed snapshots. Introduce a closed `ClientEvent` materialized-view variant and retain
+   only one desired/in-flight selection rather than a request queue.
+5. Update every `QueryDomain` test double and local API conversion/export site required by the new
+   port, then update the three named design/protocol/lifecycle documents. Run formatting,
+   architecture/qualification validation, focused application/store/local-API tests, strict
+   workspace Clippy, and the complete locked all-target/all-feature workspace suite.
+
+Risks: the page has no independent revision today, so coherence must be encoded by the enclosing
+view and guaranteed at the store actor boundary; changing selection during an in-flight refresh
+must not publish the stale page; subscription activation must remain write-confirmed; and the new
+view must remain bounded even though it carries message bodies.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-08-30 — Projects workspace interaction specification
 
 Specified Projects as a mostly modeless workspace built around the ordinary nouns Project,

@@ -23,7 +23,7 @@ Persistence|crates/hq-store/tests/repair_contract.rs|test:changed_rebuildable_ro
 Queries|crates/hq-store/tests/incremental_query_contract.rs|test:thousand_entry_later_pages_use_the_covering_conversation_index|Stable cursors canonical order and indexed later pages
 Queries|crates/hq-store/tests/incremental_query_contract.rs|test:cursor_pages_are_bound_to_the_conversation_and_concatenate_to_reducer_order|Stable cursor pages concatenate to reducer order
 Queries|crates/hq-store/tests/incremental_query_contract.rs|test:equal_time_mixed_pages_concatenate_to_local_reducer_order_after_repair_and_reopen|Canonical equal-time ordering survives repair and reopen
-Local API/node|crates/hq-local-api/tests/reconnecting_client.rs|test:subscription_acknowledgement_is_the_fresh_base_and_gaps_force_full_refresh|Replay reconnect and revision-gap closure
+Local API/node|crates/hq-local-api/tests/reconnecting_client.rs|test:subscription_converges_to_latest_selection_across_invalidation_and_reconnect|Replay reconnect, selection replacement, and revision-gap closure
 Local API/node|crates/hq-local-api/tests/reconnecting_client.rs|test:lost_mutation_response_replays_the_byte_identical_original_frame|Lost mutation response retries exact request identity
 Local API/node|crates/hq-node/tests/unix_node_cli.rs|test:concurrent_readiness_callers_spawn_candidates_but_converge_on_one_owner|Concurrent readiness converges on one node owner
 Local API/node|crates/hq-node/tests/unix_graceful_runtime.rs|test:protocol_stop_returns_the_draining_ack_before_ordered_cleanup_and_immediate_rebind|Ordered graceful stop and immediate ownership recovery

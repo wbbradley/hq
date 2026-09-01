@@ -11,15 +11,16 @@ use hq_domain::{
 };
 use hq_local_api::protocol::v1::{
     AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
-    AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
-    ClientHello, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse, Id32,
-    InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest, LifecycleState, LifecycleStatus,
-    MailboxCommandActionDto, MailboxCommandRequestDto, MutationAttemptDto, MutationRequest,
-    ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
+    AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeConversationViewDto,
+    AuthoritativeSnapshotDto, BuildMetadata, ClientHello, ConversationKeyDto, ConversationPageDto,
+    ConversationPageSelectionDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse,
+    Id32, InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest, LifecycleState,
+    LifecycleStatus, MailboxCommandActionDto, MailboxCommandRequestDto, MutationAttemptDto,
+    MutationRequest, ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
     ProjectCreationRequestDto, Request, RequestId, ResourceLocatorDto, ResourceSchemeDto,
-    ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto,
-    SubscriptionAcknowledgement, V1, VersionRange, VersionRejected, WireMessage,
-    agent_session_request_digest,
+    ResponseEnvelope, ResponseResult, RevisionInvalidation, SelectedConversationPageDto,
+    ServerHello, SessionControlDto, SubscriptionAcknowledgement, V1, VersionRange, VersionRejected,
+    WireMessage, agent_session_request_digest,
 };
 use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientAction,
@@ -217,6 +218,31 @@ fn snapshot_response(request_id: u64, revision: u64) -> Vec<u8> {
     ))
     .encode_frame()
     .expect("snapshot response")
+}
+
+fn conversation_selection(byte: u8) -> ConversationPageSelectionDto {
+    ConversationPageSelectionDto::new(
+        ConversationKeyDto::ProjectThread {
+            project: Id32::new([byte; 32]),
+            thread: Id32::new([byte.wrapping_add(1); 32]),
+        },
+        40,
+    )
+    .expect("conversation selection")
+}
+
+fn conversation_view(
+    revision: u64,
+    selection: &ConversationPageSelectionDto,
+) -> AuthoritativeConversationViewDto {
+    AuthoritativeConversationViewDto::new(
+        AuthoritativeSnapshotDto::new(revision, Vec::new()).expect("snapshot"),
+        Some(SelectedConversationPageDto::new(
+            selection.key.clone(),
+            ConversationPageDto::new(Vec::new(), None).expect("empty conversation page"),
+        )),
+    )
+    .expect("conversation view")
 }
 
 fn only_connect(actions: &[ClientAction]) -> (ConnectionGeneration, Duration) {
@@ -657,10 +683,80 @@ fn lost_agent_session_response_replays_exact_secret_bearing_frame() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn subscription_acknowledgement_is_the_fresh_base_and_gaps_force_full_refresh() {
+fn selection_replacement_while_subscription_ack_is_pending_sends_one_follow_up() {
     let mut client = client();
+    let first_selection = conversation_selection(41);
+    let latest_selection = conversation_selection(51);
     client
-        .configure_subscription(Id32::new([31; 32]), vec![InvalidationTopic::Conversation])
+        .configure_subscription_view(
+            Id32::new([30; 32]),
+            vec![InvalidationTopic::Conversation],
+            Some(first_selection.clone()),
+        )
+        .expect("subscription intent");
+    let (generation, _) = only_connect(&client.start().expect("start").actions);
+    let _ = client.connected(generation).expect("connect");
+    let negotiated = client
+        .receive_frame(
+            generation,
+            &WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([40; 32])))
+                .encode_frame()
+                .expect("hello"),
+        )
+        .expect("negotiates");
+    let (_, subscribe_frame) = only_write(&negotiated.actions);
+    let WireMessage::Request(subscribe) =
+        WireMessage::decode_frame(&subscribe_frame).expect("subscribe request")
+    else {
+        panic!("expected subscribe request")
+    };
+    let Request::Subscribe(subscription) = subscribe.request else {
+        panic!("expected subscription")
+    };
+
+    assert!(
+        client
+            .update_subscription_conversation(Some(latest_selection.clone()))
+            .expect("latest selection retained")
+            .actions
+            .is_empty(),
+        "the pending acknowledgement already occupies the one refresh slot"
+    );
+    let acknowledgement = WireMessage::Response(ResponseEnvelope::success(
+        subscribe.id,
+        ResponseResult::Subscription(SubscriptionAcknowledgement::new(
+            subscription.subscription_id,
+            conversation_view(1, &first_selection),
+        )),
+    ))
+    .encode_frame()
+    .expect("acknowledgement");
+    let transition = client
+        .receive_frame(generation, &acknowledgement)
+        .expect("stale acknowledgement is reconciled");
+
+    assert!(transition.events.is_empty());
+    let (_, refresh_frame) = only_write(&transition.actions);
+    assert!(matches!(
+        WireMessage::decode_frame(&refresh_frame),
+        Ok(WireMessage::Request(envelope))
+            if matches!(envelope.request, Request::AuthoritativeConversationView(ref request)
+                if request.conversation == Some(latest_selection))
+    ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn subscription_converges_to_latest_selection_across_invalidation_and_reconnect() {
+    let mut client = client();
+    let first_selection = conversation_selection(61);
+    let latest_selection = conversation_selection(71);
+    client
+        .configure_subscription_view(
+            Id32::new([31; 32]),
+            vec![InvalidationTopic::Conversation],
+            Some(first_selection.clone()),
+        )
         .expect("subscription intent");
     let (generation, _) = only_connect(&client.start().expect("start").actions);
     let _ = client.connected(generation).expect("connect");
@@ -672,13 +768,15 @@ fn subscription_acknowledgement_is_the_fresh_base_and_gaps_force_full_refresh() 
                 .expect("hello"),
         )
         .expect("negotiates");
-    let (request_id, subscription_id) = negotiated
+    let (request_id, subscription_id, requested_selection) = negotiated
         .actions
         .iter()
         .find_map(|action| match action {
             ClientAction::Write { frame, .. } => match WireMessage::decode_frame(frame).ok()? {
                 WireMessage::Request(envelope) => match envelope.request {
-                    Request::Subscribe(request) => Some((envelope.id, request.subscription_id)),
+                    Request::Subscribe(request) => {
+                        Some((envelope.id, request.subscription_id, request.conversation))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -686,6 +784,7 @@ fn subscription_acknowledgement_is_the_fresh_base_and_gaps_force_full_refresh() 
             _ => None,
         })
         .expect("subscribe action");
+    assert_eq!(requested_selection, Some(first_selection.clone()));
 
     let early = WireMessage::Invalidation(
         RevisionInvalidation::new(
@@ -708,7 +807,7 @@ fn subscription_acknowledgement_is_the_fresh_base_and_gaps_force_full_refresh() 
         request_id,
         ResponseResult::Subscription(SubscriptionAcknowledgement::new(
             subscription_id,
-            AuthoritativeSnapshotDto::new(7, Vec::new()).expect("snapshot"),
+            conversation_view(7, &first_selection),
         )),
     ))
     .encode_frame()
@@ -716,13 +815,18 @@ fn subscription_acknowledgement_is_the_fresh_base_and_gaps_force_full_refresh() 
     let transition = client
         .receive_frame(generation, &acknowledgement)
         .expect("ack accepted");
-    assert!(
-        matches!(transition.events.as_slice(), [ClientEvent::Snapshot(snapshot)] if snapshot.revision == 7)
-    );
+    assert!(matches!(
+        transition.events.as_slice(),
+        [ClientEvent::AuthoritativeConversationView(view)]
+            if view.snapshot.revision == 7
+                && view.conversation.as_ref().map(|page| &page.key)
+                    == Some(&first_selection.key)
+    ));
     assert!(transition.actions.iter().any(|action| matches!(
         action,
         ClientAction::Write { frame, .. }
-            if matches!(WireMessage::decode_frame(frame), Ok(WireMessage::Request(envelope)) if matches!(envelope.request, Request::AuthoritativeSnapshot))
+            if matches!(WireMessage::decode_frame(frame), Ok(WireMessage::Request(envelope))
+                if matches!(envelope.request, Request::AuthoritativeConversationView(_)))
     )));
     assert!(!client.view_is_current());
 
@@ -732,6 +836,19 @@ fn subscription_acknowledgement_is_the_fresh_base_and_gaps_force_full_refresh() 
     else {
         panic!("expected refresh request")
     };
+    assert!(matches!(
+        &refresh.request,
+        Request::AuthoritativeConversationView(request)
+            if request.conversation.as_ref() == Some(&first_selection)
+    ));
+    assert!(
+        client
+            .update_subscription_conversation(Some(latest_selection.clone()))
+            .expect("selection replacement is retained")
+            .actions
+            .is_empty(),
+        "one refresh remains in flight while only the latest desired selection changes"
+    );
     let newer = WireMessage::Invalidation(
         RevisionInvalidation::new(
             subscription_id,
@@ -752,17 +869,46 @@ fn subscription_acknowledgement_is_the_fresh_base_and_gaps_force_full_refresh() 
     );
     let stale_refresh = WireMessage::Response(ResponseEnvelope::success(
         refresh.id,
-        ResponseResult::AuthoritativeSnapshot(
-            AuthoritativeSnapshotDto::new(8, Vec::new()).expect("stale snapshot"),
-        ),
+        ResponseResult::AuthoritativeConversationView(conversation_view(8, &first_selection)),
     ))
     .encode_frame()
     .expect("stale refresh response");
     let follow_up = client
         .receive_frame(generation, &stale_refresh)
-        .expect("stale refresh accepted as an intermediate base");
+        .expect("stale selected view is suppressed");
+    assert!(follow_up.events.is_empty());
     assert_eq!(follow_up.actions.len(), 1);
     assert!(!client.view_is_current());
+
+    let (_, follow_up_frame) = only_write(&follow_up.actions);
+    let WireMessage::Request(follow_up_request) =
+        WireMessage::decode_frame(&follow_up_frame).expect("latest refresh request")
+    else {
+        panic!("expected latest refresh request")
+    };
+    assert!(matches!(
+        &follow_up_request.request,
+        Request::AuthoritativeConversationView(request)
+            if request.conversation.as_ref() == Some(&latest_selection)
+    ));
+    let latest_response = WireMessage::Response(ResponseEnvelope::success(
+        follow_up_request.id,
+        ResponseResult::AuthoritativeConversationView(conversation_view(9, &latest_selection)),
+    ))
+    .encode_frame()
+    .expect("latest view response");
+    let latest = client
+        .receive_frame(generation, &latest_response)
+        .expect("latest selected view accepted");
+    assert!(matches!(
+        latest.events.as_slice(),
+        [ClientEvent::AuthoritativeConversationView(view)]
+            if view.snapshot.revision == 9
+                && view.conversation.as_ref().map(|page| &page.key)
+                    == Some(&latest_selection.key)
+    ));
+    assert!(latest.actions.is_empty());
+    assert!(client.view_is_current());
 
     let first_subscription = client.active_subscription_id().expect("first registration");
     let reconnect = client.disconnected(generation).expect("disconnect");
@@ -776,13 +922,15 @@ fn subscription_acknowledgement_is_the_fresh_base_and_gaps_force_full_refresh() 
                 .expect("next hello"),
         )
         .expect("resubscribes");
-    let next_subscription = resubscribed
+    let (next_subscription, reconnected_selection) = resubscribed
         .actions
         .iter()
         .find_map(|action| match action {
             ClientAction::Write { frame, .. } => match WireMessage::decode_frame(frame).ok()? {
                 WireMessage::Request(envelope) => match envelope.request {
-                    Request::Subscribe(request) => Some(request.subscription_id),
+                    Request::Subscribe(request) => {
+                        Some((request.subscription_id, request.conversation))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -791,6 +939,7 @@ fn subscription_acknowledgement_is_the_fresh_base_and_gaps_force_full_refresh() 
         })
         .expect("fresh registration");
     assert_ne!(first_subscription, next_subscription);
+    assert_eq!(reconnected_selection, Some(latest_selection));
 }
 
 #[test]
@@ -878,7 +1027,11 @@ fn lost_subscription_acknowledgement_is_discarded_and_registered_fresh() {
         first_request.id,
         ResponseResult::Subscription(SubscriptionAcknowledgement::new(
             first_id,
-            AuthoritativeSnapshotDto::new(1, Vec::new()).expect("snapshot"),
+            AuthoritativeConversationViewDto::new(
+                AuthoritativeSnapshotDto::new(1, Vec::new()).expect("snapshot"),
+                None,
+            )
+            .expect("view"),
         )),
     ))
     .encode_frame()

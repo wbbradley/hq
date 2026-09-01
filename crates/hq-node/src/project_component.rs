@@ -10,10 +10,10 @@ use std::{
 
 use hq_application::{
     AgentRetirementOutcome, AgentRetirementRequest, ApplicationError, ApplicationErrorCode,
-    AuthoritativeSnapshot, CommitFacts, ControlProjects, EffectOutcome, EffectRequest,
-    FactMutation, InspectResource, MutationAttempt, MutationOutcome, ProjectCommandOutcome,
-    ProjectCommandRequest, PublishWake, QueryDomain, ResourceInspectionRequest,
-    ResourceInspectionResult, RetireAgents,
+    AuthoritativeConversationView, AuthoritativeSnapshot, CommitFacts, ControlProjects,
+    ConversationPageSelection, EffectOutcome, EffectRequest, FactMutation, InspectResource,
+    MutationAttempt, MutationOutcome, ProjectCommandOutcome, ProjectCommandRequest, PublishWake,
+    QueryDomain, ResourceInspectionRequest, ResourceInspectionResult, RetireAgents,
 };
 use hq_domain::{Page, PageCursor, Timestamp};
 use hq_projects::{
@@ -58,6 +58,13 @@ impl<W> QueryDomain for WakingApplicationStore<W> {
         cursor: Option<&PageCursor>,
     ) -> Result<Page<hq_application::ConversationEntry>, ApplicationError> {
         self.store.conversation_entries(key, limit, cursor)
+    }
+
+    fn authoritative_conversation_view(
+        &self,
+        selection: Option<&ConversationPageSelection>,
+    ) -> Result<AuthoritativeConversationView, ApplicationError> {
+        self.store.authoritative_conversation_view(selection)
     }
 }
 

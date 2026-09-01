@@ -19,7 +19,8 @@ use crate::protocol::v1::{
     VersionRange, VersionRejected, WireMessage, negotiate,
 };
 use crate::{
-    RevisionHub, application_error_to_v1, canonical_evidence_from_v1, canonical_evidence_to_v1,
+    RevisionHub, application_error_to_v1, authoritative_conversation_view_to_v1,
+    canonical_evidence_from_v1, canonical_evidence_to_v1, conversation_selection_from_v1,
     evidence_ingest_to_v1, mutation_from_v1, mutation_to_v1, page_request_from_v1, page_to_v1,
     provider_catalog_to_v1, snapshot_to_v1, subscription_from_v1, topic_to_v1,
 };
@@ -299,6 +300,18 @@ impl ServerSession {
                     snapshot_to_v1(&snapshot).map_err(|_| internal_conversion_error())
                 })
                 .map(ResponseResult::AuthoritativeSnapshot),
+            Request::AuthoritativeConversationView(request) => {
+                conversation_selection_from_v1(request.conversation)
+                    .map_err(|_| invalid_request_error())
+                    .and_then(|selection| {
+                        application.authoritative_conversation_view(selection.as_ref())
+                    })
+                    .and_then(|view| {
+                        authoritative_conversation_view_to_v1(&view)
+                            .map_err(|_| internal_conversion_error())
+                    })
+                    .map(ResponseResult::AuthoritativeConversationView)
+            }
             Request::ProviderCatalog => application
                 .provider_catalog()
                 .and_then(|catalog| {
@@ -387,33 +400,39 @@ impl ServerSession {
                 .retire_agent(agent_retirement_from_v1(*request))
                 .map(|outcome| ResponseResult::AgentRetirement(agent_retirement_to_v1(&outcome))),
             Request::Subscribe(request) => {
+                let selection = conversation_selection_from_v1(request.conversation.clone())
+                    .map_err(|_| invalid_request_error());
                 let subscription =
                     subscription_from_v1(request).map_err(|_| invalid_request_error());
-                subscription.and_then(|subscription| {
-                    let operation_id = subscription.operation_id();
-                    self.hub.register_subscription(&subscription)?;
-                    match application.authoritative_snapshot() {
-                        Ok(snapshot) => {
-                            if let Ok(snapshot) = snapshot_to_v1(&snapshot) {
-                                self.subscriptions.insert(operation_id);
-                                after = AfterWrite::Activate(operation_id);
-                                Ok(ResponseResult::Subscription(
-                                    crate::protocol::v1::SubscriptionAcknowledgement::new(
-                                        Id32::new(*operation_id.as_bytes()),
-                                        snapshot,
-                                    ),
-                                ))
-                            } else {
+                selection
+                    .and_then(|selection| {
+                        subscription.map(|subscription| (selection, subscription))
+                    })
+                    .and_then(|(selection, subscription)| {
+                        let operation_id = subscription.operation_id();
+                        self.hub.register_subscription(&subscription)?;
+                        match application.authoritative_conversation_view(selection.as_ref()) {
+                            Ok(view) => {
+                                if let Ok(view) = authoritative_conversation_view_to_v1(&view) {
+                                    self.subscriptions.insert(operation_id);
+                                    after = AfterWrite::Activate(operation_id);
+                                    Ok(ResponseResult::Subscription(
+                                        crate::protocol::v1::SubscriptionAcknowledgement::new(
+                                            Id32::new(*operation_id.as_bytes()),
+                                            view,
+                                        ),
+                                    ))
+                                } else {
+                                    let _ = self.hub.cancel_subscription(operation_id);
+                                    Err(internal_conversion_error())
+                                }
+                            }
+                            Err(error) => {
                                 let _ = self.hub.cancel_subscription(operation_id);
-                                Err(internal_conversion_error())
+                                Err(error)
                             }
                         }
-                        Err(error) => {
-                            let _ = self.hub.cancel_subscription(operation_id);
-                            Err(error)
-                        }
-                    }
-                })
+                    })
             }
             Request::CancelSubscription { subscription_id } => {
                 let operation_id = OperationId::from_bytes(subscription_id.bytes());

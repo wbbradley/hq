@@ -4,10 +4,10 @@ use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroUsize};
 
 use hq_application::{
     AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest, AgentSessionResult,
-    ApplicationError, ApplicationPorts, CanonicalEvidence, CommitFacts, ConfigureRelays,
-    ControlHarness, ControlMailbox, ControlProjects, EffectOutcome, EffectRequest,
-    EvidenceIngestOutcome, FactMutation, InspectResource, MailboxCommandRequest, MailboxDraft,
-    MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
+    ApplicationError, ApplicationPorts, AuthoritativeConversationView, CanonicalEvidence,
+    CommitFacts, ConfigureRelays, ControlHarness, ControlMailbox, ControlProjects, EffectOutcome,
+    EffectRequest, EvidenceIngestOutcome, FactMutation, InspectResource, MailboxCommandRequest,
+    MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
     MailboxDraftSaveRequest, MutationAttempt, ObserveRevisions, ProjectCommandOutcome,
     ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration, RelayStatus,
     ResourceInspectionRequest, ResourceInspectionResult, RetireAgents, StateHealth,
@@ -184,6 +184,13 @@ impl<R, H, P> QueryDomain for NodeApplicationPorts<'_, R, H, P> {
         cursor: Option<&PageCursor>,
     ) -> Result<Page<hq_application::ConversationEntry>, ApplicationError> {
         self.store.conversation_entries(key, limit, cursor)
+    }
+
+    fn authoritative_conversation_view(
+        &self,
+        selection: Option<&hq_application::ConversationPageSelection>,
+    ) -> Result<AuthoritativeConversationView, ApplicationError> {
+        self.store.authoritative_conversation_view(selection)
     }
 
     fn canonical_evidence(

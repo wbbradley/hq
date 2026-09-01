@@ -1041,6 +1041,7 @@ impl LocalNodeEventClient {
             if let Some(event) = self.next_observation()? {
                 match event {
                     ClientEvent::Snapshot(snapshot) => return Ok(snapshot),
+                    ClientEvent::AuthoritativeConversationView(view) => return Ok(view.snapshot),
                     ClientEvent::IncompatibleVersion => {
                         return Err(LocalNodeClientError::Execution(
                             BlockingClientError::Incompatible,

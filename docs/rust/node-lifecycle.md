@@ -150,6 +150,10 @@ relay, harness, and project owners. Each `ServerSession` owns negotiation, write
 subscription state, but borrows a fresh transient application bundle and the lifecycle capability
 only while dispatching one decoded request. This preserves the sole component owner and ordered
 shutdown boundary without introducing reference-counted capability wrappers for task lifetimes.
+Subscription registration and refresh borrow an atomic query capability that asks the store actor
+for the complete authoritative snapshot and one optional bounded selected conversation page. The
+page inherits the enclosing snapshot revision because both are loaded during that single actor
+request; explicit snapshot and older-history page capabilities remain separate.
 
 Normal component shutdown executes these stages even when an earlier stage reports failure:
 

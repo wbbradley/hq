@@ -399,8 +399,12 @@ async fn invalidation_queue_pressure_closes_only_the_slow_subscriber_and_cancels
     let subscribe = WireMessage::Request(RequestEnvelope::new(
         RequestId::new(1).expect("request id"),
         Request::Subscribe(
-            SubscriptionRequestDto::new(subscription_id, vec![InvalidationTopic::Conversation])
-                .expect("subscription"),
+            SubscriptionRequestDto::new(
+                subscription_id,
+                vec![InvalidationTopic::Conversation],
+                None,
+            )
+            .expect("subscription"),
         ),
     ));
     client
@@ -472,6 +476,7 @@ async fn drain_cancels_a_subscription_whose_response_was_never_confirmed() {
             SubscriptionRequestDto::new(
                 Id32::new([110; 32]),
                 vec![InvalidationTopic::Conversation],
+                None,
             )
             .expect("subscription"),
         ),

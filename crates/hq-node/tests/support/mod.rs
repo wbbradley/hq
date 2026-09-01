@@ -12,11 +12,11 @@ use std::{
 
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, Application, ApplicationError, ApplicationErrorCode,
-    ApplicationPorts, AuthoritativeSnapshot, CommitFacts, ConfigureRelays, ControlMailbox,
-    ConversationEntry, ConversationKey, EffectOutcome, EffectRequest, FactMutation,
-    InspectResource, MutationAttempt, ObserveRevisions, PublishWake, RelayConfiguration,
-    ResourceInspectionRequest, ResourceInspectionResult, SubscriptionRequest,
-    SynchronizationRequest, WakeDisposition,
+    ApplicationPorts, AuthoritativeConversationView, AuthoritativeSnapshot, CommitFacts,
+    ConfigureRelays, ControlMailbox, ConversationEntry, ConversationKey, ConversationPageSelection,
+    EffectOutcome, EffectRequest, FactMutation, InspectResource, MutationAttempt, ObserveRevisions,
+    PublishWake, RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult,
+    SelectedConversationPage, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{OperationId, Page, PageCursor, Revision};
 use hq_local_api::{
@@ -219,6 +219,17 @@ fn unavailable<T>() -> Result<T, ApplicationError> {
 impl hq_application::QueryDomain for UnavailableApplicationPorts {
     fn authoritative_snapshot(&self) -> Result<AuthoritativeSnapshot, ApplicationError> {
         self.snapshot.clone().map_or_else(unavailable, Ok)
+    }
+
+    fn authoritative_conversation_view(
+        &self,
+        selection: Option<&ConversationPageSelection>,
+    ) -> Result<AuthoritativeConversationView, ApplicationError> {
+        let snapshot = self.snapshot.clone().map_or_else(unavailable, Ok)?;
+        let conversation = selection.map(|selection| {
+            SelectedConversationPage::new(selection.key().clone(), Page::new(Vec::new(), None))
+        });
+        Ok(AuthoritativeConversationView::new(snapshot, conversation))
     }
 
     fn conversation_entries(

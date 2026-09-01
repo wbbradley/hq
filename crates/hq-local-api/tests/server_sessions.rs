@@ -5,15 +5,16 @@
 use std::{cell::RefCell, collections::BTreeSet};
 
 use hq_application::{
-    AgentSessionRequest, AgentSessionResult, Application, ApplicationError, ApplicationPorts,
-    AuthoritativeSnapshot, CanonicalEvidence, CommitFacts, ConfigureRelays, ControlMailbox,
-    ConversationKey, DomainSnapshot, EffectOutcome, EffectRequest, EvidenceIngestOutcome,
-    FactMutation, InspectResource, MailboxCommandRequest, MailboxDraft, MailboxDraftDeleteOutcome,
+    AgentSessionRequest, AgentSessionResult, Application, ApplicationError, ApplicationErrorCode,
+    ApplicationPorts, AuthoritativeConversationView, AuthoritativeSnapshot, CanonicalEvidence,
+    CommitFacts, ConfigureRelays, ControlMailbox, ConversationKey, ConversationPageSelection,
+    DomainSnapshot, EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation,
+    InspectResource, MailboxCommandRequest, MailboxDraft, MailboxDraftDeleteOutcome,
     MailboxDraftDeleteRequest, MailboxDraftSaveOutcome, MailboxDraftSaveRequest, MutationAttempt,
     MutationOutcome, MutationReceipt, ObserveRevisions, ProjectCommandOutcome,
     ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration, ResourceInspectionRequest,
-    ResourceInspectionResult, ResourceReleaseState, SubscriptionRequest, SubscriptionTopic,
-    SynchronizationRequest, WakeDisposition,
+    ResourceInspectionResult, ResourceReleaseState, SelectedConversationPage, SubscriptionRequest,
+    SubscriptionTopic, SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{
     BoundedSet, CausalReferences, CommandId, EncryptionPublicKey, FactId, FactScope,
@@ -21,9 +22,10 @@ use hq_domain::{
     Revision, SemanticPayload, ShortText, SigningPublicKey, Timestamp,
 };
 use hq_local_api::protocol::v1::{
-    AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata, CanonicalEvidenceDto,
-    CanonicalEvidenceRequestDto, ClientHello, ConversationKeyDto, ConversationPageRequest,
-    EffectRequestDto, Id32, InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus,
+    AgentSessionRequestDto, AuthoritativeConversationViewRequestDto, AuthoritativeSnapshotDto,
+    BuildMetadata, CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello,
+    ConversationKeyDto, ConversationPageRequest, ConversationPageSelectionDto, EffectRequestDto,
+    Id32, InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus,
     MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDeleteRequestDto,
     MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MutationRequest, ProjectCommandActionDto,
     ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto,
@@ -39,6 +41,7 @@ use hq_local_api::{
 struct Ports {
     hub: RevisionHub,
     trace: std::rc::Rc<RefCell<Vec<&'static str>>>,
+    fail_view: bool,
 }
 
 impl Ports {
@@ -46,6 +49,15 @@ impl Ports {
         Self {
             hub,
             trace: std::rc::Rc::new(RefCell::new(Vec::new())),
+            fail_view: false,
+        }
+    }
+
+    fn failing_view(hub: RevisionHub) -> Self {
+        Self {
+            hub,
+            trace: std::rc::Rc::new(RefCell::new(Vec::new())),
+            fail_view: true,
         }
     }
 }
@@ -57,6 +69,23 @@ impl QueryDomain for Ports {
             Revision::new(7),
             DomainSnapshot::empty(),
         ))
+    }
+
+    fn authoritative_conversation_view(
+        &self,
+        selection: Option<&ConversationPageSelection>,
+    ) -> Result<AuthoritativeConversationView, ApplicationError> {
+        self.trace.borrow_mut().push("view");
+        if self.fail_view {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::AdapterUnavailable,
+            ));
+        }
+        let snapshot = AuthoritativeSnapshot::new(Revision::new(7), DomainSnapshot::empty());
+        let conversation = selection.map(|selection| {
+            SelectedConversationPage::new(selection.key().clone(), Page::new(Vec::new(), None))
+        });
+        Ok(AuthoritativeConversationView::new(snapshot, conversation))
     }
 
     fn conversation_entries(
@@ -484,6 +513,10 @@ fn subscription_commits_are_hidden_until_ack_write_then_delivered_without_a_gap(
     let (mut server, application) = session(hub.clone());
     negotiate(&mut server, &application);
     let operation_id = OperationId::from_bytes([44; 32]);
+    let selected_key = ConversationKeyDto::ProjectThread {
+        project: Id32::new([41; 32]),
+        thread: Id32::new([42; 32]),
+    };
     let outbound = server
         .receive(
             request(
@@ -492,6 +525,10 @@ fn subscription_commits_are_hidden_until_ack_write_then_delivered_without_a_gap(
                     SubscriptionRequestDto::new(
                         Id32::new(*operation_id.as_bytes()),
                         vec![InvalidationTopic::Conversation],
+                        Some(
+                            ConversationPageSelectionDto::new(selected_key.clone(), 100)
+                                .expect("selection"),
+                        ),
                     )
                     .expect("subscription"),
                 ),
@@ -500,10 +537,22 @@ fn subscription_commits_are_hidden_until_ack_write_then_delivered_without_a_gap(
             &Lifecycle,
         )
         .expect("ack prepared");
+    assert!(matches!(outbound.message(), WireMessage::Response(_)));
+    let WireMessage::Response(response) = outbound.message() else {
+        return;
+    };
     assert!(matches!(
-        outbound.message(),
-        WireMessage::Response(response)
-            if matches!(response.response, Response::Success(ResponseResult::Subscription(_)))
+        response.response,
+        Response::Success(ResponseResult::Subscription(_))
+    ));
+    let Response::Success(ResponseResult::Subscription(acknowledgement)) = &response.response
+    else {
+        return;
+    };
+    assert_eq!(acknowledgement.view.snapshot.revision, 7);
+    assert!(matches!(
+        &acknowledgement.view.conversation,
+        Some(conversation) if conversation.key == selected_key && conversation.page.items.is_empty()
     ));
 
     let _ = hub.publish(Revision::new(8), [SubscriptionTopic::Conversation], false);
@@ -518,6 +567,38 @@ fn subscription_commits_are_hidden_until_ack_write_then_delivered_without_a_gap(
 }
 
 #[test]
+fn failed_materialized_subscription_read_releases_pending_registration() {
+    let hub = RevisionHub::new(1).expect("capacity");
+    let application = Application::new(Ports::failing_view(hub.clone()));
+    let mut server = ServerSession::new(hub.clone(), build(), Id32::new([100; 32]));
+    negotiate(&mut server, &application);
+
+    let outbound = server
+        .receive(
+            request(
+                1,
+                Request::Subscribe(
+                    SubscriptionRequestDto::new(
+                        Id32::new([101; 32]),
+                        vec![InvalidationTopic::Conversation],
+                        None,
+                    )
+                    .expect("subscription"),
+                ),
+            ),
+            &application,
+            &Lifecycle,
+        )
+        .expect("query failure is returned as a typed response");
+
+    assert!(matches!(
+        outbound.message(),
+        WireMessage::Response(response) if matches!(response.response, Response::Error(_))
+    ));
+    assert_eq!(hub.len(), 0);
+}
+
+#[test]
 fn lost_acknowledgement_and_stale_disconnect_cancel_pending_and_active_capacity() {
     let hub = RevisionHub::new(1).expect("capacity");
     let (mut server, application) = session(hub.clone());
@@ -527,8 +608,12 @@ fn lost_acknowledgement_and_stale_disconnect_cancel_pending_and_active_capacity(
             request(
                 1,
                 Request::Subscribe(
-                    SubscriptionRequestDto::new(Id32::new([45; 32]), vec![InvalidationTopic::All])
-                        .expect("subscription"),
+                    SubscriptionRequestDto::new(
+                        Id32::new([45; 32]),
+                        vec![InvalidationTopic::All],
+                        None,
+                    )
+                    .expect("subscription"),
                 ),
             ),
             &application,
@@ -553,6 +638,7 @@ fn lost_acknowledgement_and_stale_disconnect_cancel_pending_and_active_capacity(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn every_typed_request_family_routes_without_storage_types() {
     let hub = RevisionHub::new(8).expect("capacity");
     let (mut server, application) = session(hub);
@@ -566,9 +652,14 @@ fn every_typed_request_family_routes_without_storage_types() {
         None,
     )
     .expect("page");
+    let view_selection = ConversationPageSelectionDto::new(page.key.clone(), 32)
+        .expect("materialized view selection");
     let requests = vec![
         Request::Lifecycle(LifecycleRequest::Status),
         Request::AuthoritativeSnapshot,
+        Request::AuthoritativeConversationView(AuthoritativeConversationViewRequestDto::new(Some(
+            view_selection,
+        ))),
         Request::ConversationPage(page),
         Request::MailboxDrafts,
         Request::SaveMailboxDraft(MailboxDraftSaveRequestDto {
@@ -785,6 +876,7 @@ fn dropping_one_call_scoped_session_cancels_only_its_revision_registration() {
                     SubscriptionRequestDto::new(
                         Id32::new([71; 32]),
                         vec![InvalidationTopic::Conversation],
+                        None,
                     )
                     .expect("dropped subscription"),
                 ),
@@ -801,6 +893,7 @@ fn dropping_one_call_scoped_session_cancels_only_its_revision_registration() {
                     SubscriptionRequestDto::new(
                         Id32::new([72; 32]),
                         vec![InvalidationTopic::Conversation],
+                        None,
                     )
                     .expect("sibling subscription"),
                 ),

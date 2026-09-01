@@ -3,12 +3,13 @@
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use hq_application::{
-    ApplicationError, ApplicationErrorCode, CanonicalEvidence, CommitFacts, ControlMailbox,
-    DomainHealth, DomainSnapshot, EvidenceIngestOutcome, FactMutation, HealthDomain,
-    MailboxCommandRequest, MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest,
-    MailboxDraftSaveOutcome, MailboxDraftSaveRequest, MutationAttempt, MutationDecision,
-    MutationOutcome, MutationReceipt as ApplicationMutationReceipt, QueryDomain, StateHealth,
-    StateRepairReport, decode_mutation_outcome, encode_mutation_outcome, plan_mailbox_command,
+    ApplicationError, ApplicationErrorCode, AuthoritativeConversationView, CanonicalEvidence,
+    CommitFacts, ControlMailbox, ConversationPageSelection, DomainHealth, DomainSnapshot,
+    EvidenceIngestOutcome, FactMutation, HealthDomain, MailboxCommandRequest, MailboxDraft,
+    MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
+    MailboxDraftSaveRequest, MutationAttempt, MutationDecision, MutationOutcome,
+    MutationReceipt as ApplicationMutationReceipt, QueryDomain, StateHealth, StateRepairReport,
+    decode_mutation_outcome, encode_mutation_outcome, plan_mailbox_command,
 };
 use hq_domain::{FactId, MailboxAddress, OperationId, Page, PageCursor};
 use hq_protocol::{Bip340Signer, CanonicalEventPlan, decode_semantic_event};
@@ -55,6 +56,15 @@ impl QueryDomain for StoreGateway {
         &self,
     ) -> Result<hq_application::AuthoritativeSnapshot, ApplicationError> {
         self.store.authoritative_snapshot().map_err(map_store_error)
+    }
+
+    fn authoritative_conversation_view(
+        &self,
+        selection: Option<&ConversationPageSelection>,
+    ) -> Result<AuthoritativeConversationView, ApplicationError> {
+        self.store
+            .authoritative_conversation_view(selection)
+            .map_err(map_store_error)
     }
 
     fn conversation_entries(

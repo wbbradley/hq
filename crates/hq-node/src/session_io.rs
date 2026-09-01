@@ -39,7 +39,7 @@ pub enum LocalSessionEvent {
         /// Connection identity assigned by the node loop.
         session_id: Id32,
         /// Complete decoded local protocol message.
-        message: WireMessage,
+        message: Box<WireMessage>,
     },
     /// Every byte of one exact session-owned response frame was written.
     Written {
@@ -216,7 +216,10 @@ async fn read_loop(
             let sent = tokio::select! {
                 biased;
                 () = close_requested(&mut close) => return LocalSessionClose::Requested,
-                result = events.send(LocalSessionEvent::Message { session_id, message }) => result,
+                result = events.send(LocalSessionEvent::Message {
+                    session_id,
+                    message: Box::new(message),
+                }) => result,
             };
             if sent.is_err() {
                 return LocalSessionClose::EventReceiverClosed;

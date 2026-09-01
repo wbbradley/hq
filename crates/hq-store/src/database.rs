@@ -17,9 +17,10 @@ use std::{
 };
 
 use hq_application::{
-    ConversationContext, ConversationParticipant, ConversationSummary, IncompleteMessageSummary,
-    MAX_MAILBOX_DRAFTS, MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest,
-    MailboxDraftSaveOutcome, MailboxDraftSaveRequest, MailboxDraftTarget,
+    AuthoritativeConversationView, ConversationContext, ConversationPageSelection,
+    ConversationParticipant, ConversationSummary, IncompleteMessageSummary, MAX_MAILBOX_DRAFTS,
+    MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
+    MailboxDraftSaveRequest, MailboxDraftTarget, SelectedConversationPage,
 };
 use hq_domain::{
     AgentId, AuthorityRole, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES,
@@ -1744,6 +1745,20 @@ impl Database {
             conversations,
         )
         .with_incomplete_messages(incomplete_messages, incomplete_messages_truncated))
+    }
+
+    pub(super) fn load_authoritative_conversation_view(
+        &self,
+        selection: Option<&ConversationPageSelection>,
+    ) -> Result<AuthoritativeConversationView, StoreError> {
+        let snapshot = self.load_authoritative_snapshot()?;
+        let conversation = selection
+            .map(|selection| {
+                self.load_conversation_entries(selection.key(), selection.limit(), None)
+                    .map(|page| SelectedConversationPage::new(selection.key().clone(), page))
+            })
+            .transpose()?;
+        Ok(AuthoritativeConversationView::new(snapshot, conversation))
     }
 
     pub(super) fn current_revision(&self) -> Result<hq_domain::Revision, StoreError> {

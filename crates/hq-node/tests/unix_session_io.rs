@@ -94,14 +94,14 @@ async fn partial_and_multiple_frames_are_decoded_in_order_and_close_exactly_once
         events_rx.recv().await,
         Some(LocalSessionEvent::Message {
             session_id,
-            message: hello("first"),
+            message: Box::new(hello("first")),
         })
     );
     assert_eq!(
         events_rx.recv().await,
         Some(LocalSessionEvent::Message {
             session_id,
-            message: hello("second"),
+            message: Box::new(hello("second")),
         })
     );
 

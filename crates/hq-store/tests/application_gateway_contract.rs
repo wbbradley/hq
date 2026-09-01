@@ -12,8 +12,8 @@ use std::{
 };
 
 use hq_application::{
-    ApplicationErrorClass, CanonicalEvidence, CommitFacts, FactMutation, FactPlan, HealthDomain,
-    MutationAttempt, MutationDecision, MutationOutcome, QueryDomain,
+    ApplicationErrorClass, CanonicalEvidence, CommitFacts, ConversationPageSelection, FactMutation,
+    FactPlan, HealthDomain, MutationAttempt, MutationDecision, MutationOutcome, QueryDomain,
 };
 use hq_domain::{
     CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode, FactId, OperationId, Revision,
@@ -57,6 +57,39 @@ fn authoritative_snapshot_is_one_revisioned_application_view() -> Result<(), Box
     assert_eq!(snapshot.conversations()[0].open_messages, 1);
     assert_eq!(snapshot.conversations()[0].archived_messages, 0);
     assert_eq!(snapshot.conversations()[0].sent_messages, 1);
+    Ok(())
+}
+
+#[test]
+fn authoritative_conversation_view_pairs_one_snapshot_and_page_from_the_store_actor()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let root = verified_fact();
+    let question = verified_question(root.verified_event().event_id());
+    let question_id = question.fact().id();
+    store.append_verified(question)?;
+    store.append_verified(root)?;
+    let gateway = StoreGateway::new(&store, authority_policy(), Arc::new(signer(1)));
+    let snapshot = gateway.authoritative_snapshot()?;
+    let key = snapshot.conversations()[0].key.clone();
+    let selection = ConversationPageSelection::new(key.clone(), 10)?;
+
+    let selected = gateway.authoritative_conversation_view(Some(&selection))?;
+
+    assert_eq!(selected.snapshot().revision(), Revision::new(2));
+    let conversation = selected.conversation().expect("selected page");
+    assert_eq!(conversation.key(), &key);
+    assert!(conversation.page().items().iter().any(|entry| {
+        matches!(entry, hq_application::ConversationEntry::Message(message)
+            if message.message.fact_id == question_id)
+    }));
+
+    let unselected = gateway.authoritative_conversation_view(None)?;
+    assert_eq!(unselected.snapshot(), selected.snapshot());
+    assert!(unselected.conversation().is_none());
+    assert!(ConversationPageSelection::new(key.clone(), 0).is_err());
+    assert!(ConversationPageSelection::new(key, 201).is_err());
     Ok(())
 }
 

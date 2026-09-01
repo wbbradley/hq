@@ -7,11 +7,12 @@ use hq_reducer::ConversationKey;
 
 use crate::{
     AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest, AgentSessionResult,
-    ApplicationError, ApplicationPorts, AuthoritativeSnapshot, CanonicalEvidence,
-    ConversationEntry, EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation,
-    MutationAttempt, MutationOutcome, ProjectCommandOutcome, ProjectCommandRequest,
-    RelayConfiguration, RelayStatus, ResourceInspectionRequest, ResourceInspectionResult,
-    StateHealth, StateRepairReport, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
+    ApplicationError, ApplicationPorts, AuthoritativeConversationView, AuthoritativeSnapshot,
+    CanonicalEvidence, ConversationEntry, ConversationPageSelection, EffectOutcome, EffectRequest,
+    EvidenceIngestOutcome, FactMutation, MutationAttempt, MutationOutcome, ProjectCommandOutcome,
+    ProjectCommandRequest, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
+    ResourceInspectionResult, StateHealth, StateRepairReport, SubscriptionRequest,
+    SynchronizationRequest, WakeDisposition,
 };
 
 /// Durable mutation attempt plus separate post-commit scheduling evidence.
@@ -87,6 +88,14 @@ where
     /// Loads one complete authoritative projection refresh.
     pub fn authoritative_snapshot(&self) -> Result<AuthoritativeSnapshot, ApplicationError> {
         self.ports.authoritative_snapshot()
+    }
+
+    /// Loads one snapshot and optional selected first page from one authoritative state boundary.
+    pub fn authoritative_conversation_view(
+        &self,
+        selection: Option<&ConversationPageSelection>,
+    ) -> Result<AuthoritativeConversationView, ApplicationError> {
+        self.ports.authoritative_conversation_view(selection)
     }
 
     /// Loads one bounded exact canonical evidence closure for offline transfer.

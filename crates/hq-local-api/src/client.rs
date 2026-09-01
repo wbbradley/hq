@@ -13,11 +13,13 @@ use sha2::{Digest, Sha256};
 
 use crate::protocol::v1::{
     AgentRetirementOutcomeDto, AgentRetirementRequestDto, AgentSessionRequestDto,
-    AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata, ClientHello, DecodeError,
-    EffectOutcomeDto, EffectRequestDto, ErrorResponse, Id32, InvalidationTopic,
-    MailboxCommandRequestDto, MutationAttemptDto, MutationRequest, ProjectCommandOutcomeDto,
-    ProjectCommandRequestDto, Request, RequestEnvelope, RequestId, Response, ResponseResult,
-    SubscriptionRequestDto, V1, VersionRange, WireMessage, agent_session_request_digest,
+    AgentSessionResultDto, AuthoritativeConversationViewDto,
+    AuthoritativeConversationViewRequestDto, AuthoritativeSnapshotDto, BuildMetadata, ClientHello,
+    ConversationPageSelectionDto, DecodeError, EffectOutcomeDto, EffectRequestDto, ErrorResponse,
+    Id32, InvalidationTopic, MailboxCommandRequestDto, MutationAttemptDto, MutationRequest,
+    ProjectCommandOutcomeDto, ProjectCommandRequestDto, Request, RequestEnvelope, RequestId,
+    Response, ResponseResult, SubscriptionRequestDto, V1, VersionRange, WireMessage,
+    agent_session_request_digest,
 };
 
 /// Maximum simultaneous exact retryable frames retained for response-loss replay.
@@ -203,6 +205,8 @@ pub enum ClientAction {
 pub enum ClientEvent {
     /// A fresh complete authoritative snapshot became available.
     Snapshot(AuthoritativeSnapshotDto),
+    /// A fresh subscribed snapshot and optional selected conversation page became available.
+    AuthoritativeConversationView(AuthoritativeConversationViewDto),
     /// A stable mutation completed or remains explicitly uncertain.
     Mutation(MutationAttemptDto),
     /// A retry-safe project command returned typed durable progress.
@@ -253,6 +257,8 @@ pub enum ClientEvent {
 pub enum ClientOperation {
     /// Automatic or invalidation-triggered authoritative snapshot refresh.
     Snapshot,
+    /// Automatic or selection-triggered subscribed materialized-view refresh.
+    AuthoritativeConversationView,
     /// Broad invalidation subscription registration.
     Subscription,
     /// Caller-submitted ordinary request.
@@ -353,12 +359,19 @@ struct RetryableResponseIdentity {
 struct SubscriptionIntent {
     seed: Id32,
     topics: Vec<InvalidationTopic>,
+    conversation: Option<ConversationPageSelectionDto>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum PendingRequest {
-    Subscription(Id32),
+    Subscription {
+        subscription_id: Id32,
+        conversation: Option<ConversationPageSelectionDto>,
+    },
     Snapshot,
+    AuthoritativeConversationView {
+        conversation: Option<ConversationPageSelectionDto>,
+    },
     Ordinary,
 }
 
@@ -439,13 +452,57 @@ impl ReconnectingClient {
         seed: Id32,
         topics: Vec<InvalidationTopic>,
     ) -> Result<(), ClientError> {
+        self.configure_subscription_view(seed, topics, None)
+    }
+
+    /// Configures one logical subscription and its initial selected conversation before start.
+    pub fn configure_subscription_view(
+        &mut self,
+        seed: Id32,
+        topics: Vec<InvalidationTopic>,
+        conversation: Option<ConversationPageSelectionDto>,
+    ) -> Result<(), ClientError> {
         if self.phase != Phase::Idle {
             return Err(ClientError::AlreadyStarted);
         }
-        SubscriptionRequestDto::new(seed, topics.clone())
+        SubscriptionRequestDto::new(seed, topics.clone(), conversation.clone())
             .map_err(|_| ClientError::InvalidSubscription)?;
-        self.subscription = Some(SubscriptionIntent { seed, topics });
+        self.subscription = Some(SubscriptionIntent {
+            seed,
+            topics,
+            conversation,
+        });
         Ok(())
+    }
+
+    /// Replaces the latest selected-conversation interest on one logical subscription.
+    pub fn update_subscription_conversation(
+        &mut self,
+        conversation: Option<ConversationPageSelectionDto>,
+    ) -> Result<ClientTransition, ClientError> {
+        let Some(current) = self.subscription.as_ref() else {
+            return Err(ClientError::InvalidSubscription);
+        };
+        SubscriptionRequestDto::new(current.seed, current.topics.clone(), conversation.clone())
+            .map_err(|_| ClientError::InvalidSubscription)?;
+        if current.conversation == conversation {
+            return Ok(ClientTransition::default());
+        }
+        self.subscription
+            .as_mut()
+            .ok_or(ClientError::InvalidSubscription)?
+            .conversation = conversation;
+        self.view_current = false;
+        let Some(generation) = self.active_generation() else {
+            return Ok(ClientTransition::default());
+        };
+        if self.active_subscription_id.is_none() || self.refresh_in_flight {
+            return Ok(ClientTransition::default());
+        }
+        Ok(ClientTransition {
+            actions: vec![self.begin_authoritative_conversation_view_refresh(generation)?],
+            events: Vec::new(),
+        })
     }
 
     /// Starts the initial immediate connection attempt.
@@ -761,6 +818,7 @@ impl ReconnectingClient {
                 | Request::ControlAgentSession(_)
                 | Request::Subscribe(_)
                 | Request::AuthoritativeSnapshot
+                | Request::AuthoritativeConversationView(_)
         ) {
             return Err(ClientError::ReservedRequest);
         }
@@ -780,7 +838,7 @@ impl ReconnectingClient {
         }
         self.view_current = false;
         Ok(ClientTransition {
-            actions: vec![self.begin_snapshot_refresh(generation)?],
+            actions: vec![self.begin_refresh(generation)?],
             events: Vec::new(),
         })
     }
@@ -847,11 +905,22 @@ impl ReconnectingClient {
                         derive_subscription_id(subscription.seed, hello.session_id);
                     self.active_subscription_id = Some(subscription_id);
                     let request_id = self.allocate_request_id()?;
-                    let request = SubscriptionRequestDto::new(subscription_id, subscription.topics)
-                        .map_err(|_| ClientError::InvalidSubscription)?;
+                    let conversation = subscription.conversation;
+                    let request = SubscriptionRequestDto::new(
+                        subscription_id,
+                        subscription.topics,
+                        conversation.clone(),
+                    )
+                    .map_err(|_| ClientError::InvalidSubscription)?;
                     let frame = request_frame(request_id, Request::Subscribe(request))?;
-                    self.pending_requests
-                        .insert(request_id, PendingRequest::Subscription(subscription_id));
+                    self.pending_requests.insert(
+                        request_id,
+                        PendingRequest::Subscription {
+                            subscription_id,
+                            conversation,
+                        },
+                    );
+                    self.refresh_in_flight = true;
                     transition
                         .actions
                         .push(ClientAction::Write { generation, frame });
@@ -933,7 +1002,7 @@ impl ReconnectingClient {
                     self.view_current = false;
                     if !self.refresh_in_flight {
                         return Ok(ClientTransition {
-                            actions: vec![self.begin_snapshot_refresh(generation)?],
+                            actions: vec![self.begin_refresh(generation)?],
                             events: Vec::new(),
                         });
                     }
@@ -1021,17 +1090,35 @@ impl ReconnectingClient {
                     Ok(transition)
                 }
                 ResponseResult::Subscription(acknowledgement) => {
-                    let Some(PendingRequest::Subscription(expected)) =
-                        self.pending_requests.remove(&response.id)
+                    let Some(PendingRequest::Subscription {
+                        subscription_id: expected,
+                        conversation,
+                    }) = self.pending_requests.remove(&response.id)
                     else {
                         return Err(ClientError::ProtocolOrder);
                     };
                     if acknowledgement.subscription_id != expected
                         || Some(expected) != self.active_subscription_id
+                        || !view_matches_conversation(&acknowledgement.view, conversation.as_ref())
                     {
                         return Err(ClientError::ProtocolOrder);
                     }
-                    self.accept_snapshot(generation, &acknowledgement.snapshot)
+                    self.refresh_in_flight = false;
+                    let desired = self
+                        .subscription
+                        .as_ref()
+                        .and_then(|subscription| subscription.conversation.clone());
+                    if conversation != desired {
+                        self.current_revision = Some(acknowledgement.view.snapshot.revision);
+                        self.view_current = false;
+                        return Ok(ClientTransition {
+                            actions: vec![
+                                self.begin_authoritative_conversation_view_refresh(generation)?,
+                            ],
+                            events: Vec::new(),
+                        });
+                    }
+                    self.accept_authoritative_conversation_view(generation, acknowledgement.view)
                 }
                 ResponseResult::AuthoritativeSnapshot(snapshot) => {
                     if self.pending_requests.remove(&response.id) != Some(PendingRequest::Snapshot)
@@ -1040,6 +1127,32 @@ impl ReconnectingClient {
                     }
                     self.refresh_in_flight = false;
                     self.accept_snapshot(generation, &snapshot)
+                }
+                ResponseResult::AuthoritativeConversationView(view) => {
+                    let Some(PendingRequest::AuthoritativeConversationView { conversation }) =
+                        self.pending_requests.remove(&response.id)
+                    else {
+                        return Err(ClientError::ProtocolOrder);
+                    };
+                    self.refresh_in_flight = false;
+                    if !view_matches_conversation(&view, conversation.as_ref()) {
+                        return Err(ClientError::ProtocolOrder);
+                    }
+                    let desired = self
+                        .subscription
+                        .as_ref()
+                        .and_then(|subscription| subscription.conversation.clone());
+                    if conversation != desired {
+                        self.current_revision = Some(view.snapshot.revision);
+                        self.view_current = false;
+                        return Ok(ClientTransition {
+                            actions: vec![
+                                self.begin_authoritative_conversation_view_refresh(generation)?,
+                            ],
+                            events: Vec::new(),
+                        });
+                    }
+                    self.accept_authoritative_conversation_view(generation, view)
                 }
                 ResponseResult::ProjectCommand(outcome) => {
                     let Some(command_id) = project_command else {
@@ -1198,14 +1311,19 @@ impl ReconnectingClient {
             .remove(&request_id)
             .ok_or(ClientError::ProtocolOrder)?;
         let operation = match pending {
-            PendingRequest::Subscription(_) => ClientOperation::Subscription,
+            PendingRequest::Subscription { .. } => ClientOperation::Subscription,
             PendingRequest::Snapshot => ClientOperation::Snapshot,
+            PendingRequest::AuthoritativeConversationView { .. } => {
+                ClientOperation::AuthoritativeConversationView
+            }
             PendingRequest::Ordinary => ClientOperation::Ordinary,
         };
         let mut transition = error_transition(request_id, operation, error);
         if matches!(
             pending,
-            PendingRequest::Subscription(_) | PendingRequest::Snapshot
+            PendingRequest::Subscription { .. }
+                | PendingRequest::Snapshot
+                | PendingRequest::AuthoritativeConversationView { .. }
         ) {
             transition.actions.push(ClientAction::Close { generation });
             let reconnect = self.prepare_reconnect()?;
@@ -1229,14 +1347,76 @@ impl ReconnectingClient {
         if self.newest_invalidation > snapshot.revision {
             self.view_current = false;
             if !self.refresh_in_flight {
-                transition
-                    .actions
-                    .push(self.begin_snapshot_refresh(generation)?);
+                transition.actions.push(self.begin_refresh(generation)?);
             }
         } else {
             self.view_current = true;
         }
         Ok(transition)
+    }
+
+    fn accept_authoritative_conversation_view(
+        &mut self,
+        generation: ConnectionGeneration,
+        view: AuthoritativeConversationViewDto,
+    ) -> Result<ClientTransition, ClientError> {
+        let revision = view.snapshot.revision;
+        self.current_revision = Some(revision);
+        self.failures = 0;
+        let event = if view.conversation.is_some() {
+            ClientEvent::AuthoritativeConversationView(view)
+        } else {
+            ClientEvent::Snapshot(view.snapshot)
+        };
+        let mut transition = ClientTransition {
+            actions: Vec::new(),
+            events: vec![event],
+        };
+        if self.newest_invalidation > revision {
+            self.view_current = false;
+            if !self.refresh_in_flight {
+                transition
+                    .actions
+                    .push(self.begin_authoritative_conversation_view_refresh(generation)?);
+            }
+        } else {
+            self.view_current = true;
+        }
+        Ok(transition)
+    }
+
+    fn begin_refresh(
+        &mut self,
+        generation: ConnectionGeneration,
+    ) -> Result<ClientAction, ClientError> {
+        if self.subscription.is_some() && self.active_subscription_id.is_some() {
+            self.begin_authoritative_conversation_view_refresh(generation)
+        } else {
+            self.begin_snapshot_refresh(generation)
+        }
+    }
+
+    fn begin_authoritative_conversation_view_refresh(
+        &mut self,
+        generation: ConnectionGeneration,
+    ) -> Result<ClientAction, ClientError> {
+        let conversation = self
+            .subscription
+            .as_ref()
+            .and_then(|subscription| subscription.conversation.clone());
+        let request_id = self.allocate_request_id()?;
+        let frame = request_frame(
+            request_id,
+            Request::AuthoritativeConversationView(AuthoritativeConversationViewRequestDto::new(
+                conversation.clone(),
+            )),
+        )?;
+        self.pending_requests.insert(
+            request_id,
+            PendingRequest::AuthoritativeConversationView { conversation },
+        );
+        self.refresh_in_flight = true;
+        Ok(ClientAction::Write { generation, frame })
     }
 
     fn begin_snapshot_refresh(
@@ -1256,7 +1436,7 @@ impl ReconnectingClient {
             .pending_requests
             .iter()
             .filter_map(|(request_id, pending)| {
-                (*pending == PendingRequest::Ordinary)
+                matches!(pending, PendingRequest::Ordinary)
                     .then_some(ClientEvent::RequestLost(*request_id))
             })
             .collect::<Vec<_>>();
@@ -1377,6 +1557,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                 }
                 Some(
                     ClientEvent::Snapshot(_)
+                    | ClientEvent::AuthoritativeConversationView(_)
                     | ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
@@ -1407,7 +1588,8 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                     return Err(BlockingClientError::Incompatible);
                 }
                 Some(
-                    ClientEvent::Mutation(_)
+                    ClientEvent::AuthoritativeConversationView(_)
+                    | ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
                     | ClientEvent::AgentSession { .. }
@@ -1458,6 +1640,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                         MutationAttemptDto::Completed { .. } | MutationAttemptDto::Uncertain { .. },
                     )
                     | ClientEvent::Snapshot(_)
+                    | ClientEvent::AuthoritativeConversationView(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
                     | ClientEvent::AgentSession { .. }
@@ -1508,6 +1691,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                         MutationAttemptDto::Completed { .. } | MutationAttemptDto::Uncertain { .. },
                     )
                     | ClientEvent::Snapshot(_)
+                    | ClientEvent::AuthoritativeConversationView(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
                     | ClientEvent::AgentSession { .. }
@@ -1553,6 +1737,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                 }
                 Some(
                     ClientEvent::Snapshot(_)
+                    | ClientEvent::AuthoritativeConversationView(_)
                     | ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
@@ -1599,6 +1784,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                 }
                 Some(
                     ClientEvent::Snapshot(_)
+                    | ClientEvent::AuthoritativeConversationView(_)
                     | ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
@@ -1645,6 +1831,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                 }
                 Some(
                     ClientEvent::Snapshot(_)
+                    | ClientEvent::AuthoritativeConversationView(_)
                     | ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
@@ -1664,6 +1851,18 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
             self.transport.close(connection);
         }
         self.transport
+    }
+
+    /// Replaces the subscribed materialized-view selection without blocking for its response.
+    pub fn update_subscription_conversation(
+        &mut self,
+        conversation: Option<ConversationPageSelectionDto>,
+    ) -> Result<(), BlockingClientError> {
+        let transition = self
+            .client
+            .update_subscription_conversation(conversation)
+            .map_err(BlockingClientError::Client)?;
+        self.enqueue(transition)
     }
 
     /// Drives connection, subscription, and refresh work for at most the supplied wait.
@@ -1921,6 +2120,17 @@ fn request_frame(request_id: RequestId, request: Request) -> Result<Vec<u8>, Cli
     WireMessage::Request(RequestEnvelope::new(request_id, request))
         .encode_frame()
         .map_err(|_| ClientError::Codec)
+}
+
+fn view_matches_conversation(
+    view: &AuthoritativeConversationViewDto,
+    conversation: Option<&ConversationPageSelectionDto>,
+) -> bool {
+    match (conversation, view.conversation.as_ref()) {
+        (None, None) => true,
+        (Some(expected), Some(actual)) => actual.key == expected.key,
+        (None, Some(_)) | (Some(_), None) => false,
+    }
 }
 
 fn submitted_request_id(transition: &ClientTransition) -> Result<RequestId, BlockingClientError> {

@@ -30,8 +30,9 @@ pub struct EvidenceIngestOutcome {
 use hq_reducer::ConversationKey;
 
 use crate::{
-    ApplicationError, ApplicationErrorCode, ApplicationValueError, AuthoritativeSnapshot,
-    ConversationEntry, FactMutation, MutationAttempt,
+    ApplicationError, ApplicationErrorCode, ApplicationValueError, AuthoritativeConversationView,
+    AuthoritativeSnapshot, ConversationEntry, ConversationPageSelection, FactMutation,
+    MutationAttempt,
 };
 
 /// Maximum relay policies in one bounded application observation.
@@ -94,6 +95,16 @@ pub trait QueryProviders {
 pub trait QueryDomain {
     /// Loads all authoritative projection packages and their one serialized revision.
     fn authoritative_snapshot(&self) -> Result<AuthoritativeSnapshot, ApplicationError>;
+
+    /// Loads one snapshot and optional selected first page from one authoritative state boundary.
+    fn authoritative_conversation_view(
+        &self,
+        _selection: Option<&ConversationPageSelection>,
+    ) -> Result<AuthoritativeConversationView, ApplicationError> {
+        Err(ApplicationError::new(
+            ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
 
     /// Loads one bounded reducer-ordered conversation page.
     fn conversation_entries(

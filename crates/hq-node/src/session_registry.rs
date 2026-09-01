@@ -406,7 +406,7 @@ impl LocalSessionRegistry {
                 }
                 let routed = slot
                     .session
-                    .receive(message, application, lifecycle)
+                    .receive(*message, application, lifecycle)
                     .map_err(LocalSessionDisconnectCause::Protocol)
                     .and_then(|outbound| {
                         slot.io

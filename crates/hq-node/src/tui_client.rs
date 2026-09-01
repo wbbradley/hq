@@ -665,6 +665,11 @@ impl TuiObservationPort for LocalTuiObserver {
                     revision: snapshot.revision,
                 });
             }
+            Ok(Some(ClientEvent::AuthoritativeConversationView(view))) => {
+                observations.push(TuiClientObservation::Invalidated {
+                    revision: view.snapshot.revision,
+                });
+            }
             Ok(Some(ClientEvent::IncompatibleVersion) | None) => {}
             Ok(Some(
                 ClientEvent::Mutation(_)

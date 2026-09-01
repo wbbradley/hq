@@ -15,17 +15,19 @@ use hq_domain::{
 use hq_local_api::protocol::v1::{
     ActivityStatusDto, AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
     AgentSelectionCandidateDto, AgentSessionBindingDto, AgentSessionNameCandidateDto,
-    AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
+    AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeConversationViewDto,
+    AuthoritativeConversationViewRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
     CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, CompletedItemPresentationDto,
     ConversationActivityDto, ConversationActivityKindDto, ConversationContextDto,
     ConversationEntryDto, ConversationKeyDto, ConversationMessageDto, ConversationPageDto,
-    ConversationPageRequest, ConversationParticipantDto, DecodeError, DeviceGrantDto,
-    DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto, EncodeError, ErrorClass,
-    ErrorResponse, EvidenceIngestOutcomeDto, FrameDecoder, HealthDomainDto, Id32,
-    InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest, LifecycleState, LifecycleStatus,
-    MAX_FRAME_BYTES, MAX_PROVIDER_CATALOG_ITEMS, MailboxAddressDto, MailboxCommandActionDto,
-    MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto,
-    MailboxDraftDto, MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+    ConversationPageRequest, ConversationPageSelectionDto, ConversationParticipantDto, DecodeError,
+    DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto,
+    EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, FrameDecoder,
+    HealthDomainDto, Id32, InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest,
+    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MAX_PROVIDER_CATALOG_ITEMS,
+    MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto,
+    MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto, MailboxDraftDto,
+    MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
     MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCreationRequestDto, ProjectExternalStateWarningDto,
@@ -33,11 +35,11 @@ use hq_local_api::protocol::v1::{
     RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto, Request,
     RequestEnvelope, RequestId, ResourceHealthDto, ResourceInspectionRequestDto,
     ResourceInspectionResultDto, ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto,
-    ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto,
-    SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionAcknowledgement,
-    SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError, VersionRange,
-    VersionRejected, WireMessage, WorktreeProvisioningRequestDto, agent_session_request_digest,
-    negotiate, resource_inspection_request_digest,
+    ResponseEnvelope, ResponseResult, RevisionInvalidation, SelectedConversationPageDto,
+    ServerHello, SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
+    SubscriptionAcknowledgement, SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError,
+    VersionRange, VersionRejected, WireMessage, WorktreeProvisioningRequestDto,
+    agent_session_request_digest, negotiate, resource_inspection_request_digest,
 };
 use hq_local_api::{project_command_from_v1, project_command_request_to_v1, snapshot_to_v1};
 
@@ -116,6 +118,52 @@ fn project_thread_conversation_key_round_trips_in_local_api_v1() {
         WireMessage::decode_frame(&message.encode_frame().expect("request encodes")),
         Ok(message)
     );
+}
+
+#[test]
+fn materialized_conversation_view_round_trips_with_one_bounded_typed_selection() {
+    let key = ConversationKeyDto::Thread {
+        counterparty_installation: Id32::new([1; 32]),
+        counterparty_mailbox: Id32::new([2; 32]),
+        thread: Id32::new([5; 32]),
+    };
+    let selection = ConversationPageSelectionDto::new(key.clone(), 100).expect("selection");
+    let snapshot = AuthoritativeSnapshotDto::new(7, Vec::new()).expect("snapshot");
+    let page = ConversationPageDto::new(Vec::new(), None).expect("page");
+    let view = AuthoritativeConversationViewDto::new(
+        snapshot,
+        Some(SelectedConversationPageDto::new(key.clone(), page)),
+    )
+    .expect("coherent view");
+
+    round_trip(&WireMessage::Request(RequestEnvelope::new(
+        RequestId::new(1).expect("request id"),
+        Request::AuthoritativeConversationView(AuthoritativeConversationViewRequestDto::new(Some(
+            selection.clone(),
+        ))),
+    )));
+    round_trip(&WireMessage::Response(ResponseEnvelope::success(
+        RequestId::new(1).expect("request id"),
+        ResponseResult::AuthoritativeConversationView(view.clone()),
+    )));
+    round_trip(&WireMessage::Response(ResponseEnvelope::success(
+        RequestId::new(2).expect("request id"),
+        ResponseResult::Subscription(SubscriptionAcknowledgement::new(Id32::new([6; 32]), view)),
+    )));
+    round_trip(&WireMessage::Request(RequestEnvelope::new(
+        RequestId::new(3).expect("request id"),
+        Request::Subscribe(
+            SubscriptionRequestDto::new(
+                Id32::new([6; 32]),
+                vec![InvalidationTopic::All],
+                Some(selection),
+            )
+            .expect("subscription"),
+        ),
+    )));
+
+    assert!(ConversationPageSelectionDto::new(key.clone(), 0).is_err());
+    assert!(ConversationPageSelectionDto::new(key, 201).is_err());
 }
 
 #[test]
@@ -868,6 +916,7 @@ fn every_request_notification_and_negotiation_family_interoperates() {
             SubscriptionRequestDto::new(
                 Id32::new([7; 32]),
                 vec![InvalidationTopic::Project, InvalidationTopic::Authority],
+                None,
             )
             .expect("subscription"),
         ),
@@ -994,7 +1043,7 @@ fn every_success_and_error_response_family_interoperates() {
         }),
         ResponseResult::Subscription(SubscriptionAcknowledgement::new(
             Id32::new([7; 32]),
-            snapshot,
+            AuthoritativeConversationViewDto::new(snapshot, None).expect("snapshot view"),
         )),
         ResponseResult::Empty,
     ];

@@ -78,14 +78,15 @@ pub use project::{
 };
 pub use service::{Application, MutationCompletion, PreparedSubscription};
 pub use snapshot::{
-    AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot,
-    ClientAgentLifecycle, ClientDeviceGrant, ClientMembershipState, ClientPeerRouteBlock,
-    ClientPeerRouteCandidate, ClientPeerRouteState, ClientProjectAssignment,
+    AgentProjectionSnapshot, AuthoritativeConversationView, AuthoritativeSnapshot,
+    AuthorityProjectionSnapshot, ClientAgentLifecycle, ClientDeviceGrant, ClientMembershipState,
+    ClientPeerRouteBlock, ClientPeerRouteCandidate, ClientPeerRouteState, ClientProjectAssignment,
     ClientProjectAssignmentPhase, ClientProjectLifecycle, ClientProjectOutputStatus,
     ClientProjectThread, ClientProjection, ClientRemoteCommandStage, ConversationContext,
-    ConversationEntry, ConversationMessageEntry, ConversationParticipant,
-    ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot, IncompleteMessageSummary,
-    ProjectProjectionSnapshot, ProjectionSnapshot,
+    ConversationEntry, ConversationMessageEntry, ConversationPageSelection,
+    ConversationParticipant, ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot,
+    IncompleteMessageSummary, MAX_CONVERSATION_PAGE_ITEMS, ProjectProjectionSnapshot,
+    ProjectionSnapshot, SelectedConversationPage,
 };
 
 /// Minimal in-memory use-case host for the workspace walking skeleton.

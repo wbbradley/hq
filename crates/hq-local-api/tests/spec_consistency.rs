@@ -2,8 +2,8 @@
 
 use hq_local_api::protocol::v1::{
     MAX_BUFFERED_BYTES, MAX_BUILD_FIELD_BYTES, MAX_CANONICAL_EVIDENCE_BYTES,
-    MAX_CANONICAL_EVIDENCE_ITEMS, MAX_CURSOR_BYTES, MAX_FRAME_BYTES, MAX_PAGE_ITEMS,
-    MAX_SNAPSHOT_ITEMS, MAX_TOPICS, V1,
+    MAX_CANONICAL_EVIDENCE_ITEMS, MAX_CURSOR_BYTES, MAX_FRAME_BYTES,
+    MAX_MATERIALIZED_CONVERSATION_PAGE_ITEMS, MAX_PAGE_ITEMS, MAX_SNAPSHOT_ITEMS, MAX_TOPICS, V1,
 };
 
 const SPEC: &str = include_str!("../../../docs/protocol/local-api-v1.md");
@@ -16,6 +16,7 @@ fn normative_spec_names_the_independent_version_and_every_local_bound() {
         MAX_BUFFERED_BYTES.to_string(),
         MAX_BUILD_FIELD_BYTES.to_string(),
         MAX_PAGE_ITEMS.to_string(),
+        MAX_MATERIALIZED_CONVERSATION_PAGE_ITEMS.to_string(),
         MAX_CURSOR_BYTES.to_string(),
         MAX_TOPICS.to_string(),
         MAX_SNAPSHOT_ITEMS.to_string(),
@@ -38,7 +39,7 @@ fn normative_spec_pins_replay_subscription_and_trust_invariants() {
         "registers a subscription as pending before reading",
         "only after the acknowledgement frame is confirmed written",
         "never blocks a commit",
-        "authoritative full",
+        "authoritative materialized view",
     ] {
         assert!(
             SPEC.contains(required),

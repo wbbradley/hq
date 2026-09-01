@@ -48,6 +48,7 @@ All limits are inclusive. A larger value is rejected before it can become applic
 | build name, version, or commit field | 128 bytes, nonempty, no control characters |
 | unsigned canonical mutation plan | canonical v1 `MAX_CONTENT_BYTES` |
 | conversation page | 256 entries |
+| selected materialized first page | 200 entries |
 | opaque page cursor | 512 bytes, nonempty |
 | invalidation topics | 6, nonempty, sorted, unique |
 | authoritative snapshot | 16,384 projection items |
@@ -96,6 +97,7 @@ Request methods are closed and typed:
 
 - lifecycle `status`, `readiness`, `stop`, and `restart`;
 - authoritative snapshot;
+- authoritative snapshot plus an optional typed selected first page;
 - bounded reducer-ordered conversation page;
 - exact retryable canonical-fact mutation;
 - bounded exact canonical-evidence closure query and reverified idempotent import;
@@ -109,7 +111,8 @@ Request methods are closed and typed:
 - subscription registration; and
 - idempotent subscription cancellation.
 
-Successful response families are lifecycle status, authoritative snapshot, conversation page,
+Successful response families are lifecycle status, authoritative snapshot, authoritative snapshot
+plus optional selected first page, conversation page,
 mutation attempt, canonical evidence, evidence-ingest outcomes, empty external effect,
 relay status, four-domain state health, explicit repair report, provider catalog, agent-session effect,
 resource-inspection effect, typed project-command progress, named-agent-retirement progress,
@@ -307,10 +310,12 @@ notification contains only subscription ID, newest committed revision, sorted to
 `full_snapshot` flag. It never contains projection rows, message bodies, secrets, or transport
 observations.
 
-The server registers a subscription as pending before reading the authoritative snapshot named by
-its acknowledgement. The acknowledgement contains that snapshot. The subscription becomes active
-only after the acknowledgement frame is confirmed written. Disconnect cancels pending or active
-registration idempotently.
+Registration may carry an optional typed conversation key and a nonzero first-page limit of at most
+200. The server registers a subscription as pending before reading one materialized view from the
+serialized store actor. Its acknowledgement contains the complete snapshot and, when selected, that
+conversation's first page; the enclosing snapshot revision applies to both. The subscription
+becomes active only after the acknowledgement frame is confirmed written. Disconnect cancels
+pending or active registration idempotently.
 
 A server session accepts at most one unconfirmed response write. The opaque confirmation ticket is
 owned by that session, is single-use, and cannot activate another session's registration. The next
@@ -329,17 +334,20 @@ safe point. Normal delivery has no polling interval, and the wire notification r
 
 After reconnect, a client renegotiates and derives a new registration ID from its stable local
 subscription seed plus the server's ephemeral session ID. It accepts the registration
-acknowledgement's authoritative full snapshot as a fresh base and only then treats invalidations as
-current. An invalidation marks the view stale and triggers a complete authoritative snapshot; it is
-not a patch. Notices coalesce to their greatest revision while a refresh is in flight, and a
-returned snapshot behind that revision immediately triggers another refresh. The client never
-infers missed rows from a revision gap.
+acknowledgement's authoritative materialized view as a fresh base and only then treats invalidations
+as current. An invalidation marks the view stale and triggers the same snapshot-plus-selection
+query; it is not a patch. Notices coalesce to their greatest revision while a refresh is in flight.
+A returned view behind that revision immediately triggers another refresh. Replacing the selection
+retains only the latest desired value: an in-flight response for the prior key is validated but not
+published, then one follow-up query asks for the latest key. The latest interest survives reconnect.
+The client never infers missed rows from a revision gap, and invalidations remain projection-free.
 
 The installed TUI uses two independently negotiated local connections. It first registers and
 acknowledges the broad subscription, then opens an ordinary command/query connection for explicit
-snapshots, conversations, drafts, and mutations. The subscribed owner only reads invalidations,
-refresh snapshots, and connection-generation transitions, so an in-flight command cannot starve
-wire reads. Both connections reconnect with their own generation and correlation state. The
+snapshots, conversations, drafts, and mutations. The subscribed owner only reads acknowledgements,
+materialized refreshes, invalidations, and connection-generation transitions, so an in-flight
+command cannot starve wire reads. Both connections reconnect with their own generation and
+correlation state. The
 observer hands revision-only events through a bounded process-local queue; it never forwards a
 snapshot body as an invalidation. TUI shutdown closes the active subscribed Unix stream to wake its
 blocking read and joins that owner instead of waiting for a short poll deadline. The five-minute

@@ -22,6 +22,8 @@ pub const MAX_BUFFERED_BYTES: usize = MAX_FRAME_BYTES + 4;
 pub const MAX_BUILD_FIELD_BYTES: usize = 128;
 /// Maximum requested conversation page size.
 pub const MAX_PAGE_ITEMS: u16 = 256;
+/// Maximum first-page size embedded in one materialized authoritative view.
+pub const MAX_MATERIALIZED_CONVERSATION_PAGE_ITEMS: u16 = 200;
 /// Maximum opaque cursor bytes.
 pub const MAX_CURSOR_BYTES: usize = 512;
 /// Maximum broad topics in a subscription request.
@@ -702,6 +704,54 @@ impl ConversationPageRequest {
     }
 }
 
+/// One bounded first-page interest for a materialized authoritative view.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationPageSelectionDto {
+    /// Typed conversation identity.
+    pub key: ConversationKeyDto,
+    /// Nonzero inclusive first-page limit.
+    pub limit: u16,
+}
+
+impl ConversationPageSelectionDto {
+    /// Constructs one bounded typed selection.
+    pub fn new(key: ConversationKeyDto, limit: u16) -> Result<Self, ValueError> {
+        let selection = Self { key, limit };
+        selection.validate()?;
+        Ok(selection)
+    }
+
+    fn validate(&self) -> Result<(), ValueError> {
+        validate_conversation_key(&self.key)?;
+        if self.limit == 0 || self.limit > MAX_MATERIALIZED_CONVERSATION_PAGE_ITEMS {
+            return Err(ValueError::InvalidPageLimit);
+        }
+        Ok(())
+    }
+}
+
+/// Request for one coherent snapshot and optional selected first page.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoritativeConversationViewRequestDto {
+    /// Selected first-page interest, or no conversation detail.
+    pub conversation: Option<ConversationPageSelectionDto>,
+}
+
+impl AuthoritativeConversationViewRequestDto {
+    /// Constructs one materialized-view request.
+    pub const fn new(conversation: Option<ConversationPageSelectionDto>) -> Self {
+        Self { conversation }
+    }
+
+    fn validate(&self) -> Result<(), ValueError> {
+        self.conversation
+            .as_ref()
+            .map_or(Ok(()), ConversationPageSelectionDto::validate)
+    }
+}
+
 /// Broad invalidation topic; notifications never carry projection rows.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -728,6 +778,8 @@ pub struct SubscriptionRequestDto {
     pub subscription_id: Id32,
     /// Sorted, unique, nonempty broad topics.
     pub topics: Vec<InvalidationTopic>,
+    /// Optional selected first-page interest for materialized refreshes.
+    pub conversation: Option<ConversationPageSelectionDto>,
 }
 
 impl SubscriptionRequestDto {
@@ -735,13 +787,18 @@ impl SubscriptionRequestDto {
     pub fn new(
         subscription_id: Id32,
         mut topics: Vec<InvalidationTopic>,
+        conversation: Option<ConversationPageSelectionDto>,
     ) -> Result<Self, ValueError> {
         topics.sort_unstable();
         topics.dedup();
         validate_topics(&topics)?;
+        if let Some(conversation) = &conversation {
+            conversation.validate()?;
+        }
         Ok(Self {
             subscription_id,
             topics,
+            conversation,
         })
     }
 }
@@ -1527,6 +1584,8 @@ pub enum Request {
     Lifecycle(LifecycleRequest),
     /// Load one complete authoritative client snapshot.
     AuthoritativeSnapshot,
+    /// Load one coherent authoritative snapshot and optional selected first page.
+    AuthoritativeConversationView(AuthoritativeConversationViewRequestDto),
     /// Load providers registered with this running installation.
     ProviderCatalog,
     /// Load one bounded reducer-ordered conversation page.
@@ -2472,6 +2531,48 @@ impl ConversationPageDto {
     }
 }
 
+/// One bounded selected conversation page in a materialized authoritative view.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectedConversationPageDto {
+    /// Stable typed conversation identity.
+    pub key: ConversationKeyDto,
+    /// Bounded reducer-ordered first page.
+    pub page: ConversationPageDto,
+}
+
+impl SelectedConversationPageDto {
+    /// Constructs one selected first page.
+    pub const fn new(key: ConversationKeyDto, page: ConversationPageDto) -> Self {
+        Self { key, page }
+    }
+}
+
+/// One authoritative snapshot and optional selected page from one serialized state boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoritativeConversationViewDto {
+    /// Complete authoritative projection snapshot.
+    pub snapshot: AuthoritativeSnapshotDto,
+    /// Selected first page, when requested.
+    pub conversation: Option<SelectedConversationPageDto>,
+}
+
+impl AuthoritativeConversationViewDto {
+    /// Constructs and validates one bounded coherent view.
+    pub fn new(
+        snapshot: AuthoritativeSnapshotDto,
+        conversation: Option<SelectedConversationPageDto>,
+    ) -> Result<Self, ValueError> {
+        let view = Self {
+            snapshot,
+            conversation,
+        };
+        validate_authoritative_conversation_view(&view)?;
+        Ok(view)
+    }
+}
+
 /// Stable semantic mutation outcome.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -2624,16 +2725,16 @@ impl ResourceInspectionResultDto {
 pub struct SubscriptionAcknowledgement {
     /// Stable pending subscription identity.
     pub subscription_id: Id32,
-    /// Snapshot loaded after pending registration.
-    pub snapshot: AuthoritativeSnapshotDto,
+    /// Materialized view loaded after pending registration.
+    pub view: AuthoritativeConversationViewDto,
 }
 
 impl SubscriptionAcknowledgement {
     /// Constructs a pending-registration acknowledgement with its authoritative snapshot.
-    pub const fn new(subscription_id: Id32, snapshot: AuthoritativeSnapshotDto) -> Self {
+    pub const fn new(subscription_id: Id32, view: AuthoritativeConversationViewDto) -> Self {
         Self {
             subscription_id,
-            snapshot,
+            view,
         }
     }
 }
@@ -2646,6 +2747,8 @@ pub enum ResponseResult {
     Lifecycle(LifecycleStatus),
     /// Complete authoritative snapshot.
     AuthoritativeSnapshot(AuthoritativeSnapshotDto),
+    /// Coherent authoritative snapshot and optional selected first page.
+    AuthoritativeConversationView(AuthoritativeConversationViewDto),
     /// Passive provider registrations and configured preference.
     ProviderCatalog(ProviderCatalogDto),
     /// Bounded conversation page.
@@ -2891,6 +2994,7 @@ impl WireMessage {
             }
             Self::Request(envelope) => match &envelope.request {
                 Request::ConversationPage(request) => request.validate(),
+                Request::AuthoritativeConversationView(request) => request.validate(),
                 Request::SaveMailboxDraft(request) => {
                     if request.content.len() > CONTENT_MAX_BYTES
                         || request.expected_version == Some(0)
@@ -2916,7 +3020,13 @@ impl WireMessage {
                     validate_id_set(&request.roots, MAX_CANONICAL_EVIDENCE_ITEMS)
                 }
                 Request::IngestCanonicalEvidence(evidence) => validate_evidence(evidence),
-                Request::Subscribe(request) => validate_topics(&request.topics),
+                Request::Subscribe(request) => {
+                    validate_topics(&request.topics)?;
+                    request
+                        .conversation
+                        .as_ref()
+                        .map_or(Ok(()), ConversationPageSelectionDto::validate)
+                }
                 Request::ConfigureRelay(request) => validate_locator(&request.body.endpoint),
                 Request::Synchronize(request) => match &request.body {
                     SynchronizationRequestDto::All => Ok(()),
@@ -3096,7 +3206,10 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
             })
         }
         Response::Success(ResponseResult::Subscription(acknowledgement)) => {
-            validate_snapshot(&acknowledgement.snapshot)
+            validate_authoritative_conversation_view(&acknowledgement.view)
+        }
+        Response::Success(ResponseResult::AuthoritativeConversationView(view)) => {
+            validate_authoritative_conversation_view(view)
         }
         Response::Success(ResponseResult::ProjectCommand(outcome)) => {
             validate_project_outcome(outcome)
@@ -3929,6 +4042,20 @@ fn validate_page(page: &ConversationPageDto) -> Result<(), ValueError> {
         }
         if matches!(item, ConversationEntryDto::Activity(activity) if activity.sequence == 0) {
             return Err(ValueError::InvalidSequence);
+        }
+    }
+    Ok(())
+}
+
+fn validate_authoritative_conversation_view(
+    view: &AuthoritativeConversationViewDto,
+) -> Result<(), ValueError> {
+    validate_snapshot(&view.snapshot)?;
+    if let Some(conversation) = &view.conversation {
+        validate_conversation_key(&conversation.key)?;
+        validate_page(&conversation.page)?;
+        if conversation.page.items.len() > usize::from(MAX_MATERIALIZED_CONVERSATION_PAGE_ITEMS) {
+            return Err(ValueError::TooManyItems);
         }
     }
     Ok(())

@@ -130,10 +130,13 @@ relevant change. Invalidations contain only the revision, broad topics (`message
 `network`, `peers`, `human`, `relays`, and `agents`), and an optional full-snapshot flag. They never contain
 message bodies, database rows, signing material, or mutation results.
 
-A subscription is registered before its acknowledged revision is read. Activation occurs only
-after the acknowledgement response is written; queued changes at or below that revision are
-discarded and every newer coalesced revision wakes the client. Per-subscriber queues have size one,
-socket writes happen outside the commit path, and disconnect removes the subscription.
+A subscription may name one typed conversation and a bounded first-page limit. The store actor
+reads that page and the complete snapshot in one request, so the enclosing materialized view gives
+both one revision and never pairs a newer list with older detail. The subscription is registered
+before this acknowledged view is read. Activation occurs only after the acknowledgement response
+is written; queued changes at or below its revision are discarded and every newer coalesced
+revision wakes the client. Per-subscriber queues have size one, socket writes happen outside the
+commit path, and disconnect removes the subscription.
 
 The synchronous store actor publishes each committed revision by replacing one latest-value wake;
 publication neither waits for Tokio nor allocates per subscriber. The daemon's sole local-session
@@ -147,9 +150,11 @@ subscribed socket read while the command thread may wait on snapshots, project w
 round trips. A committed revision therefore reaches the model without waiting for command
 completion or a client polling interval. Shutdown interrupts the exact active observation socket
 and joins both owners. The Codex bridge, CLI `ask`, and CLI `wait` retain their own subscription
-composition. All reload authoritative state on invalidation or reconnect; the TUI's five-minute
-periodic refresh is a repair assertion, not its notification path. TUI drafts, focus, and selection
-survive reloads.
+composition. The reconnecting client can replace its desired conversation while one materialized
+refresh is in flight; it suppresses the stale selection, coalesces invalidations, and requests only
+the latest interest. Unselected subscribers and ordinary clients retain explicit snapshot and
+older-page queries. The TUI's five-minute periodic refresh is a repair assertion, not its
+notification path. TUI drafts, focus, and selection survive reloads.
 
 ## SQLite data
 

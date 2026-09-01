@@ -3,41 +3,42 @@
 use crate::protocol::v1::{
     AgentRetirementOutcomeDto, AgentRetirementRequestDto, AgentSelectionCandidateDto,
     AgentSessionBindingDto, AgentSessionNameCandidateDto, AgentSessionRequestDto,
-    AgentSessionResultDto, AuthoritativeSnapshotDto, CanonicalEvidenceDto, ConversationActivityDto,
-    ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationPageDto,
-    ConversationPageRequest, ConversationParticipantDto, DeviceGrantDto, DomainErrorDto,
-    DomainHealthDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse,
-    EvidenceIngestOutcomeDto, HealthDomainDto, Id32, InvalidationTopic,
-    MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MailboxAddressDto,
-    MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto,
-    MailboxDraftDeleteRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
-    MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto,
-    MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
-    PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
+    AgentSessionResultDto, AuthoritativeConversationViewDto, AuthoritativeSnapshotDto,
+    CanonicalEvidenceDto, ConversationActivityDto, ConversationContextDto, ConversationEntryDto,
+    ConversationKeyDto, ConversationPageDto, ConversationPageRequest, ConversationPageSelectionDto,
+    ConversationParticipantDto, DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto,
+    EffectRequestDto, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, HealthDomainDto, Id32,
+    InvalidationTopic, MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS,
+    MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto,
+    MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto, MailboxDraftDto,
+    MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+    MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
+    PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCommandStageDto, ProjectExternalStateWarningDto,
     ProviderAvailabilityDto, ProviderCatalogDto, RelayAccessDto, RelayAuthenticationDto,
     RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto,
     RemoteCommandResultDto, RepositoryContextDto, ResourceHealthDto, ResourceInspectionRequestDto,
     ResourceInspectionResultDto, ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto,
-    RuntimeObservationDto, SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
-    SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
+    RuntimeObservationDto, SelectedConversationPageDto, SessionControlDto, SnapshotItem,
+    StateHealthDto, StateRepairReportDto, SubscriptionRequestDto, SynchronizationRequestDto,
+    ValueError,
 };
 use hq_application::{
     AgentLaunchContext, AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest,
-    AgentSessionResult, ApplicationError, ApplicationErrorClass, AuthoritativeSnapshot,
-    CanonicalEvidence, ClientAgentLifecycle, ClientMembershipState, ClientPeerRouteState,
-    ClientProjectAssignmentPhase, ClientProjectLifecycle, ClientProjectOutputStatus,
-    ClientProjection, ClientRemoteCommandStage, ConversationContext, ConversationEntry,
-    ConversationKey, ConversationParticipant, DomainHealth, EffectOutcome, EffectRequest,
-    EvidenceIngestOutcome, FactMutation, HealthDomain, LaunchEnvironment, MailboxCommandAction,
-    MailboxCommandRequest, MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest,
-    MailboxDraftSaveOutcome, MailboxDraftSaveRequest, MailboxDraftTarget, MutationAttempt,
-    MutationDecision, MutationOutcome, MutationReceipt, ProjectCommandAction,
-    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest,
-    ProviderCatalog, RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus,
-    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, StateHealth,
-    StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
-    WorktreeProvisioningRequest,
+    AgentSessionResult, ApplicationError, ApplicationErrorClass, AuthoritativeConversationView,
+    AuthoritativeSnapshot, CanonicalEvidence, ClientAgentLifecycle, ClientMembershipState,
+    ClientPeerRouteState, ClientProjectAssignmentPhase, ClientProjectLifecycle,
+    ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage, ConversationContext,
+    ConversationEntry, ConversationKey, ConversationPageSelection, ConversationParticipant,
+    DomainHealth, EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation, HealthDomain,
+    LaunchEnvironment, MailboxCommandAction, MailboxCommandRequest, MailboxDraft,
+    MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
+    MailboxDraftSaveRequest, MailboxDraftTarget, MutationAttempt, MutationDecision,
+    MutationOutcome, MutationReceipt, ProjectCommandAction, ProjectCommandOutcome,
+    ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest, ProviderCatalog,
+    RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
+    ResourceInspectionResult, SessionControl, StateHealth, StateRepairReport, SubscriptionRequest,
+    SubscriptionTopic, SynchronizationRequest, WorktreeProvisioningRequest,
 };
 
 /// Converts one bounded neutral provider catalog into its local wire representation.
@@ -763,6 +764,37 @@ pub fn page_to_v1(page: &Page<ConversationEntry>) -> Result<ConversationPageDto,
         items,
         page.next_cursor().map(|cursor| cursor.as_str().to_owned()),
     )
+}
+
+/// Converts one optional wire first-page interest into the bounded application value.
+pub fn conversation_selection_from_v1(
+    selection: Option<ConversationPageSelectionDto>,
+) -> Result<Option<ConversationPageSelection>, ValueError> {
+    selection
+        .map(|selection| {
+            ConversationPageSelection::new(
+                conversation_key_from_v1(selection.key)?,
+                usize::from(selection.limit),
+            )
+            .map_err(|_| ValueError::InvalidPageLimit)
+        })
+        .transpose()
+}
+
+/// Converts one coherent application view into its bounded wire representation.
+pub fn authoritative_conversation_view_to_v1(
+    view: &AuthoritativeConversationView,
+) -> Result<AuthoritativeConversationViewDto, ValueError> {
+    let snapshot = snapshot_to_v1(view.snapshot())?;
+    let conversation = view
+        .conversation()
+        .map(|conversation| {
+            page_to_v1(conversation.page()).map(|page| {
+                SelectedConversationPageDto::new(conversation_key_to_v1(conversation.key()), page)
+            })
+        })
+        .transpose()?;
+    AuthoritativeConversationViewDto::new(snapshot, conversation)
 }
 
 /// Converts one exact wire mutation into a one-shot application decision.

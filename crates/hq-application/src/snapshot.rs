@@ -8,7 +8,7 @@ use std::{
 use hq_domain::{
     AccountId, AgentId, AssignmentId, CommandDigest, CommandId, ContentText, DispatchId,
     EncryptionPublicKey, ErrorCode, FactId, GrantId, InstallationAddress, InstallationId,
-    MailboxAddress, MailboxKind, MessageContent, MessageId, ProjectId, ProviderId,
+    MailboxAddress, MailboxKind, MessageContent, MessageId, Page, ProjectId, ProviderId,
     ProviderSessionId, RelayHints, RemoteCommandResult, RepositoryContext, ResourceHealth,
     ResourceId, ResourceLocator, Revision, RuntimeObservation, ShortText, SigningPublicKey,
     ThreadId, Timestamp,
@@ -23,6 +23,9 @@ use hq_reducer::{
 };
 
 use crate::ApplicationValueError;
+
+/// Maximum entries in one bounded current-conversation page.
+pub const MAX_CONVERSATION_PAGE_ITEMS: usize = 200;
 
 /// One normalized projection package independent of persistence layout and transport encoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -978,6 +981,96 @@ pub struct AuthoritativeSnapshot {
     conversations: Vec<ConversationSummary>,
     incomplete_messages: Vec<IncompleteMessageSummary>,
     incomplete_messages_truncated: bool,
+}
+
+/// One typed current-conversation interest attached to an authoritative view query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationPageSelection {
+    key: hq_reducer::ConversationKey,
+    limit: usize,
+}
+
+impl ConversationPageSelection {
+    /// Constructs one bounded first-page selection.
+    pub fn new(
+        key: hq_reducer::ConversationKey,
+        limit: usize,
+    ) -> Result<Self, ApplicationValueError> {
+        if limit == 0 {
+            return Err(ApplicationValueError::Empty);
+        }
+        if limit > MAX_CONVERSATION_PAGE_ITEMS {
+            return Err(ApplicationValueError::TooManyItems {
+                maximum: MAX_CONVERSATION_PAGE_ITEMS,
+                actual: limit,
+            });
+        }
+        Ok(Self { key, limit })
+    }
+
+    /// Returns the selected stable conversation identity.
+    pub const fn key(&self) -> &hq_reducer::ConversationKey {
+        &self.key
+    }
+
+    /// Returns the inclusive first-page item limit.
+    pub const fn limit(&self) -> usize {
+        self.limit
+    }
+}
+
+/// One selected page paired with its stable conversation identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectedConversationPage {
+    key: hq_reducer::ConversationKey,
+    page: Page<ConversationEntry>,
+}
+
+impl SelectedConversationPage {
+    /// Constructs one typed selected page.
+    pub const fn new(key: hq_reducer::ConversationKey, page: Page<ConversationEntry>) -> Self {
+        Self { key, page }
+    }
+
+    /// Returns the selected stable conversation identity.
+    pub const fn key(&self) -> &hq_reducer::ConversationKey {
+        &self.key
+    }
+
+    /// Returns the bounded reducer-ordered page.
+    pub const fn page(&self) -> &Page<ConversationEntry> {
+        &self.page
+    }
+}
+
+/// One authoritative snapshot and optional selected page read at one serialized store point.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthoritativeConversationView {
+    snapshot: AuthoritativeSnapshot,
+    conversation: Option<SelectedConversationPage>,
+}
+
+impl AuthoritativeConversationView {
+    /// Constructs one coherent materialized view.
+    pub const fn new(
+        snapshot: AuthoritativeSnapshot,
+        conversation: Option<SelectedConversationPage>,
+    ) -> Self {
+        Self {
+            snapshot,
+            conversation,
+        }
+    }
+
+    /// Returns the authoritative projection snapshot.
+    pub const fn snapshot(&self) -> &AuthoritativeSnapshot {
+        &self.snapshot
+    }
+
+    /// Returns the selected first page, when requested.
+    pub const fn conversation(&self) -> Option<&SelectedConversationPage> {
+        self.conversation.as_ref()
+    }
 }
 
 impl AuthoritativeSnapshot {

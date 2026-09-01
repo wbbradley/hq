@@ -10,8 +10,9 @@ use std::{
 };
 
 use hq_application::{
-    CanonicalEvidence, MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest,
-    MailboxDraftSaveOutcome, MailboxDraftSaveRequest,
+    AuthoritativeConversationView, CanonicalEvidence, ConversationPageSelection, MailboxDraft,
+    MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
+    MailboxDraftSaveRequest,
 };
 use hq_domain::{
     AgentId, CommandId, FactId, InstallationId, OperationId, Page, PageCursor, Revision,
@@ -283,6 +284,10 @@ enum Request {
     AuthoritativeSnapshot {
         reply: SyncSender<Result<AuthoritativeSnapshot, StoreError>>,
     },
+    AuthoritativeConversationView {
+        selection: Option<ConversationPageSelection>,
+        reply: SyncSender<Result<AuthoritativeConversationView, StoreError>>,
+    },
     CanonicalEvidence {
         roots: BTreeSet<FactId>,
         maximum_facts: usize,
@@ -543,6 +548,23 @@ impl ApplicationStateHandle {
         let (reply, response) = mpsc::sync_channel(1);
         self.requests
             .send(Request::AuthoritativeSnapshot { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one snapshot and optional selected page from one serialized store point.
+    pub fn authoritative_conversation_view(
+        &self,
+        selection: Option<&ConversationPageSelection>,
+    ) -> Result<AuthoritativeConversationView, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::AuthoritativeConversationView {
+                selection: selection.cloned(),
+                reply,
+            })
             .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
         response
             .recv()
@@ -1312,6 +1334,10 @@ fn run(
             }
             Request::AuthoritativeSnapshot { reply } => {
                 let _ = reply.send(database.load_authoritative_snapshot());
+            }
+            Request::AuthoritativeConversationView { selection, reply } => {
+                let _ =
+                    reply.send(database.load_authoritative_conversation_view(selection.as_ref()));
             }
             Request::CanonicalEvidence {
                 roots,
