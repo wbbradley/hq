@@ -108,6 +108,7 @@ outcome without specifying those representations.
 | CONV-015 | equal-time-mixed-order | Concurrent messages/activity share authored and occurrence times | Reduce permutations | Sole comparator yields one stable total presentation order | Canonical ordering |
 | CONV-016 | child-clock-before-parent | Child authored time precedes parent time | Reduce | Parent is emitted first by topology | Causal presentation |
 | CONV-017 | inert-markdown-presentation | Maximum-page messages contain Markdown, raw HTML, controls, terminal escape lookalikes, links, images, nested lists, and oversized tables | TUI adapter, render budget, and installed PTY | Bodies are themed, width-bounded inert text; drafts stay raw; activity stays unparsed; redraw meets the declared cached budget; no resource is loaded | Presentation-only trust boundary |
+| CONV-018 | continuous-oversized-viewport | One message exceeds the transcript height with short entries around it | TUI model/render and installed PTY | Home, row scrolling, and entry navigation expose the first, middle, and last regions plus adjacent short entries; clipped edges show `↑`/`↓`; follow-tail and cached redraw remain bounded | Complete transcript reachability |
 | ACT-001 | activity-message-inertness | Activity surrounds question/answer/archive facts | Reduce | Activity changes no inbox, unread, action, reply, archive, delivery, draft, or final-answer state | Dual-stream separation |
 | ACT-002 | sequenced-plan-snapshots | Causal plan snapshots have increasing source sequence | Reduce reverse arrival | Highest causal sequence is selected and exact facts remain | Snapshot coalescing |
 | ACT-003 | concurrent-sequence-winner | Same source/runtime logical key has concurrent unequal sequence snapshots | Reduce | Higher semantic sequence wins; decision is independent of display comparator | Explicit activity rule |
@@ -295,9 +296,11 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Wide Inbox layout keeps a bounded 24–36-column list and gives later width to Conversation;
   compact layout keeps both list and transcript visible. Authors and bodies start at the pane edge,
   and full-row focus does not add a marker or reflow text.
-- Transcript capacity is measured from wrapped display cells around the stable fact anchor. An
+- Transcript capacity is measured from wrapped display cells and painted as continuous slices from
+  a stable entry-plus-row viewport position. Oversized entries can flow through both pane edges,
+  `↑`/`↓` identify clipped content, and selection remains independent from row scrolling. An
   older-page load or failure retains existing entries and exposes only its actionable PageDown
-  state; resize and an open draft do not replace the anchor.
+  state; resize and an open draft preserve the viewport anchor.
 - Subscription activation retains its acknowledged snapshot, selects the initial Inbox row before
   terminal activation, and draws the matching first page without another snapshot/page chain.
   Navigation replaces a latest-value selected-row interest and wakes the idle Unix observer without

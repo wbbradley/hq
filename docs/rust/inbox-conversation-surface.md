@@ -1,7 +1,8 @@
 # Inbox conversation surface specification
 
-Status: implemented. Typed conversation voices, compact activity, responsive pane sizing, measured
-scrolling, dedicated theme roles, and the in-pane technical inspector are production behavior.
+Status: implemented. Typed conversation voices, compact activity, responsive pane sizing,
+continuous row scrolling, dedicated theme roles, and the in-pane technical inspector are production
+behavior.
 
 ## Product intent
 
@@ -309,8 +310,9 @@ existing draft is never replaced.
 
 - List selection and transcript focus are different. Moving through Inbox rows immediately updates
   Conversation, but the transcript shows no focused-message surface until Conversation owns focus.
-- Enter or `l`/Right enters the transcript at its stable fact anchor. `j`/`k` and Up/Down move among
-  selectable messages and activity. `h`/Left returns one visible level.
+- Enter or `l`/Right enters the transcript at its stable fact anchor. Up/Down moves the viewport by
+  one visual row, `j`/`k` selects the next or previous entry and reveals its beginning, and Home/End
+  reveals the selected entry's beginning or end. `h`/Left returns one visible level.
 - Focus uses a full-width semantic selection surface. It does not add `›`, indentation, a border,
   or any other glyph that reflows body text. The no-color theme uses reverse plus weight; explicit
   author and footer text preserve meaning without style inspection.
@@ -319,11 +321,14 @@ existing draft is never replaced.
   inspection but never reply or reversible-state actions.
 - Rendering measures each item's actual wrapped display-cell height at the current pane width,
   including preserved paragraph breaks, author line, status line when present, and selection
-  inspector. It centers or reveals the stable fact anchor by visual rows rather than assuming three
-  rows per entry.
-- Resize recalculates visual row spans without changing the fact anchor. Page loading prepends or
-  appends according to authoritative reducer order and preserves the selected fact's screen
-  position where practical.
+  inspector. The viewport starts at a stable entry identity plus row offset and paints every
+  intersecting slice continuously; an oversized entry may begin above and end below the pane while
+  adjacent entries use every remaining row. `↑` and `↓` mark clipped content without consuming a
+  blank separator row.
+- Selection and viewport position are separate. Follow-tail keeps a reader at the newest row until
+  manual navigation detaches it. Resize recalculates visual spans while preserving the stable
+  entry-plus-row position; page loading prepends or appends in authoritative reducer order without
+  jumping the selected fact where practical.
 - Very long unbroken content is clipped or wrapped by display cell without splitting wide Unicode
   characters. Renderer-added whitespace is never mistaken for content indentation.
 

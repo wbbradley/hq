@@ -11771,3 +11771,34 @@ message is not moved below it, and a pending interaction exclusively owns the li
 discarding canonical history or technical evidence.
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-01 — Qualified oversized conversation scrolling
+
+Installed PTY coverage now opens an oversized Markdown conversation independently of Inbox row
+ordering, follows the initial tail, returns Home, traverses its first, middle, and final regions by
+visual row, observes both continuation cues, and opens the neighboring short entries. The existing
+inert-Markdown PTY path also visits both bounds, while pure renderer and model tests retain the
+bounded artifact cache, redraw budget, stable entry-plus-row viewport, selection, and follow-tail
+contracts.
+
+The TUI, conversation-surface, acceptance-scenario, and behavior-ledger documents now describe
+continuous intersecting entry slices, row versus entry navigation, continuation cues, stable
+viewport restoration, and explicit follow-tail. Formatting, architecture/specification verifiers,
+strict locked workspace Clippy, the installed PTY suite, and the complete locked all-target and
+all-feature workspace suite pass.
+
+### Original plan entry
+
+### Qualify oversized conversation scrolling
+
+- Add an installed PTY regression proving the complete oversized message and adjacent entries are
+  reachable with row and entry navigation across redraws.
+- Retain the Markdown redraw qualification budget and bounded artifact cache.
+- Update the TUI, conversation-surface, acceptance-scenario, and behavior-ledger contracts for the
+  final viewport, navigation, continuation-cue, selection, and follow-tail behavior.
+- Run formatting, architecture/spec verifiers, strict locked workspace Clippy, the complete locked
+  all-target/all-feature test suite, and installed conversation PTY coverage.
+
+Done when installed behavior and qualification evidence prove the complete oversized-message task.
+
+<!-- End of archived plan entry. -->

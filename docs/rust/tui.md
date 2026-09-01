@@ -23,7 +23,7 @@ UiModel + UiEvent -> Result<(UiModel, [UiEffect]), UiError>
 ```
 
 `UiEvent` covers one-time startup, normalized input, complete resizes, coherent materialized Inbox
-views, identity-bearing timer, snapshot, older-conversation-page, draft, mailbox-command,
+views, identity-bearing timer, snapshot, older-conversation-page, passive viewport geometry, draft, mailbox-command,
 named-agent administration, and managed-session completions, revision-only invalidations, and
 generation-scoped connection states and failures. `UiEffect` covers complete all-section snapshot
 requests, latest-value selected-conversation observation, bounded older-page requests, draft open/autosave, stable mailbox
@@ -39,8 +39,9 @@ it is never treated as current merely because the request succeeded. Connection 
 the shell's monotonic generation.
 
 The model preserves each section's summary selection, focus, open conversation, typed-detail state,
-and conversation scroll anchor by stable row/fact identity,
-not by screen coordinate or vector index. Reload keeps each identity while it remains present and
+and conversation viewport by stable entry identity plus visual-row offset, independently from the
+selected fact and explicit follow-tail state, not by screen coordinate or vector index. Reload keeps
+each identity while it remains present and
 falls back to the first logical item when it disappears. The subscribed materialized view installs
 the Inbox list and selected first page from one revision in one transition. The model retains at
 most eight revision-tagged first pages by stable row identity, keeps the last coherent pair visible
@@ -334,10 +335,12 @@ before returning to top-level navigation. The conversation region is always pres
 its loading, empty, unavailable, or selected state without a surrounding box. Participant-authored
 message bodies render Markdown in column-zero author/body blocks. Paragraphs, breaks, headings,
 emphasis, code, quotes, ordered/unordered/task lists, links, images, and GFM tables use one
-width-specific Ratatui text artifact for both display-cell measurement and painting around a stable
-fact anchor. Wide tables clip inside the pane; wrapped nested-list lines retain their structural
-indentation. A focused item receives a full-row semantic selection surface without a marker or text
-shift. Compact typed activity is not parsed as Markdown and uses status-specific semantic roles.
+width-specific Ratatui text artifact for both display-cell measurement and continuous entry-slice
+painting. The viewport's stable entry-plus-row start may cut through an oversized item, every
+intersecting row is painted, and `↑`/`↓` cues mark clipped content without introducing blank rows.
+Wide tables clip inside the pane; wrapped nested-list lines retain their structural indentation. A
+focused item receives a full-row semantic selection surface without a marker or text shift. Compact
+typed activity is not parsed as Markdown and uses status-specific semantic roles.
 Older-page loading or failure retains the transcript and advertises only the actionable PageDown
 state.
 
@@ -483,8 +486,10 @@ The Inbox always uses a selection-driven master/detail layout: its responsive se
 the selected conversation and a modeless draft pane occupies the lower portion of that detail pane
 while composing. Project rows expose `r continue` for the exact selected thread and `c new
 conversation` for a separate root. A newly committed root is selected by its returned message ID,
-never by display text. An activated conversation centers rendering around the stable fact anchor,
-and rendering shows participant-oriented headings, measured themed Markdown message bodies, and
+never by display text. An activated conversation follows the tail unless the reader has navigated
+away; Up/Down moves one visual row, `j`/`k` selects adjacent entries, and Home/End reveals the
+selected entry's bounds. Rendering shows participant-oriented headings, measured themed Markdown
+message bodies, and
 compact typed non-Markdown activity. The terminal owns a bounded 128-entry artifact cache keyed by
 stable entry identity, exact body, pane width, and the five semantic Markdown styles. Content,
 resize, or theme changes therefore rebuild the artifact without adding presentation state to the

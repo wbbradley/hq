@@ -243,7 +243,10 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
     let run = run_in_pty(
         &state_root,
         true,
-        PtyInteraction::NavigateInboxConversation(content),
+        PtyInteraction::NavigateInboxConversation {
+            marker: content,
+            visit_bounds: false,
+        },
     );
     assert!(
         run.status.success(),
@@ -330,7 +333,10 @@ fn installed_markdown_content_is_inert_and_resource_free() {
     let run = run_in_pty(
         &state_root,
         true,
-        PtyInteraction::NavigateInboxConversation("Adversarial Markdown"),
+        PtyInteraction::NavigateInboxConversation {
+            marker: "Adversarial Markdown",
+            visit_bounds: true,
+        },
     );
     assert!(
         run.status.success(),
@@ -374,6 +380,88 @@ fn installed_markdown_content_is_inert_and_resource_free() {
         );
     }
     assert!(!absent_image.exists());
+    assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+}
+
+#[test]
+fn installed_conversation_reaches_every_oversized_message_region_and_adjacent_entry() {
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+    assert!(
+        hq_output(&state_root, &["human", "create"])
+            .status
+            .success()
+    );
+
+    let before = "BBBBBBBBBBBB-BEFORE-BBBBBBBBBBBB";
+    let first = "OVERSIZED-FIRST-REGION";
+    let middle = "OVERSIZED-MIDDLE-REGION";
+    let last = "OVERSIZED-LAST-REGION";
+    let after = "AAAAAAAAAAAA-AFTER-AAAAAAAAAAAA";
+    let oversized = (0..48)
+        .map(|index| match index {
+            0 => format!("## {first}"),
+            24 => format!("## {middle}"),
+            47 => format!("## {last}"),
+            _ => format!("## oversized row {index:02}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    for interaction in [
+        PtyInteraction::SubmitSelfNote(before),
+        PtyInteraction::SubmitPastedSelfNote {
+            content: &oversized,
+            marker: first,
+        },
+        PtyInteraction::SubmitSelfNote(after),
+    ] {
+        let seeded = run_in_pty(&state_root, true, interaction);
+        assert!(
+            seeded.status.success(),
+            "note setup failed: {:?}",
+            seeded.bytes
+        );
+    }
+
+    let run = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::ScrollOversizedConversation {
+            before,
+            first,
+            middle,
+            last,
+            after,
+        },
+    );
+    assert!(
+        run.status.success(),
+        "oversized scroll failed: {:?}",
+        run.bytes
+    );
+    for marker in [before, first, middle, last, after] {
+        assert!(
+            run.bytes
+                .windows(marker.len())
+                .any(|window| window == marker.as_bytes()),
+            "installed conversation never rendered {marker:?}: {:?}",
+            run.bytes
+        );
+    }
+    assert!(
+        run.bytes
+            .windows("↑".len())
+            .any(|window| window == "↑".as_bytes())
+            && run
+                .bytes
+                .windows("↓".len())
+                .any(|window| window == "↓".as_bytes()),
+        "installed conversation omitted continuation cues: {:?}",
+        run.bytes
+    );
     assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
 }
 
@@ -892,7 +980,17 @@ enum PtyInteraction<'content> {
         content: &'content str,
         marker: &'content str,
     },
-    NavigateInboxConversation(&'content str),
+    NavigateInboxConversation {
+        marker: &'content str,
+        visit_bounds: bool,
+    },
+    ScrollOversizedConversation {
+        before: &'content str,
+        first: &'content str,
+        middle: &'content str,
+        last: &'content str,
+        after: &'content str,
+    },
     ReplyToProjectConversation {
         name: &'content str,
         initial: &'content str,
@@ -993,6 +1091,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
     let mut resource_commit_sent = false;
     let mut interaction_answer_sent = false;
     let mut exit_sent = false;
+    let mut oversized_to_before_keys = Vec::new();
+    let mut before_to_after_keys = Vec::new();
+    let mut oversized_phase = 0_u8;
     let mut next_state_probe_at = Instant::now();
     let status = loop {
         let previous_output_length = bytes.len();
@@ -1046,7 +1147,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::SubmitSelfNote(_) | PtyInteraction::SubmitPastedSelfNote { .. } => {
                     vec![b"N"]
                 }
-                PtyInteraction::NavigateInboxConversation(_)
+                PtyInteraction::NavigateInboxConversation { .. }
+                | PtyInteraction::ScrollOversizedConversation { .. }
                 | PtyInteraction::ReplyToProjectConversation { .. } => Vec::new(),
                 PtyInteraction::CreateAgent(_) => vec![b"l", b"l", b"l", b"c"],
                 PtyInteraction::StartRejectedSession => vec![b"l", b"l", b"l", b"\t"],
@@ -1151,9 +1253,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .windows(b"0/16384".len())
                 .any(|window| window == b"0/16384")
         {
-            master
-                .write_all(format!("{content}\r").as_bytes())
-                .expect("self-note text writes");
+            write_pty_bytes(&mut master, format!("{content}\r").as_bytes());
             master.flush().expect("self-note text flushes");
             content_sent = true;
         }
@@ -1164,19 +1264,19 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .windows(b"0/16384".len())
                 .any(|window| window == b"0/16384")
         {
-            master
-                .write_all(format!("\x1b[200~{content}\x1b[201~\r").as_bytes())
-                .expect("bracketed self-note paste writes");
+            write_pty_bytes(
+                &mut master,
+                format!("\x1b[200~{content}\x1b[201~\r").as_bytes(),
+            );
             master.flush().expect("bracketed self-note paste flushes");
             content_sent = true;
         }
-        if let PtyInteraction::NavigateInboxConversation(content) = interaction
+        if let PtyInteraction::NavigateInboxConversation { marker, .. } = interaction
             && initial_key_sent
             && !content_sent
             && bytes
-                .windows(content.len())
-                .any(|window| window == content.as_bytes())
-            && bytes.windows(b"You".len()).any(|window| window == b"You")
+                .windows(marker.len())
+                .any(|window| window == marker.as_bytes())
         {
             master
                 .write_all(b"\t\r")
@@ -1185,7 +1285,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             content_sent = true;
             completion_offset = Some(bytes.len());
         }
-        if matches!(interaction, PtyInteraction::NavigateInboxConversation(_))
+        if let PtyInteraction::NavigateInboxConversation { visit_bounds, .. } = interaction
             && content_sent
             && !managed_action_sent
             && completion_offset.is_some_and(|offset| {
@@ -1194,13 +1294,40 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                     .any(|window| window == "h/← Inbox".as_bytes())
             })
         {
-            master.write_all(b"h").expect("Inbox back key writes");
-            master.flush().expect("Inbox back key flushes");
+            let keys = if visit_bounds {
+                b"\x1b[H".as_slice()
+            } else {
+                b"h"
+            };
+            master.write_all(keys).expect("Inbox navigation keys write");
+            master.flush().expect("Inbox navigation keys flush");
             managed_action_sent = true;
+            managed_provider_sent = !visit_bounds;
             completion_offset = Some(bytes.len());
         }
-        if matches!(interaction, PtyInteraction::NavigateInboxConversation(_))
+        if let PtyInteraction::NavigateInboxConversation {
+            marker,
+            visit_bounds: true,
+        } = interaction
             && managed_action_sent
+            && !managed_provider_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(marker.len())
+                    .any(|window| window == marker.as_bytes())
+            })
+        {
+            master
+                .write_all(b"\x1b[Fh")
+                .expect("Inbox End and back keys write");
+            master.flush().expect("Inbox End and back keys flush");
+            managed_provider_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(
+            interaction,
+            PtyInteraction::NavigateInboxConversation { .. }
+        ) && managed_provider_sent
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
@@ -1211,6 +1338,187 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             master.write_all(&[0x03]).expect("Ctrl-C writes");
             master.flush().expect("Ctrl-C flushes");
             exit_sent = true;
+        }
+        if let PtyInteraction::ScrollOversizedConversation {
+            before,
+            first,
+            after,
+            ..
+        } = interaction
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(after.len())
+                .any(|window| window == after.as_bytes())
+            && bytes
+                .windows(before.len())
+                .any(|window| window == before.as_bytes())
+            && bytes
+                .windows(first.len())
+                .any(|window| window == first.as_bytes())
+        {
+            let marker_positions = [before, first, after].map(|marker| {
+                bytes
+                    .windows(marker.len())
+                    .position(|window| window == marker.as_bytes())
+                    .expect("all seeded conversation markers are visible")
+            });
+            let before_rank = marker_positions
+                .iter()
+                .filter(|position| **position < marker_positions[0])
+                .count();
+            let oversized_rank = marker_positions
+                .iter()
+                .filter(|position| **position < marker_positions[1])
+                .count();
+            let after_rank = marker_positions
+                .iter()
+                .filter(|position| **position < marker_positions[2])
+                .count();
+            let mut keys = vec![b'\t'];
+            keys.extend(std::iter::repeat_n(b'j', oversized_rank));
+            keys.push(b'\r');
+            oversized_to_before_keys = navigation_keys(oversized_rank, before_rank);
+            before_to_after_keys = navigation_keys(before_rank, after_rank);
+            master
+                .write_all(&keys)
+                .expect("oversized conversation entry keys write");
+            master.flush().expect("oversized entry keys flush");
+            content_sent = true;
+            oversized_phase = 1;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::ScrollOversizedConversation { last, .. } = interaction
+            && oversized_phase == 1
+            && completion_offset.is_some_and(|offset| {
+                let rendered = &bytes[offset..];
+                rendered
+                    .windows("h/← Inbox".len())
+                    .any(|window| window == "h/← Inbox".as_bytes())
+                    && rendered
+                        .windows(last.len())
+                        .any(|window| window == last.as_bytes())
+            })
+        {
+            master.write_all(b"\x1b[H").expect("Home key writes");
+            master.flush().expect("Home key flushes");
+            oversized_phase = 2;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::ScrollOversizedConversation { first, .. } = interaction
+            && oversized_phase == 2
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(first.len())
+                    .any(|window| window == first.as_bytes())
+            })
+        {
+            for _ in 0..40 {
+                write_pty_bytes(&mut master, b"\x1b[B");
+            }
+            master.flush().expect("row-down keys flush");
+            managed_action_sent = true;
+            oversized_phase = 3;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::ScrollOversizedConversation { middle, .. } = interaction
+            && oversized_phase == 3
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(middle.len())
+                    .any(|window| window == middle.as_bytes())
+            })
+        {
+            for _ in 0..88 {
+                write_pty_bytes(&mut master, b"\x1b[B");
+            }
+            master.flush().expect("remaining row-down keys flush");
+            managed_provider_sent = true;
+            oversized_phase = 4;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::ScrollOversizedConversation { last, .. } = interaction
+            && oversized_phase == 4
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(last.len())
+                    .any(|window| window == last.as_bytes())
+            })
+        {
+            master.write_all(b"h").expect("Inbox back key writes");
+            master.flush().expect("Inbox back key flushes");
+            resource_commit_sent = true;
+            oversized_phase = 5;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(
+            interaction,
+            PtyInteraction::ScrollOversizedConversation { .. }
+        ) && oversized_phase == 5
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Enter".len())
+                    .any(|window| window == b"Enter")
+            })
+        {
+            let mut keys = oversized_to_before_keys.clone();
+            keys.push(b'\r');
+            master
+                .write_all(&keys)
+                .expect("open preceding conversation entry");
+            master.flush().expect("preceding entry keys flush");
+            interaction_answer_sent = true;
+            oversized_phase = 6;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::ScrollOversizedConversation { before, .. } = interaction
+            && oversized_phase == 6
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(before.len())
+                    .any(|window| window == before.as_bytes())
+            })
+        {
+            master
+                .write_all(b"h")
+                .expect("second Inbox back key writes");
+            master.flush().expect("second Inbox back key flushes");
+            oversized_phase = 7;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(
+            interaction,
+            PtyInteraction::ScrollOversizedConversation { .. }
+        ) && oversized_phase == 7
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Enter".len())
+                    .any(|window| window == b"Enter")
+            })
+        {
+            let mut keys = before_to_after_keys.clone();
+            keys.push(b'\r');
+            master
+                .write_all(&keys)
+                .expect("open following conversation entry");
+            master.flush().expect("following entry keys flush");
+            oversized_phase = 8;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::ScrollOversizedConversation { after, .. } = interaction
+            && oversized_phase == 8
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                let after_probe = after.split_once('-').map_or(after, |(prefix, _)| prefix);
+                bytes[offset..]
+                    .windows(after_probe.len())
+                    .any(|window| window == after_probe.as_bytes())
+            })
+        {
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
+            oversized_phase = 9;
         }
         if let PtyInteraction::ReplyToProjectConversation { name, initial, .. } = interaction
             && initial_key_sent
@@ -1802,6 +2110,28 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         bytes,
         before,
         after,
+    }
+}
+
+fn navigation_keys(from_rank: usize, to_rank: usize) -> Vec<u8> {
+    if to_rank > from_rank {
+        std::iter::repeat_n(b'j', to_rank - from_rank).collect()
+    } else {
+        std::iter::repeat_n(b'k', from_rank - to_rank).collect()
+    }
+}
+
+fn write_pty_bytes(master: &mut File, mut bytes: &[u8]) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !bytes.is_empty() {
+        match master.write(bytes) {
+            Ok(0) => panic!("pseudoterminal stopped accepting input"),
+            Ok(written) => bytes = &bytes[written..],
+            Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("pseudoterminal input failed: {error}"),
+        }
     }
 }
 
