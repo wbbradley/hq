@@ -209,7 +209,7 @@ grep -Fq 'impl RelayStatePort for RelayStoreAdapter' \
 grep -Fq 'impl HarnessStatePort for HarnessStoreAdapter' \
   "$repository_root/crates/hq-node/src/harness_store.rs" ||
   fail "hq-node must own the harness/store record mapping"
-grep -Fq 'impl<P: CommitFacts + Send + Sync> HarnessPersistencePort' \
+grep -Fq 'impl<P: CommitFacts + QueryDomain + Send + Sync> HarnessPersistencePort' \
   "$repository_root/crates/hq-node/src/harness_persistence.rs" ||
   fail "hq-node must own canonical normalized harness persistence"
 grep -Fq 'plan_harness_output(' "$repository_root/crates/hq-application/src/harness.rs" ||
