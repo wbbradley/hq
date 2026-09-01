@@ -8,6 +8,10 @@ use std::{
     num::NonZeroUsize,
     os::unix::net::UnixStream,
     path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -892,6 +896,8 @@ pub struct LocalNodeClient {
 pub struct LocalNodeEventClient {
     installation_id: InstallationId,
     runner: BlockingClientRunner<UnixClientTransport>,
+    interrupt: UnixClientInterrupt,
+    observation_deadline: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -913,7 +919,8 @@ impl LocalNodeClient {
         config: LocalNodeClientConfig,
         launcher: L,
     ) -> Result<Self, LocalNodeClientError> {
-        let (installation_id, runner) = connect_runner(config, launcher, SubscriptionMode::None)?;
+        let (installation_id, runner, _interrupt) =
+            connect_runner(config, launcher, SubscriptionMode::None)?;
         Ok(Self {
             installation_id,
             runner,
@@ -1003,10 +1010,14 @@ impl LocalNodeEventClient {
         config: LocalNodeClientConfig,
         launcher: L,
     ) -> Result<Self, LocalNodeClientError> {
-        let (installation_id, runner) = connect_runner(config, launcher, SubscriptionMode::All)?;
+        let observation_deadline = config.command_deadline;
+        let (installation_id, runner, interrupt) =
+            connect_runner(config, launcher, SubscriptionMode::All)?;
         Ok(Self {
             installation_id,
             runner,
+            interrupt,
+            observation_deadline,
         })
     }
 
@@ -1015,38 +1026,43 @@ impl LocalNodeEventClient {
         self.installation_id
     }
 
-    /// Drives connection, subscription, and invalidation refresh work for a bounded interval.
-    pub fn poll_event(
+    /// Drives subscribed work until an event, connection-state change, or workflow deadline.
+    pub fn next_observation(&mut self) -> Result<Option<ClientEvent>, LocalNodeClientError> {
+        self.runner
+            .poll_event_or_state_change(self.observation_deadline)
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Completes the initial subscription acknowledgement and returns its authoritative base.
+    pub fn activate_subscription(
         &mut self,
-        wait: Duration,
-    ) -> Result<Option<ClientEvent>, LocalNodeClientError> {
-        self.runner
-            .poll_event(wait)
-            .map_err(LocalNodeClientError::Execution)
+    ) -> Result<AuthoritativeSnapshotDto, LocalNodeClientError> {
+        loop {
+            if let Some(event) = self.next_observation()? {
+                match event {
+                    ClientEvent::Snapshot(snapshot) => return Ok(snapshot),
+                    ClientEvent::IncompatibleVersion => {
+                        return Err(LocalNodeClientError::Execution(
+                            BlockingClientError::Incompatible,
+                        ));
+                    }
+                    ClientEvent::Error { .. } => {
+                        return Err(LocalNodeClientError::Client);
+                    }
+                    ClientEvent::Mutation(_)
+                    | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::AgentRetirement { .. }
+                    | ClientEvent::AgentSession { .. }
+                    | ClientEvent::Response { .. }
+                    | ClientEvent::RequestLost(_) => {}
+                }
+            }
+        }
     }
 
-    /// Loads one explicit complete authoritative snapshot on the same subscribed connection.
-    pub fn snapshot(&mut self) -> Result<AuthoritativeSnapshotDto, LocalNodeClientError> {
-        self.runner
-            .snapshot()
-            .map_err(LocalNodeClientError::Execution)
-    }
-
-    /// Executes one non-retryable typed request on the subscribed connection.
-    pub fn request(&mut self, request: Request) -> Result<ClientEvent, LocalNodeClientError> {
-        self.runner
-            .request(request)
-            .map_err(LocalNodeClientError::Execution)
-    }
-
-    /// Executes or reconciles one retry-safe mailbox command on the subscribed connection.
-    pub fn mailbox_command(
-        &mut self,
-        request: MailboxCommandRequestDto,
-    ) -> Result<ClientEvent, LocalNodeClientError> {
-        self.runner
-            .mailbox_command(request)
-            .map_err(LocalNodeClientError::Execution)
+    /// Returns a cloneable handle that wakes the active subscribed Unix read.
+    pub fn interrupt_handle(&self) -> UnixClientInterrupt {
+        self.interrupt.clone()
     }
 
     /// Returns the generation-scoped reconnecting-client state.
@@ -1059,7 +1075,14 @@ fn connect_runner<L: NodeLauncher>(
     config: LocalNodeClientConfig,
     launcher: L,
     subscription: SubscriptionMode,
-) -> Result<(InstallationId, BlockingClientRunner<UnixClientTransport>), LocalNodeClientError> {
+) -> Result<
+    (
+        InstallationId,
+        BlockingClientRunner<UnixClientTransport>,
+        UnixClientInterrupt,
+    ),
+    LocalNodeClientError,
+> {
     let runtime = RuntimePaths::new(config.state.root().join("runtime"))
         .map_err(|_error: RuntimePathError| LocalNodeClientError::RuntimePath)?;
     let probe = LifecycleClient::new(LifecycleClientConfig {
@@ -1092,6 +1115,7 @@ fn connect_runner<L: NodeLauncher>(
         io_timeout: config.io_timeout,
     })
     .map_err(LocalNodeClientError::Transport)?;
+    let interrupt = transport.interrupt_handle();
     let reconnect = ReconnectPolicy::new(config.reconnect_initial, config.reconnect_maximum)
         .map_err(|_| LocalNodeClientError::Client)?;
     let mut client = ReconnectingClient::new(
@@ -1118,26 +1142,77 @@ fn connect_runner<L: NodeLauncher>(
         transport,
     )
     .map_err(LocalNodeClientError::Execution)?;
-    Ok((installation_id, runner))
+    Ok((installation_id, runner, interrupt))
 }
 
 /// Standard blocking transport that owns no state beyond validated configuration.
 #[derive(Clone, Debug)]
 pub struct UnixClientTransport {
     config: UnixClientTransportConfig,
+    interrupt: UnixClientInterrupt,
+    next_connection_id: Arc<AtomicU64>,
+}
+
+/// Cloneable capability that interrupts only the transport's currently active Unix connection.
+#[derive(Clone, Debug, Default)]
+pub struct UnixClientInterrupt {
+    active: Arc<Mutex<Option<InterruptConnection>>>,
+}
+
+#[derive(Debug)]
+struct InterruptConnection {
+    id: u64,
+    stream: UnixStream,
+}
+
+impl UnixClientInterrupt {
+    /// Wakes an idle transport read without waiting for its configured timeout.
+    pub fn interrupt(&self) {
+        if let Ok(active) = self.active.lock()
+            && let Some(active) = active.as_ref()
+        {
+            let _ = active.stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    fn register(&self, id: u64, stream: UnixStream) {
+        if let Ok(mut active) = self.active.lock() {
+            *active = Some(InterruptConnection { id, stream });
+        }
+    }
+
+    fn clear(&self, id: u64) {
+        if let Ok(mut active) = self.active.lock()
+            && active.as_ref().is_some_and(|active| active.id == id)
+        {
+            *active = None;
+        }
+    }
 }
 
 /// One Unix client connection with an incremental frame decoder retained across idle polls.
 #[derive(Debug)]
 pub struct UnixClientConnection {
+    id: u64,
     stream: UnixStream,
     decoder: FrameDecoder,
     ready_frames: VecDeque<Vec<u8>>,
 }
 
 impl UnixClientConnection {
+    #[cfg(test)]
     fn new(stream: UnixStream) -> Self {
         Self {
+            id: 0,
+            stream,
+            decoder: FrameDecoder::new(),
+            ready_frames: VecDeque::new(),
+        }
+    }
+
+    fn tracked(id: u64, stream: UnixStream) -> Self {
+        Self {
+            id,
             stream,
             decoder: FrameDecoder::new(),
             ready_frames: VecDeque::new(),
@@ -1151,7 +1226,31 @@ impl UnixClientTransport {
         if config.io_timeout.is_zero() {
             return Err(UnixClientTransportError::InvalidTimeout);
         }
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            interrupt: UnixClientInterrupt::default(),
+            next_connection_id: Arc::new(AtomicU64::new(1)),
+        })
+    }
+
+    /// Returns an idempotent handle for waking the currently active connection.
+    pub fn interrupt_handle(&self) -> UnixClientInterrupt {
+        self.interrupt.clone()
+    }
+
+    fn own_connection(
+        &self,
+        stream: UnixStream,
+    ) -> Result<UnixClientConnection, UnixClientTransportError> {
+        let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
+        if id == 0 {
+            return Err(UnixClientTransportError::Transport);
+        }
+        let interrupt_stream = stream
+            .try_clone()
+            .map_err(|_| UnixClientTransportError::Transport)?;
+        self.interrupt.register(id, interrupt_stream);
+        Ok(UnixClientConnection::tracked(id, stream))
     }
 }
 
@@ -1174,7 +1273,7 @@ impl ClientTransport for UnixClientTransport {
             .set_read_timeout(Some(self.config.io_timeout))
             .and_then(|()| stream.set_write_timeout(Some(self.config.io_timeout)))
             .map_err(|_| UnixClientTransportError::Transport)?;
-        Ok(UnixClientConnection::new(stream))
+        self.own_connection(stream)
     }
 
     fn write(
@@ -1259,6 +1358,7 @@ impl ClientTransport for UnixClientTransport {
     }
 
     fn close(&mut self, connection: Self::Connection) {
+        self.interrupt.clear(connection.id);
         let _ = connection.stream.shutdown(std::net::Shutdown::Both);
     }
 
@@ -1271,7 +1371,12 @@ impl ClientTransport for UnixClientTransport {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::{io::Write as _, os::unix::net::UnixStream, time::Duration};
+    use std::{
+        io::{Read as _, Write as _},
+        os::unix::net::UnixStream,
+        thread,
+        time::Duration,
+    };
 
     use hq_local_api::{
         ClientTransport,
@@ -1315,5 +1420,32 @@ mod tests {
                 .expect("completed poll"),
             Some(frame)
         );
+    }
+
+    #[test]
+    fn unix_interrupt_wakes_an_idle_read_and_old_close_cannot_disarm_the_new_generation() {
+        let mut transport = UnixClientTransport::new(UnixClientTransportConfig {
+            runtime: RuntimePaths::new(std::env::temp_dir().join("hq-local-client-interrupt-test"))
+                .expect("absolute runtime path"),
+            io_timeout: Duration::from_secs(30),
+        })
+        .expect("transport");
+        let interrupt = transport.interrupt_handle();
+        let (_first_writer, first_reader) = UnixStream::pair().expect("first socket pair");
+        let first = transport.own_connection(first_reader).expect("first owner");
+        let (_second_writer, second_reader) = UnixStream::pair().expect("second socket pair");
+        let mut second = transport
+            .own_connection(second_reader)
+            .expect("second owner");
+
+        transport.close(first);
+        let reader = thread::spawn(move || {
+            let mut byte = [0_u8; 1];
+            second.stream.read(&mut byte)
+        });
+        interrupt.interrupt();
+
+        let result = reader.join().expect("idle reader joined");
+        assert!(matches!(result, Ok(0) | Err(_)));
     }
 }

@@ -1695,6 +1695,41 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
         }
     }
 
+    /// Drives connection, subscription, and refresh work until an event, state change, or timeout.
+    ///
+    /// Unlike [`Self::poll_event`], this returns `Ok(None)` as soon as the generation-scoped
+    /// connection state changes. Interactive observers can therefore publish reconnect boundaries
+    /// without waiting for the rest of a reconnect attempt or for the supplied deadline.
+    pub fn poll_event_or_state_change(
+        &mut self,
+        wait: Duration,
+    ) -> Result<Option<ClientEvent>, BlockingClientError> {
+        if let Some(event) = self.events.pop_front() {
+            return Ok(Some(event));
+        }
+        if wait.is_zero() {
+            return Ok(None);
+        }
+        let observed_state = self.connection_state();
+        let deadline = Instant::now()
+            .checked_add(wait)
+            .ok_or(BlockingClientError::Deadline)?;
+        self.connection_attempts = 0;
+        self.ensure_started()?;
+        if self.connection_state() != observed_state {
+            return Ok(None);
+        }
+        loop {
+            match self.step(deadline) {
+                Ok(Some(event)) => return Ok(Some(event)),
+                Ok(None) if self.connection_state() != observed_state => return Ok(None),
+                Ok(None) => {}
+                Err(BlockingClientError::Deadline) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Returns the generation-scoped state of the owned reconnecting client.
     pub const fn connection_state(&self) -> ClientConnectionState {
         self.client.connection_state()

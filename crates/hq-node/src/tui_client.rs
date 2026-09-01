@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     },
@@ -41,7 +41,7 @@ use hq_tui::{
 };
 
 use crate::{
-    LocalNodeClientError, LocalNodeEventClient, StatePaths,
+    LocalNodeClient, LocalNodeClientError, LocalNodeEventClient, StatePaths, UnixClientInterrupt,
     local_client::{
         LocalManagedSessionCommand, LocalManagedSessionOutcome, LocalNamedAgentCommand,
         LocalProject, LocalProjectCommand, LocalProjectOutcome, execute_managed_session_command,
@@ -52,8 +52,6 @@ use crate::{
 
 const CLIENT_COMMAND_CAPACITY: usize = 8;
 const CLIENT_EVENT_CAPACITY: usize = 16;
-const COMMAND_WAIT: Duration = Duration::from_millis(10);
-const CLIENT_POLL_WAIT: Duration = Duration::from_millis(25);
 
 /// Monotonic clock capability used only by the effect executor's timer queue.
 pub trait TuiClock {
@@ -160,9 +158,21 @@ pub trait TuiClientPort: Send {
             action: "restart HQ with support for project changes".to_owned(),
         })
     }
+}
 
-    /// Polls subscribed invalidation and reconnect observations for a bounded interval.
-    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation>;
+/// Cross-thread capability that wakes one blocking observation read during shutdown.
+pub trait TuiObservationInterrupt: Send + Sync {
+    /// Interrupts the active observation wait. Repeated calls are harmless.
+    fn interrupt(&self);
+}
+
+/// Dedicated subscribed observation capability owned independently from TUI commands.
+pub trait TuiObservationPort: Send {
+    /// Blocks until subscribed work produces observations or a transport workflow boundary.
+    fn next_observations(&mut self) -> Vec<TuiClientObservation>;
+
+    /// Returns a capability that can wake the blocking observation owner from another thread.
+    fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt>;
 }
 
 /// Actionable draft failure with the current server value on optimistic conflict.
@@ -176,11 +186,16 @@ pub struct TuiDraftError {
 
 /// Ordinary local-API implementation of the TUI client capability.
 pub struct LocalTuiClient {
-    client: LocalNodeEventClient,
+    client: LocalNodeClient,
     state: StatePaths,
-    observed_connection: Option<ClientConnectionState>,
     conversation_keys: BTreeMap<String, ConversationKeyDto>,
     conversation_presentations: BTreeMap<String, ConversationPresentationContext>,
+}
+
+/// Subscribed local-API observation adapter with no command or query authority.
+pub struct LocalTuiObserver {
+    client: LocalNodeEventClient,
+    observed_connection: Option<ClientConnectionState>,
 }
 
 #[derive(Clone)]
@@ -190,15 +205,30 @@ struct ConversationPresentationContext {
 }
 
 impl LocalTuiClient {
-    /// Wraps one already-ready subscribed ordinary local API client.
-    pub const fn new(client: LocalNodeEventClient, state: StatePaths) -> Self {
+    /// Wraps one already-ready ordinary local API command client.
+    pub const fn new(client: LocalNodeClient, state: StatePaths) -> Self {
         Self {
             client,
             state,
-            observed_connection: None,
             conversation_keys: BTreeMap::new(),
             conversation_presentations: BTreeMap::new(),
         }
+    }
+}
+
+impl LocalTuiObserver {
+    /// Wraps one activated broad-invalidation subscription.
+    pub const fn new(client: LocalNodeEventClient) -> Self {
+        Self {
+            client,
+            observed_connection: None,
+        }
+    }
+}
+
+impl TuiObservationInterrupt for UnixClientInterrupt {
+    fn interrupt(&self) {
+        UnixClientInterrupt::interrupt(self);
     }
 }
 
@@ -611,9 +641,17 @@ impl TuiClientPort for LocalTuiClient {
             outcome,
         })
     }
+}
 
-    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
-        let result = self.client.poll_event(wait);
+impl TuiObservationPort for LocalTuiObserver {
+    fn next_observations(&mut self) -> Vec<TuiClientObservation> {
+        let current = self.client.connection_state();
+        if self.observed_connection != Some(current) {
+            self.observed_connection = Some(current);
+            let (generation, state) = connection_observation(current);
+            return vec![TuiClientObservation::Connection { generation, state }];
+        }
+        let result = self.client.next_observation();
         let state = self.client.connection_state();
         let mut observations = Vec::new();
         if self.observed_connection != Some(state) {
@@ -649,6 +687,10 @@ impl TuiClientPort for LocalTuiClient {
             }),
         }
         observations
+    }
+
+    fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt> {
+        Arc::new(self.client.interrupt_handle())
     }
 }
 
@@ -804,41 +846,73 @@ pub struct TuiEffectExecutor<C: TuiClock> {
     clock: C,
     commands: SyncSender<WorkerCommand>,
     events: Receiver<UiEvent>,
-    worker: Option<JoinHandle<()>>,
+    workers: Option<TuiWorkers>,
     cancellation: Arc<AtomicBool>,
+    observation_interrupt: Arc<dyn TuiObservationInterrupt>,
     timers: Vec<ScheduledTimer>,
     outstanding_snapshots: Vec<EffectId>,
     redraw_pending: bool,
     exit_requested: bool,
 }
 
+struct TuiWorkers {
+    commands: JoinHandle<()>,
+    observations: JoinHandle<()>,
+}
+
 impl<C: TuiClock> TuiEffectExecutor<C> {
-    /// Starts one named worker that exclusively owns the supplied client capability.
+    /// Starts a command worker with an interruptible parked observation owner.
     pub fn spawn<P: TuiClientPort + 'static>(
         client: P,
+        clock: C,
+    ) -> Result<Self, TuiExecutorError> {
+        Self::spawn_with_observer(client, ParkedTuiObserver::default(), clock)
+    }
+
+    /// Starts independent named workers for commands and subscribed observations.
+    pub fn spawn_with_observer<P: TuiClientPort + 'static, O: TuiObservationPort + 'static>(
+        client: P,
+        observer: O,
         clock: C,
     ) -> Result<Self, TuiExecutorError> {
         let (commands, command_receiver) = mpsc::sync_channel(CLIENT_COMMAND_CAPACITY);
         let (event_sender, events) = mpsc::sync_channel(CLIENT_EVENT_CAPACITY);
         let cancellation = Arc::new(AtomicBool::new(false));
-        let worker_cancellation = Arc::clone(&cancellation);
-        let worker = thread::Builder::new()
-            .name("hq-tui-client".to_owned())
+        let command_cancellation = Arc::clone(&cancellation);
+        let command_events = event_sender.clone();
+        let command_worker = thread::Builder::new()
+            .name("hq-tui-commands".to_owned())
             .spawn(move || {
                 client_worker(
                     client,
                     &command_receiver,
-                    &event_sender,
-                    &worker_cancellation,
+                    &command_events,
+                    &command_cancellation,
                 );
             })
             .map_err(|_| TuiExecutorError::WorkerSpawn)?;
+        let observation_interrupt = observer.interrupt_handle();
+        let observation_cancellation = Arc::clone(&cancellation);
+        let Ok(observation_worker) = thread::Builder::new()
+            .name("hq-tui-observations".to_owned())
+            .spawn(move || {
+                observation_worker(observer, &event_sender, &observation_cancellation);
+            })
+        else {
+            drop(commands);
+            let _ = command_worker.join();
+            return Err(TuiExecutorError::WorkerSpawn);
+        };
         Ok(Self {
             clock,
             commands,
             events,
-            worker: Some(worker),
+            workers: Some(TuiWorkers {
+                commands: command_worker,
+                observations: observation_worker,
+            }),
             cancellation,
+            observation_interrupt,
             timers: Vec::new(),
             outstanding_snapshots: Vec::new(),
             redraw_pending: false,
@@ -977,10 +1051,11 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
 
     /// Stops and joins the worker, draining bounded results while it exits.
     pub fn shutdown(&mut self) -> Result<(), TuiExecutorError> {
-        let Some(worker) = self.worker.take() else {
+        let Some(workers) = self.workers.take() else {
             return Ok(());
         };
         self.cancellation.store(true, Ordering::SeqCst);
+        self.observation_interrupt.interrupt();
         let mut command = WorkerCommand::Shutdown;
         loop {
             match self.commands.try_send(command) {
@@ -988,18 +1063,24 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                 Err(TrySendError::Full(returned)) => {
                     command = returned;
                     while self.events.try_recv().is_ok() {}
-                    if worker.is_finished() {
+                    if workers.commands.is_finished() {
                         break;
                     }
                     thread::yield_now();
                 }
             }
         }
-        while !worker.is_finished() {
+        while !workers.commands.is_finished() || !workers.observations.is_finished() {
             while self.events.try_recv().is_ok() {}
             thread::yield_now();
         }
-        worker.join().map_err(|_| TuiExecutorError::WorkerPanicked)
+        let command_result = workers.commands.join();
+        let observation_result = workers.observations.join();
+        if command_result.is_err() || observation_result.is_err() {
+            Err(TuiExecutorError::WorkerPanicked)
+        } else {
+            Ok(())
+        }
     }
 
     fn effect_is_outstanding(&self, id: EffectId) -> bool {
@@ -1057,6 +1138,40 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
     }
 }
 
+#[derive(Clone, Default)]
+struct ParkedTuiInterrupt {
+    interrupted: Arc<(Mutex<bool>, Condvar)>,
+}
+
+#[derive(Default)]
+struct ParkedTuiObserver {
+    interrupt: ParkedTuiInterrupt,
+}
+
+impl TuiObservationInterrupt for ParkedTuiInterrupt {
+    fn interrupt(&self) {
+        let (interrupted, wake) = &*self.interrupted;
+        if let Ok(mut interrupted) = interrupted.lock() {
+            *interrupted = true;
+            wake.notify_all();
+        }
+    }
+}
+
+impl TuiObservationPort for ParkedTuiObserver {
+    fn next_observations(&mut self) -> Vec<TuiClientObservation> {
+        let (interrupted, wake) = &*self.interrupt.interrupted;
+        if let Ok(interrupted) = interrupted.lock() {
+            drop(wake.wait_while(interrupted, |interrupted| !*interrupted));
+        }
+        Vec::new()
+    }
+
+    fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt> {
+        Arc::new(self.interrupt.clone())
+    }
+}
+
 impl<C: TuiClock> Drop for TuiEffectExecutor<C> {
     fn drop(&mut self) {
         let _ = self.shutdown();
@@ -1074,7 +1189,7 @@ fn client_worker<P: TuiClientPort>(
         if cancellation.load(Ordering::SeqCst) {
             break;
         }
-        match commands.recv_timeout(COMMAND_WAIT) {
+        match commands.recv() {
             Ok(_) if cancellation.load(Ordering::SeqCst) => break,
             Ok(WorkerCommand::LoadSnapshot { id }) => {
                 let event = match client.load_snapshot() {
@@ -1199,31 +1314,37 @@ fn client_worker<P: TuiClientPort>(
                     break;
                 }
             }
-            Ok(WorkerCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if cancellation.load(Ordering::SeqCst) {
-                    break;
+            Ok(WorkerCommand::Shutdown) | Err(mpsc::RecvError) => break,
+        }
+    }
+}
+
+fn observation_worker<O: TuiObservationPort>(
+    mut observer: O,
+    events: &SyncSender<UiEvent>,
+    cancellation: &AtomicBool,
+) {
+    while !cancellation.load(Ordering::SeqCst) {
+        let observations = observer.next_observations();
+        if cancellation.load(Ordering::SeqCst) {
+            break;
+        }
+        for observation in observations {
+            let event = match observation {
+                TuiClientObservation::Invalidated { revision } => UiEvent::Invalidated { revision },
+                TuiClientObservation::Connection { generation, state } => {
+                    UiEvent::ConnectionObserved { generation, state }
                 }
-                for observation in client.poll(CLIENT_POLL_WAIT) {
-                    let event = match observation {
-                        TuiClientObservation::Invalidated { revision } => {
-                            UiEvent::Invalidated { revision }
-                        }
-                        TuiClientObservation::Connection { generation, state } => {
-                            UiEvent::ConnectionObserved { generation, state }
-                        }
-                        TuiClientObservation::Failure {
-                            generation,
-                            failure,
-                        } => UiEvent::ClientFailed {
-                            generation,
-                            failure,
-                        },
-                    };
-                    if events.send(event).is_err() {
-                        return;
-                    }
-                }
+                TuiClientObservation::Failure {
+                    generation,
+                    failure,
+                } => UiEvent::ClientFailed {
+                    generation,
+                    failure,
+                },
+            };
+            if events.send(event).is_err() {
+                return;
             }
         }
     }

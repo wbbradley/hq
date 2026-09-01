@@ -1334,6 +1334,55 @@ fn blocking_runner_idle_poll_preserves_the_active_connection() {
     assert_eq!(transport.writes.len(), 1);
 }
 
+#[test]
+fn blocking_runner_yields_each_connection_state_change_without_waiting_for_a_deadline() {
+    let hello = WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([98; 32])))
+        .encode_frame()
+        .expect("hello frame");
+    let transport = IdlePollingTransport {
+        reads: VecDeque::from([Some(hello)]),
+        writes: Vec::new(),
+        connects: 0,
+        closes: 0,
+    };
+    let client = ReconnectingClient::new(build(), policy(), 2, InitialView::OnDemand)
+        .expect("observed client");
+    let mut runner = BlockingClientRunner::new(
+        BlockingClientConfig {
+            deadline: Duration::from_secs(1),
+            max_connection_attempts: NonZeroUsize::new(2).expect("nonzero"),
+        },
+        client,
+        transport,
+    )
+    .expect("runner config");
+
+    assert_eq!(
+        runner.poll_event_or_state_change(Duration::from_secs(1)),
+        Ok(None)
+    );
+    assert!(matches!(
+        runner.connection_state(),
+        ClientConnectionState::Connecting(generation) if generation.value() == 1
+    ));
+    assert_eq!(
+        runner.poll_event_or_state_change(Duration::from_secs(1)),
+        Ok(None)
+    );
+    assert!(matches!(
+        runner.connection_state(),
+        ClientConnectionState::Negotiating(generation) if generation.value() == 1
+    ));
+    assert_eq!(
+        runner.poll_event_or_state_change(Duration::from_secs(1)),
+        Ok(None)
+    );
+    assert!(matches!(
+        runner.connection_state(),
+        ClientConnectionState::Active(generation) if generation.value() == 1
+    ));
+}
+
 struct IdlePollingTransport {
     reads: VecDeque<Option<Vec<u8>>>,
     writes: Vec<Vec<u8>>,

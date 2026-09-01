@@ -335,6 +335,16 @@ not a patch. Notices coalesce to their greatest revision while a refresh is in f
 returned snapshot behind that revision immediately triggers another refresh. The client never
 infers missed rows from a revision gap.
 
+The installed TUI uses two independently negotiated local connections. It first registers and
+acknowledges the broad subscription, then opens an ordinary command/query connection for explicit
+snapshots, conversations, drafts, and mutations. The subscribed owner only reads invalidations,
+refresh snapshots, and connection-generation transitions, so an in-flight command cannot starve
+wire reads. Both connections reconnect with their own generation and correlation state. The
+observer hands revision-only events through a bounded process-local queue; it never forwards a
+snapshot body as an invalidation. TUI shutdown closes the active subscribed Unix stream to wake its
+blocking read and joins that owner instead of waiting for a short poll deadline. The five-minute
+model refresh remains only a repair check for missed or buggy notification behavior.
+
 ## Failure and close policy
 
 Malformed, oversized, noncanonical, unknown-version, or out-of-state input closes the session after

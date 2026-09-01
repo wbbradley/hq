@@ -189,11 +189,11 @@ logical anchor.
 
 ## Reconnecting client and effect executor
 
-`hq-node::LocalNodeEventClient` is the long-lived subscribed form of the ordinary local API client.
-Its bounded poll distinguishes an idle socket from a disconnect, and its Unix connection retains an
-incremental frame decoder so a read timeout cannot discard a partial frame. Reconnect delays remain
-queued against monotonic deadlines across short shell polls. Every negotiated generation registers
-the broad invalidation subscription before its acknowledged authoritative snapshot is exposed.
+`hq-node::LocalNodeEventClient` is a read-only, long-lived subscribed local API owner. Its Unix
+connection retains an incremental frame decoder, yields generation-scoped connection changes, and
+registers the broad subscription before exposing the acknowledgement's authoritative base. The
+installed composition completes that activation before it opens the ordinary `LocalNodeClient`
+used by the command adapter. The two clients negotiate and reconnect independently.
 
 `LocalTuiClient` joins each complete authoritative local API snapshot with the passive node-local
 provider catalog and maps them into one presentation bundle containing Inbox, Sent, Archived,
@@ -241,16 +241,22 @@ stop targets to the existing harness CLI workflow, which captures launch directo
 outside the TUI and submits the ordinary `AgentSession` frame. The TUI never stores or renders the
 captured environment and does not own provider authority.
 
-`TuiEffectExecutor` owns one named worker and bounded command/result channels. The worker alone owns
-the subscribed client; the shell cannot reach storage, domain planners, signers, relays, providers,
-or files through this boundary. The executor preserves snapshot effect identity, releases each
-timer once, coalesces redraw requests, and joins its worker on explicit shutdown or drop. Shutdown
-drains bounded results while enqueueing the stop command, so saturated queues cannot deadlock the
-join. Client failures and connection observations retain their generation so older results cannot
-overwrite newer UI state.
+`TuiEffectExecutor` owns two named workers, a bounded command queue, and one bounded result queue.
+The command worker exclusively owns `LocalTuiClient` and serially executes snapshots,
+conversations, draft operations, mailbox commands, project work, and provider-session operations.
+The observation worker exclusively owns `LocalTuiObserver` and blocks in its subscribed socket read;
+it does not wait for command-queue idle time or use a 25 ms notification poll. Both can publish typed
+events independently, while reducer effect identities and generation checks still reject stale
+completions.
 
-The same worker executes draft list/save requests and stable mailbox commands through the ordinary
-subscribed client. It allocates command/message identities, semantic time, and auxiliary randomness
+The executor preserves snapshot effect identity, releases each timer once, coalesces redraw
+requests, and joins both workers on explicit shutdown or drop. Shutdown sets shared cancellation,
+interrupts the exact active observation socket, drains bounded results while enqueueing the command
+stop, and joins both owners even when either panics. Saturated command or result queues cannot
+deadlock the join. The five-minute periodic refresh remains a repair assertion and is not used for
+ordinary notification latency.
+
+The command worker allocates command/message identities, semantic time, and auxiliary randomness
 once, then the reconnecting runner retains and replays that exact command frame until a durable
 receipt is known. No TUI component resolves human authority, thread roots, recipient validity, or
 message-state frontiers. Those remain transaction-local node decisions.

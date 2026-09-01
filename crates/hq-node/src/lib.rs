@@ -99,7 +99,8 @@ pub use lifecycle_client::{
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local_client::{
     LocalNodeClient, LocalNodeClientConfig, LocalNodeClientError, LocalNodeEventClient,
-    UnixClientConnection, UnixClientTransport, UnixClientTransportConfig, UnixClientTransportError,
+    UnixClientConnection, UnixClientInterrupt, UnixClientTransport, UnixClientTransportConfig,
+    UnixClientTransportError,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local_transport::{
@@ -144,9 +145,9 @@ pub use session_registry::{
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use tui_client::{
-    LocalTuiClient, MonotonicTuiClock, TuiClientObservation, TuiClientPort, TuiClock,
-    TuiDraftError, TuiEffectExecutor, TuiExecutorError, tui_conversation_page, tui_snapshot,
-    tui_snapshot_with_provider_catalog,
+    LocalTuiClient, LocalTuiObserver, MonotonicTuiClock, TuiClientObservation, TuiClientPort,
+    TuiClock, TuiDraftError, TuiEffectExecutor, TuiExecutorError, TuiObservationInterrupt,
+    TuiObservationPort, tui_conversation_page, tui_snapshot, tui_snapshot_with_provider_catalog,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use tui_shell::{

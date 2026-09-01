@@ -6,7 +6,8 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -22,7 +23,8 @@ use hq_local_api::protocol::v1::{
 };
 use hq_node::{
     TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiEffectExecutor,
-    TuiExecutorError, tui_conversation_page, tui_snapshot, tui_snapshot_with_provider_catalog,
+    TuiExecutorError, TuiObservationInterrupt, TuiObservationPort, tui_conversation_page,
+    tui_snapshot, tui_snapshot_with_provider_catalog,
 };
 use hq_tui::{
     UiAgentAction, UiCompletedItemPresentation, UiConnectionState, UiConversationActivityKind,
@@ -250,7 +252,6 @@ fn executor_loads_the_complete_snapshot_and_preserves_identity() {
         requests: Arc::clone(&requests),
         conversation_requests: Arc::new(Mutex::new(Vec::new())),
         snapshots: VecDeque::from([Ok(empty_snapshot(7))]),
-        observations: VecDeque::new(),
         stopped: Arc::clone(&stopped),
     };
     let clock = ManualClock::default();
@@ -388,7 +389,6 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
         requests: Arc::new(AtomicUsize::new(0)),
         conversation_requests: Arc::clone(&requests),
         snapshots: VecDeque::new(),
-        observations: VecDeque::new(),
         stopped: Arc::new(Mutex::new(false)),
     };
     let mut executor =
@@ -641,24 +641,25 @@ fn executor_forwards_subscription_and_connection_observations() {
         requests: Arc::new(AtomicUsize::new(0)),
         conversation_requests: Arc::new(Mutex::new(Vec::new())),
         snapshots: VecDeque::new(),
-        observations: VecDeque::from([
-            TuiClientObservation::Connection {
-                generation: 3,
-                state: UiConnectionState::Reconnecting,
-            },
-            TuiClientObservation::Invalidated { revision: 12 },
-            TuiClientObservation::Failure {
-                generation: 3,
-                failure: UiFailure {
-                    code: "local_client_unavailable".to_owned(),
-                    action: "waiting to reconnect".to_owned(),
-                },
-            },
-        ]),
         stopped: Arc::new(Mutex::new(false)),
     };
+    let observer = ScriptedObserver::new([
+        TuiClientObservation::Connection {
+            generation: 3,
+            state: UiConnectionState::Reconnecting,
+        },
+        TuiClientObservation::Invalidated { revision: 12 },
+        TuiClientObservation::Failure {
+            generation: 3,
+            failure: UiFailure {
+                code: "local_client_unavailable".to_owned(),
+                action: "waiting to reconnect".to_owned(),
+            },
+        },
+    ]);
     let mut executor =
-        TuiEffectExecutor::spawn(client, ManualClock::default()).expect("spawn executor");
+        TuiEffectExecutor::spawn_with_observer(client, observer, ManualClock::default())
+            .expect("spawn executor");
 
     assert!(matches!(
         receive_event(&mut executor),
@@ -677,6 +678,47 @@ fn executor_forwards_subscription_and_connection_observations() {
             if failure.code == "local_client_unavailable"
     ));
     executor.shutdown().expect("joined shutdown");
+}
+
+#[test]
+fn blocked_command_cannot_delay_a_subscribed_invalidation() {
+    let command_started = Arc::new(AtomicBool::new(false));
+    let (release_command, command_release) = mpsc::channel();
+    let client = BlockingSnapshotClient {
+        started: Arc::clone(&command_started),
+        release: command_release,
+    };
+    let observer = CommandGatedObserver::new(command_started, 41);
+    let mut executor =
+        TuiEffectExecutor::spawn_with_observer(client, observer, ManualClock::default())
+            .expect("spawn split executor");
+
+    let effect = snapshot_load_effects(1)
+        .into_iter()
+        .next()
+        .expect("snapshot effect");
+    let UiEffect::LoadSnapshot { id } = effect.clone() else {
+        panic!("expected snapshot effect")
+    };
+    executor.execute([effect]).expect("queue blocked snapshot");
+    assert_eq!(
+        receive_event(&mut executor),
+        UiEvent::Invalidated { revision: 41 }
+    );
+    assert!(
+        executor.poll_event().is_none(),
+        "blocked command must not have completed"
+    );
+
+    release_command.send(()).expect("release command");
+    assert!(matches!(
+        receive_event(&mut executor),
+        UiEvent::SnapshotLoaded {
+            effect_id,
+            snapshot,
+        } if effect_id == id && snapshot.revision == 1
+    ));
+    executor.shutdown().expect("joined split shutdown");
 }
 
 #[test]
@@ -1779,9 +1821,24 @@ fn conversation_message(sender_installation: Id32, sender_mailbox: Id32) -> Conv
 }
 
 #[test]
-fn worker_panics_are_joined_and_reported() {
+fn command_worker_panics_are_joined_and_reported() {
     let mut executor =
         TuiEffectExecutor::spawn(PanickingClient, ManualClock::default()).expect("spawn executor");
+    executor
+        .execute([snapshot_load_effects(1).remove(0)])
+        .expect("queue panicking command");
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(executor.shutdown(), Err(TuiExecutorError::WorkerPanicked));
+}
+
+#[test]
+fn observation_worker_panics_are_joined_and_reported() {
+    let mut executor = TuiEffectExecutor::spawn_with_observer(
+        ImmediateSnapshotClient,
+        PanickingObserver::new(),
+        ManualClock::default(),
+    )
+    .expect("spawn executor");
     thread::sleep(Duration::from_millis(50));
     assert_eq!(executor.shutdown(), Err(TuiExecutorError::WorkerPanicked));
 }
@@ -1812,6 +1869,23 @@ fn shutdown_drains_saturated_worker_results_before_joining() {
     }
 
     executor.shutdown().expect("saturated worker joins");
+}
+
+#[test]
+fn shutdown_drains_saturated_observation_results_and_joins_idempotently() {
+    let observer = ScriptedObserver::new(
+        (1..=25).map(|revision| TuiClientObservation::Invalidated { revision }),
+    );
+    let mut executor = TuiEffectExecutor::spawn_with_observer(
+        ImmediateSnapshotClient,
+        observer,
+        ManualClock::default(),
+    )
+    .expect("spawn observation executor");
+    thread::sleep(Duration::from_millis(50));
+
+    executor.shutdown().expect("drain and join observer");
+    executor.shutdown().expect("repeat shutdown is inert");
 }
 
 #[test]
@@ -1865,11 +1939,152 @@ impl TuiClock for ManualClock {
     }
 }
 
+struct ScriptedObserver {
+    observations: VecDeque<TuiClientObservation>,
+    wake: mpsc::Receiver<()>,
+    interrupt: ScriptedInterrupt,
+}
+
+struct PanickingObserver {
+    interrupt: ScriptedInterrupt,
+}
+
+impl PanickingObserver {
+    fn new() -> Self {
+        let (interrupt, _wake) = mpsc::channel();
+        Self {
+            interrupt: ScriptedInterrupt(interrupt),
+        }
+    }
+}
+
+impl TuiObservationPort for PanickingObserver {
+    fn next_observations(&mut self) -> Vec<TuiClientObservation> {
+        panic!("scripted observation failure");
+    }
+
+    fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt> {
+        Arc::new(self.interrupt.clone())
+    }
+}
+
+struct BlockingSnapshotClient {
+    started: Arc<AtomicBool>,
+    release: mpsc::Receiver<()>,
+}
+
+impl TuiClientPort for BlockingSnapshotClient {
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
+        self.started.store(true, Ordering::SeqCst);
+        self.release.recv().expect("command release");
+        Ok(empty_snapshot(1))
+    }
+
+    fn load_conversation(
+        &mut self,
+        _row_id: &str,
+        _cursor: Option<String>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        Err(unsupported_failure())
+    }
+
+    fn open_draft(
+        &mut self,
+        _target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn save_draft(&mut self, _draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        _draft: Option<UiMailboxDraft>,
+        _action: UiMailboxAction,
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
+        Err(unsupported_failure())
+    }
+}
+
+struct CommandGatedObserver {
+    command_started: Arc<AtomicBool>,
+    revision: Option<u64>,
+    wake: mpsc::Receiver<()>,
+    interrupt: ScriptedInterrupt,
+}
+
+impl CommandGatedObserver {
+    fn new(command_started: Arc<AtomicBool>, revision: u64) -> Self {
+        let (interrupt, wake) = mpsc::channel();
+        Self {
+            command_started,
+            revision: Some(revision),
+            wake,
+            interrupt: ScriptedInterrupt(interrupt),
+        }
+    }
+}
+
+impl TuiObservationPort for CommandGatedObserver {
+    fn next_observations(&mut self) -> Vec<TuiClientObservation> {
+        if let Some(revision) = self.revision {
+            while !self.command_started.load(Ordering::SeqCst) {
+                thread::yield_now();
+            }
+            self.revision = None;
+            vec![TuiClientObservation::Invalidated { revision }]
+        } else {
+            let _ = self.wake.recv();
+            Vec::new()
+        }
+    }
+
+    fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt> {
+        Arc::new(self.interrupt.clone())
+    }
+}
+
+#[derive(Clone)]
+struct ScriptedInterrupt(mpsc::Sender<()>);
+
+impl ScriptedObserver {
+    fn new(observations: impl IntoIterator<Item = TuiClientObservation>) -> Self {
+        let (interrupt, wake) = mpsc::channel();
+        Self {
+            observations: observations.into_iter().collect(),
+            wake,
+            interrupt: ScriptedInterrupt(interrupt),
+        }
+    }
+}
+
+impl TuiObservationInterrupt for ScriptedInterrupt {
+    fn interrupt(&self) {
+        let _ = self.0.send(());
+    }
+}
+
+impl TuiObservationPort for ScriptedObserver {
+    fn next_observations(&mut self) -> Vec<TuiClientObservation> {
+        if let Some(observation) = self.observations.pop_front() {
+            vec![observation]
+        } else {
+            let _ = self.wake.recv();
+            Vec::new()
+        }
+    }
+
+    fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt> {
+        Arc::new(self.interrupt.clone())
+    }
+}
+
 struct ScriptedTuiClient {
     requests: Arc<AtomicUsize>,
     conversation_requests: ConversationRequests,
     snapshots: VecDeque<Result<UiSnapshot, UiFailure>>,
-    observations: VecDeque<TuiClientObservation>,
     stopped: Arc<Mutex<bool>>,
 }
 
@@ -1879,7 +2094,6 @@ impl ScriptedTuiClient {
             requests: Arc::new(AtomicUsize::new(0)),
             conversation_requests: Arc::new(Mutex::new(Vec::new())),
             snapshots: VecDeque::new(),
-            observations: VecDeque::new(),
             stopped: Arc::new(Mutex::new(false)),
         }
     }
@@ -1931,15 +2145,6 @@ impl TuiClientPort for ScriptedTuiClient {
         _action: UiMailboxAction,
     ) -> Result<UiMailboxCommandResult, UiFailure> {
         Err(unsupported_failure())
-    }
-
-    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
-        if let Some(observation) = self.observations.pop_front() {
-            vec![observation]
-        } else {
-            thread::sleep(wait);
-            Vec::new()
-        }
     }
 }
 
@@ -2047,11 +2252,6 @@ impl TuiClientPort for ProjectTuiClient {
             outcome,
         })
     }
-
-    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
-        thread::sleep(wait);
-        Vec::new()
-    }
 }
 
 impl TuiClientPort for ManagedSessionTuiClient {
@@ -2105,11 +2305,6 @@ impl TuiClientPort for ManagedSessionTuiClient {
             },
         })
     }
-
-    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
-        thread::sleep(wait);
-        Vec::new()
-    }
 }
 
 impl TuiClientPort for AgentTuiClient {
@@ -2154,11 +2349,6 @@ impl TuiClientPort for AgentTuiClient {
         self.calls.lock().expect("calls lock").push(action);
         Ok(23)
     }
-
-    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
-        thread::sleep(wait);
-        Vec::new()
-    }
 }
 
 impl TuiClientPort for PanickingClient {
@@ -2190,10 +2380,6 @@ impl TuiClientPort for PanickingClient {
         _draft: Option<UiMailboxDraft>,
         _action: UiMailboxAction,
     ) -> Result<UiMailboxCommandResult, UiFailure> {
-        panic!("scripted worker failure");
-    }
-
-    fn poll(&mut self, _wait: Duration) -> Vec<TuiClientObservation> {
         panic!("scripted worker failure");
     }
 }
@@ -2243,11 +2429,6 @@ impl TuiClientPort for SlowSnapshotClient {
     ) -> Result<UiMailboxCommandResult, UiFailure> {
         Err(unsupported_failure())
     }
-
-    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
-        thread::sleep(wait);
-        Vec::new()
-    }
 }
 
 impl TuiClientPort for ImmediateSnapshotClient {
@@ -2286,11 +2467,6 @@ impl TuiClientPort for ImmediateSnapshotClient {
         _action: UiMailboxAction,
     ) -> Result<UiMailboxCommandResult, UiFailure> {
         Err(unsupported_failure())
-    }
-
-    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
-        thread::sleep(wait);
-        Vec::new()
     }
 }
 
@@ -2367,11 +2543,6 @@ impl TuiClientPort for MailboxTuiClient {
             revision: 9,
             message_id: Some([9; 32]),
         })
-    }
-
-    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
-        thread::sleep(wait);
-        Vec::new()
     }
 }
 

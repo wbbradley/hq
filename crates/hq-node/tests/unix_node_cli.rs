@@ -424,7 +424,10 @@ fn subscribed_local_event_client_refreshes_and_reconnects_to_a_real_node() {
     let _stop = DaemonStopGuard(state_root.clone());
     let state = StatePaths::new(state_root.clone()).expect("state paths");
     let mut subscriber = local_event_client(state);
-    let initial_revision = subscriber.snapshot().expect("initial snapshot").revision;
+    let initial_revision = subscriber
+        .activate_subscription()
+        .expect("initial subscription snapshot")
+        .revision;
     let initial_connection = subscriber.connection_state();
 
     let created = human_output(&state_root, &["create", "Subscribed"]);
@@ -437,8 +440,8 @@ fn subscribed_local_event_client_refreshes_and_reconnects_to_a_real_node() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let event = subscriber
-            .poll_event(Duration::from_millis(100))
-            .expect("subscribed client poll");
+            .next_observation()
+            .expect("subscribed client read");
         if matches!(
             event,
             Some(ClientEvent::Snapshot(ref snapshot)) if snapshot.revision > initial_revision
@@ -465,8 +468,8 @@ fn subscribed_local_event_client_refreshes_and_reconnects_to_a_real_node() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let event = subscriber
-            .poll_event(Duration::from_millis(100))
-            .expect("reconnecting subscribed client poll");
+            .next_observation()
+            .expect("reconnecting subscribed client read");
         if subscriber.connection_state() != initial_connection
             && matches!(event, Some(ClientEvent::Snapshot(_)))
         {

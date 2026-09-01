@@ -141,9 +141,15 @@ pump awaits that observer directly alongside listener and session readiness, pub
 revision into the shared subscription hub, and performs one bounded nonblocking socket-delivery
 pass. There is no timer between a normal store commit and daemon invalidation delivery.
 
-The TUI and Codex bridge subscribe before their initial snapshots. CLI `ask` and `wait` do the same.
-All reload authoritative state on invalidation or reconnect and keep a five-minute periodic repair
-fallback. TUI drafts, focus, and selection survive reloads.
+The TUI activates a dedicated subscribed local connection before it opens the independent ordinary
+connection used for snapshots and commands. One observation thread remains blocked in the
+subscribed socket read while the command thread may wait on snapshots, project work, or provider
+round trips. A committed revision therefore reaches the model without waiting for command
+completion or a client polling interval. Shutdown interrupts the exact active observation socket
+and joins both owners. The Codex bridge, CLI `ask`, and CLI `wait` retain their own subscription
+composition. All reload authoritative state on invalidation or reconnect; the TUI's five-minute
+periodic refresh is a repair assertion, not its notification path. TUI drafts, focus, and selection
+survive reloads.
 
 ## SQLite data
 

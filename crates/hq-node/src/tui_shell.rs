@@ -17,8 +17,9 @@ use nix::unistd::{Uid, User};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
-    IdentityError, IdentityErrorClass, LocalNodeEventClient, LocalTuiClient, MonotonicTuiClock,
-    StatePaths, TuiClientPort, TuiClock, TuiEffectExecutor, TuiThemeEnvironment, TuiThemeError,
+    IdentityError, IdentityErrorClass, LocalNodeClient, LocalNodeEventClient, LocalTuiClient,
+    LocalTuiObserver, MonotonicTuiClock, StatePaths, TuiClientPort, TuiClock, TuiEffectExecutor,
+    TuiObservationPort, TuiThemeEnvironment, TuiThemeError,
     local_client::installed_local_client_config, resolve_tui_theme,
 };
 
@@ -73,7 +74,7 @@ pub enum TuiShellError {
     Model,
     /// The bounded effect executor failed or its worker panicked.
     Executor,
-    /// The ordinary subscribed local client could not be composed.
+    /// The independent ordinary and subscribed local clients could not be composed.
     Client,
     /// Installed build metadata was invalid.
     Build,
@@ -307,16 +308,22 @@ fn normalize_key(key: KeyEvent) -> Option<TuiTerminalEvent> {
 }
 
 /// Runs the complete terminal loop over injected terminal, client, and monotonic clock ports.
-pub fn run_tui_shell<T, P, C>(terminal: T, client: P, clock: C) -> Result<(), TuiShellError>
+pub fn run_tui_shell<T, P, O, C>(
+    terminal: T,
+    client: P,
+    observer: O,
+    clock: C,
+) -> Result<(), TuiShellError>
 where
     T: TuiTerminalPort,
     P: TuiClientPort + 'static,
+    O: TuiObservationPort + 'static,
     C: TuiClock,
 {
     let home_directory = current_user_home_directory();
     let mut terminal = TerminalGuard::activate(terminal)?;
-    let mut executor =
-        TuiEffectExecutor::spawn(client, clock).map_err(|_| TuiShellError::Executor)?;
+    let mut executor = TuiEffectExecutor::spawn_with_observer(client, observer, clock)
+        .map_err(|_| TuiShellError::Executor)?;
     let model = UiModel::new(terminal.size()?).with_home_directory(home_directory);
     let started = update(model, UiEvent::Started).map_err(|_| TuiShellError::Model)?;
     let mut model = started.model;
@@ -375,16 +382,19 @@ pub fn run_installed_tui(state: StatePaths) -> Result<(), TuiShellError> {
         option_env!("HQ_BUILD_COMMIT"),
     )
     .map_err(|_| TuiShellError::Build)?;
-    let event_client = LocalNodeEventClient::connect(installed_local_client_config(
-        state.clone(),
-        build,
-        InitialView::OnDemand,
-    ))
-    .map_err(|_| TuiShellError::Client)?;
+    let client_config = installed_local_client_config(state.clone(), build, InitialView::OnDemand);
+    let mut event_client =
+        LocalNodeEventClient::connect(client_config.clone()).map_err(|_| TuiShellError::Client)?;
+    event_client
+        .activate_subscription()
+        .map_err(|_| TuiShellError::Client)?;
+    let command_client =
+        LocalNodeClient::connect(client_config).map_err(|_| TuiShellError::Client)?;
     let terminal = CrosstermTerminal::new(theme)?;
     run_tui_shell(
         terminal,
-        LocalTuiClient::new(event_client, state),
+        LocalTuiClient::new(command_client, state),
+        LocalTuiObserver::new(event_client),
         MonotonicTuiClock::default(),
     )
 }

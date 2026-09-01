@@ -270,3 +270,11 @@ bounded slots until their exact tasks join. Each session progress event also per
 coalesced-invalidation pass. Explicit pump intake closure drops the listener and closes registry
 admission while retaining existing sessions; pump shutdown then joins them all and returns a plain
 report before foundation cleanup.
+
+The installed TUI consumes this path through a dedicated subscribed Unix connection. Subscription
+activation and its authoritative base complete before the TUI opens a separate ordinary connection
+for snapshots and commands. Independent named observation and command threads feed one bounded UI
+event channel, so a slow provider or query response cannot prevent the subscription owner from
+reading a ready invalidation. Shutdown sets shared cancellation, calls `shutdown(Both)` through a
+generation-safe clone of the currently registered observation socket, drains bounded results, and
+joins both threads. Closing an older generation cannot clear or interrupt a newer registered socket.

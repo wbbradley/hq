@@ -6,15 +6,16 @@
 use std::{
     collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::Duration,
 };
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use hq_node::{
-    TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiTerminalError,
-    TuiTerminalEvent, TuiTerminalPort, normalize_crossterm_event, run_tui_shell,
+    TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiObservationInterrupt,
+    TuiObservationPort, TuiTerminalError, TuiTerminalEvent, TuiTerminalPort,
+    normalize_crossterm_event, run_tui_shell,
 };
 use hq_tui::{
     UiFailure, UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft,
@@ -121,7 +122,8 @@ fn normal_quit_and_ctrl_c_cancellation_restore_exactly_once() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let terminal = ScriptedTerminal::new(Arc::clone(&log), [Ok(Some(terminal_event))]);
 
-        run_tui_shell(terminal, EmptyClient, FixedClock).expect("shell exits cleanly");
+        run_tui_shell(terminal, EmptyClient, idle_observer(), FixedClock)
+            .expect("shell exits cleanly");
 
         let log = log.lock().expect("terminal log");
         assert_eq!(log.iter().filter(|entry| **entry == "restore").count(), 1);
@@ -134,7 +136,7 @@ fn normal_quit_and_ctrl_c_cancellation_restore_exactly_once() {
 fn terminal_errors_and_partial_activation_restore_exactly_once() {
     let poll_log = Arc::new(Mutex::new(Vec::new()));
     let poll_terminal = ScriptedTerminal::new(Arc::clone(&poll_log), [Err(TuiTerminalError::Poll)]);
-    assert!(run_tui_shell(poll_terminal, EmptyClient, FixedClock).is_err());
+    assert!(run_tui_shell(poll_terminal, EmptyClient, idle_observer(), FixedClock).is_err());
     assert_eq!(
         poll_log
             .lock()
@@ -151,7 +153,15 @@ fn terminal_errors_and_partial_activation_restore_exactly_once() {
         std::iter::empty::<Result<Option<TuiTerminalEvent>, TuiTerminalError>>(),
     );
     activation_terminal.activation_fails = true;
-    assert!(run_tui_shell(activation_terminal, EmptyClient, FixedClock).is_err());
+    assert!(
+        run_tui_shell(
+            activation_terminal,
+            EmptyClient,
+            idle_observer(),
+            FixedClock,
+        )
+        .is_err()
+    );
     assert_eq!(
         activation_log.lock().expect("activation log").as_slice(),
         &["activate", "restore"]
@@ -169,7 +179,7 @@ fn panic_unwinding_restores_the_terminal_exactly_once() {
 
     assert!(
         catch_unwind(AssertUnwindSafe(|| {
-            let _ = run_tui_shell(terminal, EmptyClient, FixedClock);
+            let _ = run_tui_shell(terminal, EmptyClient, idle_observer(), FixedClock);
         }))
         .is_err()
     );
@@ -192,7 +202,7 @@ fn client_worker_failure_restores_the_terminal_exactly_once() {
     );
     terminal.draw_delay = Duration::from_millis(50);
 
-    assert!(run_tui_shell(terminal, PanickingClient, FixedClock).is_err());
+    assert!(run_tui_shell(terminal, PanickingClient, idle_observer(), FixedClock).is_err());
     assert_eq!(
         log.lock()
             .expect("client failure log")
@@ -319,11 +329,6 @@ impl TuiClientPort for EmptyClient {
     ) -> Result<UiMailboxCommandResult, UiFailure> {
         Err(test_failure())
     }
-
-    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
-        thread::sleep(wait);
-        Vec::new()
-    }
 }
 
 struct PanickingClient;
@@ -359,9 +364,38 @@ impl TuiClientPort for PanickingClient {
     ) -> Result<UiMailboxCommandResult, UiFailure> {
         panic!("scripted client failure")
     }
+}
 
-    fn poll(&mut self, _wait: Duration) -> Vec<TuiClientObservation> {
+struct IdleObserver {
+    wake: mpsc::Receiver<()>,
+    interrupt: IdleInterrupt,
+}
+
+#[derive(Clone)]
+struct IdleInterrupt(mpsc::Sender<()>);
+
+impl TuiObservationInterrupt for IdleInterrupt {
+    fn interrupt(&self) {
+        let _ = self.0.send(());
+    }
+}
+
+impl TuiObservationPort for IdleObserver {
+    fn next_observations(&mut self) -> Vec<TuiClientObservation> {
+        let _ = self.wake.recv();
         Vec::new()
+    }
+
+    fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt> {
+        Arc::new(self.interrupt.clone())
+    }
+}
+
+fn idle_observer() -> IdleObserver {
+    let (interrupt, wake) = mpsc::channel();
+    IdleObserver {
+        wake,
+        interrupt: IdleInterrupt(interrupt),
     }
 }
 
