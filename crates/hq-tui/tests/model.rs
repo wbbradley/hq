@@ -374,6 +374,32 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
             }
         }) if *project_id == [5; 32]
     ));
+    assert_project_draft_context(&resumed.model, [5; 32], "release", None);
+
+    let refreshing = update(resumed.model, UiEvent::Invalidated { revision: 3 })
+        .expect("refresh while composing new project conversation");
+    let snapshot_id = snapshot_effect(&refreshing.effects);
+    let mut current = refreshing
+        .model
+        .snapshot()
+        .expect("current snapshot")
+        .clone();
+    current.revision = 3;
+    let refreshed = update(
+        refreshing.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: current,
+        },
+    )
+    .expect("project draft snapshot refreshed");
+    assert!(
+        refreshed
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::LoadConversation { .. }))
+    );
+    assert_project_draft_context(&refreshed.model, [5; 32], "release", None);
 }
 
 #[test]
@@ -2256,7 +2282,7 @@ fn live_agent_status_stays_at_the_presentation_tail_after_new_authoritative_outp
 }
 
 #[test]
-fn project_rows_continue_or_start_explicit_conversations_and_select_the_new_root() {
+fn project_reply_continues_the_exact_selected_conversation() {
     let project_id = [5; 32];
     let mut initial = snapshot(1, &["existing"]);
     initial.inbox_rows[0].conversation_target = Some(UiConversationTarget::Project {
@@ -2266,7 +2292,7 @@ fn project_rows_continue_or_start_explicit_conversations_and_select_the_new_root
     });
 
     let continued = update(
-        loaded_model(initial.clone()),
+        loaded_model(initial),
         UiEvent::Input(UiInput::Character('r')),
     )
     .expect("continue selected project conversation");
@@ -2277,6 +2303,18 @@ fn project_rows_continue_or_start_explicit_conversations_and_select_the_new_root
             thread_id: Some(thread_id),
         } if *selected_project == project_id && *thread_id == [6; 32]
     ));
+}
+
+#[test]
+fn new_project_conversation_tracks_local_context_then_selects_authoritative_root() {
+    let project_id = [5; 32];
+    let mut initial = snapshot(1, &["existing"]);
+    initial.inbox_rows[0].conversation_target = Some(UiConversationTarget::Project {
+        project_id,
+        thread_id: [6; 32],
+        root_message: [7; 32],
+    });
+    initial.projects = vec![project(5, "release", "/work/release")];
 
     let opening = update(
         loaded_model(initial),
@@ -2291,6 +2329,7 @@ fn project_rows_continue_or_start_explicit_conversations_and_select_the_new_root
             thread_id: None,
         }
     );
+    assert_project_draft_context(&opening.model, project_id, "release", None);
     let loaded = update(
         opening.model,
         UiEvent::DraftLoaded {
@@ -2332,8 +2371,15 @@ fn project_rows_continue_or_start_explicit_conversations_and_select_the_new_root
         },
     )
     .expect("new project root committed");
+    assert_project_draft_context(
+        &committed.model,
+        project_id,
+        "release",
+        Some("A separate topic"),
+    );
     let refresh_id = snapshot_effect(&committed.effects);
     let mut refreshed = snapshot(2, &["existing", "new"]);
+    refreshed.projects = vec![project(5, "release", "/work/release")];
     refreshed.inbox_rows[0].conversation_target = Some(UiConversationTarget::Project {
         project_id,
         thread_id: [6; 32],
@@ -4622,6 +4668,47 @@ fn project_conversation_row(project: u8, thread: u8, root_message: u8, title: &s
             thread_id: [thread; 32],
             root_message: [root_message; 32],
         }),
+    }
+}
+
+fn assert_project_draft_context(
+    model: &UiModel,
+    project_id: [u8; 32],
+    project_name: &str,
+    expected_body: Option<&str>,
+) {
+    assert_eq!(model.section(), UiSection::Inbox);
+    assert_eq!(
+        model
+            .project_filter()
+            .map(|filter| (filter.project_id, filter.project_name.as_str())),
+        Some((project_id, project_name))
+    );
+    assert_eq!(
+        model
+            .selected_row_data()
+            .map(|row| (row.title.as_str(), row.detail.as_str())),
+        Some((project_name, "New project conversation"))
+    );
+    let conversation = model.conversation().expect("local project conversation");
+    assert_eq!(conversation.title, project_name);
+    assert_eq!(
+        conversation.context.as_deref(),
+        Some("New project conversation")
+    );
+    match expected_body {
+        None => assert!(conversation.entries.is_empty()),
+        Some(expected_body) => assert!(matches!(
+            conversation.entries.as_slice(),
+            [entry]
+                if matches!(
+                    &entry.presentation,
+                    UiConversationEntryPresentation::Message {
+                        author: UiConversationAuthor::You,
+                        body,
+                    } if body == expected_body
+                )
+        )),
     }
 }
 

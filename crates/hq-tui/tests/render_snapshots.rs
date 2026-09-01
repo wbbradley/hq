@@ -1005,6 +1005,56 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
 }
 
 #[test]
+fn project_composer_keeps_orange_project_context_on_its_upper_right_border() {
+    let size = UiSize {
+        width: 120,
+        height: 24,
+    };
+    let opening = update(project_model(size), UiEvent::Input(UiInput::Activate))
+        .expect("start project conversation");
+    let (effect_id, target) = opening
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::OpenDraft { id, target } => Some((*id, target.clone())),
+            _ => None,
+        })
+        .expect("project draft request");
+    let model = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id,
+            draft: UiMailboxDraft {
+                draft_id: [31; 32],
+                target,
+                content: String::new(),
+                version: 1,
+            },
+        },
+    )
+    .expect("project draft loaded")
+    .model;
+    let orange = Color::Rgb(254, 128, 25);
+    let theme = UiTheme::terminal().with_style(
+        UiThemeRole::ConversationProjectContext,
+        Style::new().fg(orange).add_modifier(Modifier::BOLD),
+    );
+    let buffer = render_buffer_with_theme(&model, &theme);
+    let project_title = find_text_starts(&buffer, "release")
+        .into_iter()
+        .find(|(x, y)| *x > size.width / 2 && *y > size.height / 2)
+        .unwrap_or_else(|| {
+            panic!(
+                "project title is absent from composer:\n{}",
+                snapshot_text(&buffer)
+            )
+        });
+    let cell = buffer.cell(project_title).expect("project title cell");
+    assert_eq!(cell.fg, orange);
+    assert!(cell.modifier.contains(Modifier::BOLD));
+}
+
+#[test]
 fn agent_inspection_is_responsive_and_rendering_only_borrows_state() {
     for size in [
         UiSize {
@@ -2042,31 +2092,34 @@ fn render_buffer_with_theme(model: &UiModel, theme: &UiTheme) -> Buffer {
 }
 
 fn find_text_start(buffer: &Buffer, needle: &str) -> (u16, u16) {
+    find_text_starts(buffer, needle)
+        .into_iter()
+        .next()
+        .expect("rendered text exists")
+}
+
+fn find_text_starts(buffer: &Buffer, needle: &str) -> Vec<(u16, u16)> {
     let needle = needle
         .chars()
         .map(|value| value.to_string())
         .collect::<Vec<_>>();
     let width = usize::from(buffer.area.width);
-    buffer
-        .content()
-        .chunks(width)
-        .enumerate()
-        .find_map(|(row, cells)| {
-            (0..=cells.len().saturating_sub(needle.len()))
-                .find(|&column| {
-                    cells[column..column + needle.len()]
-                        .iter()
-                        .zip(&needle)
-                        .all(|(cell, expected)| cell.symbol() == expected)
-                })
-                .map(|column| {
-                    (
-                        u16::try_from(column).expect("test column fits terminal coordinates"),
-                        u16::try_from(row).expect("test row fits terminal coordinates"),
-                    )
-                })
-        })
-        .expect("rendered text exists")
+    let mut matches = Vec::new();
+    for (row, cells) in buffer.content().chunks(width).enumerate() {
+        for column in 0..=cells.len().saturating_sub(needle.len()) {
+            if cells[column..column + needle.len()]
+                .iter()
+                .zip(&needle)
+                .all(|(cell, expected)| cell.symbol() == expected)
+            {
+                matches.push((
+                    u16::try_from(column).expect("test column fits terminal coordinates"),
+                    u16::try_from(row).expect("test row fits terminal coordinates"),
+                ));
+            }
+        }
+    }
+    matches
 }
 
 fn contextual_help_model(size: UiSize, section: UiSection, selected: bool) -> UiModel {

@@ -2,7 +2,7 @@
 
 use ratatui::style::{Color, Style};
 
-const ROLE_COUNT: usize = 42;
+const ROLE_COUNT: usize = 43;
 
 /// Every independently configurable visual role in the HQ terminal interface.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -28,6 +28,8 @@ pub enum UiThemeRole {
     ConversationAuthorSelf,
     /// Named or fallback counterparty author label in a conversation.
     ConversationAuthorParticipant,
+    /// Project name retained as neutral conversation composition context.
+    ConversationProjectContext,
     /// Neutral or running compact conversation activity.
     ConversationActivity,
     /// Successful compact conversation activity.
@@ -107,6 +109,7 @@ impl UiThemeRole {
         Self::Accent,
         Self::ConversationAuthorSelf,
         Self::ConversationAuthorParticipant,
+        Self::ConversationProjectContext,
         Self::ConversationActivity,
         Self::ConversationActivitySuccess,
         Self::ConversationActivityWarning,
@@ -154,6 +157,7 @@ impl UiThemeRole {
             Self::Accent => "ui.accent",
             Self::ConversationAuthorSelf => "conversation.author.self",
             Self::ConversationAuthorParticipant => "conversation.author.participant",
+            Self::ConversationProjectContext => "conversation.project.context",
             Self::ConversationActivity => "conversation.activity",
             Self::ConversationActivitySuccess => "conversation.activity.success",
             Self::ConversationActivityWarning => "conversation.activity.warning",
@@ -241,7 +245,7 @@ impl UiTheme {
         set(
             &mut styles,
             UiThemeRole::TextTechnical,
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(Color::LightCyan),
         );
         set(
             &mut styles,
@@ -272,6 +276,11 @@ impl UiTheme {
             &mut styles,
             UiThemeRole::ConversationAuthorParticipant,
             Style::new().fg(Color::Magenta).bold(),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationProjectContext,
+            Style::new().fg(Color::Indexed(208)).bold(),
         );
         set(
             &mut styles,
@@ -466,6 +475,11 @@ impl UiTheme {
         );
         set(
             &mut styles,
+            UiThemeRole::ConversationProjectContext,
+            Style::new().bold(),
+        );
+        set(
+            &mut styles,
             UiThemeRole::ConversationActivity,
             Style::new().dim(),
         );
@@ -539,13 +553,19 @@ impl UiTheme {
     }
 
     /// Deterministically maps one Tinted/Base16 palette into every HQ role.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "complete closed semantic role catalog"
+    )]
     pub fn from_base16(name: String, author: Option<String>, palette: Base16Palette) -> Self {
         let background = palette.color(0x00);
         let surface = palette.color(0x01);
         let selection = palette.color(0x02);
         let muted = palette.color(0x03);
+        let technical = palette.color(0x04);
         let text = palette.color(0x05);
         let error = palette.color(0x08);
+        let project_context = palette.color(0x09);
         let warning = palette.color(0x0A);
         let success = palette.color(0x0B);
         let accent = palette.color(0x0D);
@@ -558,7 +578,7 @@ impl UiTheme {
             .with_style(UiThemeRole::Screen, Style::new().fg(text).bg(background))
             .with_style(UiThemeRole::Text, Style::new().fg(text))
             .with_style(UiThemeRole::TextMuted, Style::new().fg(muted))
-            .with_style(UiThemeRole::TextTechnical, Style::new().fg(muted).dim())
+            .with_style(UiThemeRole::TextTechnical, Style::new().fg(technical))
             .with_style(UiThemeRole::Heading, Style::new().fg(accent).bold())
             .with_style(
                 UiThemeRole::PaneTitleFocused,
@@ -576,6 +596,10 @@ impl UiTheme {
             .with_style(
                 UiThemeRole::ConversationAuthorParticipant,
                 Style::new().fg(participant).bold(),
+            )
+            .with_style(
+                UiThemeRole::ConversationProjectContext,
+                Style::new().fg(project_context).bold(),
             )
             .with_style(UiThemeRole::ConversationActivity, Style::new().fg(muted))
             .with_style(
@@ -708,6 +732,23 @@ mod tests {
     }
 
     #[test]
+    fn terminal_technical_text_is_prominent_and_non_gray() {
+        let style = UiTheme::terminal().style(UiThemeRole::TextTechnical);
+
+        assert_eq!(style.fg, Some(Color::LightCyan));
+        assert!(!style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn project_context_uses_neutral_orange_semantics() {
+        let terminal = UiTheme::terminal().style(UiThemeRole::ConversationProjectContext);
+        assert_eq!(terminal.fg, Some(Color::Indexed(208)));
+
+        let no_color = UiTheme::no_color().style(UiThemeRole::ConversationProjectContext);
+        assert!(no_color.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
     fn base16_mapping_fills_every_semantic_status() {
         let colors =
             std::array::from_fn(|index| Color::Indexed(u8::try_from(index).unwrap_or(u8::MAX)));
@@ -720,6 +761,9 @@ mod tests {
         assert_eq!(theme.author(), Some("Theme Author"));
         assert_eq!(theme.style(UiThemeRole::Screen).bg, Some(Color::Indexed(0)));
         assert_eq!(theme.style(UiThemeRole::Text).fg, Some(Color::Indexed(5)));
+        let technical = theme.style(UiThemeRole::TextTechnical);
+        assert_eq!(technical.fg, Some(Color::Indexed(4)));
+        assert!(!technical.add_modifier.contains(Modifier::DIM));
         assert_eq!(theme.style(UiThemeRole::Error).fg, Some(Color::Indexed(8)));
         assert_eq!(
             theme.style(UiThemeRole::Warning).fg,
@@ -740,6 +784,10 @@ mod tests {
         assert_eq!(
             theme.style(UiThemeRole::ConversationAuthorParticipant).fg,
             Some(Color::Indexed(14))
+        );
+        assert_eq!(
+            theme.style(UiThemeRole::ConversationProjectContext).fg,
+            Some(Color::Indexed(9))
         );
         assert_eq!(
             theme.style(UiThemeRole::ConversationActivity).fg,

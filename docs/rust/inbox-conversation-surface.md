@@ -280,8 +280,7 @@ Below 40 columns or 10 rows, the existing bounded resize message remains appropr
 The draft remains the lower part of the Conversation pane and uses the same content origin:
 
 ```text
-────────────────────────────────────────────────────────
-Message Alice · saved
+─ Message Alice · saved ────────────────────── release ─
 Let's check the ignored files too.
 
 Enter send · Esc save and close
@@ -289,7 +288,10 @@ Enter send · Esc save and close
 
 Opening a draft reduces transcript height but does not hide its selected conversation. The divider
 is the only box edge. Draft target, persistence state, and validation stay in its header/footer;
-the transcript does not repeat them.
+the transcript does not repeat them. A project-bound draft keeps the current project name on the
+upper-right border. A new project conversation also installs a local typed Inbox row and empty
+Conversation view immediately; the authoritative project-thread row replaces that local context
+after the first message commits and appears in a snapshot.
 
 ## Focus, selection, and scrolling
 
@@ -338,6 +340,7 @@ The implementation should add roles rather than hard-code colors in `render.rs`:
 | --- | --- |
 | `conversation.author.self` | `You` author label |
 | `conversation.author.participant` | Named or fallback counterparty author label |
+| `conversation.project.context` | Neutral project name retained on the composer border |
 | `conversation.activity` | Neutral/running compact activity |
 | `conversation.activity.success` | Successful compact activity |
 | `conversation.activity.warning` | Interrupted or caution activity |
@@ -354,12 +357,13 @@ to `ui.heading`, links and list markers to `ui.accent`, inline and fenced code t
 `ui.text.muted`. Strong, emphasis, and strikethrough add structural modifiers. The full-row
 conversation selection style remains underneath those span styles, including in no-color themes.
 
-The terminal theme may use distinct ANSI colors for the two author roles, muted activity, and
-status colors. Base16 maps self/participant authors to two distinct accent palette entries,
-selection to `base02`, neutral activity to `base03`, success to `base0B`, warning to `base0A`, and
-error to `base08`. The no-color theme uses explicit labels, bold for authors, dim for neutral
-activity, reverse plus weight for focus, and bold status text. Snapshot tests must inspect styles as
-well as text so a color regression cannot silently erase hierarchy.
+The terminal theme may use distinct ANSI colors for the two author roles, project context, muted
+activity, and status colors. Base16 maps self/participant authors to two distinct accent palette
+entries, project context to orange `base09`, selection to `base02`, neutral activity to `base03`,
+success to `base0B`, warning to `base0A`, and error to `base08`. The no-color theme uses explicit
+labels, bold for authors and project context, dim for neutral activity, reverse plus weight for
+focus, and bold status text. Snapshot tests must inspect styles as well as text so a color
+regression cannot silently erase hierarchy.
 
 ## Typed presentation boundary
 

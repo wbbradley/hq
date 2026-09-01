@@ -3101,15 +3101,22 @@ fn render_draft_pane(
         return;
     };
     match draft_pane {
-        UiMailboxDraftPane::Loading { target } => frame.render_widget(
-            Paragraph::new(format!("Loading {} draft…", draft_target_label(target))).block(
+        UiMailboxDraftPane::Loading { target } => {
+            let block = with_draft_project_title(
                 Block::new()
                     .borders(borders)
                     .border_style(theme.style(UiThemeRole::BorderFocused))
                     .title(" Draft "),
-            ),
-            area,
-        ),
+                model,
+                theme,
+                area.width,
+            );
+            frame.render_widget(
+                Paragraph::new(format!("Loading {} draft…", draft_target_label(target)))
+                    .block(block),
+                area,
+            );
+        }
         UiMailboxDraftPane::Editing {
             draft,
             dirty,
@@ -3125,19 +3132,24 @@ fn render_draft_pane(
             } else {
                 "saved"
             };
-            let block = Block::new()
-                .borders(borders)
-                .border_style(theme.style(if model.focus() == UiFocus::Draft {
-                    UiThemeRole::BorderFocused
-                } else {
-                    UiThemeRole::BorderUnfocused
-                }))
-                .title(format!(
-                    " {} · {status} · {}/{} bytes ",
-                    draft_target_label(&draft.target),
-                    draft.content.len(),
-                    MAX_DRAFT_BYTES
-                ));
+            let block = with_draft_project_title(
+                Block::new()
+                    .borders(borders)
+                    .border_style(theme.style(if model.focus() == UiFocus::Draft {
+                        UiThemeRole::BorderFocused
+                    } else {
+                        UiThemeRole::BorderUnfocused
+                    }))
+                    .title(format!(
+                        " {} · {status} · {}/{} bytes ",
+                        draft_target_label(&draft.target),
+                        draft.content.len(),
+                        MAX_DRAFT_BYTES
+                    )),
+                model,
+                theme,
+                area.width,
+            );
             let inner = block.inner(area);
             frame.render_widget(block, area);
             let [text_area, hint] =
@@ -3167,6 +3179,26 @@ fn render_draft_pane(
             );
         }
     }
+}
+
+fn with_draft_project_title<'a>(
+    block: Block<'a>,
+    model: &UiModel,
+    theme: &UiTheme,
+    width: u16,
+) -> Block<'a> {
+    let Some(project_name) = model.draft_project_name() else {
+        return block;
+    };
+    let maximum_width = usize::from(width.saturating_sub(4) / 2);
+    let project_name = clipped_preview_line(project_name, maximum_width);
+    block.title(
+        Line::styled(
+            format!(" {project_name} "),
+            theme.style(UiThemeRole::ConversationProjectContext),
+        )
+        .right_aligned(),
+    )
 }
 
 fn inert_draft_source(source: &str) -> String {

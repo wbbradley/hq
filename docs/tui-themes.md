@@ -107,6 +107,7 @@ Every configurable role is listed below. A resolved theme always has a style for
 | `ui.accent` | Primary interactive accent |
 | `conversation.author.self` | Explicit `You` author label |
 | `conversation.author.participant` | Named or fallback participant author label |
+| `conversation.project.context` | Project name on project-bound composition surfaces |
 | `conversation.activity` | Neutral or running compact transcript activity |
 | `conversation.activity.success` | Successful compact transcript activity |
 | `conversation.activity.warning` | Interrupted or cautionary compact transcript activity |
@@ -170,8 +171,10 @@ complete HQ theme using this mapping:
 | `base00` | Screen background |
 | `base05` | Ordinary text |
 | `base03` | Muted text and neutral conversation activity |
+| `base04` | Technical text, including inline and fenced code |
 | `base02` | Selections and secondary surfaces |
 | `base08` | Errors and failed conversation activity |
+| `base09` | Neutral project context on composition surfaces |
 | `base0A` | Warnings and interrupted conversation activity |
 | `base0B` | Success and successful conversation activity |
 | `base0D` | Accents, focus, and the local-human author |

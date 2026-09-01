@@ -2488,6 +2488,63 @@ impl UiModel {
         self.mailbox_draft.as_ref()
     }
 
+    /// Borrows the authoritative project name associated with the active draft, when applicable.
+    pub fn draft_project_name(&self) -> Option<&str> {
+        let project_id = self.draft_project_id()?;
+        self.snapshot
+            .as_ref()?
+            .projects
+            .iter()
+            .find(|project| project.project_id == project_id)
+            .map(|project| project.name.as_str())
+    }
+
+    fn draft_target(&self) -> Option<&UiMailboxDraftTarget> {
+        let target = match self.mailbox_draft.as_ref()? {
+            UiMailboxDraftPane::Loading { target }
+            | UiMailboxDraftPane::Editing {
+                draft: UiMailboxDraft { target, .. },
+                ..
+            } => target,
+        };
+        Some(target)
+    }
+
+    fn draft_project_id(&self) -> Option<[u8; 32]> {
+        Some(match self.draft_target()? {
+            UiMailboxDraftTarget::Project { project_id, .. } => *project_id,
+            UiMailboxDraftTarget::Reply { .. } => {
+                match self.selected_row_data()?.conversation_target {
+                    Some(UiConversationTarget::Project { project_id, .. }) => project_id,
+                    None => return None,
+                }
+            }
+            UiMailboxDraftTarget::Direct { .. } | UiMailboxDraftTarget::SelfNote => return None,
+        })
+    }
+
+    fn new_project_draft_id(&self) -> Option<[u8; 32]> {
+        match self.draft_target()? {
+            UiMailboxDraftTarget::Project {
+                project_id,
+                thread_id: None,
+            } => Some(*project_id),
+            UiMailboxDraftTarget::Reply { .. }
+            | UiMailboxDraftTarget::Direct { .. }
+            | UiMailboxDraftTarget::SelfNote
+            | UiMailboxDraftTarget::Project {
+                thread_id: Some(_), ..
+            } => None,
+        }
+    }
+
+    fn selected_conversation_is_local_project_draft(&self) -> bool {
+        self.project_filter.as_ref().is_some_and(|filter| {
+            self.selected_row.as_deref()
+                == Some(project_draft_conversation_id(filter.project_id).as_str())
+        })
+    }
+
     /// Borrows the current named-agent interaction.
     pub const fn agent_modal(&self) -> Option<&UiAgentModal> {
         self.agent_modal.as_ref()
@@ -2737,6 +2794,20 @@ impl UiModel {
             kind: PendingMailboxKind::OpenDraft,
         });
         self.change_section(UiSection::Inbox);
+        if let UiMailboxDraftTarget::Project {
+            project_id,
+            thread_id: None,
+        } = target
+            && let Some(project) = self.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .projects
+                    .iter()
+                    .find(|project| project.project_id == project_id)
+                    .cloned()
+            })
+        {
+            self.install_project_draft_conversation(&project);
+        }
         self.focus = UiFocus::Draft;
         self.mailbox_modal = None;
         self.mailbox_draft = Some(UiMailboxDraftPane::Loading {
@@ -3034,6 +3105,26 @@ impl UiModel {
         };
         filter.project_name.clone_from(&project.name);
         self.project_filter_rows = project_conversation_rows(snapshot, filter.project_id);
+        let targets_local_draft = self.new_project_draft_id() == Some(filter.project_id);
+        let awaits_authoritative_row =
+            self.pending_project_conversation
+                .is_some_and(|(project_id, root_message)| {
+                    project_id == filter.project_id
+                        && !has_project_conversation_root(
+                            &self.project_filter_rows,
+                            project_id,
+                            root_message,
+                        )
+                });
+        if targets_local_draft || awaits_authoritative_row {
+            let row = project_draft_conversation_row(project);
+            if let Some(conversation) = &mut self.conversation
+                && conversation.row_id == row.id
+            {
+                conversation.title.clone_from(&project.name);
+            }
+            self.project_filter_rows.insert(0, row);
+        }
         self.project_filter = Some(filter);
     }
 
@@ -3060,6 +3151,24 @@ impl UiModel {
         self.project_filter_rows = self.snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
             project_conversation_rows(snapshot, project.project_id)
         });
+    }
+
+    fn install_project_draft_conversation(&mut self, project: &UiProject) {
+        self.install_project_filter(project);
+        let row = project_draft_conversation_row(project);
+        self.project_filter_rows
+            .retain(|candidate| candidate.id != row.id);
+        self.project_filter_rows.insert(0, row.clone());
+        self.selected_row = Some(row.id.clone());
+        self.conversation = Some(UiConversation {
+            row_id: row.id,
+            title: project.name.clone(),
+            context: Some("New project conversation".to_owned()),
+            entries: Vec::new(),
+            next_cursor: None,
+        });
+        self.conversation_anchor = None;
+        self.technical_visible = false;
     }
 
     fn clear_project_filter(&mut self) {
@@ -3260,6 +3369,38 @@ fn project_conversation_rows(snapshot: &UiSnapshot, project_id: [u8; 32]) -> Vec
         .filter(|row| seen.insert(row.id.clone()))
         .cloned()
         .collect()
+}
+
+fn has_project_conversation_root(
+    rows: &[UiRow],
+    project_id: [u8; 32],
+    root_message: [u8; 32],
+) -> bool {
+    rows.iter().any(|row| {
+        matches!(
+            row.conversation_target,
+            Some(UiConversationTarget::Project {
+                project_id: candidate_project,
+                root_message: candidate_root,
+                ..
+            }) if candidate_project == project_id && candidate_root == root_message
+        )
+    })
+}
+
+fn project_draft_conversation_row(project: &UiProject) -> UiRow {
+    UiRow {
+        id: project_draft_conversation_id(project.project_id),
+        title: project.name.clone(),
+        detail: "New project conversation".to_owned(),
+        state: UiRowState::Open,
+        kind: UiRowKind::Conversation,
+        conversation_target: None,
+    }
+}
+
+fn project_draft_conversation_id(project_id: [u8; 32]) -> String {
+    format!("project-draft:{}", agent_hex(project_id))
 }
 
 /// Applies one event without performing I/O or domain mutation.
@@ -7539,6 +7680,7 @@ fn snapshot_loaded(
             .conversation
             .as_ref()
             .map(|conversation| conversation.row_id.clone())
+        && !model.selected_conversation_is_local_project_draft()
     {
         model.request_conversation(row_id, None, model.focus == UiFocus::Conversation, effects)?;
     } else if model.required_revision.is_none() {
@@ -7924,11 +8066,14 @@ fn append_committed_message(model: &mut UiModel, draft: &UiMailboxDraft, message
                 ..
             }) if selected_project == project_id && selected_thread == thread_id
         ),
-        UiMailboxDraftTarget::Direct { .. }
-        | UiMailboxDraftTarget::SelfNote
-        | UiMailboxDraftTarget::Project {
-            thread_id: None, ..
-        } => false,
+        UiMailboxDraftTarget::Project {
+            project_id,
+            thread_id: None,
+        } => model.conversation.as_ref().is_some_and(|conversation| {
+            conversation.row_id == project_draft_conversation_id(project_id)
+                && model.selected_row.as_ref() == Some(&conversation.row_id)
+        }),
+        UiMailboxDraftTarget::Direct { .. } | UiMailboxDraftTarget::SelfNote => false,
     };
     if !targets_open_conversation {
         return;

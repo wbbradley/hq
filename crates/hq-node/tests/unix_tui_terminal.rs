@@ -1605,8 +1605,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && Instant::now() >= next_state_probe_at
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"new conversation".len())
-                    .any(|window| window == b"new conversation")
+                    .windows(b"Project agent".len())
+                    .any(|window| window == b"Project agent")
             })
         {
             next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
