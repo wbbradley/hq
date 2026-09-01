@@ -23,6 +23,11 @@ present as a typed choice. Use progressive disclosure: ordinary screens explain 
 actions, while detail views expose stable IDs, causal evidence, provider/session identities, and
 recovery diagnostics.
 
+Correlate state with typed identities and source sequence, not display prose, timestamps, storage
+arrival order, or page-local inference. Treat invalidations as body-free hints to reread
+authoritative state; never put prompts, message bodies, secrets, or other sensitive content in an
+invalidation.
+
 Keep `PLAN.md` limited to unfinished, task-specific work. Put durable repository guidance here.
 Plan entries should state the concrete problem, scope, dependencies, invariants, and observable
 completion condition. Do not repeat repository-wide implementation ceremony, generic engineering
