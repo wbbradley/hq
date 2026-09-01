@@ -76,6 +76,60 @@ Acceptance criteria:
 - Definite rejection preserves editable text; response loss and duplicate invalidations never
   author the message twice.
 
+#### Implementation plan
+
+1. Add pure-model tests in `crates/hq-tui/tests/model.rs` before changing submission state. Pin the
+   same-transition optimistic local-human row for reply, direct, self-note, and project drafts; its
+   effect-identity anchor, exact body/target retention, `Pending` delivery, conversation focus, and
+   live-activity tail ordering; committed canonical identity replacement with `Sent` for ordinary
+   messages and queued `Pending` for project messages; duplicate/stale completions; definite
+   rejection restoring the exact editable draft and removing only its optimistic row; and uncertain
+   completion retaining pending text without making a second authored row.
+2. Replace the copy-only `PendingMailbox` marker in `crates/hq-tui/src/model.rs` with submission state
+   that retains the draft, typed action, and optional optimistic entry identity. Insert the
+   optimistic entry before emitting `SubmitMailboxCommand`. Reconcile that exact row in place on a
+   committed receipt, preserve its logical anchor through reload, and let authoritative conversation
+   pages replace it by canonical message identity. Keep archive/restore state-only commands and
+   autosave/open-draft paths free of optimistic message rows.
+3. Add a project-component wake capability and test-first worker contracts in
+   `crates/hq-node/src/project_component.rs` and `crates/hq-node/tests/project_node_component.rs`.
+   Move reconciliation over shared immutable worker/input capabilities into one named component-owned
+   thread. A condition-variable latest-value signal must coalesce concurrent wakes, serialize each
+   reconciliation pass, continue immediately when a bounded pass truncates, retry durable failures
+   on the next wake or periodic repair, and perform a final pass before deterministic drain/join.
+   Startup repair must precede admission, and forced stop must wake and join without inventing
+   successful delivery evidence.
+4. Refactor `NodeApplicationPorts` in `crates/hq-node/src/components.rs` so a committed project
+   mailbox receipt schedules the reconciliation worker and returns immediately. Apply the same wake
+   to later relevant canonical commits instead of running project reconciliation in the request
+   dispatcher. Add component tests with a deliberately blocked project reconciler proving the
+   mailbox mutation receipt returns first, duplicate wakes coalesce, unrelated/noncommitted mailbox
+   outcomes do not schedule work, and wake failure after commit cannot rewrite the durable receipt.
+5. Retain the existing canonical project-input and dispatch planners unchanged. Add worker tests for
+   unrunnable inputs, delayed runtime/provider acceptance, rejected automatic commands, failure then
+   wake retry, truncation, startup recovery, periodic repair, and shutdown with a wake in flight.
+   The background owner must derive every retry from durable state; the in-memory wake carries no
+   message body, project identity, or provider payload.
+6. Extend `crates/hq-node/tests/tui_effect_executor.rs` and the installed PTY scenarios in
+   `crates/hq-node/tests/unix_tui_terminal.rs` so sending paints the local-human row before a blocked
+   command/provider path completes, terminal input and redraw remain responsive, the durable receipt
+   changes ordinary delivery to sent while project delivery stays queued, and authoritative
+   convergence produces no duplicate transcript row.
+7. Update `docs/projects.md`, `docs/protocol/local-api-v1.md`, and
+   `docs/rust/{tui,acceptance-scenarios,behavior-ledger}.md` with the distinct optimistic submission,
+   durable mailbox commit, accepted project input, dispatch, and provider-delivery evidence. Run
+   formatting, architecture and qualification validation, strict workspace Clippy, focused
+   model/component/executor/PTY tests, and the complete locked all-target/all-feature workspace
+   suite. Commit with a Conventional Commit, remove this task from `PLAN.md`, and append its
+   implementation summary plus this complete original entry to `COMPLETED.md`.
+
+Risks and open questions: an optimistic row has no canonical message identity until the receipt and
+must never be mistaken for action authority; response loss must retain one stable in-flight command
+without enabling a duplicate submission; a wake can be lost after commit or during process death so
+startup/periodic repair must remain sufficient; the background worker shares command/input adapters
+with foreground project operations and therefore requires explicit serialization/thread-safety
+bounds; and shutdown must not deadlock when reconciliation is blocked in a bounded provider call.
+
 ### Let humans resolve provider requests
 
 Expose provider-neutral questions, command/file approvals, permission requests, and MCP
