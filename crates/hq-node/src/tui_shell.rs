@@ -12,7 +12,10 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use hq_local_api::{InitialView, protocol::v1::BuildMetadata};
-use hq_tui::{UiEvent, UiInput, UiModel, UiRenderCache, UiSize, UiTheme, update};
+use hq_tui::{
+    UiConversationViewportObservation, UiEvent, UiInput, UiModel, UiRenderCache, UiSize, UiTheme,
+    update,
+};
 use nix::unistd::{Uid, User};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -153,7 +156,10 @@ pub trait TuiTerminalPort {
     /// Polls one normalized terminal event for a bounded interval.
     fn poll(&mut self, wait: Duration) -> Result<Option<TuiTerminalEvent>, TuiTerminalError>;
     /// Draws the latest complete model by immutable borrow.
-    fn draw(&mut self, model: &UiModel) -> Result<(), TuiTerminalError>;
+    fn draw(
+        &mut self,
+        model: &UiModel,
+    ) -> Result<Option<UiConversationViewportObservation>, TuiTerminalError>;
     /// Restores every mode activated by this capability; repeated calls are safe.
     fn restore(&mut self) -> Result<(), TuiTerminalError>;
 }
@@ -225,13 +231,19 @@ impl TuiTerminalPort for CrosstermTerminal {
             .map_err(|_| TuiTerminalError::Poll)
     }
 
-    fn draw(&mut self, model: &UiModel) -> Result<(), TuiTerminalError> {
+    fn draw(
+        &mut self,
+        model: &UiModel,
+    ) -> Result<Option<UiConversationViewportObservation>, TuiTerminalError> {
         let theme = &self.theme;
         let cache = &mut self.render_cache;
+        let mut observation = None;
         self.terminal
-            .draw(|frame| hq_tui::render_with_cache(frame, model, theme, cache))
-            .map(|_| ())
-            .map_err(|_| TuiTerminalError::Draw)
+            .draw(|frame| {
+                observation = hq_tui::render_with_cache(frame, model, theme, cache);
+            })
+            .map_err(|_| TuiTerminalError::Draw)?;
+        Ok(observation)
     }
 
     fn restore(&mut self) -> Result<(), TuiTerminalError> {
@@ -349,8 +361,15 @@ where
                 .execute(transition.effects)
                 .map_err(|_| TuiShellError::Executor)?;
         }
-        if executor.take_redraw_request() {
-            terminal.draw(&model)?;
+        if executor.take_redraw_request()
+            && let Some(observation) = terminal.draw(&model)?
+        {
+            let transition = update(model, UiEvent::ConversationViewportObserved { observation })
+                .map_err(|_| TuiShellError::Model)?;
+            model = transition.model;
+            executor
+                .execute(transition.effects)
+                .map_err(|_| TuiShellError::Executor)?;
         }
         if executor.exit_requested() {
             break;
@@ -441,7 +460,10 @@ impl<T: TuiTerminalPort> TerminalGuard<T> {
         self.terminal.poll(wait)
     }
 
-    fn draw(&mut self, model: &UiModel) -> Result<(), TuiTerminalError> {
+    fn draw(
+        &mut self,
+        model: &UiModel,
+    ) -> Result<Option<UiConversationViewportObservation>, TuiTerminalError> {
         self.terminal.draw(model)
     }
 

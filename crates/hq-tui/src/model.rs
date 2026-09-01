@@ -241,6 +241,37 @@ pub struct UiSize {
     pub height: u16,
 }
 
+/// Stable visual-row position within one conversation entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiConversationViewportPosition {
+    /// Stable conversation entry identity.
+    pub entry_id: String,
+    /// Zero-based measured visual row within the entry.
+    pub row: u16,
+}
+
+/// Exact measured height for one conversation entry in the current transcript layout.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiConversationEntryGeometry {
+    /// Stable conversation entry identity.
+    pub entry_id: String,
+    /// Positive measured visual rows, including presentation spacing.
+    pub height: u16,
+}
+
+/// Passive width-specific transcript geometry observed by the terminal renderer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiConversationViewportObservation {
+    /// Stable selected conversation summary identity.
+    pub conversation_id: String,
+    /// Transcript columns used to measure every entry.
+    pub width: u16,
+    /// Rows available to paint transcript entries.
+    pub height: u16,
+    /// Ordered measured entries currently eligible for transcript presentation.
+    pub entries: Vec<UiConversationEntryGeometry>,
+}
+
 /// Passive shell-normalized status for one summary row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiRowState {
@@ -1957,6 +1988,11 @@ pub enum UiEvent {
     Input(UiInput),
     /// Complete terminal resize.
     Resized(UiSize),
+    /// Passive width-specific transcript geometry observed during a terminal draw.
+    ConversationViewportObserved {
+        /// Exact current conversation and entry measurements.
+        observation: UiConversationViewportObservation,
+    },
     /// One scheduled timer elapsed.
     TimerElapsed {
         /// Identity of the completed timer effect.
@@ -2281,6 +2317,7 @@ struct UiSectionWorkspace {
     conversation: Option<UiConversation>,
     conversation_anchor: Option<String>,
     conversation_scroll_mode: ConversationScrollMode,
+    conversation_viewport_position: Option<UiConversationViewportPosition>,
     technical_visible: bool,
     technical_scroll: u16,
     focus: UiFocus,
@@ -2311,6 +2348,61 @@ enum ConversationScrollMode {
     FollowTail,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConversationViewportGeometry {
+    height: u16,
+    entries: Vec<UiConversationEntryGeometry>,
+}
+
+impl ConversationViewportGeometry {
+    fn total_height(&self) -> u64 {
+        self.entries
+            .iter()
+            .map(|entry| u64::from(entry.height))
+            .sum()
+    }
+
+    fn maximum_top(&self) -> u64 {
+        self.total_height().saturating_sub(u64::from(self.height))
+    }
+
+    fn entry_start(&self, entry_id: &str) -> Option<(u64, u16)> {
+        let mut start = 0_u64;
+        for entry in &self.entries {
+            if entry.entry_id == entry_id {
+                return Some((start, entry.height));
+            }
+            start = start.saturating_add(u64::from(entry.height));
+        }
+        None
+    }
+
+    fn offset_for(&self, position: &UiConversationViewportPosition) -> Option<u64> {
+        let (start, height) = self.entry_start(&position.entry_id)?;
+        Some(
+            start
+                .saturating_add(u64::from(position.row.min(height.saturating_sub(1))))
+                .min(self.maximum_top()),
+        )
+    }
+
+    fn position_at(&self, offset: u64) -> Option<UiConversationViewportPosition> {
+        let offset = offset.min(self.maximum_top());
+        let mut start = 0_u64;
+        for entry in &self.entries {
+            let end = start.saturating_add(u64::from(entry.height));
+            if offset < end {
+                return Some(UiConversationViewportPosition {
+                    entry_id: entry.entry_id.clone(),
+                    row: u16::try_from(offset.saturating_sub(start)).unwrap_or(u16::MAX),
+                });
+            }
+            start = end;
+        }
+        None
+    }
+}
+
 /// Complete invariant-bearing TUI application state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiModel {
@@ -2329,6 +2421,8 @@ pub struct UiModel {
     observation_mode: UiObservationMode,
     conversation_anchor: Option<String>,
     conversation_scroll_mode: ConversationScrollMode,
+    conversation_viewport_position: Option<UiConversationViewportPosition>,
+    conversation_viewport_geometry: Option<ConversationViewportGeometry>,
     technical_visible: bool,
     technical_scroll: u16,
     mailbox_modal: Option<UiMailboxModal>,
@@ -2395,6 +2489,8 @@ impl UiModel {
             observation_mode: UiObservationMode::SnapshotFallback,
             conversation_anchor: None,
             conversation_scroll_mode: ConversationScrollMode::Anchored,
+            conversation_viewport_position: None,
+            conversation_viewport_geometry: None,
             technical_visible: false,
             technical_scroll: 0,
             mailbox_modal: None,
@@ -2662,6 +2758,19 @@ impl UiModel {
     /// Returns the stable selected conversation-entry identity.
     pub fn conversation_anchor(&self) -> Option<&str> {
         self.conversation_anchor.as_deref()
+    }
+
+    /// Returns the stable visual row currently at the top of the transcript viewport.
+    pub const fn conversation_viewport_position(&self) -> Option<&UiConversationViewportPosition> {
+        self.conversation_viewport_position.as_ref()
+    }
+
+    /// Reports whether new conversation content should remain pinned to the transcript tail.
+    pub const fn conversation_follows_tail(&self) -> bool {
+        matches!(
+            self.conversation_scroll_mode,
+            ConversationScrollMode::FollowTail
+        )
     }
 
     /// Reports whether typed technical disclosure is expanded.
@@ -3065,7 +3174,14 @@ impl UiModel {
                 row_id: Some(row_id.clone()),
             });
         }
-        self.install_retained_conversation(&row_id);
+        if self.desired_conversation.is_some()
+            || self
+                .conversation
+                .as_ref()
+                .is_none_or(|conversation| conversation.row_id != row_id)
+        {
+            self.install_retained_conversation(&row_id);
+        }
     }
 
     fn open_draft(
@@ -3208,6 +3324,7 @@ impl UiModel {
             conversation: self.conversation.clone(),
             conversation_anchor: self.conversation_anchor.clone(),
             conversation_scroll_mode: self.conversation_scroll_mode,
+            conversation_viewport_position: self.conversation_viewport_position.clone(),
             technical_visible: self.technical_visible,
             technical_scroll: self.technical_scroll,
             focus: self.focus,
@@ -3222,6 +3339,8 @@ impl UiModel {
             self.conversation = workspace.conversation;
             self.conversation_anchor = workspace.conversation_anchor;
             self.conversation_scroll_mode = workspace.conversation_scroll_mode;
+            self.conversation_viewport_position = workspace.conversation_viewport_position;
+            self.conversation_viewport_geometry = None;
             self.technical_visible = workspace.technical_visible;
             self.technical_scroll = workspace.technical_scroll;
             self.focus = workspace.focus;
@@ -3231,6 +3350,8 @@ impl UiModel {
             self.conversation = None;
             self.conversation_anchor = None;
             self.conversation_scroll_mode = ConversationScrollMode::Anchored;
+            self.conversation_viewport_position = None;
+            self.conversation_viewport_geometry = None;
             self.technical_visible = false;
             self.technical_scroll = 0;
             self.focus = UiFocus::Navigation;
@@ -3330,10 +3451,152 @@ impl UiModel {
         } else {
             self.conversation_anchor = Some(selected);
             self.conversation_scroll_mode = ConversationScrollMode::Anchored;
+            self.reveal_conversation_entry_start();
             self.technical_visible = false;
             self.technical_scroll = 0;
             true
         }
+    }
+
+    fn observe_conversation_viewport(
+        &mut self,
+        observation: UiConversationViewportObservation,
+    ) -> bool {
+        let Some(conversation) = self
+            .conversation
+            .as_ref()
+            .filter(|conversation| conversation.row_id == observation.conversation_id)
+        else {
+            return false;
+        };
+        if observation.width == 0
+            || observation.height == 0
+            || observation.entries.is_empty()
+            || observation.entries.iter().any(|entry| entry.height == 0)
+        {
+            return false;
+        }
+        let mut previous_index = None;
+        for measured in &observation.entries {
+            let Some(index) = conversation
+                .entries
+                .iter()
+                .position(|entry| entry.id == measured.entry_id)
+            else {
+                return false;
+            };
+            if previous_index.is_some_and(|previous| index <= previous) {
+                return false;
+            }
+            previous_index = Some(index);
+        }
+        let geometry = ConversationViewportGeometry {
+            height: observation.height,
+            entries: observation.entries,
+        };
+        let previous = self.conversation_viewport_position.clone();
+        self.conversation_viewport_position =
+            if self.conversation_scroll_mode == ConversationScrollMode::FollowTail {
+                geometry.position_at(geometry.maximum_top())
+            } else if let Some(position) = previous.as_ref() {
+                geometry
+                    .offset_for(position)
+                    .and_then(|offset| geometry.position_at(offset))
+                    .or_else(|| self.anchor_start_in(&geometry))
+            } else {
+                self.anchor_start_in(&geometry)
+            };
+        let changed = previous != self.conversation_viewport_position;
+        self.conversation_viewport_geometry = Some(geometry);
+        changed
+    }
+
+    fn anchor_start_in(
+        &self,
+        geometry: &ConversationViewportGeometry,
+    ) -> Option<UiConversationViewportPosition> {
+        self.conversation_anchor
+            .as_deref()
+            .and_then(|anchor| geometry.entry_start(anchor))
+            .and_then(|(start, _)| geometry.position_at(start))
+            .or_else(|| geometry.position_at(geometry.maximum_top()))
+    }
+
+    fn scroll_conversation_viewport(&mut self, forward: bool) -> bool {
+        let Some(geometry) = self.conversation_viewport_geometry.as_ref() else {
+            return false;
+        };
+        let current = self
+            .conversation_viewport_position
+            .as_ref()
+            .and_then(|position| geometry.offset_for(position))
+            .unwrap_or_else(|| geometry.maximum_top());
+        let next = if forward {
+            current.saturating_add(1).min(geometry.maximum_top())
+        } else {
+            current.saturating_sub(1)
+        };
+        let next_mode = if forward && next == geometry.maximum_top() {
+            ConversationScrollMode::FollowTail
+        } else {
+            ConversationScrollMode::Anchored
+        };
+        let position = geometry.position_at(next);
+        if position == self.conversation_viewport_position
+            && next_mode == self.conversation_scroll_mode
+        {
+            return false;
+        }
+        self.conversation_viewport_position = position;
+        self.conversation_scroll_mode = next_mode;
+        true
+    }
+
+    fn reveal_conversation_entry_start(&mut self) -> bool {
+        let Some(anchor) = self.conversation_anchor.clone() else {
+            return false;
+        };
+        let requested = UiConversationViewportPosition {
+            entry_id: anchor,
+            row: 0,
+        };
+        let position = self
+            .conversation_viewport_geometry
+            .as_ref()
+            .and_then(|geometry| {
+                geometry
+                    .offset_for(&requested)
+                    .and_then(|offset| geometry.position_at(offset))
+            })
+            .unwrap_or(requested);
+        let changed = self.conversation_viewport_position.as_ref() != Some(&position)
+            || self.conversation_scroll_mode != ConversationScrollMode::Anchored;
+        self.conversation_viewport_position = Some(position);
+        self.conversation_scroll_mode = ConversationScrollMode::Anchored;
+        changed
+    }
+
+    fn reveal_conversation_entry_end(&mut self) -> bool {
+        let Some(geometry) = self.conversation_viewport_geometry.as_ref() else {
+            return false;
+        };
+        let Some(anchor) = self.conversation_anchor.as_deref() else {
+            return false;
+        };
+        let Some((start, height)) = geometry.entry_start(anchor) else {
+            return false;
+        };
+        let top_within_entry = height.saturating_sub(geometry.height);
+        let position = geometry.position_at(
+            start
+                .saturating_add(u64::from(top_within_entry))
+                .min(geometry.maximum_top()),
+        );
+        let changed = position != self.conversation_viewport_position
+            || self.conversation_scroll_mode != ConversationScrollMode::Anchored;
+        self.conversation_viewport_position = position;
+        self.conversation_scroll_mode = ConversationScrollMode::Anchored;
+        changed
     }
 
     fn toggle_technical_details(&mut self) -> bool {
@@ -3380,6 +3643,8 @@ impl UiModel {
         self.conversation = None;
         self.conversation_anchor = None;
         self.conversation_scroll_mode = ConversationScrollMode::Anchored;
+        self.conversation_viewport_position = None;
+        self.conversation_viewport_geometry = None;
         self.close_technical_details();
         self.pending_conversation = None;
         if self.focus == UiFocus::Conversation {
@@ -3465,12 +3730,13 @@ impl UiModel {
     }
 
     fn install_first_conversation_page(&mut self, mut page: UiConversationPage) {
+        let same_conversation = self
+            .conversation
+            .as_ref()
+            .is_some_and(|conversation| conversation.row_id == page.row_id);
         let previous_anchor = self.conversation_anchor.clone();
-        let follow_tail = self.conversation_scroll_mode == ConversationScrollMode::FollowTail
-            && self
-                .conversation
-                .as_ref()
-                .is_some_and(|conversation| conversation.row_id == page.row_id);
+        let follow_tail = !same_conversation
+            || self.conversation_scroll_mode == ConversationScrollMode::FollowTail;
         apply_pending_project_delivery(self.snapshot.as_ref(), &mut page.entries);
         self.conversation = Some(UiConversation {
             row_id: page.row_id,
@@ -3483,9 +3749,6 @@ impl UiModel {
             place_live_activity_at_tail(&mut conversation.entries);
         }
         self.conversation_anchor = self.conversation.as_ref().and_then(|conversation| {
-            if follow_tail {
-                return conversation.entries.last().map(|entry| entry.id.clone());
-            }
             previous_anchor
                 .filter(|anchor| conversation.entries.iter().any(|entry| &entry.id == anchor))
                 .or_else(|| conversation.entries.last().map(|entry| entry.id.clone()))
@@ -3495,6 +3758,10 @@ impl UiModel {
         } else {
             ConversationScrollMode::Anchored
         };
+        if !same_conversation {
+            self.conversation_viewport_position = None;
+        }
+        self.conversation_viewport_geometry = None;
         self.conversation_failure = None;
         self.last_failure = None;
     }
@@ -3822,6 +4089,12 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         UiEvent::Resized(viewport) => {
             if model.viewport != viewport {
                 model.viewport = viewport;
+                model.conversation_viewport_geometry = None;
+                effects.push(UiEffect::RequestRedraw);
+            }
+        }
+        UiEvent::ConversationViewportObserved { observation } => {
+            if model.observe_conversation_viewport(observation) {
                 effects.push(UiEffect::RequestRedraw);
             }
         }
@@ -4289,7 +4562,7 @@ fn apply_input(
             UiFocus::Conversation if model.technical_visible => {
                 model.scroll_technical_details(true)
             }
-            UiFocus::Conversation => model.move_conversation_anchor(true),
+            UiFocus::Conversation => model.scroll_conversation_viewport(true),
             UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
                 model.change_section(model.section.next());
                 true
@@ -4301,7 +4574,7 @@ fn apply_input(
             UiFocus::Conversation if model.technical_visible => {
                 model.scroll_technical_details(false)
             }
-            UiFocus::Conversation => model.move_conversation_anchor(false),
+            UiFocus::Conversation => model.scroll_conversation_viewport(false),
             UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
                 model.change_section(model.section.previous());
                 true
@@ -4317,6 +4590,12 @@ fn apply_input(
             true
         }
         UiInput::Character(character) => mailbox_shortcut(model, *character, effects)?,
+        UiInput::MoveCursorHome if model.focus == UiFocus::Conversation => {
+            model.reveal_conversation_entry_start()
+        }
+        UiInput::MoveCursorEnd if model.focus == UiFocus::Conversation => {
+            model.reveal_conversation_entry_end()
+        }
         UiInput::Paste(_)
         | UiInput::Help
         | UiInput::Refresh
@@ -4814,6 +5093,7 @@ fn normalize_vim_navigation(model: &UiModel, input: &UiInput) -> UiInput {
         return input.clone();
     }
     match input {
+        UiInput::Character('j' | 'k') if model.focus == UiFocus::Conversation => input.clone(),
         UiInput::Character('j') => UiInput::NextItem,
         UiInput::Character('k') => UiInput::PreviousItem,
         _ => input.clone(),
@@ -8171,6 +8451,9 @@ fn mailbox_shortcut(
             UiFocus::Conversation | UiFocus::Draft => Ok(false),
         },
         'j' => Ok(match model.focus {
+            UiFocus::Conversation if model.technical_visible => {
+                model.scroll_technical_details(true)
+            }
             UiFocus::Conversation => model.move_conversation_anchor(true),
             UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
                 model.change_section(model.section.next());
@@ -8180,6 +8463,9 @@ fn mailbox_shortcut(
             UiFocus::Draft => false,
         }),
         'k' => Ok(match model.focus {
+            UiFocus::Conversation if model.technical_visible => {
+                model.scroll_technical_details(false)
+            }
             UiFocus::Conversation => model.move_conversation_anchor(false),
             UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
                 model.change_section(model.section.previous());
@@ -8506,9 +8792,6 @@ fn conversation_loaded(
         place_live_activity_at_tail(&mut conversation.entries);
     }
     model.conversation_anchor = model.conversation.as_ref().and_then(|conversation| {
-        if followed_tail || previous_anchor.is_none() {
-            return conversation.entries.last().map(|entry| entry.id.clone());
-        }
         previous_anchor
             .filter(|anchor| conversation.entries.iter().any(|entry| &entry.id == anchor))
             .or_else(|| {
@@ -8528,7 +8811,10 @@ fn conversation_loaded(
     });
     if model.conversation_anchor.is_none() {
         model.conversation_scroll_mode = ConversationScrollMode::Anchored;
+    } else if followed_tail {
+        model.conversation_scroll_mode = ConversationScrollMode::FollowTail;
     }
+    model.conversation_viewport_geometry = None;
     if pending.enter_on_load {
         model.focus = UiFocus::Conversation;
     }
@@ -8946,6 +9232,8 @@ fn append_pending_message(
         ConversationScrollMode::Anchored
     };
     model.focus = UiFocus::Conversation;
+    model.conversation_viewport_position = None;
+    model.conversation_viewport_geometry = None;
     model.close_technical_details();
     Some(id)
 }
@@ -8976,6 +9264,7 @@ fn reconcile_committed_message(
                 .entries
                 .retain(|entry| entry.id != optimistic_entry);
         }
+        replace_viewport_entry_identity(model, optimistic_entry, &existing_id);
         retain_sent_message_anchor(model, existing_id);
         return;
     }
@@ -8999,6 +9288,7 @@ fn reconcile_committed_message(
             message_id,
             reply_allowed: false,
         });
+        replace_viewport_entry_identity(model, Some(optimistic_entry), &id);
         retain_sent_message_anchor(model, id);
         return;
     }
@@ -9040,6 +9330,20 @@ fn retain_sent_message_anchor(model: &mut UiModel, sent_entry: String) {
     }
     model.focus = UiFocus::Conversation;
     model.close_technical_details();
+}
+
+fn replace_viewport_entry_identity(
+    model: &mut UiModel,
+    previous_entry: Option<&str>,
+    current_entry: &str,
+) {
+    if let Some(previous_entry) = previous_entry
+        && let Some(position) = &mut model.conversation_viewport_position
+        && position.entry_id == previous_entry
+    {
+        current_entry.clone_into(&mut position.entry_id);
+    }
+    model.conversation_viewport_geometry = None;
 }
 
 fn mailbox_command_failed(

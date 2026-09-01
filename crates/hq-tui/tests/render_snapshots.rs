@@ -960,8 +960,11 @@ fn technical_details_are_in_pane_and_keep_exact_activity_content() {
             height: 20,
         },
     ] {
-        let activity = update(conversation_model(size), UiEvent::Input(UiInput::NextItem))
-            .expect("select activity");
+        let activity = update(
+            conversation_model(size),
+            UiEvent::Input(UiInput::Character('j')),
+        )
+        .expect("select activity");
         let details = update(activity.model, UiEvent::Input(UiInput::Activate))
             .expect("open technical details")
             .model;
@@ -1874,9 +1877,12 @@ fn ordinary_surfaces_use_user_intentions_and_label_technical_evidence() {
         assert!(provider.contains("Offline service · unavailable"));
         assert!(!provider.contains("Provider namespace"));
 
-        let conversation = update(conversation_model(size), UiEvent::Input(UiInput::NextItem))
-            .expect("select conversation update")
-            .model;
+        let conversation = update(
+            conversation_model(size),
+            UiEvent::Input(UiInput::Character('j')),
+        )
+        .expect("select conversation update")
+        .model;
         let conversation = render_text(&conversation);
         assert!(
             conversation.contains("● Work in progress…"),
@@ -2825,7 +2831,7 @@ fn conversation_model_with_content(
         .expect("focus conversation list");
     let opened =
         update(content.model, UiEvent::Input(UiInput::Activate)).expect("focus conversation");
-    update(opened.model, UiEvent::Input(UiInput::PreviousItem))
+    update(opened.model, UiEvent::Input(UiInput::Character('k')))
         .expect("select message")
         .model
 }

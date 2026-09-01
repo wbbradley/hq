@@ -19,9 +19,11 @@ use hq_node::{
     normalize_crossterm_event, run_tui_shell,
 };
 use hq_tui::{
-    UiConversationPage, UiFailure, UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult,
-    UiMailboxDraft, UiMailboxDraftTarget, UiMaterializedConversationView, UiModel, UiRow,
-    UiRowKind, UiRowState, UiSize, UiSnapshot,
+    UiConversationAuthor, UiConversationEntry, UiConversationEntryGeometry,
+    UiConversationEntryPresentation, UiConversationPage, UiConversationViewportObservation,
+    UiConversationViewportPosition, UiFailure, UiHumanState, UiInput, UiMailboxAction,
+    UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget, UiMaterializedConversationView,
+    UiMessageState, UiModel, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
 };
 
 #[test]
@@ -186,6 +188,83 @@ fn retained_subscription_view_is_drawn_without_refetching_startup_state() {
 }
 
 #[test]
+fn passive_draw_geometry_is_reduced_before_the_next_frame() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let positions = Arc::new(Mutex::new(Vec::new()));
+    let mut terminal = ScriptedTerminal::new(
+        Arc::clone(&log),
+        [Ok(None), Ok(Some(TuiTerminalEvent::Input(UiInput::Quit)))],
+    );
+    terminal.draw_positions = Some(Arc::clone(&positions));
+    terminal
+        .draw_observations
+        .push_back(Some(UiConversationViewportObservation {
+            conversation_id: "thread-a".to_owned(),
+            width: 40,
+            height: 4,
+            entries: vec![UiConversationEntryGeometry {
+                entry_id: "message-1".to_owned(),
+                height: 7,
+            }],
+        }));
+    let observer = InitialObserver {
+        idle: idle_observer(),
+        initial: Some(UiMaterializedConversationView {
+            snapshot: UiSnapshot {
+                revision: 1,
+                human_state: UiHumanState::Ready,
+                inbox_rows: vec![UiRow {
+                    id: "thread-a".to_owned(),
+                    title: "Alice".to_owned(),
+                    detail: "ready".to_owned(),
+                    state: UiRowState::Open,
+                    kind: UiRowKind::Conversation,
+                    conversation_target: None,
+                }],
+                sent_rows: Vec::new(),
+                archived_rows: Vec::new(),
+                agent_rows: Vec::new(),
+                project_rows: Vec::new(),
+                direct_targets: Vec::new(),
+                providers: Vec::new(),
+                agents: Vec::new(),
+                projects: Vec::new(),
+            },
+            conversation: Some(UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
+                row_id: "thread-a".to_owned(),
+                entries: vec![UiConversationEntry {
+                    id: "message-1".to_owned(),
+                    presentation: UiConversationEntryPresentation::Message {
+                        author: UiConversationAuthor::Participant("Alice".to_owned()),
+                        body: "long message".to_owned(),
+                    },
+                    message_state: Some(UiMessageState::Open),
+                    delivery: None,
+                    message_target: None,
+                    technical: Vec::new(),
+                }],
+                next_cursor: None,
+            }),
+        }),
+    };
+
+    run_tui_shell(terminal, EmptyClient, observer, FixedClock).expect("shell exits cleanly");
+
+    assert_eq!(
+        positions.lock().expect("draw positions").as_slice(),
+        &[
+            None,
+            Some(UiConversationViewportPosition {
+                entry_id: "message-1".to_owned(),
+                row: 3,
+            }),
+        ]
+    );
+}
+
+#[test]
 fn terminal_errors_and_partial_activation_restore_exactly_once() {
     let poll_log = Arc::new(Mutex::new(Vec::new()));
     let poll_terminal = ScriptedTerminal::new(Arc::clone(&poll_log), [Err(TuiTerminalError::Poll)]);
@@ -272,6 +351,8 @@ struct ScriptedTerminal {
     activation_fails: bool,
     draw_panics: bool,
     draw_delay: Duration,
+    draw_observations: VecDeque<Option<UiConversationViewportObservation>>,
+    draw_positions: Option<Arc<Mutex<Vec<Option<UiConversationViewportPosition>>>>>,
 }
 
 impl ScriptedTerminal {
@@ -285,6 +366,8 @@ impl ScriptedTerminal {
             activation_fails: false,
             draw_panics: false,
             draw_delay: Duration::ZERO,
+            draw_observations: VecDeque::new(),
+            draw_positions: None,
         }
     }
 
@@ -318,11 +401,20 @@ impl TuiTerminalPort for ScriptedTerminal {
             .unwrap_or(Ok(Some(TuiTerminalEvent::Input(UiInput::Quit))))
     }
 
-    fn draw(&mut self, _model: &UiModel) -> Result<(), TuiTerminalError> {
+    fn draw(
+        &mut self,
+        model: &UiModel,
+    ) -> Result<Option<UiConversationViewportObservation>, TuiTerminalError> {
         self.record("draw");
         assert!(!self.draw_panics, "scripted draw panic");
         thread::sleep(self.draw_delay);
-        Ok(())
+        if let Some(positions) = &self.draw_positions {
+            positions
+                .lock()
+                .expect("draw positions")
+                .push(model.conversation_viewport_position().cloned());
+        }
+        Ok(self.draw_observations.pop_front().flatten())
     }
 
     fn restore(&mut self) -> Result<(), TuiTerminalError> {

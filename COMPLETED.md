@@ -1,5 +1,42 @@
 # Completed
 
+## 2026-09-01 — Stable continuous conversation viewport state
+
+Added a typed, passive renderer-to-reducer geometry observation and a stable entry-plus-row
+transcript position independent from entry selection, technical-detail scrolling, and follow-tail
+intent. Arrow keys now move by measured visual row while `j`/`k` retain entry navigation, Home/End
+reveal entry boundaries, and explicit tail following survives live refreshes without stealing the
+selected fact. Position is retained and remeasured across workspaces, resize, paging, refresh,
+layout changes, and optimistic message identity replacement.
+
+The terminal shell now reduces render observations before subsequent frames. Reducer, renderer,
+shell, snapshot, paging, resize, workspace, identity-reconciliation, and qualification-budget tests
+pass across all `hq-tui` targets and the focused `hq-node` shell/client suites.
+
+### Original plan entry
+
+### Establish stable continuous conversation viewport state
+
+Add a typed passive renderer observation containing the exact visible conversation identity,
+entry identities and measured heights, and transcript viewport dimensions. Store a stable
+entry-plus-row viewport position independently from `conversation_anchor`, `technical_scroll`, and
+explicit follow-tail intent, including each Inbox section workspace.
+
+- Distinguish Up/Down from `j`/`k`: arrows move one measured visual row, while `j`/`k` keep
+  previous/next-entry navigation and reveal the selected entry's beginning. Home/End reveal the
+  beginning/end of the selected entry; PageDown continues to request older history.
+- Opening and sending at the tail retain explicit follow-tail intent. Manual row or entry movement
+  leaves follow-tail mode. A passive geometry refresh deterministically clamps the stable position
+  without granting render-cache state selection or action authority.
+- Preserve the viewport position across resize, coherent refresh/reorder, older-page append,
+  draft/inspector/interaction layout changes, and optimistic-to-canonical message identity
+  replacement. Reset it only when the selected conversation changes or disappears.
+- Cover pure row navigation, entry jumps, Home/End, top/bottom clamps, follow-tail transitions,
+  workspace restoration, refresh/reorder, paging, resize, and pending identity replacement.
+
+Done when the pure model and terminal shell own a stable continuous-row viewport contract driven
+by typed passive layout observations, without changing transcript painting yet.
+
 ## 2026-08-30 — Responsive chat-like Inbox conversation surface
 
 Reworked Inbox into a conversation-dominant responsive workspace. Wide layouts now use a bounded

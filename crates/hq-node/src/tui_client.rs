@@ -1788,6 +1788,7 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             UiEvent::Started
             | UiEvent::Input(_)
             | UiEvent::Resized(_)
+            | UiEvent::ConversationViewportObserved { .. }
             | UiEvent::TimerElapsed { .. }
             | UiEvent::MaterializedViewObserved { .. }
             | UiEvent::InteractionsObserved { .. }

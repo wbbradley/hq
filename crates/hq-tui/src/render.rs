@@ -15,15 +15,16 @@ use crate::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentAttentionReason, UiAgentModal,
     UiAgentProjectAssignment, UiAgentStatus, UiCompletedItemPresentation, UiConnectionState,
     UiConversationActivityKind, UiConversationAuthor, UiConversationEntry,
-    UiConversationEntryPresentation, UiFocus, UiHelpPage, UiHumanIssue, UiHumanMembershipEvidence,
-    UiHumanMembershipStatus, UiHumanState, UiInteractionKind, UiInteractionModal, UiMailboxAction,
-    UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
-    UiManagedSessionOutcome, UiMessageDelivery, UiMessageState, UiModel, UiNewChoice, UiNewModal,
-    UiProjectAction, UiProjectAssignedAgentStatus, UiProjectCreationChoice, UiProjectFolderAction,
-    UiProjectFolderOwnership, UiProjectFormField, UiProjectInteraction, UiProjectLifecycle,
-    UiProjectManagementAction, UiProjectOutcome, UiProjectRecoverySummary, UiProjectSummaryFocus,
-    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
-    UiTechnicalSection, UiTheme, UiThemeRole,
+    UiConversationEntryGeometry, UiConversationEntryPresentation,
+    UiConversationViewportObservation, UiFocus, UiHelpPage, UiHumanIssue,
+    UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanState, UiInteractionKind,
+    UiInteractionModal, UiMailboxAction, UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiMessageDelivery, UiMessageState, UiModel,
+    UiNewChoice, UiNewModal, UiProjectAction, UiProjectAssignedAgentStatus,
+    UiProjectCreationChoice, UiProjectFolderAction, UiProjectFolderOwnership, UiProjectFormField,
+    UiProjectInteraction, UiProjectLifecycle, UiProjectManagementAction, UiProjectOutcome,
+    UiProjectRecoverySummary, UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel,
+    UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, UiTheme, UiThemeRole,
     message_markdown::{MessageRenderCache, RenderedMessage},
     model::WIDE_WIDTH,
 };
@@ -67,6 +68,7 @@ fn inbox_list_width(available: u16) -> u16 {
 #[derive(Default)]
 pub struct UiRenderCache {
     messages: MessageRenderCache,
+    conversation_viewport: Option<UiConversationViewportObservation>,
 }
 
 impl UiRenderCache {
@@ -79,7 +81,7 @@ impl UiRenderCache {
 
 /// Renders the complete model without mutation or I/O.
 pub fn render(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme) {
-    render_with_cache(frame, model, theme, &mut UiRenderCache::new());
+    let _ = render_with_cache(frame, model, theme, &mut UiRenderCache::new());
 }
 
 /// Renders the complete model while reusing terminal-owned presentation artifacts.
@@ -88,12 +90,13 @@ pub fn render_with_cache(
     model: &UiModel,
     theme: &UiTheme,
     cache: &mut UiRenderCache,
-) {
+) -> Option<UiConversationViewportObservation> {
+    cache.conversation_viewport = None;
     let area = frame.area();
     frame.render_widget(Block::new().style(theme.style(UiThemeRole::Screen)), area);
     if area.width < MINIMUM_WIDTH || area.height < MINIMUM_HEIGHT {
         render_too_small(frame, model, theme, area);
-        return;
+        return None;
     }
 
     let [header, content, footer] = Layout::vertical([
@@ -115,6 +118,7 @@ pub fn render_with_cache(
     render_project_interaction(frame, model, theme, content, true);
     render_interaction_modal(frame, model, theme, content);
     render_help(frame, model, theme, content);
+    cache.conversation_viewport.take()
 }
 
 fn render_interaction_modal(
@@ -3842,6 +3846,19 @@ fn render_conversation_entries(
         .iter()
         .map(|layout| layout.height)
         .collect::<Vec<_>>();
+    cache.conversation_viewport = Some(UiConversationViewportObservation {
+        conversation_id: conversation.row_id.clone(),
+        width: area.width,
+        height: area.height,
+        entries: visible_entries
+            .iter()
+            .zip(&heights)
+            .map(|(entry, height)| UiConversationEntryGeometry {
+                entry_id: entry.id.clone(),
+                height: *height,
+            })
+            .collect(),
+    });
     let selected_index = model
         .conversation_anchor()
         .and_then(|anchor| visible_entries.iter().position(|entry| entry.id == anchor))
@@ -4518,14 +4535,16 @@ mod tests {
     use super::{
         activity_preview, completed_item_detail_lines, conversation_entry_layout, display_prefix,
         display_suffix, draft_context_label, inbox_list_width, inert_draft_source,
-        interaction_supersedes_live_tail, navigation_width, text_field_line,
-        visible_conversation_entries,
+        interaction_supersedes_live_tail, navigation_width, render_conversation_entries,
+        text_field_line, visible_conversation_entries,
     };
     use crate::{
         UiActivityStatus, UiCompletedItemPresentation, UiConversationActivityKind,
-        UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiInteraction,
-        UiInteractionKind, UiMessageState, UiTechnicalSection, UiTheme,
+        UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation,
+        UiConversationViewportObservation, UiInteraction, UiInteractionKind, UiMessageState,
+        UiModel, UiSize, UiTechnicalSection, UiTheme,
     };
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use unicode_width::UnicodeWidthStr;
 
     #[test]
@@ -4750,6 +4769,60 @@ mod tests {
         assert_eq!(visible_conversation_entries(&heights, 4, 7), 3..5);
         assert_eq!(visible_conversation_entries(&[12, 3], 0, 5), 0..1);
         assert_eq!(visible_conversation_entries(&heights, 2, 0), 0..0);
+    }
+
+    #[test]
+    fn renderer_reports_exact_conversation_geometry_to_the_shell() {
+        let mut first = message("one");
+        first.id = "first".to_owned();
+        let mut second = message("two\nthree");
+        second.id = "second".to_owned();
+        let conversation = crate::UiConversation {
+            row_id: "thread-a".to_owned(),
+            title: "Alice".to_owned(),
+            context: None,
+            entries: vec![first, second],
+            next_cursor: None,
+        };
+        let model = UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        });
+        let theme = UiTheme::terminal();
+        let mut cache = super::UiRenderCache::new();
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).expect("test terminal");
+
+        terminal
+            .draw(|frame| {
+                render_conversation_entries(
+                    frame,
+                    &model,
+                    &theme,
+                    Rect::new(0, 0, 40, 8),
+                    &conversation,
+                    &mut cache,
+                );
+            })
+            .expect("render conversation geometry");
+
+        assert_eq!(
+            cache.conversation_viewport,
+            Some(UiConversationViewportObservation {
+                conversation_id: "thread-a".to_owned(),
+                width: 40,
+                height: 8,
+                entries: vec![
+                    crate::UiConversationEntryGeometry {
+                        entry_id: "first".to_owned(),
+                        height: 3,
+                    },
+                    crate::UiConversationEntryGeometry {
+                        entry_id: "second".to_owned(),
+                        height: 3,
+                    },
+                ],
+            })
+        );
     }
 
     fn message(body: &str) -> UiConversationEntry {

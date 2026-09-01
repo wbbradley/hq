@@ -116,12 +116,16 @@ fn maximum_markdown_page_renders_within_the_declared_redraw_budget() {
     let theme = UiTheme::terminal();
     let mut cache = UiRenderCache::new();
     terminal
-        .draw(|frame| render_with_cache(frame, &model, &theme, &mut cache))
+        .draw(|frame| {
+            let _ = render_with_cache(frame, &model, &theme, &mut cache);
+        })
         .expect("initial maximum Markdown page renders");
     let initial = terminal.backend().buffer().clone();
     let measured_at = Instant::now();
     terminal
-        .draw(|frame| render_with_cache(frame, &model, &theme, &mut cache))
+        .draw(|frame| {
+            let _ = render_with_cache(frame, &model, &theme, &mut cache);
+        })
         .expect("maximum Markdown page renders");
     let elapsed = measured_at.elapsed();
     assert_eq!(terminal.backend().buffer(), &initial);

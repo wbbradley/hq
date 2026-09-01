@@ -8,17 +8,19 @@ use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase, UiAgentLifecycle,
     UiAgentMailbox, UiAgentModal, UiAgentProjectAssignment, UiAgentSession, UiAgentStatus,
     UiCompletedItemPresentation, UiConnectionState, UiConversationActivityKind,
-    UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
-    UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage,
-    UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftPane,
-    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiManagedSessionResult, UiMaterializedConversationView, UiMessageDelivery, UiMessageState,
-    UiMessageTarget, UiModel, UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectCreationChoice, UiProjectFolderAction,
-    UiProjectFormField, UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind,
-    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiConversationAuthor, UiConversationEntry, UiConversationEntryGeometry,
+    UiConversationEntryPresentation, UiConversationPage, UiConversationTarget,
+    UiConversationViewportObservation, UiConversationViewportPosition, UiDirectTarget, UiEffect,
+    UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput, UiMailboxAction,
+    UiMailboxDraft, UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
+    UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiMessageTarget, UiModel,
+    UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject, UiProjectAction,
+    UiProjectAssignment, UiProjectCreationChoice, UiProjectFolderAction, UiProjectFormField,
+    UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome, UiProjectResource,
+    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus,
+    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
+    UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -1449,9 +1451,10 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
     let focused =
         update(opened.model, UiEvent::Input(UiInput::Activate)).expect("focus conversation");
     let earlier =
-        update(focused.model, UiEvent::Input(UiInput::PreviousItem)).expect("move earlier");
+        update(focused.model, UiEvent::Input(UiInput::Character('k'))).expect("move earlier");
     assert_eq!(earlier.model.conversation_anchor(), Some("message-1"));
-    let moved = update(earlier.model, UiEvent::Input(UiInput::NextItem)).expect("return to tail");
+    let moved =
+        update(earlier.model, UiEvent::Input(UiInput::Character('j'))).expect("return to tail");
     assert_eq!(moved.model.conversation_anchor(), Some("activity-2"));
     let technical = update(moved.model, UiEvent::Input(UiInput::Activate)).expect("show details");
     assert!(technical.model.technical_visible());
@@ -1466,7 +1469,9 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
     assert_eq!(resized.model.conversation_anchor(), Some("activity-2"));
     assert!(resized.model.technical_visible());
 
-    let more = update(resized.model, UiEvent::Input(UiInput::LoadMore)).expect("load more");
+    let observed =
+        observe_conversation_viewport(resized.model, &[("message-1", 3), ("activity-2", 5)], 4);
+    let more = update(observed.model, UiEvent::Input(UiInput::LoadMore)).expect("load more");
     let (more_id, more_row, more_cursor) = conversation_effect(&more.effects);
     assert_eq!(more_row, "thread-a");
     assert_eq!(more_cursor, Some("next-page"));
@@ -1494,6 +1499,199 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
         3
     );
     assert_eq!(appended.model.conversation_anchor(), Some("activity-2"));
+    assert_eq!(
+        appended.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "activity-2".to_owned(),
+            row: 0,
+        }),
+        "older-page application preserves the stable top row until fresh geometry arrives"
+    );
+}
+
+#[test]
+fn conversation_viewport_scrolls_visual_rows_independently_from_entry_navigation() {
+    let model = opened_conversation(vec![
+        entry("message-1", false),
+        entry("message-2", false),
+        entry("message-3", false),
+    ]);
+    let observed = observe_conversation_viewport(
+        model,
+        &[("message-1", 3), ("message-2", 10), ("message-3", 3)],
+        5,
+    );
+    assert_eq!(
+        observed.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-2".to_owned(),
+            row: 8,
+        })
+    );
+    assert!(observed.model.conversation_follows_tail());
+
+    let scrolled = update(observed.model, UiEvent::Input(UiInput::PreviousItem))
+        .expect("scroll one visual row");
+    assert_eq!(scrolled.model.conversation_anchor(), Some("message-3"));
+    assert_eq!(
+        scrolled.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-2".to_owned(),
+            row: 7,
+        })
+    );
+    assert!(!scrolled.model.conversation_follows_tail());
+
+    let selected = update(scrolled.model, UiEvent::Input(UiInput::Character('k')))
+        .expect("jump to previous entry");
+    assert_eq!(selected.model.conversation_anchor(), Some("message-2"));
+    assert_eq!(
+        selected.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-2".to_owned(),
+            row: 0,
+        })
+    );
+
+    let within_entry = update(selected.model, UiEvent::Input(UiInput::NextItem))
+        .expect("scroll inside selected entry");
+    assert_eq!(within_entry.model.conversation_anchor(), Some("message-2"));
+    assert_eq!(
+        within_entry.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-2".to_owned(),
+            row: 1,
+        })
+    );
+}
+
+#[test]
+fn conversation_viewport_home_end_and_geometry_refresh_preserve_stable_entry_rows() {
+    let model = opened_conversation(vec![entry("message-1", false), entry("message-2", false)]);
+    let observed = observe_conversation_viewport(model, &[("message-1", 4), ("message-2", 12)], 5);
+    let selected = update(observed.model, UiEvent::Input(UiInput::Character('k')))
+        .expect("select first entry");
+    let ended = update(selected.model, UiEvent::Input(UiInput::MoveCursorEnd))
+        .expect("show selected entry end");
+    assert_eq!(
+        ended.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-1".to_owned(),
+            row: 0,
+        })
+    );
+
+    let selected = update(ended.model, UiEvent::Input(UiInput::Character('j')))
+        .expect("select oversized entry");
+    let ended = update(selected.model, UiEvent::Input(UiInput::MoveCursorEnd))
+        .expect("show oversized entry end");
+    assert_eq!(
+        ended.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-2".to_owned(),
+            row: 7,
+        })
+    );
+    let refreshed =
+        observe_conversation_viewport(ended.model, &[("message-2", 8), ("message-1", 4)], 5);
+    assert_eq!(
+        refreshed.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-2".to_owned(),
+            row: 7,
+        }),
+        "the same stable entry and nearby row survive reordering"
+    );
+    let homed = update(refreshed.model, UiEvent::Input(UiInput::MoveCursorHome))
+        .expect("show entry beginning");
+    assert_eq!(
+        homed.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-2".to_owned(),
+            row: 0,
+        })
+    );
+}
+
+#[test]
+fn conversation_viewport_clamps_restores_workspace_and_remeasures_after_resize() {
+    let model = opened_conversation(vec![
+        entry("message-1", false),
+        entry("message-2", false),
+        entry("message-3", false),
+    ]);
+    let observed = observe_conversation_viewport(
+        model,
+        &[("message-1", 3), ("message-2", 4), ("message-3", 3)],
+        4,
+    );
+    let at_bottom =
+        update(observed.model, UiEvent::Input(UiInput::NextItem)).expect("bottom clamp is inert");
+    assert!(at_bottom.model.conversation_follows_tail());
+    assert_eq!(redraw_count(&at_bottom.effects), 0);
+
+    let mut scrolled = at_bottom.model;
+    for _ in 0..20 {
+        scrolled = update(scrolled, UiEvent::Input(UiInput::PreviousItem))
+            .expect("scroll toward top")
+            .model;
+    }
+    assert_eq!(
+        scrolled.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-1".to_owned(),
+            row: 0,
+        })
+    );
+    assert!(!scrolled.conversation_follows_tail());
+
+    let resized = update(
+        scrolled,
+        UiEvent::Resized(UiSize {
+            width: 100,
+            height: 30,
+        }),
+    )
+    .expect("resize preserves stable position");
+    assert_eq!(
+        resized.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-1".to_owned(),
+            row: 0,
+        })
+    );
+    let without_geometry = update(resized.model, UiEvent::Input(UiInput::NextItem))
+        .expect("stale geometry cannot move the viewport");
+    assert_eq!(redraw_count(&without_geometry.effects), 0);
+    let remeasured = observe_conversation_viewport(
+        without_geometry.model,
+        &[("message-1", 2), ("message-2", 3), ("message-3", 2)],
+        6,
+    );
+    assert_eq!(
+        remeasured.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-1".to_owned(),
+            row: 0,
+        })
+    );
+
+    let content = update(remeasured.model, UiEvent::Input(UiInput::MoveCursorLeft))
+        .expect("leave conversation");
+    let navigation =
+        update(content.model, UiEvent::Input(UiInput::MoveCursorLeft)).expect("focus navigation");
+    let sent =
+        update(navigation.model, UiEvent::Input(UiInput::NextItem)).expect("visit Sent workspace");
+    let restored =
+        update(sent.model, UiEvent::Input(UiInput::PreviousItem)).expect("restore Inbox workspace");
+    assert_eq!(restored.model.section(), UiSection::Inbox);
+    assert_eq!(
+        restored.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-1".to_owned(),
+            row: 0,
+        })
+    );
 }
 
 #[test]
@@ -1792,8 +1990,8 @@ fn older_page_failure_preserves_transcript_anchor_and_retry_cursor() {
     );
     let focused =
         update(opened.model, UiEvent::Input(UiInput::Activate)).expect("focus conversation");
-    let anchored =
-        update(focused.model, UiEvent::Input(UiInput::NextItem)).expect("select second message");
+    let anchored = update(focused.model, UiEvent::Input(UiInput::Character('j')))
+        .expect("select second message");
     let loading =
         update(anchored.model, UiEvent::Input(UiInput::LoadMore)).expect("load older page");
     assert!(loading.model.conversation_older_loading());
@@ -2010,7 +2208,8 @@ fn activity_never_becomes_a_reply_or_state_action_target() {
         actionable_entry("message", [1; 32]),
         entry("activity", true),
     ]);
-    let activity = update(opened, UiEvent::Input(UiInput::NextItem)).expect("select activity");
+    let activity =
+        update(opened, UiEvent::Input(UiInput::Character('j'))).expect("select activity");
     for shortcut in ['r', 'a', 'u'] {
         let guided = update(
             activity.model.clone(),
@@ -2026,7 +2225,7 @@ fn activity_never_becomes_a_reply_or_state_action_target() {
     }
 
     let message =
-        update(activity.model, UiEvent::Input(UiInput::PreviousItem)).expect("select message");
+        update(activity.model, UiEvent::Input(UiInput::Character('k'))).expect("select message");
     let reply = update(
         message.model.clone(),
         UiEvent::Input(UiInput::Character('r')),
@@ -2205,9 +2404,22 @@ fn committed_reply_dismisses_the_editor_and_appears_as_sent_at_the_conversation_
     ));
     assert_eq!(pending.delivery, Some(UiMessageDelivery::Pending));
     assert!(pending.message_target.is_none());
+    let pending_id = pending.id.clone();
     assert_eq!(
         submitting.model.conversation_anchor(),
         Some(pending.id.as_str())
+    );
+    let submitting = observe_conversation_viewport(
+        submitting.model,
+        &[("question", 3), (pending_id.as_str(), 3)],
+        2,
+    );
+    assert_eq!(
+        submitting.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: pending_id,
+            row: 1,
+        })
     );
 
     let committed = update(
@@ -2242,6 +2454,14 @@ fn committed_reply_dismisses_the_editor_and_appears_as_sent_at_the_conversation_
         committed.model.conversation_anchor(),
         Some(sent.id.as_str())
     );
+    assert_eq!(
+        committed.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: sent.id.clone(),
+            row: 1,
+        }),
+        "optimistic geometry keeps its stable row when the canonical identity replaces it"
+    );
 }
 
 #[test]
@@ -2250,7 +2470,8 @@ fn sent_agent_message_follows_the_live_tail_through_automatic_followup() {
         actionable_entry("question", [3; 32]),
         agent_turn_entry("turn-running", UiActivityStatus::Running),
     ]);
-    let question = update(opened, UiEvent::Input(UiInput::PreviousItem)).expect("select question");
+    let question =
+        update(opened, UiEvent::Input(UiInput::Character('k'))).expect("select question");
     let opening = update(question.model, UiEvent::Input(UiInput::Character('r'))).expect("reply");
     let (open_id, _) = open_draft_effect(&opening.effects);
     let loaded = update(
@@ -5498,6 +5719,31 @@ fn opened_conversation(entries: Vec<UiConversationEntry>) -> UiModel {
     update(observed.model, UiEvent::Input(UiInput::Activate))
         .expect("open conversation")
         .model
+}
+
+fn observe_conversation_viewport(
+    model: UiModel,
+    entries: &[(&str, u16)],
+    height: u16,
+) -> hq_tui::UiTransition {
+    update(
+        model,
+        UiEvent::ConversationViewportObserved {
+            observation: UiConversationViewportObservation {
+                conversation_id: "thread-a".to_owned(),
+                width: 60,
+                height,
+                entries: entries
+                    .iter()
+                    .map(|(entry_id, height)| UiConversationEntryGeometry {
+                        entry_id: (*entry_id).to_owned(),
+                        height: *height,
+                    })
+                    .collect(),
+            },
+        },
+    )
+    .expect("conversation viewport observation applies")
 }
 
 fn materialized_transition(snapshot: UiSnapshot, page: UiConversationPage) -> hq_tui::UiTransition {
