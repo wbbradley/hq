@@ -27,40 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Keep TUI invalidation observation independent from commands
-
-Make the local TUI receive invalidations and reconnect observations on a dedicated subscribed
-connection while snapshots, conversations, drafts, mailbox commands, project commands, and provider
-round trips run independently. Preserve authoritative reloads and the five-minute repair fallback,
-but remove short polling intervals from normal client notification and shutdown.
-
-This task depends on **Wake local sessions directly from store commits**.
-
-- Split TUI observation from command execution in
-  `crates/hq-node/src/{local_client,tui_client}.rs`. A dedicated subscribed connection/read owner
-  must keep receiving invalidations and reconnecting while all command/query work runs on an
-  independent ordinary local API client and worker.
-- Make shutdown explicitly interrupt the blocking subscription read instead of relying on
-  `COMMAND_WAIT`, `CLIENT_POLL_WAIT`, or another short timeout. Preserve partial-frame decoding,
-  independent reconnect generations, subscription-before-snapshot activation, bounded channels,
-  stale-effect suppression, and deterministic thread joins.
-- Keep invalidation frames body-free and revision/topic-only. Keep the five-minute TUI refresh as a
-  repair assertion rather than a latency mechanism.
-- Add local-client tests for interruptible idle reads, reconnect, and partial frames. Add executor
-  tests proving a deliberately blocked command cannot delay an invalidation or redraw, and cover
-  idle, queued, saturated, panic, and shutdown joins for both workers.
-- Update `docs/design.md`, `docs/protocol/local-api-v1.md`, and
-  `docs/rust/{node-lifecycle,tui,behavior-ledger}.md` with independent command/subscription
-  ownership and the repair-only timer.
-
-Acceptance criteria:
-
-- A healthy subscribed connection wakes the TUI without a 25 ms client polling interval.
-- A slow command, provider round trip, snapshot, or conversation query cannot starve subscription
-  reads.
-- Reconnect, response loss, stale effects, idle shutdown, saturated-channel shutdown, and the
-  five-minute repair fallback remain deterministic and leak-free.
-
 ### Acknowledge mailbox messages before project delivery
 
 Give immediate, truthful send feedback and move project sequencing/runtime delivery out of the

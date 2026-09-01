@@ -11314,3 +11314,105 @@ of commits into unbounded listener/session starvation; and Tokio synchronization
 remain an adapter detail rather than leak runtime ownership into the synchronous database thread.
 
 <!-- End of archived plan entry. -->
+
+## 2026-08-31 — Independent TUI subscription observations
+
+Split the installed TUI across an ordinary command/query client and an independently negotiated
+subscribed observation client. Subscription activation now completes before the command snapshot,
+and separate named workers let revision invalidations and reconnect state reach the model while a
+snapshot, project operation, or provider round trip is blocked. The subscribed type no longer
+exposes command methods.
+
+Added a generation-safe Unix socket interrupt that wakes the exact active read during shutdown,
+connection-state-yielding runner support, and deterministic dual-worker drain/join behavior for
+idle, queued, saturated, and panicking owners. Added focused transport, runner, executor, shell, and
+real-daemon regressions and updated the design, protocol, lifecycle, TUI, and behavior-ledger docs.
+Formatting, architecture and qualification validation, strict workspace Clippy, installed PTY
+coverage, and the complete locked all-target/all-feature workspace suite pass.
+
+### Original plan entry
+
+### Keep TUI invalidation observation independent from commands
+
+Make the local TUI receive invalidations and reconnect observations on a dedicated subscribed
+connection while snapshots, conversations, drafts, mailbox commands, project commands, and provider
+round trips run independently. Preserve authoritative reloads and the five-minute repair fallback,
+but remove short polling intervals from normal client notification and shutdown.
+
+This task depends on **Wake local sessions directly from store commits**.
+
+- Split TUI observation from command execution in
+  `crates/hq-node/src/{local_client,tui_client}.rs`. A dedicated subscribed connection/read owner
+  must keep receiving invalidations and reconnecting while all command/query work runs on an
+  independent ordinary local API client and worker.
+- Make shutdown explicitly interrupt the blocking subscription read instead of relying on
+  `COMMAND_WAIT`, `CLIENT_POLL_WAIT`, or another short timeout. Preserve partial-frame decoding,
+  independent reconnect generations, subscription-before-snapshot activation, bounded channels,
+  stale-effect suppression, and deterministic thread joins.
+- Keep invalidation frames body-free and revision/topic-only. Keep the five-minute TUI refresh as a
+  repair assertion rather than a latency mechanism.
+- Add local-client tests for interruptible idle reads, reconnect, and partial frames. Add executor
+  tests proving a deliberately blocked command cannot delay an invalidation or redraw, and cover
+  idle, queued, saturated, panic, and shutdown joins for both workers.
+- Update `docs/design.md`, `docs/protocol/local-api-v1.md`, and
+  `docs/rust/{node-lifecycle,tui,behavior-ledger}.md` with independent command/subscription
+  ownership and the repair-only timer.
+
+Acceptance criteria:
+
+- A healthy subscribed connection wakes the TUI without a 25 ms client polling interval.
+- A slow command, provider round trip, snapshot, or conversation query cannot starve subscription
+  reads.
+- Reconnect, response loss, stale effects, idle shutdown, saturated-channel shutdown, and the
+  five-minute repair fallback remain deterministic and leak-free.
+
+#### Implementation plan
+
+1. Add test-first Unix transport coverage in `crates/hq-node/src/local_client.rs` for interrupting
+   an idle blocking read, preserving an incrementally decoded partial frame before an ordinary wake,
+   and clearing only the exact interrupted connection across reconnect generations. Introduce a
+   cloneable, idempotent interrupt handle that retains only a cloned active socket and uses
+   `shutdown(Both)`; registration and close must be generation-safe and must not add a polling flag
+   to the transport read loop.
+2. Teach `hq-local-api::BlockingClientRunner::poll_event` to yield when its generation-scoped
+   connection state changes, with scripted coverage for disconnect/reconnect observation. This lets
+   the subscribed owner report connecting, active, and failure boundaries immediately after a
+   transport wake instead of hiding them until an arbitrary poll deadline, while retaining partial
+   frames, request correlation, and existing reconnect behavior.
+3. Split `LocalTuiClient` into an ordinary command/query adapter backed by `LocalNodeClient` and a
+   `LocalTuiObserver` backed by `LocalNodeEventClient`. Move connection-state tracking and
+   invalidation mapping entirely to the observer. Compose the installed TUI by activating the
+   subscribed connection and accepting its subscription snapshot before opening the ordinary
+   command client, so registration still precedes the authoritative snapshot used by the model.
+4. Split `TuiClientPort` from a new `TuiObservationPort` and give `TuiEffectExecutor` one named
+   command worker plus one named observation worker feeding the same bounded event queue. Replace
+   command `recv_timeout` with a blocking receive, remove `COMMAND_WAIT` and `CLIENT_POLL_WAIT`, and
+   let the observation worker block in the subscribed read. On shutdown, set shared cancellation,
+   interrupt the observer socket, drain bounded results, and join both workers deterministically;
+   report a panic from either owner without skipping the other join.
+5. Add executor and shell tests before the worker refactor. Use independently controlled command and
+   observation fakes to prove a blocked snapshot/command cannot delay an invalidation, reconnect, or
+   redraw-producing model transition. Cover idle and queued shutdown, saturated command and result
+   channels, observer and command panics, idempotent shutdown, and exact joining of both workers.
+   Keep existing effect identity and stale-completion tests as evidence that parallel observation
+   does not weaken reducer authority.
+6. Extend the real-node subscribed-client regression to exercise direct invalidation delivery,
+   interrupted idle shutdown, daemon reconnect with a fresh subscription generation, and partial
+   frame preservation. Update `docs/design.md`, `docs/protocol/local-api-v1.md`, and
+   `docs/rust/{node-lifecycle,tui,behavior-ledger}.md` to distinguish the ordinary command socket,
+   subscribed observation socket, explicit read interruption, bounded event handoff, and the
+   five-minute repair-only refresh.
+7. Run formatting, architecture and qualification validation, strict workspace Clippy, focused
+   local-API/local-client/executor/shell/real-node tests, the installed PTY regressions, and the
+   complete locked all-target/all-feature workspace suite. Commit with a Conventional Commit,
+   remove this task from `PLAN.md`, and append its implementation summary plus this complete original
+   entry to `COMPLETED.md`.
+
+Risks and open questions: an interrupt for an old Unix generation must never close a newly connected
+socket; cancellation must win after a read wake so the observer cannot begin another reconnect;
+subscription activation must happen before the command snapshot without sharing either connection;
+two producers can both block on the bounded result queue during shutdown, so draining and joining
+must remain panic-safe; and command completion ordering must remain serial even though observation
+events can now interleave independently.
+
+<!-- End of archived plan entry. -->
