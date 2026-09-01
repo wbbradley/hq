@@ -11232,3 +11232,85 @@ state, item family, command/output boundaries, or display policy from prose.
   non-actionability, and typed failure/interruption semantics remain intact.
 
 <!-- End of archived plan entry. -->
+
+## 2026-08-31 — Direct store revision invalidation wakes
+
+Replaced the store's capacity-one polling hint with a latest-value Tokio watch observer whose
+synchronous publisher never blocks the database worker. The local session pump now awaits committed
+revisions directly alongside listener and session readiness, gives each pending revision one bounded
+dispatch, and cleanly disables the observer when the store closes. RevisionHub fanout remains
+body-free, nonblocking, and isolated per slow subscriber.
+
+Added actor coverage for preexisting and concurrent publications, greatest-revision coalescing,
+disconnect, and store shutdown, plus an integration regression proving a real commit wins one pump
+dispatch without starving listener progress. Updated the design, protocol, lifecycle, and behavior
+ledger documentation. Formatting, architecture and qualification validation, strict workspace
+Clippy, focused tests, and the complete locked all-target/all-feature workspace suite pass.
+
+### Original plan entry
+
+### Wake local sessions directly from store commits
+
+Make the store → daemon → local socket path wake immediately from committed state changes. Preserve
+revision-only invalidations, greatest-revision coalescing, fair listener/session progress, and the
+existing bounded nonblocking subscriber queues, but remove timer polling from ordinary daemon
+delivery.
+
+- Replace the capacity-one `std::sync::mpsc` observer in `crates/hq-store/src/actor.rs` with a
+  runtime-safe wakeable observer that still lets the synchronous store thread publish without
+  blocking. Retain only the greatest committed revision, close cleanly, and avoid lost wakes
+  between checking the revision and awaiting the next change.
+- Update `crates/hq-node/src/session_pump.rs` so `LocalSessionPump::drive_next` selects directly on
+  store readiness alongside listener and session readiness. Remove
+  `STORE_INVALIDATION_POLL_INTERVAL` while retaining deterministic listener/session fairness and
+  nonblocking invalidation fanout.
+- Keep invalidation frames body-free and revision/topic-only. Pressure must continue to coalesce or
+  close only a slow subscriber; a store commit must never block on socket delivery.
+- Add store tests for publish-before-wait, publish-during-wait, coalescing, disconnect, and store
+  shutdown. Add session-pump coverage proving a committed revision progresses promptly while
+  listener and session work are also ready.
+- Update `docs/design.md`, `docs/protocol/local-api-v1.md`, and
+  `docs/rust/{node-lifecycle,behavior-ledger}.md` with the direct wake path and bounded fanout.
+
+Acceptance criteria:
+
+- A committed relevant change wakes the daemon without `STORE_INVALIDATION_POLL_INTERVAL` or any
+  equivalent timer.
+- Commits never block on a subscriber and concurrent commits coalesce to the greatest revision.
+- Listener admission, session dispatch, slow-subscriber isolation, disconnect, and shutdown remain
+  deterministic and leak-free.
+
+#### Implementation plan
+
+1. Add Tokio's synchronization feature to `hq-store` and replace the capacity-one MPSC wake plus
+   separate atomic revision with one latest-value watch channel. Give `RevisionInvalidations` a
+   cancellation-safe `next_revision(&mut self)` future while retaining `try_revision` for bounded
+   synchronous callers and existing contracts. Keep `InvalidationEmitter::publish` synchronous and
+   nonblocking through latest-value replacement.
+2. Add actor-level tests in `crates/hq-store/src/actor.rs` before changing the implementation. Pin
+   publication before an await, publication while awaiting, greatest-revision coalescing, sender
+   disconnect, and observer completion when the store worker shuts down. Retain the existing
+   mutation and ingest tests as evidence that only real commits publish.
+3. Replace the 25 ms sleep branch in `LocalSessionPump::drive_next` with the observer future. Check
+   an already-pending revision before selecting, then include store readiness in every listener and
+   session readiness combination. Give a ready store wake priority for one bounded dispatch; once
+   consumed it cannot starve listener or session work.
+4. Extend `crates/hq-node/tests/unix_session_pump.rs` with a real committed store mutation while
+   listener/session work is available. Assert the exact revision reaches `RevisionHub` and active
+   subscribers promptly, then prove the competing listener/session work still advances and shutdown
+   joins all owners.
+5. Update the design, local API, node lifecycle, and behavior-ledger documentation to identify the
+   synchronous nonblocking publisher, latest-revision wake, direct Tokio selection, body-free
+   invalidation, and bounded per-session delivery boundary.
+6. Run formatting, architecture validation, strict workspace Clippy, and the complete locked
+   all-target/all-feature test suite. Commit with a Conventional Commit, remove this task from
+   `PLAN.md`, and append its implementation summary plus this complete original entry to
+   `COMPLETED.md`.
+
+Risks and open questions: the wake primitive must not lose a commit between observing the current
+revision and registering its waker; a closed store must terminate the await instead of leaving the
+session pump parked; biased selection may prioritize one pending revision but must not turn a stream
+of commits into unbounded listener/session starvation; and Tokio synchronization in `hq-store` must
+remain an adapter detail rather than leak runtime ownership into the synchronous database thread.
+
+<!-- End of archived plan entry. -->

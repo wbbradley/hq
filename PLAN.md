@@ -27,49 +27,39 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Deliver revision invalidations without polling
+### Keep TUI invalidation observation independent from commands
 
-Make the ordinary store → daemon → local socket → TUI refresh path wake immediately from committed
-state changes. Preserve revision-only invalidations, bounded coalescing, authoritative reloads,
-reconnect recovery, and the five-minute repair fallback, but remove timer polling as the mechanism
-for normal delivery.
+Make the local TUI receive invalidations and reconnect observations on a dedicated subscribed
+connection while snapshots, conversations, drafts, mailbox commands, project commands, and provider
+round trips run independently. Preserve authoritative reloads and the five-minute repair fallback,
+but remove short polling intervals from normal client notification and shutdown.
 
-- Replace the capacity-one `std::sync::mpsc` observer in `crates/hq-store/src/actor.rs` with a
-  runtime-safe wakeable observer that still lets the synchronous store thread publish without
-  blocking. Retain only the greatest committed revision, coalesce concurrent commits, close
-  cleanly, and avoid lost wakes between checking the revision and awaiting the next change.
-- Update `crates/hq-node/src/session_pump.rs` so `LocalSessionPump::drive_next` selects directly on
-  store readiness alongside listener and session readiness. Remove
-  `STORE_INVALIDATION_POLL_INTERVAL` while retaining fair listener/session progress and the
-  existing nonblocking per-subscriber write queues.
-- Split TUI observation from potentially slow command execution in
+This task depends on **Wake local sessions directly from store commits**.
+
+- Split TUI observation from command execution in
   `crates/hq-node/src/{local_client,tui_client}.rs`. A dedicated subscribed connection/read owner
-  must keep receiving invalidations and reconnecting while mailbox, project, harness, draft,
-  snapshot, or conversation work runs on an independent command/query path.
-- Make shutdown explicitly interrupt the blocking subscription read instead of relying on a short
-  timeout. Preserve partial-frame decoding, independent reconnect generations,
-  subscription-before-snapshot activation, bounded channels, stale-effect suppression, and
-  deterministic thread joins.
+  must keep receiving invalidations and reconnecting while all command/query work runs on an
+  independent ordinary local API client and worker.
+- Make shutdown explicitly interrupt the blocking subscription read instead of relying on
+  `COMMAND_WAIT`, `CLIENT_POLL_WAIT`, or another short timeout. Preserve partial-frame decoding,
+  independent reconnect generations, subscription-before-snapshot activation, bounded channels,
+  stale-effect suppression, and deterministic thread joins.
 - Keep invalidation frames body-free and revision/topic-only. Keep the five-minute TUI refresh as a
   repair assertion rather than a latency mechanism.
-- Add store tests for publish-before-wait, publish-during-wait, coalescing, disconnect, and
-  shutdown; session-pump tests for prompt invalidation under listener/session pressure;
-  local-client tests for reconnect and partial frames; and executor tests proving a blocked command
-  cannot delay an invalidation or redraw.
+- Add local-client tests for interruptible idle reads, reconnect, and partial frames. Add executor
+  tests proving a deliberately blocked command cannot delay an invalidation or redraw, and cover
+  idle, queued, saturated, panic, and shutdown joins for both workers.
 - Update `docs/design.md`, `docs/protocol/local-api-v1.md`, and
-  `docs/rust/{node-lifecycle,tui,behavior-ledger}.md` with the wake path, independent
-  command/subscription ownership, and repair-only timer.
+  `docs/rust/{node-lifecycle,tui,behavior-ledger}.md` with independent command/subscription
+  ownership and the repair-only timer.
 
 Acceptance criteria:
 
-- A committed relevant change wakes every healthy subscriber without a 25 ms store or TUI polling
-  interval.
+- A healthy subscribed connection wakes the TUI without a 25 ms client polling interval.
 - A slow command, provider round trip, snapshot, or conversation query cannot starve subscription
   reads.
-- Commits never block on a subscriber; pressure still coalesces or closes only the slow subscriber
-  according to the existing bounded contract.
-- Reconnect, idle shutdown, saturated-channel shutdown, and the five-minute repair fallback remain
-  deterministic and leak-free.
+- Reconnect, response loss, stale effects, idle shutdown, saturated-channel shutdown, and the
+  five-minute repair fallback remain deterministic and leak-free.
 
 ### Acknowledge mailbox messages before project delivery
 
@@ -77,7 +67,7 @@ Give immediate, truthful send feedback and move project sequencing/runtime deliv
 mailbox command response path. A human message is first shown locally as pending; its durable commit
 is acknowledged independently of later project reconciliation and provider submission.
 
-This task depends on **Deliver revision invalidations without polling**.
+This task depends on **Keep TUI invalidation observation independent from commands**.
 
 - Enrich pending mailbox state in `crates/hq-tui/src/model.rs` so submitting a draft immediately
   places an optimistic local-human entry in the open conversation, anchored by the effect identity
@@ -126,7 +116,7 @@ Expose provider-neutral questions, command/file approvals, permission requests, 
 elicitations through the local API and TUI. When no explicitly registered responder can receive
 them, fail closed immediately instead of leaving an agent blocked invisibly.
 
-This task depends on **Deliver revision invalidations without polling**.
+This task depends on **Keep TUI invalidation observation independent from commands**.
 
 - Keep `hq-harness` as the provider-neutral request/response owner, but add application-level
   passive interaction records and query/control ports instead of importing provider or supervisor
