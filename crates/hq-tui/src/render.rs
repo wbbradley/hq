@@ -1,6 +1,6 @@
 //! Borrowed responsive Ratatui renderer.
 
-use std::{fmt::Write as _, sync::Arc};
+use std::fmt::Write as _;
 
 use ratatui::{
     Frame,
@@ -25,8 +25,7 @@ use crate::{
     UiProjectInteraction, UiProjectLifecycle, UiProjectManagementAction, UiProjectOutcome,
     UiProjectRecoverySummary, UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel,
     UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, UiTheme, UiThemeRole,
-    message_markdown::{MessageRenderCache, RenderedMessage},
-    model::WIDE_WIDTH,
+    message_markdown::MessageRenderCache, model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -3859,26 +3858,46 @@ fn render_conversation_entries(
             })
             .collect(),
     });
-    let selected_index = model
-        .conversation_anchor()
-        .and_then(|anchor| visible_entries.iter().position(|entry| entry.id == anchor))
-        .unwrap_or(0);
-    let visible = visible_conversation_entries(&heights, selected_index, area.height);
+    let origin = if model.conversation_follows_tail() {
+        conversation_viewport_tail_origin(&heights, area.height)
+    } else {
+        model
+            .conversation_viewport_position()
+            .and_then(|position| {
+                visible_entries
+                    .iter()
+                    .position(|entry| entry.id == position.entry_id)
+                    .map(|index| (index, position.row))
+            })
+            .unwrap_or_else(|| {
+                (
+                    model
+                        .conversation_anchor()
+                        .and_then(|anchor| {
+                            visible_entries.iter().position(|entry| entry.id == anchor)
+                        })
+                        .unwrap_or(0),
+                    0,
+                )
+            })
+    };
+    let visible = conversation_viewport_slices(&heights, origin.0, origin.1, area.height);
     let mut y = area.y;
     let bottom = area.y.saturating_add(area.height);
-    for index in visible {
+    for slice in visible {
         if y >= bottom {
             break;
         }
-        let entry = &visible_entries[index];
-        let layout = &layouts[index];
-        let height = layout.height.min(bottom - y);
+        let entry = &visible_entries[slice.index];
+        let layout = &layouts[slice.index];
+        let height = slice.height.min(bottom - y);
         render_conversation_entry(
             frame,
             model,
             entry,
             layout,
             theme,
+            slice.first_row,
             Rect {
                 x: area.x,
                 y,
@@ -3921,8 +3940,7 @@ fn interaction_supersedes_live_tail(
 }
 
 struct ConversationEntryLayout {
-    message: Option<Arc<RenderedMessage>>,
-    activity: Option<Vec<String>>,
+    rows: Vec<Line<'static>>,
     height: u16,
 }
 
@@ -3933,24 +3951,81 @@ fn conversation_entry_layout(
     cache: &mut UiRenderCache,
 ) -> ConversationEntryLayout {
     match &entry.presentation {
-        UiConversationEntryPresentation::Message { body, .. } => {
+        UiConversationEntryPresentation::Message { author, body } => {
             let message = cache.messages.render(&entry.id, body, width, theme);
-            let height = message.body_height().saturating_add(2);
+            let (author, author_role) = match author {
+                UiConversationAuthor::You => ("You", UiThemeRole::ConversationAuthorSelf),
+                UiConversationAuthor::Participant(label) => {
+                    (label.as_str(), UiThemeRole::ConversationAuthorParticipant)
+                }
+                UiConversationAuthor::Unknown => {
+                    ("Unknown sender", UiThemeRole::ConversationAuthorParticipant)
+                }
+            };
+            let delivery = if entry.message_state == Some(UiMessageState::Rejected) {
+                ""
+            } else {
+                match entry.delivery {
+                    Some(UiMessageDelivery::Pending) => " · Pending",
+                    Some(UiMessageDelivery::Sent) | None => "",
+                    Some(UiMessageDelivery::Received) => " · Received",
+                }
+            };
+            let exceptional = match entry.message_state {
+                Some(UiMessageState::Archived) => " · Archived",
+                Some(UiMessageState::Rejected) => " · Could not be delivered",
+                Some(UiMessageState::Open) | None => "",
+            };
+            let mut rows = Vec::with_capacity(usize::from(message.body_height()).saturating_add(2));
+            rows.push(Line::styled(
+                format!("{author}{delivery}{exceptional}"),
+                theme.style(author_role),
+            ));
+            if message.text().lines.is_empty() {
+                rows.push(Line::default());
+            } else {
+                rows.extend(message.text().lines.iter().cloned());
+            }
+            rows.push(Line::default());
             ConversationEntryLayout {
-                message: Some(message),
-                activity: None,
-                height,
+                height: u16::try_from(rows.len()).unwrap_or(u16::MAX),
+                rows,
             }
         }
-        UiConversationEntryPresentation::Activity { .. } => {
-            let activity = activity_preview(entry, width);
-            let height = u16::try_from(activity.len())
-                .unwrap_or(u16::MAX)
-                .saturating_add(1);
+        UiConversationEntryPresentation::Activity { status, .. } => {
+            let symbol = match status {
+                UiActivityStatus::Snapshot => "·",
+                UiActivityStatus::Running => "●",
+                UiActivityStatus::Succeeded => "✓",
+                UiActivityStatus::Failed { .. } => "!",
+                UiActivityStatus::Interrupted => "×",
+            };
+            let role = match status {
+                UiActivityStatus::Snapshot | UiActivityStatus::Running => {
+                    UiThemeRole::ConversationActivity
+                }
+                UiActivityStatus::Succeeded => UiThemeRole::ConversationActivitySuccess,
+                UiActivityStatus::Failed { .. } => UiThemeRole::ConversationActivityError,
+                UiActivityStatus::Interrupted => UiThemeRole::ConversationActivityWarning,
+            };
+            let mut rows = activity_preview(entry, width)
+                .into_iter()
+                .enumerate()
+                .map(|(index, line)| {
+                    Line::styled(
+                        if index == 0 {
+                            format!("{symbol} {line}")
+                        } else {
+                            line
+                        },
+                        theme.style(role),
+                    )
+                })
+                .collect::<Vec<_>>();
+            rows.push(Line::default());
             ConversationEntryLayout {
-                message: None,
-                activity: Some(activity),
-                height,
+                height: u16::try_from(rows.len()).unwrap_or(u16::MAX),
+                rows,
             }
         }
     }
@@ -4112,33 +4187,62 @@ fn clipped_preview_line(value: &str, width: usize) -> String {
     format!("{}…", display_prefix(value, width.saturating_sub(1)))
 }
 
-fn visible_conversation_entries(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ConversationViewportSlice {
+    index: usize,
+    first_row: u16,
+    height: u16,
+}
+
+fn conversation_viewport_slices(
     heights: &[u16],
-    selected_index: usize,
+    top_index: usize,
+    top_row: u16,
     available_height: u16,
-) -> std::ops::Range<usize> {
+) -> Vec<ConversationViewportSlice> {
     if heights.is_empty() || available_height == 0 {
-        return 0..0;
+        return Vec::new();
     }
-    let selected_index = selected_index.min(heights.len() - 1);
-    let mut start = selected_index;
-    let mut end = selected_index + 1;
-    let mut used = heights[selected_index].min(available_height);
-    let mut above_budget = available_height.saturating_sub(used) / 2;
-    while start > 0 && heights[start - 1] <= above_budget {
-        start -= 1;
-        used = used.saturating_add(heights[start]);
-        above_budget = above_budget.saturating_sub(heights[start]);
+    let top_index = top_index.min(heights.len() - 1);
+    let mut first_row = top_row.min(heights[top_index].saturating_sub(1));
+    let mut remaining = available_height;
+    let mut slices = Vec::new();
+    for (index, entry_height) in heights.iter().copied().enumerate().skip(top_index) {
+        if remaining == 0 {
+            break;
+        }
+        let height = entry_height.saturating_sub(first_row).min(remaining);
+        if height > 0 {
+            slices.push(ConversationViewportSlice {
+                index,
+                first_row,
+                height,
+            });
+            remaining = remaining.saturating_sub(height);
+        }
+        first_row = 0;
     }
-    while end < heights.len() && heights[end] <= available_height.saturating_sub(used) {
-        used = used.saturating_add(heights[end]);
-        end += 1;
+    slices
+}
+
+fn conversation_viewport_tail_origin(heights: &[u16], available_height: u16) -> (usize, u16) {
+    let maximum_top = heights
+        .iter()
+        .map(|height| u64::from(*height))
+        .sum::<u64>()
+        .saturating_sub(u64::from(available_height));
+    let mut start = 0_u64;
+    for (index, height) in heights.iter().copied().enumerate() {
+        let end = start.saturating_add(u64::from(height));
+        if maximum_top < end {
+            return (
+                index,
+                u16::try_from(maximum_top.saturating_sub(start)).unwrap_or(u16::MAX),
+            );
+        }
+        start = end;
     }
-    while start > 0 && heights[start - 1] <= available_height.saturating_sub(used) {
-        start -= 1;
-        used = used.saturating_add(heights[start]);
-    }
-    start..end
+    (0, 0)
 }
 
 fn render_conversation_entry(
@@ -4147,6 +4251,7 @@ fn render_conversation_entry(
     entry: &UiConversationEntry,
     layout: &ConversationEntryLayout,
     theme: &UiTheme,
+    first_row: u16,
     area: Rect,
 ) {
     if area.is_empty() {
@@ -4161,81 +4266,47 @@ fn render_conversation_entry(
         };
         frame.render_widget(Block::new().style(theme.style(role)), area);
     }
-    match &entry.presentation {
-        UiConversationEntryPresentation::Message { author, .. } => {
-            let (author, author_role) = match author {
-                UiConversationAuthor::You => ("You", UiThemeRole::ConversationAuthorSelf),
-                UiConversationAuthor::Participant(label) => {
-                    (label.as_str(), UiThemeRole::ConversationAuthorParticipant)
-                }
-                UiConversationAuthor::Unknown => {
-                    ("Unknown sender", UiThemeRole::ConversationAuthorParticipant)
-                }
-            };
-            let delivery = if entry.message_state == Some(UiMessageState::Rejected) {
-                ""
-            } else {
-                match entry.delivery {
-                    Some(UiMessageDelivery::Pending) => " · Pending",
-                    Some(UiMessageDelivery::Sent) | None => "",
-                    Some(UiMessageDelivery::Received) => " · Received",
-                }
-            };
-            let exceptional = match entry.message_state {
-                Some(UiMessageState::Archived) => " · Archived",
-                Some(UiMessageState::Rejected) => " · Could not be delivered",
-                Some(UiMessageState::Open) | None => "",
-            };
+    let lines = layout
+        .rows
+        .iter()
+        .skip(usize::from(first_row))
+        .take(usize::from(area.height))
+        .cloned()
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), area);
+    let continues_above = first_row > 0;
+    let continues_below = first_row.saturating_add(area.height) < layout.height;
+    if continues_above || continues_below {
+        let cue = match (continues_above, continues_below) {
+            (true, true) if area.height == 1 => "↕",
+            (true, _) => "↑",
+            (_, true) => "↓",
+            (false, false) => "",
+        };
+        let cue_y = if continues_above {
+            area.y
+        } else {
+            area.bottom() - 1
+        };
+        frame.render_widget(
+            Paragraph::new(cue).style(theme.style(UiThemeRole::TextMuted)),
+            Rect {
+                x: area.right() - 1,
+                y: cue_y,
+                width: 1,
+                height: 1,
+            },
+        );
+        if continues_above && continues_below && area.height > 1 {
             frame.render_widget(
-                Paragraph::new(format!("{author}{delivery}{exceptional}"))
-                    .style(theme.style(author_role)),
-                Rect { height: 1, ..area },
+                Paragraph::new("↓").style(theme.style(UiThemeRole::TextMuted)),
+                Rect {
+                    x: area.right() - 1,
+                    y: area.bottom() - 1,
+                    width: 1,
+                    height: 1,
+                },
             );
-            if area.height > 1
-                && let Some(message) = &layout.message
-            {
-                frame.render_widget(
-                    Paragraph::new(message.text().clone()).style(theme.style(UiThemeRole::Text)),
-                    Rect {
-                        y: area.y + 1,
-                        height: area.height.saturating_sub(2),
-                        ..area
-                    },
-                );
-            }
-        }
-        UiConversationEntryPresentation::Activity { status, .. } => {
-            let symbol = match status {
-                UiActivityStatus::Snapshot => "·",
-                UiActivityStatus::Running => "●",
-                UiActivityStatus::Succeeded => "✓",
-                UiActivityStatus::Failed { .. } => "!",
-                UiActivityStatus::Interrupted => "×",
-            };
-            let role = match status {
-                UiActivityStatus::Snapshot | UiActivityStatus::Running => {
-                    UiThemeRole::ConversationActivity
-                }
-                UiActivityStatus::Succeeded => UiThemeRole::ConversationActivitySuccess,
-                UiActivityStatus::Failed { .. } => UiThemeRole::ConversationActivityError,
-                UiActivityStatus::Interrupted => UiThemeRole::ConversationActivityWarning,
-            };
-            if let Some(lines) = &layout.activity {
-                let mut rendered = lines
-                    .iter()
-                    .map(|line| Line::from(line.clone()))
-                    .collect::<Vec<_>>();
-                if let Some(first) = rendered.first_mut() {
-                    first.spans.insert(0, Span::raw(format!("{symbol} ")));
-                }
-                frame.render_widget(
-                    Paragraph::new(rendered).style(theme.style(role)),
-                    Rect {
-                        height: area.height.saturating_sub(1),
-                        ..area
-                    },
-                );
-            }
         }
     }
 }
@@ -4533,10 +4604,11 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
 #[cfg(test)]
 mod tests {
     use super::{
-        activity_preview, completed_item_detail_lines, conversation_entry_layout, display_prefix,
+        activity_preview, completed_item_detail_lines, conversation_entry_layout,
+        conversation_viewport_slices, conversation_viewport_tail_origin, display_prefix,
         display_suffix, draft_context_label, inbox_list_width, inert_draft_source,
         interaction_supersedes_live_tail, navigation_width, render_conversation_entries,
-        text_field_line, visible_conversation_entries,
+        render_conversation_entry, text_field_line,
     };
     use crate::{
         UiActivityStatus, UiCompletedItemPresentation, UiConversationActivityKind,
@@ -4763,12 +4835,35 @@ mod tests {
     }
 
     #[test]
-    fn measured_viewport_keeps_the_stable_anchor_visible() {
-        let heights = [3, 3, 3, 3, 3];
-        assert_eq!(visible_conversation_entries(&heights, 2, 10), 1..4);
-        assert_eq!(visible_conversation_entries(&heights, 4, 7), 3..5);
-        assert_eq!(visible_conversation_entries(&[12, 3], 0, 5), 0..1);
-        assert_eq!(visible_conversation_entries(&heights, 2, 0), 0..0);
+    fn continuous_viewport_slices_every_intersecting_entry() {
+        assert_eq!(
+            conversation_viewport_slices(&[3, 12, 3], 1, 4, 5),
+            vec![super::ConversationViewportSlice {
+                index: 1,
+                first_row: 4,
+                height: 5,
+            }]
+        );
+        assert_eq!(
+            conversation_viewport_slices(&[3, 12, 3], 0, 2, 5),
+            vec![
+                super::ConversationViewportSlice {
+                    index: 0,
+                    first_row: 2,
+                    height: 1,
+                },
+                super::ConversationViewportSlice {
+                    index: 1,
+                    first_row: 0,
+                    height: 4,
+                },
+            ]
+        );
+        assert!(conversation_viewport_slices(&[3], 0, 0, 0).is_empty());
+        assert_eq!(conversation_viewport_slices(&[8], 0, 3, 1)[0].height, 1);
+        assert_eq!(conversation_viewport_slices(&[8], 0, 3, 2)[0].height, 2);
+        assert_eq!(conversation_viewport_tail_origin(&[3, 20], 5), (1, 15));
+        assert_eq!(conversation_viewport_tail_origin(&[20, 3], 5), (0, 18));
     }
 
     #[test]
@@ -4822,6 +4917,55 @@ mod tests {
                     },
                 ],
             })
+        );
+    }
+
+    #[test]
+    fn entry_painting_slices_cached_markdown_rows_with_continuation_cues() {
+        let entry = message("# One\n\n# Two\n\n# Three");
+        let model = UiModel::new(UiSize {
+            width: 40,
+            height: 8,
+        });
+        let theme = UiTheme::terminal();
+        let mut cache = super::UiRenderCache::new();
+        let layout = conversation_entry_layout(&entry, 16, &theme, &mut cache);
+        let middle = layout
+            .rows
+            .iter()
+            .position(|line| line.to_string().contains("Two"))
+            .unwrap_or(usize::MAX);
+        assert!(middle > 0 && middle + 1 < layout.rows.len());
+        let mut terminal = Terminal::new(TestBackend::new(16, 1)).expect("test terminal");
+
+        terminal
+            .draw(|frame| {
+                render_conversation_entry(
+                    frame,
+                    &model,
+                    &entry,
+                    &layout,
+                    &theme,
+                    u16::try_from(middle).unwrap_or(u16::MAX),
+                    Rect::new(0, 0, 16, 1),
+                );
+            })
+            .expect("render middle message slice");
+
+        let buffer = terminal.backend().buffer();
+        let row = buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(row.contains("Two"), "{row}");
+        assert!(row.ends_with('↕'), "{row}");
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .find(|cell| cell.symbol() == "T")
+                .is_some_and(|cell| cell.modifier.contains(ratatui::style::Modifier::BOLD))
         );
     }
 

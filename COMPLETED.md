@@ -1,5 +1,43 @@
 # Completed
 
+## 2026-09-01 — Intersecting conversation entry slices
+
+Replaced whole-entry transcript budgeting with a continuous viewport slicer that paints every
+intersecting portion of an entry from its measured top row. `ConversationEntryLayout` now owns the
+complete width-specific styled row sequence for message headers, cached Markdown, typed activity,
+and spacing, so measurement and output cannot drift and Markdown is never reparsed while scrolling.
+
+Oversized entries paint their top, middle, and bottom slices in one- and two-row viewports, retain
+entry selection and action identity with offscreen headers, and show muted up/down continuation
+cues. Follow-tail painting resolves the latest bottom immediately on refresh, while explicit entry
+selection begins at its header. All `hq-tui` targets and strict all-target/all-feature Clippy pass,
+including bounded redraw/cache qualification and responsive draft, inspector, and interaction
+snapshots.
+
+### Original plan entry
+
+### Paint intersecting conversation entry slices
+
+Replace `visible_conversation_entries`' whole-entry range with a pure viewport layout containing
+each intersecting entry's identity/index, first visible visual row, and painted height.
+
+- Make `ConversationEntryLayout` the single width-specific row model for measurement, slicing,
+  continuation cues, selection painting, and output. Slice cached Markdown lines without reparsing
+  or losing styles, grapheme boundaries, table clipping, or terminal safety.
+- Paint every entry slice that intersects the viewport; never leave usable transcript rows blank
+  merely because a complete entry does not fit, including one- and two-row message areas.
+- Keep selection, reply/archive/restore, and technical-detail authority attached to the stable fact
+  identity even when only part of an entry is visible. Show noncanonical continuation cues when its
+  header or body continues outside the viewport.
+- Opening at the tail shows the bottom slice of an oversized latest message; explicitly selecting
+  an entry reveals its beginning. Append new live content follows the tail only when the reader was
+  already at the bottom.
+- Cover oversized entries above, at, and below the anchor; top/middle/bottom Markdown slices; narrow
+  panes and wide Unicode; and drafts, inspectors, and interaction banners.
+
+Done when every nonempty conversation viewport paints available transcript content and every visual
+row of an oversized message is reachable.
+
 ## 2026-09-01 — Stable continuous conversation viewport state
 
 Added a typed, passive renderer-to-reducer geometry observation and a stable entry-plus-row

@@ -11,8 +11,8 @@ use hq_tui::{
     UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectFolderAction,
     UiProjectManagementAction, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
     UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus, UiProjectThread, UiProvider,
-    UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTheme,
-    UiThemeRole, render, update,
+    UiRenderCache, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection,
+    UiTheme, UiThemeRole, render, render_with_cache, update,
 };
 use ratatui::{
     Terminal,
@@ -946,6 +946,58 @@ fn markdown_messages_render_safely_across_widths_without_parsing_activity() {
     .model;
     assert_eq!(resized.conversation_anchor(), anchor.as_deref());
     assert!(render_text(&resized).contains("a deliberately wide value"));
+}
+
+#[test]
+fn oversized_markdown_scrolls_by_rows_without_changing_entry_selection() {
+    let body = (0..20)
+        .map(|index| format!("## Marker {index:02}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut model = conversation_model_with_content(
+        UiSize {
+            width: 64,
+            height: 16,
+        },
+        UiMessageState::Open,
+        None,
+        &body,
+        "Work in progress…",
+    );
+    let observation = render_observation(&model);
+    assert!(
+        observation.entries[0].height > observation.height,
+        "test message must exceed the transcript viewport"
+    );
+    model = update(model, UiEvent::ConversationViewportObserved { observation })
+        .expect("install measured transcript")
+        .model;
+    for _ in 0..8 {
+        model = update(model, UiEvent::Input(UiInput::NextItem))
+            .expect("scroll one visual row")
+            .model;
+    }
+    assert_eq!(model.conversation_anchor(), Some("message-1"));
+    let scrolled = render_text(&model);
+    assert!(!scrolled.contains("Marker 00"), "{scrolled}");
+    assert!(scrolled.contains('↑'), "{scrolled}");
+    assert!(scrolled.contains('↓'), "{scrolled}");
+    let buffer = render_buffer_with_theme(&model, &UiTheme::terminal());
+    let (marker_x, marker_y) = find_text_start(&buffer, "Marker");
+    assert!(
+        buffer
+            .cell((marker_x, marker_y))
+            .expect("partially visible selected message")
+            .modifier
+            .contains(Modifier::REVERSED),
+        "selection remains attached to the entry while its header is offscreen"
+    );
+
+    let activity = update(model, UiEvent::Input(UiInput::Character('j')))
+        .expect("jump to next entry")
+        .model;
+    assert_eq!(activity.conversation_anchor(), Some("activity-2"));
+    assert!(render_text(&activity).contains("Work in progress…"));
 }
 
 #[test]
@@ -2095,6 +2147,20 @@ fn render_text(model: &UiModel) -> String {
         .expect("render buffer");
     assert_eq!(model, &before);
     snapshot_text(terminal.backend().buffer())
+}
+
+fn render_observation(model: &UiModel) -> hq_tui::UiConversationViewportObservation {
+    let viewport = model.viewport();
+    let backend = TestBackend::new(viewport.width, viewport.height);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut cache = UiRenderCache::new();
+    let mut observation = None;
+    terminal
+        .draw(|frame| {
+            observation = render_with_cache(frame, model, &UiTheme::terminal(), &mut cache);
+        })
+        .expect("render observed buffer");
+    observation.expect("conversation geometry")
 }
 
 fn visible_words(rendered: &str) -> String {
