@@ -2,41 +2,6 @@
 
 ## Next Up
 
-### Consume materialized Inbox details without loading flashes
-
-Use coherent subscribed conversation views in the installed TUI so list and detail change together
-and already-observed snapshots are never discarded and fetched again.
-
-- Map subscribed materialized views in `LocalTuiObserver` and share their typed conversation
-  directory with the independent command client without giving the observer mutation authority.
-- Route selected-conversation interest over an interruptible latest-value observation control path;
-  blocked commands must not delay selection or daemon updates, and shutdown must still join both
-  workers deterministically.
-- Retain a bounded set of first pages in `UiModel` by stable conversation identity. Apply list and
-  selected detail atomically, keep the last coherent view while a newer one is pending, and ignore
-  stale/out-of-order views.
-- If a selected Inbox row disappears after send, choose its deterministic successor and install the
-  matching detail together. Rapid navigation, reconnect, row reordering, activity updates, and send
-  acknowledgement must never paint the wrong conversation or duplicate a sent message.
-- Remove `Loading messages…` from passive first-page flows. Only explicit older-history pagination
-  may show loading progress, and retained pages must have an explicit memory bound.
-- Add model, mapper, executor, shell, and installed PTY tests for startup, rapid selection, blocked
-  commands, row disappearance after send, reconnect, cache eviction, and authoritative convergence.
-- Update `docs/rust/{tui,acceptance-scenarios,behavior-ledger}.md` with the materialized observation
-  boundary, atomic presentation, bounded retention, and explicit older-history loading.
-
-Acceptance criteria:
-
-- The Inbox list and selected detail shown in one frame share a revision and stable conversation
-  identity; a newer list is never paired with stale detail from another row.
-- Startup, navigation, reconnect, automatic refresh, and message submission never flash
-  `Loading messages…`; only explicit older-history pagination may show loading progress.
-- Subscribed snapshots are consumed directly rather than converted to invalidations and fetched
-  again, while commands and observations remain independently responsive.
-- Rapid selection, row disappearance, duplicate updates, response loss, reconnect, and cache
-  eviction cannot regress revision, show the wrong page, duplicate a message, or grow memory without
-  a bound.
-
 ### Acknowledge mailbox messages before project delivery
 
 Give immediate, truthful send feedback and move project sequencing/runtime delivery out of the

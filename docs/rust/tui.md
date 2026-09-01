@@ -22,12 +22,11 @@ The only behavioral entry point is:
 UiModel + UiEvent -> Result<(UiModel, [UiEffect]), UiError>
 ```
 
-`UiEvent` covers one-time startup, normalized input, complete resizes, identity-bearing timer,
-snapshot, conversation, draft, mailbox-command, named-agent administration, and managed-session
-completions,
-revision-only invalidations, and
+`UiEvent` covers one-time startup, normalized input, complete resizes, coherent materialized Inbox
+views, identity-bearing timer, snapshot, older-conversation-page, draft, mailbox-command,
+named-agent administration, and managed-session completions, revision-only invalidations, and
 generation-scoped connection states and failures. `UiEffect` covers complete all-section snapshot
-requests, bounded reducer-ordered conversation-page requests, draft open/autosave, stable mailbox
+requests, latest-value selected-conversation observation, bounded older-page requests, draft open/autosave, stable mailbox
 commands, typed named-agent and managed-session commands, timers, redraw requests, and exit. The transition function
 performs no I/O and has no domain mutation port.
 
@@ -42,18 +41,22 @@ the shell's monotonic generation.
 The model preserves each section's summary selection, focus, open conversation, typed-detail state,
 and conversation scroll anchor by stable row/fact identity,
 not by screen coordinate or vector index. Reload keeps each identity while it remains present and
-falls back to the first logical item when it disappears. An invalidation cancels the model's claim
-on an in-flight old conversation page; after the required snapshot arrives, the selected
-conversation reloads from its first page and retains the fact anchor when still present. Reconnect
-uses the same repair path. Resize changes dimensions only; it does not rewrite logical focus,
+falls back to the first logical item when it disappears. The subscribed materialized view installs
+the Inbox list and selected first page from one revision in one transition. The model retains at
+most eight revision-tagged first pages by stable row identity, keeps the last coherent pair visible
+while another row is requested, ignores stale or mismatched views, and selects the row at the old
+index when the current row disappears. Invalidations and reconnect rely on that active observation
+stream; ordinary snapshots may repair catalogs but cannot replace a newer coherent list/detail pair.
+Resize changes dimensions only; it does not rewrite logical focus,
 selection, the open conversation, typed-detail disclosure, applicable draft identity, modal state,
 edited text, direct target identity, or pending submission.
 
 ## Mailbox composition and actions
 
 The pure model owns reply, direct-message, self-note, archive, and restore interaction state. Inbox
-selection eagerly loads the selected conversation while retaining list focus; Enter or `l`/Right
-moves focus into that already visible conversation so the operator can select an exact message. `r` opens an
+selection replaces a latest-value subscription interest while retaining the previous coherent
+conversation; the matching materialized view changes list highlight and detail together. Enter or
+`l`/Right moves focus into that already visible conversation so the operator can select an exact message. `r` opens an
 applicable reply draft only for a typed message target whose purpose permits replies; `d` selects
 one unconflicted named-agent mailbox by stable installation/mailbox identity; `N` opens a self-note;
 `a` opens archive confirmation for an open message; and `u` opens restore confirmation for an
@@ -191,9 +194,12 @@ logical anchor.
 
 `hq-node::LocalNodeEventClient` is a read-only, long-lived subscribed local API owner. Its Unix
 connection retains an incremental frame decoder, yields generation-scoped connection changes, and
-registers the broad subscription before exposing the acknowledgement's authoritative base. The
-installed composition completes that activation before it opens the ordinary `LocalNodeClient`
-used by the command adapter. The two clients negotiate and reconnect independently.
+registers the subscription before exposing the acknowledgement's authoritative base. The installed
+composition retains that base, resolves and subscribes to the initial Inbox row, and obtains its
+coherent page before terminal activation. A generation-scoped local socket-pair wake lets selection
+changes interrupt an idle read normally without closing or reconnecting the daemon socket; the
+separate close interrupt remains reserved for shutdown. The ordinary `LocalNodeClient` command
+adapter and observation client negotiate, block, reconnect, and join independently.
 
 `LocalTuiClient` joins each complete authoritative local API snapshot with the passive node-local
 provider catalog and maps them into one presentation bundle containing Inbox, Sent, Archived,
@@ -207,8 +213,12 @@ the typed context for participant-first list titles such as `Alice`, `Project ag
 participant`, and `Personal notes`; optional project context and a bounded preview occupy the
 second line. Unresolved names use an honest fallback rather than an internal identifier. Mailbox
 filters do not scan or reorder message bodies.
-Selecting a summary issues the ordinary `ConversationPage` request with an opaque cursor, and a
-newer selection supersedes the pending preview without allowing a stale completion to replace it.
+Selecting a summary replaces a capacity-one desired-row slot and wakes the observation owner; rapid
+selection therefore collapses to the latest stable row even while an ordinary command is blocked.
+The observer shares an encapsulated typed key/presentation directory with the command adapter, but
+has no mutation authority. Only PageDown sends an ordinary `ConversationPage` request, always with
+a nonempty opaque older-history cursor. First-page loading text is never rendered; the retained
+coherent detail remains visible until its replacement arrives.
 Returned message/activity unions remain in reducer order. The page mapper classifies an author as
 `You`, the named or fallback participant, or `Unknown sender` from exact mailbox evidence; labels
 never become routing authority. It maps the closed status, agent-turn, progress, plan, diff, and

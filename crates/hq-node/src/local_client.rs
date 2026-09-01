@@ -4,8 +4,9 @@ use std::{
     collections::VecDeque,
     error::Error,
     fmt,
-    io::Read as _,
+    io::{Read as _, Write as _},
     num::NonZeroUsize,
+    os::fd::AsFd as _,
     os::unix::net::UnixStream,
     path::PathBuf,
     sync::{
@@ -24,10 +25,11 @@ use hq_local_api::{
     ClientEvent, ClientTransport, InitialView, ReconnectPolicy, ReconnectingClient,
     protocol::v1::{
         AgentRetirementRequestDto, AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
-        EffectRequestDto, FrameDecoder, Id32, InvalidationTopic, MailboxCommandRequestDto,
-        MutationRequest, ProjectCommandRequestDto, Request,
+        ConversationPageSelectionDto, EffectRequestDto, FrameDecoder, Id32, InvalidationTopic,
+        MailboxCommandRequestDto, MutationRequest, ProjectCommandRequestDto, Request,
     },
 };
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::{
     LifecycleClient, LifecycleClientConfig, NodeClientCoordinator, NodeCoordinatorConfig,
@@ -897,6 +899,7 @@ pub struct LocalNodeEventClient {
     installation_id: InstallationId,
     runner: BlockingClientRunner<UnixClientTransport>,
     interrupt: UnixClientInterrupt,
+    wake: UnixClientWake,
     observation_deadline: Duration,
 }
 
@@ -919,7 +922,7 @@ impl LocalNodeClient {
         config: LocalNodeClientConfig,
         launcher: L,
     ) -> Result<Self, LocalNodeClientError> {
-        let (installation_id, runner, _interrupt) =
+        let (installation_id, runner, _interrupt, _wake) =
             connect_runner(config, launcher, SubscriptionMode::None)?;
         Ok(Self {
             installation_id,
@@ -1011,12 +1014,13 @@ impl LocalNodeEventClient {
         launcher: L,
     ) -> Result<Self, LocalNodeClientError> {
         let observation_deadline = config.command_deadline;
-        let (installation_id, runner, interrupt) =
+        let (installation_id, runner, interrupt, wake) =
             connect_runner(config, launcher, SubscriptionMode::All)?;
         Ok(Self {
             installation_id,
             runner,
             interrupt,
+            wake,
             observation_deadline,
         })
     }
@@ -1030,6 +1034,16 @@ impl LocalNodeEventClient {
     pub fn next_observation(&mut self) -> Result<Option<ClientEvent>, LocalNodeClientError> {
         self.runner
             .poll_event_or_state_change(self.observation_deadline)
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Replaces the subscribed selected-conversation interest without waiting for its response.
+    pub fn update_subscription_conversation(
+        &mut self,
+        conversation: Option<ConversationPageSelectionDto>,
+    ) -> Result<(), LocalNodeClientError> {
+        self.runner
+            .update_subscription_conversation(conversation)
             .map_err(LocalNodeClientError::Execution)
     }
 
@@ -1066,6 +1080,11 @@ impl LocalNodeEventClient {
         self.interrupt.clone()
     }
 
+    /// Returns a cloneable handle that normally wakes the active subscribed Unix read.
+    pub fn wake_handle(&self) -> UnixClientWake {
+        self.wake.clone()
+    }
+
     /// Returns the generation-scoped reconnecting-client state.
     pub const fn connection_state(&self) -> ClientConnectionState {
         self.runner.connection_state()
@@ -1081,6 +1100,7 @@ fn connect_runner<L: NodeLauncher>(
         InstallationId,
         BlockingClientRunner<UnixClientTransport>,
         UnixClientInterrupt,
+        UnixClientWake,
     ),
     LocalNodeClientError,
 > {
@@ -1117,6 +1137,7 @@ fn connect_runner<L: NodeLauncher>(
     })
     .map_err(LocalNodeClientError::Transport)?;
     let interrupt = transport.interrupt_handle();
+    let wake = transport.wake_handle();
     let reconnect = ReconnectPolicy::new(config.reconnect_initial, config.reconnect_maximum)
         .map_err(|_| LocalNodeClientError::Client)?;
     let mut client = ReconnectingClient::new(
@@ -1143,7 +1164,7 @@ fn connect_runner<L: NodeLauncher>(
         transport,
     )
     .map_err(LocalNodeClientError::Execution)?;
-    Ok((installation_id, runner, interrupt))
+    Ok((installation_id, runner, interrupt, wake))
 }
 
 /// Standard blocking transport that owns no state beyond validated configuration.
@@ -1151,6 +1172,7 @@ fn connect_runner<L: NodeLauncher>(
 pub struct UnixClientTransport {
     config: UnixClientTransportConfig,
     interrupt: UnixClientInterrupt,
+    wake: UnixClientWake,
     next_connection_id: Arc<AtomicU64>,
 }
 
@@ -1160,8 +1182,20 @@ pub struct UnixClientInterrupt {
     active: Arc<Mutex<Option<InterruptConnection>>>,
 }
 
+/// Cloneable capability that wakes an idle read without closing its daemon connection.
+#[derive(Clone, Debug, Default)]
+pub struct UnixClientWake {
+    active: Arc<Mutex<Option<WakeConnection>>>,
+}
+
 #[derive(Debug)]
 struct InterruptConnection {
+    id: u64,
+    stream: UnixStream,
+}
+
+#[derive(Debug)]
+struct WakeConnection {
     id: u64,
     stream: UnixStream,
 }
@@ -1191,30 +1225,47 @@ impl UnixClientInterrupt {
     }
 }
 
+impl UnixClientWake {
+    /// Makes the currently active transport poll return normally. Repeated wakes coalesce.
+    pub fn wake(&self) {
+        if let Ok(mut active) = self.active.lock()
+            && let Some(active) = active.as_mut()
+        {
+            let _ = active.stream.write(&[1]);
+        }
+    }
+
+    fn register(&self, id: u64, stream: UnixStream) {
+        if let Ok(mut active) = self.active.lock() {
+            *active = Some(WakeConnection { id, stream });
+        }
+    }
+
+    fn clear(&self, id: u64) {
+        if let Ok(mut active) = self.active.lock()
+            && active.as_ref().is_some_and(|active| active.id == id)
+        {
+            *active = None;
+        }
+    }
+}
+
 /// One Unix client connection with an incremental frame decoder retained across idle polls.
 #[derive(Debug)]
 pub struct UnixClientConnection {
     id: u64,
     stream: UnixStream,
+    wake: UnixStream,
     decoder: FrameDecoder,
     ready_frames: VecDeque<Vec<u8>>,
 }
 
 impl UnixClientConnection {
-    #[cfg(test)]
-    fn new(stream: UnixStream) -> Self {
-        Self {
-            id: 0,
-            stream,
-            decoder: FrameDecoder::new(),
-            ready_frames: VecDeque::new(),
-        }
-    }
-
-    fn tracked(id: u64, stream: UnixStream) -> Self {
+    fn tracked(id: u64, stream: UnixStream, wake: UnixStream) -> Self {
         Self {
             id,
             stream,
+            wake,
             decoder: FrameDecoder::new(),
             ready_frames: VecDeque::new(),
         }
@@ -1230,6 +1281,7 @@ impl UnixClientTransport {
         Ok(Self {
             config,
             interrupt: UnixClientInterrupt::default(),
+            wake: UnixClientWake::default(),
             next_connection_id: Arc::new(AtomicU64::new(1)),
         })
     }
@@ -1237,6 +1289,11 @@ impl UnixClientTransport {
     /// Returns an idempotent handle for waking the currently active connection.
     pub fn interrupt_handle(&self) -> UnixClientInterrupt {
         self.interrupt.clone()
+    }
+
+    /// Returns a handle that wakes a read normally without changing connection generation.
+    pub fn wake_handle(&self) -> UnixClientWake {
+        self.wake.clone()
     }
 
     fn own_connection(
@@ -1250,8 +1307,15 @@ impl UnixClientTransport {
         let interrupt_stream = stream
             .try_clone()
             .map_err(|_| UnixClientTransportError::Transport)?;
+        let (wake_reader, wake_writer) =
+            UnixStream::pair().map_err(|_| UnixClientTransportError::Transport)?;
+        wake_reader
+            .set_nonblocking(true)
+            .and_then(|()| wake_writer.set_nonblocking(true))
+            .map_err(|_| UnixClientTransportError::Transport)?;
         self.interrupt.register(id, interrupt_stream);
-        Ok(UnixClientConnection::tracked(id, stream))
+        self.wake.register(id, wake_writer);
+        Ok(UnixClientConnection::tracked(id, stream, wake_reader))
     }
 }
 
@@ -1320,10 +1384,36 @@ impl ClientTransport for UnixClientTransport {
         if timeout.is_zero() {
             return Ok(None);
         }
-        connection
-            .stream
-            .set_read_timeout(Some(timeout.min(self.config.io_timeout)))
+        let timeout = PollTimeout::try_from(timeout.min(self.config.io_timeout))
             .map_err(|_| UnixClientTransportError::Transport)?;
+        let mut descriptors = [
+            PollFd::new(
+                connection.stream.as_fd(),
+                PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+            ),
+            PollFd::new(
+                connection.wake.as_fd(),
+                PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+            ),
+        ];
+        if poll(&mut descriptors, timeout).map_err(|_| UnixClientTransportError::Transport)? == 0 {
+            return Ok(None);
+        }
+        if descriptors[1]
+            .revents()
+            .is_some_and(|events| events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP))
+        {
+            let mut wake_bytes = [0_u8; 64];
+            loop {
+                match connection.wake.read(&mut wake_bytes) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => return Err(UnixClientTransportError::Transport),
+                }
+            }
+            return Ok(None);
+        }
         let mut bytes = [0_u8; 8_192];
         let count = match connection.stream.read(&mut bytes) {
             Ok(0) if connection.decoder.buffered_len() == 0 => {
@@ -1360,6 +1450,7 @@ impl ClientTransport for UnixClientTransport {
 
     fn close(&mut self, connection: Self::Connection) {
         self.interrupt.clear(connection.id);
+        self.wake.clear(connection.id);
         let _ = connection.stream.shutdown(std::net::Shutdown::Both);
     }
 
@@ -1384,13 +1475,12 @@ mod tests {
         protocol::v1::{BuildMetadata, Id32, ServerHello, V1, WireMessage},
     };
 
-    use super::{UnixClientConnection, UnixClientTransport, UnixClientTransportConfig};
+    use super::{UnixClientTransport, UnixClientTransportConfig};
     use crate::RuntimePaths;
 
     #[test]
     fn unix_poll_preserves_a_partial_frame_across_an_idle_timeout() {
         let (mut writer, reader) = UnixStream::pair().expect("socket pair");
-        let mut connection = UnixClientConnection::new(reader);
         let mut transport = UnixClientTransport::new(UnixClientTransportConfig {
             runtime: RuntimePaths::new(
                 std::env::temp_dir().join("hq-local-client-partial-frame-test"),
@@ -1399,6 +1489,9 @@ mod tests {
             io_timeout: Duration::from_millis(10),
         })
         .expect("transport");
+        let mut connection = transport
+            .own_connection(reader)
+            .expect("tracked connection");
         let frame = WireMessage::ServerHello(ServerHello::new(
             V1,
             BuildMetadata::new("hq-test", "0.1.0", None::<String>).expect("build"),
@@ -1448,5 +1541,84 @@ mod tests {
 
         let result = reader.join().expect("idle reader joined");
         assert!(matches!(result, Ok(0) | Err(_)));
+    }
+
+    #[test]
+    fn unix_control_wake_preserves_the_connection_and_partial_decoder() {
+        let mut transport = UnixClientTransport::new(UnixClientTransportConfig {
+            runtime: RuntimePaths::new(std::env::temp_dir().join("hq-local-client-control-wake"))
+                .expect("absolute runtime path"),
+            io_timeout: Duration::from_secs(30),
+        })
+        .expect("transport");
+        let wake = transport.wake_handle();
+        let (mut writer, reader) = UnixStream::pair().expect("daemon socket pair");
+        let mut connection = transport
+            .own_connection(reader)
+            .expect("tracked connection");
+        let frame = WireMessage::ServerHello(ServerHello::new(
+            V1,
+            BuildMetadata::new("hq-test", "0.1.0", None::<String>).expect("build"),
+            Id32::new([8; 32]),
+        ))
+        .encode_frame()
+        .expect("frame");
+
+        writer.write_all(&frame[..2]).expect("partial prefix");
+        assert_eq!(
+            transport
+                .poll_frame(&mut connection, Duration::from_millis(1))
+                .expect("partial poll"),
+            None
+        );
+        wake.wake();
+        assert_eq!(
+            transport
+                .poll_frame(&mut connection, Duration::from_secs(5))
+                .expect("control wake"),
+            None
+        );
+        writer.write_all(&frame[2..]).expect("remaining frame");
+        assert_eq!(
+            transport
+                .poll_frame(&mut connection, Duration::from_secs(1))
+                .expect("same connection completes"),
+            Some(frame)
+        );
+    }
+
+    #[test]
+    fn old_connection_close_cannot_disarm_the_new_control_wake() {
+        let mut transport = UnixClientTransport::new(UnixClientTransportConfig {
+            runtime: RuntimePaths::new(
+                std::env::temp_dir().join("hq-local-client-control-wake-generation"),
+            )
+            .expect("absolute runtime path"),
+            io_timeout: Duration::from_secs(30),
+        })
+        .expect("transport");
+        let wake = transport.wake_handle();
+        let (_first_writer, first_reader) = UnixStream::pair().expect("first daemon socket pair");
+        let first = transport
+            .own_connection(first_reader)
+            .expect("first tracked connection");
+        let (_second_writer, second_reader) =
+            UnixStream::pair().expect("second daemon socket pair");
+        let mut second = transport
+            .own_connection(second_reader)
+            .expect("second tracked connection");
+        transport.close(first);
+
+        let polling =
+            thread::spawn(move || transport.poll_frame(&mut second, Duration::from_secs(5)));
+        wake.wake();
+
+        assert_eq!(
+            polling
+                .join()
+                .expect("control poll joined")
+                .expect("control poll"),
+            None
+        );
     }
 }

@@ -14,14 +14,14 @@ use std::{
 use hq_local_api::{
     BlockingClientError, ClientConnectionState, ClientEvent,
     protocol::v1::{
-        ActivityStatusDto, AuthoritativeSnapshotDto, CompletedItemPresentationDto,
-        ConversationActivityDto, ConversationActivityKindDto, ConversationContextDto,
-        ConversationEntryDto, ConversationKeyDto, ConversationMessageDto, ConversationPageRequest,
-        ConversationParticipantDto, Id32, MailboxAddressDto, MailboxCommandActionDto,
-        MailboxCommandRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
-        MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto,
-        MutationOutcomeDto, PresentationKindDto, ProviderCatalogDto, Request, ResponseResult,
-        SnapshotItem,
+        ActivityStatusDto, AuthoritativeConversationViewDto, AuthoritativeSnapshotDto,
+        CompletedItemPresentationDto, ConversationActivityDto, ConversationActivityKindDto,
+        ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationMessageDto,
+        ConversationPageRequest, ConversationPageSelectionDto, ConversationParticipantDto, Id32,
+        MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDto,
+        MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+        MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, PresentationKindDto,
+        ProviderCatalogDto, Request, ResponseResult, SnapshotItem,
     },
 };
 use hq_tui::{
@@ -33,15 +33,16 @@ use hq_tui::{
     UiEffect, UiEvent, UiFailure, UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus,
     UiHumanSelectionEvidence, UiHumanState, UiMailboxAction, UiMailboxCommandResult,
     UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiManagedSessionResult, UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot,
-    UiTechnicalSection, UiTimerKind,
+    UiManagedSessionResult, UiMaterializedConversationView, UiMessageDelivery, UiMessageState,
+    UiMessageTarget, UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning,
+    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
+    UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
+    UiSnapshot, UiTechnicalSection, UiTimerKind,
 };
 
 use crate::{
     LocalNodeClient, LocalNodeClientError, LocalNodeEventClient, StatePaths, UnixClientInterrupt,
+    UnixClientWake,
     local_client::{
         LocalManagedSessionCommand, LocalManagedSessionOutcome, LocalNamedAgentCommand,
         LocalProject, LocalProjectCommand, LocalProjectOutcome, execute_managed_session_command,
@@ -82,6 +83,8 @@ impl TuiClock for MonotonicTuiClock {
 /// Closed observation emitted by a subscribed TUI client port.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TuiClientObservation {
+    /// One subscribed snapshot and selected first page became current together.
+    MaterializedView(Box<UiMaterializedConversationView>),
     /// A later authoritative revision is available.
     Invalidated {
         /// Greatest observed revision.
@@ -166,13 +169,36 @@ pub trait TuiObservationInterrupt: Send + Sync {
     fn interrupt(&self);
 }
 
+/// Cross-thread latest-value control for the dedicated observation owner.
+pub trait TuiObservationControl: Send + Sync {
+    /// Replaces the desired selected Inbox row without waiting for a response.
+    fn select_conversation(&self, row_id: Option<String>);
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct NoopTuiObservationControl;
+
+impl TuiObservationControl for NoopTuiObservationControl {
+    fn select_conversation(&self, _row_id: Option<String>) {}
+}
+
 /// Dedicated subscribed observation capability owned independently from TUI commands.
 pub trait TuiObservationPort: Send {
+    /// Takes the coherent view obtained during subscription activation, when available.
+    fn take_initial_view(&mut self) -> Option<UiMaterializedConversationView> {
+        None
+    }
+
     /// Blocks until subscribed work produces observations or a transport workflow boundary.
     fn next_observations(&mut self) -> Vec<TuiClientObservation>;
 
     /// Returns a capability that can wake the blocking observation owner from another thread.
     fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt>;
+
+    /// Returns a latest-value selection control independent from the command worker.
+    fn control_handle(&self) -> Arc<dyn TuiObservationControl> {
+        Arc::new(NoopTuiObservationControl)
+    }
 }
 
 /// Actionable draft failure with the current server value on optimistic conflict.
@@ -188,14 +214,19 @@ pub struct TuiDraftError {
 pub struct LocalTuiClient {
     client: LocalNodeClient,
     state: StatePaths,
-    conversation_keys: BTreeMap<String, ConversationKeyDto>,
-    conversation_presentations: BTreeMap<String, ConversationPresentationContext>,
+    presentation: SharedTuiPresentation,
 }
 
 /// Subscribed local-API observation adapter with no command or query authority.
 pub struct LocalTuiObserver {
     client: LocalNodeEventClient,
     observed_connection: Option<ClientConnectionState>,
+    presentation: SharedTuiPresentation,
+    initial_view: Option<UiMaterializedConversationView>,
+    selection: Arc<Mutex<PendingConversationSelection>>,
+    control: LocalTuiObservationControl,
+    prior_inbox_rows: Vec<String>,
+    desired_row: Option<String>,
 }
 
 #[derive(Clone)]
@@ -204,53 +235,46 @@ struct ConversationPresentationContext {
     local_human: MailboxAddressDto,
 }
 
-impl LocalTuiClient {
-    /// Wraps one already-ready ordinary local API command client.
-    pub const fn new(client: LocalNodeClient, state: StatePaths) -> Self {
+#[derive(Clone, Default)]
+struct SharedTuiPresentation {
+    inner: Arc<Mutex<TuiPresentationData>>,
+}
+
+struct TuiPresentationData {
+    conversation_keys: BTreeMap<String, ConversationKeyDto>,
+    conversation_presentations: BTreeMap<String, ConversationPresentationContext>,
+    providers: ProviderCatalogDto,
+}
+
+impl Default for TuiPresentationData {
+    fn default() -> Self {
         Self {
-            client,
-            state,
             conversation_keys: BTreeMap::new(),
             conversation_presentations: BTreeMap::new(),
+            providers: ProviderCatalogDto {
+                providers: Vec::new(),
+                default_provider: None,
+            },
         }
     }
 }
 
-impl LocalTuiObserver {
-    /// Wraps one activated broad-invalidation subscription.
-    pub const fn new(client: LocalNodeEventClient) -> Self {
-        Self {
-            client,
-            observed_connection: None,
-        }
-    }
-}
-
-impl TuiObservationInterrupt for UnixClientInterrupt {
-    fn interrupt(&self) {
-        UnixClientInterrupt::interrupt(self);
-    }
-}
-
-impl TuiClientPort for LocalTuiClient {
-    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
-        let local_installation = *self.client.installation_id().as_bytes();
-        let snapshot = self
-            .client
-            .snapshot()
-            .map_err(|error| client_failure(&error))?;
-        self.conversation_keys = snapshot
+impl SharedTuiPresentation {
+    fn replace_snapshot(&self, snapshot: &AuthoritativeSnapshotDto) {
+        let Ok(mut presentation) = self.inner.lock() else {
+            return;
+        };
+        presentation.conversation_keys = snapshot
             .items
             .iter()
             .filter_map(|item| match item {
                 SnapshotItem::Conversation { key, .. } => {
-                    let row_id = conversation_identity(key.clone());
-                    Some((row_id, key.clone()))
+                    Some((conversation_identity(key.clone()), key.clone()))
                 }
                 _ => None,
             })
             .collect();
-        self.conversation_presentations = snapshot
+        presentation.conversation_presentations = snapshot
             .items
             .iter()
             .filter_map(|item| match item {
@@ -269,20 +293,447 @@ impl TuiClientPort for LocalTuiClient {
                 _ => None,
             })
             .collect();
-        let projects = tui_project_catalog(&snapshot).map_err(|error| project_failure(&error))?;
-        let ClientEvent::Response {
-            result: ResponseResult::ProviderCatalog(providers),
-            ..
-        } = self
-            .client
-            .request(Request::ProviderCatalog)
-            .map_err(|error| client_failure(&error))?
-        else {
-            return Err(UiFailure {
-                code: "provider_catalog_protocol".to_owned(),
-                action: "restart HQ and reload the available agent services".to_owned(),
-            });
+    }
+
+    fn replace_providers(&self, providers: ProviderCatalogDto) {
+        if let Ok(mut presentation) = self.inner.lock() {
+            presentation.providers = providers;
+        }
+    }
+
+    fn providers(&self) -> ProviderCatalogDto {
+        self.inner.lock().map_or_else(
+            |_| ProviderCatalogDto {
+                providers: Vec::new(),
+                default_provider: None,
+            },
+            |presentation| presentation.providers.clone(),
+        )
+    }
+
+    fn conversation(
+        &self,
+        row_id: &str,
+    ) -> Option<(ConversationKeyDto, ConversationPresentationContext)> {
+        let presentation = self.inner.lock().ok()?;
+        Some((
+            presentation.conversation_keys.get(row_id)?.clone(),
+            presentation.conversation_presentations.get(row_id)?.clone(),
+        ))
+    }
+}
+
+#[derive(Clone)]
+struct LocalTuiObservationControl {
+    selection: Arc<Mutex<PendingConversationSelection>>,
+    wake: UnixClientWake,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum PendingConversationSelection {
+    #[default]
+    Unchanged,
+    Replace(Option<String>),
+}
+
+impl TuiObservationControl for LocalTuiObservationControl {
+    fn select_conversation(&self, row_id: Option<String>) {
+        if let Ok(mut selection) = self.selection.lock() {
+            *selection = PendingConversationSelection::Replace(row_id);
+        }
+        self.wake.wake();
+    }
+}
+
+impl LocalTuiClient {
+    /// Wraps one already-ready ordinary local API command client.
+    pub fn new(client: LocalNodeClient, state: StatePaths) -> Self {
+        Self {
+            client,
+            state,
+            presentation: SharedTuiPresentation {
+                inner: Arc::new(Mutex::new(TuiPresentationData {
+                    conversation_keys: BTreeMap::new(),
+                    conversation_presentations: BTreeMap::new(),
+                    providers: ProviderCatalogDto {
+                        providers: Vec::new(),
+                        default_provider: None,
+                    },
+                })),
+            },
+        }
+    }
+
+    fn with_presentation(
+        client: LocalNodeClient,
+        state: StatePaths,
+        presentation: SharedTuiPresentation,
+    ) -> Self {
+        Self {
+            client,
+            state,
+            presentation,
+        }
+    }
+}
+
+impl LocalTuiObserver {
+    /// Wraps one activated broad-invalidation subscription.
+    pub fn new(client: LocalNodeEventClient) -> Self {
+        Self::with_presentation(
+            client,
+            SharedTuiPresentation::default(),
+            None,
+            Vec::new(),
+            None,
+        )
+    }
+
+    fn with_presentation(
+        client: LocalNodeEventClient,
+        presentation: SharedTuiPresentation,
+        initial_view: Option<UiMaterializedConversationView>,
+        prior_inbox_rows: Vec<String>,
+        desired_row: Option<String>,
+    ) -> Self {
+        let wake = client.wake_handle();
+        let selection = Arc::new(Mutex::new(PendingConversationSelection::Unchanged));
+        Self {
+            client,
+            observed_connection: None,
+            presentation,
+            initial_view,
+            selection: Arc::clone(&selection),
+            control: LocalTuiObservationControl { selection, wake },
+            prior_inbox_rows,
+            desired_row,
+        }
+    }
+
+    fn apply_latest_selection(&mut self) -> Result<(), UiFailure> {
+        let replacement = std::mem::take(
+            &mut *self
+                .selection
+                .lock()
+                .map_err(|_| observation_control_failure())?,
+        );
+        let PendingConversationSelection::Replace(row_id) = replacement else {
+            return Ok(());
         };
+        let conversation = row_id
+            .as_deref()
+            .map(|row_id| {
+                let (key, _) = self
+                    .presentation
+                    .conversation(row_id)
+                    .ok_or_else(observation_control_failure)?;
+                ConversationPageSelectionDto::new(key, 100)
+                    .map_err(|_| observation_control_failure())
+            })
+            .transpose()?;
+        self.client
+            .update_subscription_conversation(conversation)
+            .map_err(|error| client_failure(&error))?;
+        self.desired_row = row_id;
+        Ok(())
+    }
+
+    fn map_observation_result(
+        &mut self,
+        result: Result<Option<ClientEvent>, LocalNodeClientError>,
+        state: ClientConnectionState,
+        observations: &mut Vec<TuiClientObservation>,
+    ) {
+        match result {
+            Ok(Some(ClientEvent::Snapshot(snapshot))) => {
+                let local_installation = *self.client.installation_id().as_bytes();
+                self.presentation.replace_snapshot(&snapshot);
+                let providers = self.presentation.providers();
+                observations.push(TuiClientObservation::MaterializedView(Box::new(
+                    UiMaterializedConversationView {
+                        snapshot: tui_snapshot_with_provider_catalog(
+                            local_installation,
+                            &snapshot,
+                            &providers,
+                        ),
+                        conversation: None,
+                    },
+                )));
+            }
+            Ok(Some(ClientEvent::AuthoritativeConversationView(view))) => {
+                self.map_authoritative_conversation_view(view, state, observations);
+            }
+            Ok(Some(ClientEvent::IncompatibleVersion) | None) => {}
+            Ok(Some(
+                ClientEvent::Mutation(_)
+                | ClientEvent::ProjectCommand { .. }
+                | ClientEvent::AgentRetirement { .. }
+                | ClientEvent::AgentSession { .. }
+                | ClientEvent::Response { .. }
+                | ClientEvent::RequestLost(_)
+                | ClientEvent::Error { .. },
+            )) => observations.push(TuiClientObservation::Failure {
+                generation: connection_generation(state),
+                failure: UiFailure {
+                    code: "unexpected_local_client_event".to_owned(),
+                    action: "waiting for HQ to reload your workspace".to_owned(),
+                },
+            }),
+            Err(error) => observations.push(TuiClientObservation::Failure {
+                generation: connection_generation(state),
+                failure: client_failure(&error),
+            }),
+        }
+    }
+
+    fn map_authoritative_conversation_view(
+        &mut self,
+        view: AuthoritativeConversationViewDto,
+        state: ClientConnectionState,
+        observations: &mut Vec<TuiClientObservation>,
+    ) {
+        let local_installation = *self.client.installation_id().as_bytes();
+        let next_rows = view
+            .snapshot
+            .items
+            .iter()
+            .filter_map(|item| snapshot_row(UiSection::Inbox, item).map(|row| row.id))
+            .collect::<Vec<_>>();
+        self.presentation.replace_snapshot(&view.snapshot);
+        if let Some(desired) = self.desired_row.clone()
+            && !next_rows.iter().any(|row_id| row_id == &desired)
+            && !next_rows.is_empty()
+        {
+            self.select_successor_after_removal(&desired, next_rows, state, observations);
+            return;
+        }
+        if next_rows.is_empty() {
+            self.desired_row = None;
+        }
+        self.prior_inbox_rows = next_rows;
+        match tui_materialized_conversation_view(local_installation, view, &self.presentation) {
+            Ok(view) => observations.push(TuiClientObservation::MaterializedView(Box::new(view))),
+            Err(failure) => observations.push(TuiClientObservation::Failure {
+                generation: connection_generation(state),
+                failure,
+            }),
+        }
+    }
+
+    fn select_successor_after_removal(
+        &mut self,
+        desired: &str,
+        next_rows: Vec<String>,
+        state: ClientConnectionState,
+        observations: &mut Vec<TuiClientObservation>,
+    ) {
+        let prior_index = self
+            .prior_inbox_rows
+            .iter()
+            .position(|row_id| row_id == desired)
+            .unwrap_or(0);
+        let successor = next_rows[prior_index.min(next_rows.len() - 1)].clone();
+        let selection = conversation_selection(&self.presentation, &successor);
+        if let Err(failure) = selection.and_then(|selection| {
+            self.client
+                .update_subscription_conversation(Some(selection))
+                .map_err(|error| client_failure(&error))
+        }) {
+            observations.push(TuiClientObservation::Failure {
+                generation: connection_generation(state),
+                failure,
+            });
+        } else {
+            self.desired_row = Some(successor);
+        }
+        self.prior_inbox_rows = next_rows;
+    }
+}
+
+/// Builds the installed command and observation adapters around one retained subscription base.
+pub(crate) fn compose_tui_clients(
+    mut command_client: LocalNodeClient,
+    mut event_client: LocalNodeEventClient,
+    state: StatePaths,
+    subscription_base: &AuthoritativeSnapshotDto,
+) -> Result<(LocalTuiClient, LocalTuiObserver), UiFailure> {
+    let presentation = SharedTuiPresentation::default();
+    presentation.replace_snapshot(subscription_base);
+    let providers = request_provider_catalog(&mut command_client)?;
+    presentation.replace_providers(providers.clone());
+    let local_installation = *event_client.installation_id().as_bytes();
+    let initial_snapshot =
+        tui_snapshot_with_provider_catalog(local_installation, subscription_base, &providers);
+    let initial = activate_initial_tui_view(
+        &mut event_client,
+        &presentation,
+        local_installation,
+        initial_snapshot,
+    )?;
+    let client = LocalTuiClient::with_presentation(command_client, state, presentation.clone());
+    let observer = LocalTuiObserver::with_presentation(
+        event_client,
+        presentation,
+        Some(initial.view),
+        initial.inbox_rows,
+        initial.desired_row,
+    );
+    Ok((client, observer))
+}
+
+struct InitialTuiView {
+    view: UiMaterializedConversationView,
+    inbox_rows: Vec<String>,
+    desired_row: Option<String>,
+}
+
+fn activate_initial_tui_view(
+    event_client: &mut LocalNodeEventClient,
+    presentation: &SharedTuiPresentation,
+    local_installation: [u8; 32],
+    initial_snapshot: UiSnapshot,
+) -> Result<InitialTuiView, UiFailure> {
+    let mut inbox_rows = initial_snapshot
+        .inbox_rows
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    let mut desired_row = inbox_rows.first().cloned();
+    let view = if let Some(row_id) = desired_row.clone() {
+        let selection = conversation_selection(presentation, &row_id)?;
+        event_client
+            .update_subscription_conversation(Some(selection))
+            .map_err(|error| client_failure(&error))?;
+        loop {
+            match event_client
+                .next_observation()
+                .map_err(|error| client_failure(&error))?
+            {
+                Some(ClientEvent::AuthoritativeConversationView(view)) => {
+                    let materialized =
+                        tui_materialized_conversation_view(local_installation, view, presentation)?;
+                    if materialized
+                        .conversation
+                        .as_ref()
+                        .is_some_and(|conversation| {
+                            Some(&conversation.row_id) == desired_row.as_ref()
+                        })
+                    {
+                        break materialized;
+                    }
+                    let next_rows = materialized
+                        .snapshot
+                        .inbox_rows
+                        .iter()
+                        .map(|row| row.id.clone())
+                        .collect::<Vec<_>>();
+                    if desired_row
+                        .as_ref()
+                        .is_some_and(|row_id| !next_rows.contains(row_id))
+                    {
+                        let prior_index = desired_row
+                            .as_ref()
+                            .and_then(|row_id| {
+                                inbox_rows.iter().position(|candidate| candidate == row_id)
+                            })
+                            .unwrap_or(0);
+                        let Some(successor) = next_rows
+                            .get(prior_index.min(next_rows.len().saturating_sub(1)))
+                            .cloned()
+                        else {
+                            desired_row = None;
+                            inbox_rows = next_rows;
+                            break materialized;
+                        };
+                        let selection = conversation_selection(presentation, &successor)?;
+                        event_client
+                            .update_subscription_conversation(Some(selection))
+                            .map_err(|error| client_failure(&error))?;
+                        desired_row = Some(successor);
+                    }
+                    inbox_rows = next_rows;
+                }
+                Some(ClientEvent::Snapshot(snapshot)) => presentation.replace_snapshot(&snapshot),
+                Some(ClientEvent::IncompatibleVersion | ClientEvent::Error { .. }) => {
+                    return Err(UiFailure {
+                        code: "subscription_activation_failed".to_owned(),
+                        action: "restart HQ and reopen the Inbox".to_owned(),
+                    });
+                }
+                Some(
+                    ClientEvent::Mutation(_)
+                    | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::AgentRetirement { .. }
+                    | ClientEvent::AgentSession { .. }
+                    | ClientEvent::Response { .. }
+                    | ClientEvent::RequestLost(_),
+                )
+                | None => {}
+            }
+        }
+    } else {
+        UiMaterializedConversationView {
+            snapshot: initial_snapshot,
+            conversation: None,
+        }
+    };
+    Ok(InitialTuiView {
+        view,
+        inbox_rows,
+        desired_row,
+    })
+}
+
+fn conversation_selection(
+    presentation: &SharedTuiPresentation,
+    row_id: &str,
+) -> Result<ConversationPageSelectionDto, UiFailure> {
+    let (key, _) = presentation
+        .conversation(row_id)
+        .ok_or_else(observation_control_failure)?;
+    ConversationPageSelectionDto::new(key, 100).map_err(|_| observation_control_failure())
+}
+
+fn request_provider_catalog(client: &mut LocalNodeClient) -> Result<ProviderCatalogDto, UiFailure> {
+    let ClientEvent::Response {
+        result: ResponseResult::ProviderCatalog(providers),
+        ..
+    } = client
+        .request(Request::ProviderCatalog)
+        .map_err(|error| client_failure(&error))?
+    else {
+        return Err(UiFailure {
+            code: "provider_catalog_protocol".to_owned(),
+            action: "restart HQ and reload the available agent services".to_owned(),
+        });
+    };
+    Ok(providers)
+}
+
+fn observation_control_failure() -> UiFailure {
+    UiFailure {
+        code: "conversation_selection_stale".to_owned(),
+        action: "reload the Inbox and select the conversation again".to_owned(),
+    }
+}
+
+impl TuiObservationInterrupt for UnixClientInterrupt {
+    fn interrupt(&self) {
+        UnixClientInterrupt::interrupt(self);
+    }
+}
+
+impl TuiClientPort for LocalTuiClient {
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
+        let local_installation = *self.client.installation_id().as_bytes();
+        let snapshot = self
+            .client
+            .snapshot()
+            .map_err(|error| client_failure(&error))?;
+        self.presentation.replace_snapshot(&snapshot);
+        let projects = tui_project_catalog(&snapshot).map_err(|error| project_failure(&error))?;
+        let providers = request_provider_catalog(&mut self.client)?;
+        self.presentation.replace_providers(providers.clone());
         Ok(tui_snapshot_with_projects(
             local_installation,
             &snapshot,
@@ -296,22 +747,13 @@ impl TuiClientPort for LocalTuiClient {
         row_id: &str,
         cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
-        let key = self
-            .conversation_keys
-            .get(row_id)
-            .cloned()
-            .ok_or_else(|| UiFailure {
-                code: "conversation_stale".to_owned(),
-                action: "reload the Inbox and select the conversation again".to_owned(),
-            })?;
-        let presentation = self
-            .conversation_presentations
-            .get(row_id)
-            .cloned()
-            .ok_or_else(|| UiFailure {
-                code: "conversation_stale".to_owned(),
-                action: "reload the Inbox and select the conversation again".to_owned(),
-            })?;
+        let (key, presentation) =
+            self.presentation
+                .conversation(row_id)
+                .ok_or_else(|| UiFailure {
+                    code: "conversation_stale".to_owned(),
+                    action: "reload the Inbox and select the conversation again".to_owned(),
+                })?;
         let request = ConversationPageRequest::new(key, 100, cursor).map_err(|_| UiFailure {
             code: "conversation_page_invalid".to_owned(),
             action: "reload the Inbox and select the conversation again".to_owned(),
@@ -644,7 +1086,17 @@ impl TuiClientPort for LocalTuiClient {
 }
 
 impl TuiObservationPort for LocalTuiObserver {
+    fn take_initial_view(&mut self) -> Option<UiMaterializedConversationView> {
+        self.initial_view.take()
+    }
+
     fn next_observations(&mut self) -> Vec<TuiClientObservation> {
+        if let Err(failure) = self.apply_latest_selection() {
+            return vec![TuiClientObservation::Failure {
+                generation: connection_generation(self.client.connection_state()),
+                failure,
+            }];
+        }
         let current = self.client.connection_state();
         if self.observed_connection != Some(current) {
             self.observed_connection = Some(current);
@@ -659,43 +1111,16 @@ impl TuiObservationPort for LocalTuiObserver {
             let (generation, state) = connection_observation(state);
             observations.push(TuiClientObservation::Connection { generation, state });
         }
-        match result {
-            Ok(Some(ClientEvent::Snapshot(snapshot))) => {
-                observations.push(TuiClientObservation::Invalidated {
-                    revision: snapshot.revision,
-                });
-            }
-            Ok(Some(ClientEvent::AuthoritativeConversationView(view))) => {
-                observations.push(TuiClientObservation::Invalidated {
-                    revision: view.snapshot.revision,
-                });
-            }
-            Ok(Some(ClientEvent::IncompatibleVersion) | None) => {}
-            Ok(Some(
-                ClientEvent::Mutation(_)
-                | ClientEvent::ProjectCommand { .. }
-                | ClientEvent::AgentRetirement { .. }
-                | ClientEvent::AgentSession { .. }
-                | ClientEvent::Response { .. }
-                | ClientEvent::RequestLost(_)
-                | ClientEvent::Error { .. },
-            )) => observations.push(TuiClientObservation::Failure {
-                generation: connection_generation(state),
-                failure: UiFailure {
-                    code: "unexpected_local_client_event".to_owned(),
-                    action: "waiting for HQ to reload your workspace".to_owned(),
-                },
-            }),
-            Err(error) => observations.push(TuiClientObservation::Failure {
-                generation: connection_generation(state),
-                failure: client_failure(&error),
-            }),
-        }
+        self.map_observation_result(result, state, &mut observations);
         observations
     }
 
     fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt> {
         Arc::new(self.client.interrupt_handle())
+    }
+
+    fn control_handle(&self) -> Arc<dyn TuiObservationControl> {
+        Arc::new(self.control.clone())
     }
 }
 
@@ -854,6 +1279,7 @@ pub struct TuiEffectExecutor<C: TuiClock> {
     workers: Option<TuiWorkers>,
     cancellation: Arc<AtomicBool>,
     observation_interrupt: Arc<dyn TuiObservationInterrupt>,
+    observation_control: Arc<dyn TuiObservationControl>,
     timers: Vec<ScheduledTimer>,
     outstanding_snapshots: Vec<EffectId>,
     redraw_pending: bool,
@@ -897,6 +1323,7 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             })
             .map_err(|_| TuiExecutorError::WorkerSpawn)?;
         let observation_interrupt = observer.interrupt_handle();
+        let observation_control = observer.control_handle();
         let observation_cancellation = Arc::clone(&cancellation);
         let Ok(observation_worker) = thread::Builder::new()
             .name("hq-tui-observations".to_owned())
@@ -918,6 +1345,7 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             }),
             cancellation,
             observation_interrupt,
+            observation_control,
             timers: Vec::new(),
             outstanding_snapshots: Vec::new(),
             redraw_pending: false,
@@ -957,6 +1385,9 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                             }
                         })?;
                     self.outstanding_snapshots.push(id);
+                }
+                UiEffect::ObserveConversation { row_id } => {
+                    self.observation_control.select_conversation(row_id);
                 }
                 UiEffect::OpenDraft { id, target } => {
                     self.enqueue_client_effect(id, WorkerCommand::OpenDraft { id, target })?;
@@ -1132,6 +1563,7 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             | UiEvent::Input(_)
             | UiEvent::Resized(_)
             | UiEvent::TimerElapsed { .. }
+            | UiEvent::MaterializedViewObserved { .. }
             | UiEvent::Invalidated { .. }
             | UiEvent::ConnectionObserved { .. }
             | UiEvent::ClientFailed { .. } => None,
@@ -1336,6 +1768,9 @@ fn observation_worker<O: TuiObservationPort>(
         }
         for observation in observations {
             let event = match observation {
+                TuiClientObservation::MaterializedView(view) => {
+                    UiEvent::MaterializedViewObserved { view: *view }
+                }
                 TuiClientObservation::Invalidated { revision } => UiEvent::Invalidated { revision },
                 TuiClientObservation::Connection { generation, state } => {
                     UiEvent::ConnectionObserved { generation, state }
@@ -1376,6 +1811,36 @@ pub fn tui_snapshot_with_provider_catalog(
 ) -> UiSnapshot {
     let projects = tui_project_catalog(snapshot).unwrap_or_default();
     tui_snapshot_with_projects(local_installation, snapshot, projects, providers)
+}
+
+fn tui_materialized_conversation_view(
+    local_installation: [u8; 32],
+    view: AuthoritativeConversationViewDto,
+    presentation: &SharedTuiPresentation,
+) -> Result<UiMaterializedConversationView, UiFailure> {
+    presentation.replace_snapshot(&view.snapshot);
+    let providers = presentation.providers();
+    let snapshot =
+        tui_snapshot_with_provider_catalog(local_installation, &view.snapshot, &providers);
+    let conversation = view
+        .conversation
+        .map(|selected| {
+            let row_id = conversation_identity(selected.key);
+            let (_, context) = presentation
+                .conversation(&row_id)
+                .ok_or_else(observation_control_failure)?;
+            Ok(tui_conversation_page(
+                &row_id,
+                &context.context,
+                &context.local_human,
+                selected.page,
+            ))
+        })
+        .transpose()?;
+    Ok(UiMaterializedConversationView {
+        snapshot,
+        conversation,
+    })
 }
 
 fn tui_snapshot_with_projects(

@@ -17,10 +17,10 @@ use nix::unistd::{Uid, User};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
-    IdentityError, IdentityErrorClass, LocalNodeClient, LocalNodeEventClient, LocalTuiClient,
-    LocalTuiObserver, MonotonicTuiClock, StatePaths, TuiClientPort, TuiClock, TuiEffectExecutor,
-    TuiObservationPort, TuiThemeEnvironment, TuiThemeError,
-    local_client::installed_local_client_config, resolve_tui_theme,
+    IdentityError, IdentityErrorClass, LocalNodeClient, LocalNodeEventClient, MonotonicTuiClock,
+    StatePaths, TuiClientPort, TuiClock, TuiEffectExecutor, TuiObservationPort,
+    TuiThemeEnvironment, TuiThemeError, local_client::installed_local_client_config,
+    resolve_tui_theme, tui_client::compose_tui_clients,
 };
 
 const MAX_TERMINAL_WAIT: Duration = Duration::from_millis(50);
@@ -321,10 +321,20 @@ where
     C: TuiClock,
 {
     let home_directory = current_user_home_directory();
+    let mut observer = observer;
+    let initial_view = observer.take_initial_view();
     let mut terminal = TerminalGuard::activate(terminal)?;
     let mut executor = TuiEffectExecutor::spawn_with_observer(client, observer, clock)
         .map_err(|_| TuiShellError::Executor)?;
-    let model = UiModel::new(terminal.size()?).with_home_directory(home_directory);
+    let mut model = UiModel::new(terminal.size()?).with_home_directory(home_directory);
+    if let Some(view) = initial_view {
+        let initial_transition = update(model, UiEvent::MaterializedViewObserved { view })
+            .map_err(|_| TuiShellError::Model)?;
+        model = initial_transition.model;
+        executor
+            .execute(initial_transition.effects)
+            .map_err(|_| TuiShellError::Executor)?;
+    }
     let started = update(model, UiEvent::Started).map_err(|_| TuiShellError::Model)?;
     let mut model = started.model;
     executor
@@ -385,18 +395,16 @@ pub fn run_installed_tui(state: StatePaths) -> Result<(), TuiShellError> {
     let client_config = installed_local_client_config(state.clone(), build, InitialView::OnDemand);
     let mut event_client =
         LocalNodeEventClient::connect(client_config.clone()).map_err(|_| TuiShellError::Client)?;
-    event_client
+    let subscription_base = event_client
         .activate_subscription()
         .map_err(|_| TuiShellError::Client)?;
     let command_client =
         LocalNodeClient::connect(client_config).map_err(|_| TuiShellError::Client)?;
+    let (client, observer) =
+        compose_tui_clients(command_client, event_client, state, &subscription_base)
+            .map_err(|_| TuiShellError::Client)?;
     let terminal = CrosstermTerminal::new(theme)?;
-    run_tui_shell(
-        terminal,
-        LocalTuiClient::new(command_client, state),
-        LocalTuiObserver::new(event_client),
-        MonotonicTuiClock::default(),
-    )
+    run_tui_shell(terminal, client, observer, MonotonicTuiClock::default())
 }
 
 /// Loads and resolves the immutable startup theme before any terminal mode is activated.

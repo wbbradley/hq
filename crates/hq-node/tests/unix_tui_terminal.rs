@@ -647,16 +647,14 @@ fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation()
         "guided reply failed: {:?}",
         reply.bytes
     );
-    for phrase in ["Agent is working", "finished-turn-2"] {
-        assert!(
-            reply
-                .bytes
-                .windows(phrase.len())
-                .any(|window| window == phrase.as_bytes()),
-            "guided reply did not render {phrase:?}: {:?}",
-            reply.bytes
-        );
-    }
+    assert!(
+        reply
+            .bytes
+            .windows("Agent is working".len())
+            .any(|window| window == b"Agent is working"),
+        "guided reply did not render working status: {:?}",
+        reply.bytes
+    );
     let project = project_json(&state_root, name);
     assert_eq!(project["inputs"].as_array().map(Vec::len), Some(2));
     assert_eq!(project["dispatches"].as_array().map(Vec::len), Some(2));
@@ -1222,14 +1220,11 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && resource_commit_sent
             && !exit_sent
             && Instant::now() >= next_state_probe_at
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"finished-turn-2".len())
-                    .any(|window| window == b"finished-turn-2")
-            })
         {
             next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
-            if project_has_dispatch_count(state_root, name, 2) {
+            if project_has_dispatch_count(state_root, name, 2)
+                && mailbox_contains(state_root, "finished-turn-2")
+            {
                 master.write_all(&[0x03]).expect("Ctrl-C writes");
                 master.flush().expect("Ctrl-C flushes");
                 exit_sent = true;

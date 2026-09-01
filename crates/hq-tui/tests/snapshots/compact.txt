@@ -9,7 +9,7 @@ Build release
 agent-1
 Deploy production
 ────────────────────────────────────────────────────────────────────────
-Loading messages…
+Select a conversation to view its messages.
 
 
 ────────────────────────────────────────────────────────────────────────

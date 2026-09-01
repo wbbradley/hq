@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 
 use hq_tui::{
     UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
-    UiEffect, UiEvent, UiHumanState, UiInput, UiMessageState, UiModel, UiRenderCache, UiRow,
-    UiRowKind, UiRowState, UiSize, UiSnapshot, UiTheme, render_with_cache, update,
+    UiEffect, UiEvent, UiHumanState, UiMaterializedConversationView, UiMessageState, UiModel,
+    UiRenderCache, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot, UiTheme, render_with_cache,
+    update,
 };
 use ratatui::{Terminal, backend::TestBackend};
 
@@ -145,53 +146,26 @@ fn maximum_markdown_page_renders_within_the_declared_redraw_budget() {
 
 fn maximum_markdown_conversation(size: UiSize, body: &str) -> UiModel {
     let started = update(UiModel::new(size), UiEvent::Started).expect("model starts");
-    let snapshot_id = started
-        .effects
-        .iter()
-        .find_map(|effect| match effect {
-            UiEffect::LoadSnapshot { id } => Some(*id),
-            _ => None,
-        })
-        .expect("startup requests a snapshot");
-    let loaded = update(
-        started.model,
-        UiEvent::SnapshotLoaded {
-            effect_id: snapshot_id,
-            snapshot: UiSnapshot {
-                revision: 1,
-                human_state: UiHumanState::Ready,
-                inbox_rows: vec![UiRow {
-                    id: "markdown-conversation".to_owned(),
-                    title: "Markdown qualification".to_owned(),
-                    detail: "maximum page".to_owned(),
-                    state: UiRowState::Open,
-                    kind: UiRowKind::Conversation,
-                    conversation_target: None,
-                }],
-                sent_rows: Vec::new(),
-                archived_rows: Vec::new(),
-                agent_rows: Vec::new(),
-                project_rows: Vec::new(),
-                direct_targets: Vec::new(),
-                providers: Vec::new(),
-                agents: Vec::new(),
-                projects: Vec::new(),
-            },
-        },
-    )
-    .expect("snapshot loads");
-    let conversation_id = loaded
-        .effects
-        .iter()
-        .find_map(|effect| match effect {
-            UiEffect::LoadConversation { id, .. } => Some(*id),
-            _ => None,
-        })
-        .expect("selected conversation loads");
-    let focused = update(loaded.model, UiEvent::Input(UiInput::NextFocus))
-        .expect("conversation list receives focus");
-    let opening =
-        update(focused.model, UiEvent::Input(UiInput::Activate)).expect("conversation opens");
+    let snapshot = UiSnapshot {
+        revision: 1,
+        human_state: UiHumanState::Ready,
+        inbox_rows: vec![UiRow {
+            id: "markdown-conversation".to_owned(),
+            title: "Markdown qualification".to_owned(),
+            detail: "maximum page".to_owned(),
+            state: UiRowState::Open,
+            kind: UiRowKind::Conversation,
+            conversation_target: None,
+        }],
+        sent_rows: Vec::new(),
+        archived_rows: Vec::new(),
+        agent_rows: Vec::new(),
+        project_rows: Vec::new(),
+        direct_targets: Vec::new(),
+        providers: Vec::new(),
+        agents: Vec::new(),
+        projects: Vec::new(),
+    };
 
     let entries = (0..MAXIMUM_TUI_CONVERSATION_PAGE)
         .map(|index| UiConversationEntry {
@@ -208,15 +182,17 @@ fn maximum_markdown_conversation(size: UiSize, body: &str) -> UiModel {
         .collect::<Vec<_>>();
     assert_eq!(entries.len(), MAXIMUM_TUI_CONVERSATION_PAGE);
     update(
-        opening.model,
-        UiEvent::ConversationLoaded {
-            effect_id: conversation_id,
-            page: UiConversationPage {
-                row_id: "markdown-conversation".to_owned(),
-                title: "Markdown qualification".to_owned(),
-                context: None,
-                entries,
-                next_cursor: None,
+        started.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot,
+                conversation: Some(UiConversationPage {
+                    row_id: "markdown-conversation".to_owned(),
+                    title: "Markdown qualification".to_owned(),
+                    context: None,
+                    entries,
+                    next_cursor: None,
+                }),
             },
         },
     )

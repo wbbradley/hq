@@ -6,6 +6,7 @@
 use std::{
     collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
+    sync::atomic::{AtomicUsize, Ordering},
     sync::{Arc, Mutex, mpsc},
     thread,
     time::Duration,
@@ -18,8 +19,9 @@ use hq_node::{
     normalize_crossterm_event, run_tui_shell,
 };
 use hq_tui::{
-    UiFailure, UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft,
-    UiMailboxDraftTarget, UiModel, UiSize, UiSnapshot,
+    UiConversationPage, UiFailure, UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult,
+    UiMailboxDraft, UiMailboxDraftTarget, UiMaterializedConversationView, UiModel, UiRow,
+    UiRowKind, UiRowState, UiSize, UiSnapshot,
 };
 
 #[test]
@@ -130,6 +132,57 @@ fn normal_quit_and_ctrl_c_cancellation_restore_exactly_once() {
         assert_eq!(log.first(), Some(&"activate"));
         assert!(log.contains(&"draw"));
     }
+}
+
+#[test]
+fn retained_subscription_view_is_drawn_without_refetching_startup_state() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let terminal = ScriptedTerminal::new(
+        Arc::clone(&log),
+        [Ok(Some(TuiTerminalEvent::Input(UiInput::Quit)))],
+    );
+    let snapshot_loads = Arc::new(AtomicUsize::new(0));
+    let client = CountingClient {
+        snapshot_loads: Arc::clone(&snapshot_loads),
+    };
+    let snapshot = UiSnapshot {
+        revision: 7,
+        human_state: UiHumanState::Ready,
+        inbox_rows: vec![UiRow {
+            id: "thread-a".to_owned(),
+            title: "Alice".to_owned(),
+            detail: "ready".to_owned(),
+            state: UiRowState::Open,
+            kind: UiRowKind::Conversation,
+            conversation_target: None,
+        }],
+        sent_rows: Vec::new(),
+        archived_rows: Vec::new(),
+        agent_rows: Vec::new(),
+        project_rows: Vec::new(),
+        direct_targets: Vec::new(),
+        providers: Vec::new(),
+        agents: Vec::new(),
+        projects: Vec::new(),
+    };
+    let observer = InitialObserver {
+        idle: idle_observer(),
+        initial: Some(UiMaterializedConversationView {
+            snapshot,
+            conversation: Some(UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
+                row_id: "thread-a".to_owned(),
+                entries: Vec::new(),
+                next_cursor: None,
+            }),
+        }),
+    };
+
+    run_tui_shell(terminal, client, observer, FixedClock).expect("shell exits cleanly");
+
+    assert_eq!(snapshot_loads.load(Ordering::SeqCst), 0);
+    assert!(log.lock().expect("terminal log").contains(&"draw"));
 }
 
 #[test]
@@ -280,6 +333,44 @@ impl TuiTerminalPort for ScriptedTerminal {
 
 struct EmptyClient;
 
+struct CountingClient {
+    snapshot_loads: Arc<AtomicUsize>,
+}
+
+impl TuiClientPort for CountingClient {
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
+        self.snapshot_loads.fetch_add(1, Ordering::SeqCst);
+        EmptyClient.load_snapshot()
+    }
+
+    fn load_conversation(
+        &mut self,
+        row_id: &str,
+        cursor: Option<String>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        EmptyClient.load_conversation(row_id, cursor)
+    }
+
+    fn open_draft(
+        &mut self,
+        target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        EmptyClient.open_draft(target)
+    }
+
+    fn save_draft(&mut self, draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        EmptyClient.save_draft(draft)
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        draft: Option<UiMailboxDraft>,
+        action: UiMailboxAction,
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
+        EmptyClient.submit_mailbox_command(draft, action)
+    }
+}
+
 impl TuiClientPort for EmptyClient {
     fn load_snapshot(&mut self) -> Result<UiSnapshot, hq_tui::UiFailure> {
         Ok(UiSnapshot {
@@ -369,6 +460,25 @@ impl TuiClientPort for PanickingClient {
 struct IdleObserver {
     wake: mpsc::Receiver<()>,
     interrupt: IdleInterrupt,
+}
+
+struct InitialObserver {
+    idle: IdleObserver,
+    initial: Option<UiMaterializedConversationView>,
+}
+
+impl TuiObservationPort for InitialObserver {
+    fn take_initial_view(&mut self) -> Option<UiMaterializedConversationView> {
+        self.initial.take()
+    }
+
+    fn next_observations(&mut self) -> Vec<TuiClientObservation> {
+        self.idle.next_observations()
+    }
+
+    fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt> {
+        self.idle.interrupt_handle()
+    }
 }
 
 #[derive(Clone)]

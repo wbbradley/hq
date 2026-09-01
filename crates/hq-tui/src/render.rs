@@ -3474,23 +3474,6 @@ fn render_conversation(
         } else {
             render_conversation_entries(frame, model, theme, entries_area, conversation, cache);
         }
-    } else if model.conversation_loading() {
-        frame.render_widget(
-            Paragraph::new("Loading messages…").style(theme.style(UiThemeRole::Warning)),
-            inner,
-        );
-    } else if let Some(failure) = model.conversation_failure() {
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::styled(
-                    "Messages could not be loaded.",
-                    theme.style(UiThemeRole::Attention),
-                ),
-                Line::from(failure.action.clone()),
-            ])
-            .wrap(Wrap { trim: false }),
-            inner,
-        );
     } else if let Some(row) = model
         .selected_row_data()
         .filter(|row| row.kind != UiRowKind::Conversation)
@@ -3505,7 +3488,8 @@ fn render_conversation(
         );
     } else if model.selected_row_data().is_some() {
         frame.render_widget(
-            Paragraph::new("Loading messages…").style(theme.style(UiThemeRole::TextMuted)),
+            Paragraph::new("Select a conversation to view its messages.")
+                .style(theme.style(UiThemeRole::TextMuted)),
             inner,
         );
     } else {

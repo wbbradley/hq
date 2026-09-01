@@ -23,8 +23,8 @@ use hq_local_api::protocol::v1::{
 };
 use hq_node::{
     TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiEffectExecutor,
-    TuiExecutorError, TuiObservationInterrupt, TuiObservationPort, tui_conversation_page,
-    tui_snapshot, tui_snapshot_with_provider_catalog,
+    TuiExecutorError, TuiObservationControl, TuiObservationInterrupt, TuiObservationPort,
+    tui_conversation_page, tui_snapshot, tui_snapshot_with_provider_catalog,
 };
 use hq_tui::{
     UiAgentAction, UiCompletedItemPresentation, UiConnectionState, UiConversationActivityKind,
@@ -32,9 +32,10 @@ use hq_tui::{
     UiFailure, UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus,
     UiHumanSelectionEvidence, UiHumanState, UiInput, UiMailboxAction, UiMailboxCommandResult,
     UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiManagedSessionResult, UiMessageDelivery, UiMessageState, UiModel, UiProjectAction,
-    UiProjectExternalWarning, UiProjectOutcome, UiProjectResourceCheck, UiProjectResult, UiRow,
-    UiRowKind, UiRowState, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiManagedSessionResult, UiMaterializedConversationView, UiMessageDelivery, UiMessageState,
+    UiModel, UiProjectAction, UiProjectExternalWarning, UiProjectOutcome, UiProjectResourceCheck,
+    UiProjectResult, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot, UiTechnicalSection,
+    UiTimerKind, update,
 };
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
@@ -350,33 +351,35 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
         UiEvent::Started,
     )
     .expect("start");
-    let snapshot_id = started
-        .effects
-        .iter()
-        .find_map(|effect| match effect {
-            UiEffect::LoadSnapshot { id, .. } => Some(*id),
-            _ => None,
-        })
-        .expect("snapshot id");
     let loaded = update(
         started.model,
-        UiEvent::SnapshotLoaded {
-            effect_id: snapshot_id,
-            snapshot: UiSnapshot {
-                inbox_rows: vec![UiRow {
-                    id: "thread-a".to_owned(),
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: UiSnapshot {
+                    inbox_rows: vec![UiRow {
+                        id: "thread-a".to_owned(),
+                        title: "Thread A".to_owned(),
+                        detail: "1 open message".to_owned(),
+                        state: UiRowState::Open,
+                        kind: UiRowKind::Conversation,
+                        conversation_target: None,
+                    }],
+                    ..empty_snapshot(1)
+                },
+                conversation: Some(UiConversationPage {
+                    row_id: "thread-a".to_owned(),
                     title: "Thread A".to_owned(),
-                    detail: "1 open message".to_owned(),
-                    state: UiRowState::Open,
-                    kind: UiRowKind::Conversation,
-                    conversation_target: None,
-                }],
-                ..empty_snapshot(1)
+                    context: None,
+                    entries: Vec::new(),
+                    next_cursor: Some("older".to_owned()),
+                }),
             },
         },
     )
     .expect("snapshot applies");
-    let (expected_id, effect) = loaded
+    let loading =
+        update(loaded.model, UiEvent::Input(UiInput::LoadMore)).expect("request older page");
+    let (expected_id, effect) = loading
         .effects
         .into_iter()
         .find_map(|effect| match effect {
@@ -401,7 +404,7 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
     ));
     assert_eq!(
         requests.lock().expect("requests lock").as_slice(),
-        &[("thread-a".to_owned(), None)]
+        &[("thread-a".to_owned(), Some("older".to_owned()))]
     );
     executor.shutdown().expect("shutdown");
 }
@@ -718,6 +721,44 @@ fn blocked_command_cannot_delay_a_subscribed_invalidation() {
             snapshot,
         } if effect_id == id && snapshot.revision == 1
     ));
+    executor.shutdown().expect("joined split shutdown");
+}
+
+#[test]
+fn blocked_command_cannot_delay_latest_conversation_selection_control() {
+    let command_started = Arc::new(AtomicBool::new(false));
+    let (release_command, command_release) = mpsc::channel();
+    let client = BlockingSnapshotClient {
+        started: Arc::clone(&command_started),
+        release: command_release,
+    };
+    let selected = Arc::new(Mutex::new(TestSelection::Unchanged));
+    let observer = ControlledIdleObserver::new(Arc::clone(&selected));
+    let mut executor =
+        TuiEffectExecutor::spawn_with_observer(client, observer, ManualClock::default())
+            .expect("spawn split executor");
+
+    let snapshot_effect = snapshot_load_effects(1)
+        .into_iter()
+        .next()
+        .expect("snapshot effect");
+    executor
+        .execute([
+            snapshot_effect,
+            UiEffect::ObserveConversation {
+                row_id: Some("thread-a".to_owned()),
+            },
+            UiEffect::ObserveConversation {
+                row_id: Some("thread-b".to_owned()),
+            },
+        ])
+        .expect("replace selection while command is blocked");
+    assert_eq!(
+        *selected.lock().expect("selected row"),
+        TestSelection::Replace(Some("thread-b".to_owned()))
+    );
+
+    release_command.send(()).expect("release command");
     executor.shutdown().expect("joined split shutdown");
 }
 
@@ -2013,6 +2054,53 @@ struct CommandGatedObserver {
     revision: Option<u64>,
     wake: mpsc::Receiver<()>,
     interrupt: ScriptedInterrupt,
+}
+
+#[derive(Clone)]
+struct LatestSelectionControl(Arc<Mutex<TestSelection>>);
+
+#[derive(Debug, Eq, PartialEq)]
+enum TestSelection {
+    Unchanged,
+    Replace(Option<String>),
+}
+
+impl TuiObservationControl for LatestSelectionControl {
+    fn select_conversation(&self, row_id: Option<String>) {
+        *self.0.lock().expect("selection slot") = TestSelection::Replace(row_id);
+    }
+}
+
+struct ControlledIdleObserver {
+    wake: mpsc::Receiver<()>,
+    interrupt: ScriptedInterrupt,
+    control: LatestSelectionControl,
+}
+
+impl ControlledIdleObserver {
+    fn new(selected: Arc<Mutex<TestSelection>>) -> Self {
+        let (interrupt, wake) = mpsc::channel();
+        Self {
+            wake,
+            interrupt: ScriptedInterrupt(interrupt),
+            control: LatestSelectionControl(selected),
+        }
+    }
+}
+
+impl TuiObservationPort for ControlledIdleObserver {
+    fn next_observations(&mut self) -> Vec<TuiClientObservation> {
+        let _ = self.wake.recv();
+        Vec::new()
+    }
+
+    fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt> {
+        Arc::new(self.interrupt.clone())
+    }
+
+    fn control_handle(&self) -> Arc<dyn TuiObservationControl> {
+        Arc::new(self.control.clone())
+    }
 }
 
 impl CommandGatedObserver {

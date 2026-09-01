@@ -285,6 +285,17 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Transcript capacity is measured from wrapped display cells around the stable fact anchor. An
   older-page load or failure retains existing entries and exposes only its actionable PageDown
   state; resize and an open draft do not replace the anchor.
+- Subscription activation retains its acknowledged snapshot, selects the initial Inbox row before
+  terminal activation, and draws the matching first page without another snapshot/page chain.
+  Navigation replaces a latest-value selected-row interest and wakes the idle Unix observer without
+  reconnecting; blocked commands cannot delay it. List and detail always arrive from one revision,
+  the prior coherent pair remains visible while pending, and passive flows never render `Loading
+  messages…`.
+- First-page retention is revision-tagged and bounded to eight stable conversation identities.
+  Rapid selection, duplicate or stale views, reconnect, row reorder, sent-message convergence, and
+  selected-row disappearance cannot paint a mismatched page or duplicate a message. A disappearing
+  row chooses the row at its prior index (or the new final row) and suppresses the unmatched interim
+  view until that successor's page arrives.
 - Technical disclosure uses a bounded wide inspector or compact secondary pane, retains exact
   typed routing/semantics/evidence/activity values and raw detail, and closes before Back leaves the
   conversation. It never replaces an open draft.
@@ -312,7 +323,9 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Client subscription contracts cover per-server-session registration identities, early and
   coalesced invalidations, acknowledgement snapshots as fresh bases, repeated full refresh while a
   returned revision is behind, resubscription after acknowledgement loss, and two independent
-  clients racing without sharing registration state.
+  clients racing without sharing registration state. Materialized subscriptions additionally cover
+  atomic snapshot/page views, latest selected-key replacement, non-destructive control wake,
+  partial-frame preservation, and old-generation wake isolation.
 
 ## Node lifecycle foundation gates
 

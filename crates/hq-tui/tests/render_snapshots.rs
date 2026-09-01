@@ -7,11 +7,12 @@ use hq_tui::{
     UiAgentProjectAssignment, UiAgentSession, UiAgentStatus, UiConversationActivityKind,
     UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
     UiEffect, UiEvent, UiFailure, UiHumanState, UiInput, UiMailboxDraft, UiMailboxDraftTarget,
-    UiMessageDelivery, UiMessageState, UiModel, UiProject, UiProjectAction, UiProjectAssignment,
-    UiProjectExternalWarning, UiProjectFolderAction, UiProjectManagementAction, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectSummaryFocus, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
-    UiSize, UiSnapshot, UiTechnicalSection, UiTheme, UiThemeRole, render, update,
+    UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiModel, UiProject,
+    UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectFolderAction,
+    UiProjectManagementAction, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
+    UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus, UiProjectThread, UiProvider,
+    UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTheme,
+    UiThemeRole, render, update,
 };
 use ratatui::{
     Terminal,
@@ -40,6 +41,23 @@ fn compact_layout_matches_snapshot_without_mutating_the_model() {
         }),
         include_str!("snapshots/compact.txt"),
     );
+}
+
+#[test]
+fn passive_inbox_surfaces_never_render_first_page_loading_text() {
+    for size in [
+        UiSize {
+            width: 104,
+            height: 18,
+        },
+        UiSize {
+            width: 72,
+            height: 16,
+        },
+    ] {
+        assert!(!render_text(&ready_model(size)).contains("Loading messages"));
+        assert!(!render_text(&conversation_model(size)).contains("Loading messages"));
+    }
 }
 
 #[test]
@@ -2217,38 +2235,39 @@ const fn section_help_phrase(section: UiSection) -> &'static str {
 }
 
 fn ready_transition(size: UiSize) -> hq_tui::UiTransition {
-    let model = loaded_snapshot_model(
-        size,
-        UiSnapshot {
-            revision: 42,
-            human_state: UiHumanState::Ready,
-            inbox_rows: vec![
-                row("build-17", "Build release", "agent-1", UiRowState::Open),
-                row(
-                    "deploy-9",
-                    "Deploy production",
-                    "waiting for approval",
-                    UiRowState::Waiting,
-                ),
-                row(
-                    "incident-4",
-                    "Investigate timeout",
-                    "relay needs attention",
-                    UiRowState::Attention,
-                ),
-            ],
-            sent_rows: Vec::new(),
-            archived_rows: Vec::new(),
-            agent_rows: Vec::new(),
-            project_rows: Vec::new(),
-            direct_targets: Vec::new(),
-            providers: Vec::new(),
-            agents: Vec::new(),
-            projects: Vec::new(),
-        },
-    );
+    let model = loaded_snapshot_model(size, ready_snapshot());
     let focused = update(model, UiEvent::Input(UiInput::NextFocus)).expect("focus content");
     update(focused.model, UiEvent::Input(UiInput::NextItem)).expect("select second row")
+}
+
+fn ready_snapshot() -> UiSnapshot {
+    UiSnapshot {
+        revision: 42,
+        human_state: UiHumanState::Ready,
+        inbox_rows: vec![
+            row("build-17", "Build release", "agent-1", UiRowState::Open),
+            row(
+                "deploy-9",
+                "Deploy production",
+                "waiting for approval",
+                UiRowState::Waiting,
+            ),
+            row(
+                "incident-4",
+                "Investigate timeout",
+                "relay needs attention",
+                UiRowState::Attention,
+            ),
+        ],
+        sent_rows: Vec::new(),
+        archived_rows: Vec::new(),
+        agent_rows: Vec::new(),
+        project_rows: Vec::new(),
+        direct_targets: Vec::new(),
+        providers: Vec::new(),
+        agents: Vec::new(),
+        projects: Vec::new(),
+    }
 }
 
 fn ready_model(size: UiSize) -> UiModel {
@@ -2716,77 +2735,73 @@ fn conversation_model_with_content(
     body: &str,
     activity_summary: &str,
 ) -> UiModel {
-    let ready = ready_transition(size);
-    let effect_id = ready
-        .effects
-        .iter()
-        .find_map(|effect| match effect {
-            UiEffect::LoadConversation { id, .. } => Some(*id),
-            _ => None,
-        })
-        .expect("conversation request");
-    let opening =
-        update(ready.model, UiEvent::Input(UiInput::Activate)).expect("open conversation");
-    let opened = update(
-        opening.model,
-        UiEvent::ConversationLoaded {
-            effect_id,
-            page: UiConversationPage {
-                title: "Alice".to_owned(),
-                context: None,
-                row_id: "deploy-9".to_owned(),
-                entries: vec![
-                    UiConversationEntry {
-                        id: "message-1".to_owned(),
-                        presentation: UiConversationEntryPresentation::Message {
-                            author: delivery.map_or_else(
-                                || UiConversationAuthor::Participant("Alice".to_owned()),
-                                |_| UiConversationAuthor::You,
-                            ),
-                            body: body.to_owned(),
+    let started = update(UiModel::new(size), UiEvent::Started).expect("start model");
+    let observed = update(
+        started.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: ready_snapshot(),
+                conversation: Some(UiConversationPage {
+                    title: "Alice".to_owned(),
+                    context: None,
+                    row_id: "deploy-9".to_owned(),
+                    entries: vec![
+                        UiConversationEntry {
+                            id: "message-1".to_owned(),
+                            presentation: UiConversationEntryPresentation::Message {
+                                author: delivery.map_or_else(
+                                    || UiConversationAuthor::Participant("Alice".to_owned()),
+                                    |_| UiConversationAuthor::You,
+                                ),
+                                body: body.to_owned(),
+                            },
+                            message_state: Some(state),
+                            delivery,
+                            message_target: Some(hq_tui::UiMessageTarget {
+                                message_id: [1; 32],
+                                reply_allowed: true,
+                            }),
+                            technical: Vec::new(),
                         },
-                        message_state: Some(state),
-                        delivery,
-                        message_target: Some(hq_tui::UiMessageTarget {
-                            message_id: [1; 32],
-                            reply_allowed: true,
-                        }),
-                        technical: Vec::new(),
-                    },
-                    UiConversationEntry {
-                        id: "activity-2".to_owned(),
-                        presentation: UiConversationEntryPresentation::Activity {
-                            kind: UiConversationActivityKind::Progress,
-                            status: UiActivityStatus::Running,
-                            summary: activity_summary.to_owned(),
-                            detail: "compiling".to_owned(),
-                            truncated: false,
-                            completed: None,
+                        UiConversationEntry {
+                            id: "activity-2".to_owned(),
+                            presentation: UiConversationEntryPresentation::Activity {
+                                kind: UiConversationActivityKind::Progress,
+                                status: UiActivityStatus::Running,
+                                summary: activity_summary.to_owned(),
+                                detail: "compiling".to_owned(),
+                                truncated: false,
+                                completed: None,
+                            },
+                            message_state: None,
+                            delivery: None,
+                            message_target: None,
+                            technical: vec![UiTechnicalSection::Activity {
+                                sequence: 2,
+                                source_installation: "installation".to_owned(),
+                                source_mailbox: "mailbox".to_owned(),
+                                provider: "provider".to_owned(),
+                                session: "session".to_owned(),
+                                operation: "operation".to_owned(),
+                                item: Some("item".to_owned()),
+                                logical_key: "progress".to_owned(),
+                                runtime: "runtime".to_owned(),
+                                occurred_at_unix_ms: 2,
+                                status: UiActivityStatus::Running,
+                                truncated: false,
+                            }],
                         },
-                        message_state: None,
-                        delivery: None,
-                        message_target: None,
-                        technical: vec![UiTechnicalSection::Activity {
-                            sequence: 2,
-                            source_installation: "installation".to_owned(),
-                            source_mailbox: "mailbox".to_owned(),
-                            provider: "provider".to_owned(),
-                            session: "session".to_owned(),
-                            operation: "operation".to_owned(),
-                            item: Some("item".to_owned()),
-                            logical_key: "progress".to_owned(),
-                            runtime: "runtime".to_owned(),
-                            occurred_at_unix_ms: 2,
-                            status: UiActivityStatus::Running,
-                            truncated: false,
-                        }],
-                    },
-                ],
-                next_cursor: None,
+                    ],
+                    next_cursor: None,
+                }),
             },
         },
     )
     .expect("conversation page");
+    let content = update(observed.model, UiEvent::Input(UiInput::NextFocus))
+        .expect("focus conversation list");
+    let opened =
+        update(content.model, UiEvent::Input(UiInput::Activate)).expect("focus conversation");
     update(opened.model, UiEvent::Input(UiInput::PreviousItem))
         .expect("select message")
         .model

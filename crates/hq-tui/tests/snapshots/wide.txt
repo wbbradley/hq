@@ -1,7 +1,7 @@
  HQ   Inbox
  this device Connected
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
- › Inbox    │Inbox · 3 conversations         │Loading messages…
+ › Inbox    │Inbox · 3 conversations         │Select a conversation to view its messages.
    Sent     │                                │
    Archived │Build release                   │
    Agents   │agent-1                         │

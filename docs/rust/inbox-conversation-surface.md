@@ -321,16 +321,15 @@ These states use the same content origin and participant header:
 
 | State | Ordinary copy |
 | --- | --- |
-| First page loading | `Loading messages…` |
 | Loaded but empty | `No messages yet.` followed by the available compose action |
-| Initial load failed | `Messages could not be loaded.` plus the plain retry action |
 | Older page available | `Older messages available · PageDown` |
 | Older page loading | `Loading older messages…` while retained entries remain visible |
 | Older page failed | `Older messages could not be loaded · PageDown retry` |
 | Diagnostic Inbox row | Plain diagnostic summary; no fake participant or empty chat transcript |
 
-Stable failure codes and causal evidence remain in technical help. Loading never replaces a
-previously complete retained page with a blank pane.
+First pages arrive with their authoritative Inbox snapshot and never have a loading surface.
+Stable failure codes and causal evidence remain in technical help. Older-page loading never
+replaces a previously complete retained page with a blank pane.
 
 ## Semantic theme roles
 
