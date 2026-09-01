@@ -3205,7 +3205,7 @@ fn render_draft_pane(
     };
     match draft_pane {
         UiMailboxDraftPane::Loading { target } => {
-            let block = with_draft_project_title(
+            let block = with_draft_context_title(
                 Block::new()
                     .borders(borders)
                     .border_style(theme.style(UiThemeRole::BorderFocused))
@@ -3235,7 +3235,7 @@ fn render_draft_pane(
             } else {
                 "saved"
             };
-            let block = with_draft_project_title(
+            let block = with_draft_context_title(
                 Block::new()
                     .borders(borders)
                     .border_style(theme.style(if model.focus() == UiFocus::Draft {
@@ -3284,24 +3284,35 @@ fn render_draft_pane(
     }
 }
 
-fn with_draft_project_title<'a>(
+fn with_draft_context_title<'a>(
     block: Block<'a>,
     model: &UiModel,
     theme: &UiTheme,
     width: u16,
 ) -> Block<'a> {
-    let Some(project_name) = model.draft_project_name() else {
+    let Some(context) =
+        draft_context_label(model.draft_recipient_name(), model.draft_project_name())
+    else {
         return block;
     };
     let maximum_width = usize::from(width.saturating_sub(4) / 2);
-    let project_name = clipped_preview_line(project_name, maximum_width);
+    let context = clipped_preview_line(&context, maximum_width);
     block.title(
         Line::styled(
-            format!(" {project_name} "),
+            format!(" {context} "),
             theme.style(UiThemeRole::ConversationProjectContext),
         )
         .right_aligned(),
     )
+}
+
+fn draft_context_label(recipient: Option<&str>, project: Option<&str>) -> Option<String> {
+    match (recipient, project) {
+        (Some(recipient), Some(project)) => Some(format!("To: {recipient} · Project: {project}")),
+        (Some(recipient), None) => Some(format!("To: {recipient}")),
+        (None, Some(project)) => Some(format!("Project: {project}")),
+        (None, None) => None,
+    }
 }
 
 fn inert_draft_source(source: &str) -> String {
@@ -4425,8 +4436,9 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
 mod tests {
     use super::{
         activity_preview, conversation_entry_layout, display_prefix, display_suffix,
-        inbox_list_width, inert_draft_source, interaction_supersedes_live_tail, navigation_width,
-        text_field_line, visible_conversation_entries,
+        draft_context_label, inbox_list_width, inert_draft_source,
+        interaction_supersedes_live_tail, navigation_width, text_field_line,
+        visible_conversation_entries,
     };
     use crate::{
         UiActivityStatus, UiCompletedItemPresentation, UiConversationActivityKind,
@@ -4513,6 +4525,18 @@ mod tests {
             rendered
                 .chars()
                 .all(|character| !character.is_control() || character == '\n')
+        );
+    }
+
+    #[test]
+    fn draft_context_names_the_recipient_beside_the_project() {
+        assert_eq!(
+            draft_context_label(Some("alice"), Some("release")),
+            Some("To: alice · Project: release".to_owned())
+        );
+        assert_eq!(
+            draft_context_label(Some("alice"), None),
+            Some("To: alice".to_owned())
         );
     }
 

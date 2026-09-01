@@ -2678,6 +2678,85 @@ impl UiModel {
             .map(|project| project.name.as_str())
     }
 
+    /// Borrows the authoritative display name of the active draft's recipient.
+    pub fn draft_recipient_name(&self) -> Option<&str> {
+        match self.draft_target()? {
+            UiMailboxDraftTarget::SelfNote => Some("You"),
+            UiMailboxDraftTarget::Direct {
+                installation_id,
+                mailbox_id,
+            } => self
+                .snapshot
+                .as_ref()?
+                .direct_targets
+                .iter()
+                .find(|target| {
+                    target.installation_id == *installation_id && target.mailbox_id == *mailbox_id
+                })
+                .map(|target| target.label.as_str()),
+            UiMailboxDraftTarget::Reply { .. } => self
+                .conversation
+                .as_ref()
+                .map(|conversation| conversation.title.as_str()),
+            UiMailboxDraftTarget::Project {
+                project_id,
+                thread_id,
+            } => self
+                .project_draft_recipient(*project_id, *thread_id)
+                .or_else(|| self.selected_project_conversation_recipient(*project_id, *thread_id)),
+        }
+    }
+
+    fn project_draft_recipient(
+        &self,
+        project_id: [u8; 32],
+        thread_id: Option<[u8; 32]>,
+    ) -> Option<&str> {
+        let snapshot = self.snapshot.as_ref()?;
+        let project = snapshot
+            .projects
+            .iter()
+            .find(|project| project.project_id == project_id)?;
+        let agent_id = match thread_id {
+            Some(thread_id) => {
+                project
+                    .threads
+                    .iter()
+                    .find(|thread| thread.thread_id == thread_id)?
+                    .agent_id
+            }
+            None => project.assignment.as_ref()?.agent_id,
+        };
+        let agent = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == agent_id)?;
+        match agent.names.as_slice() {
+            [name] => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    fn selected_project_conversation_recipient(
+        &self,
+        project_id: [u8; 32],
+        thread_id: Option<[u8; 32]>,
+    ) -> Option<&str> {
+        let selected = self.selected_row_data()?;
+        let UiConversationTarget::Project {
+            project_id: selected_project,
+            thread_id: selected_thread,
+            ..
+        } = selected.conversation_target?;
+        if selected_project != project_id || Some(selected_thread) != thread_id {
+            return None;
+        }
+        self.conversation
+            .as_ref()
+            .filter(|conversation| conversation.row_id == selected.id)
+            .map(|conversation| conversation.title.as_str())
+    }
+
     fn draft_target(&self) -> Option<&UiMailboxDraftTarget> {
         let target = match self.mailbox_draft.as_ref()? {
             UiMailboxDraftPane::Loading { target }
@@ -9574,12 +9653,13 @@ mod tests {
     use std::num::NonZeroU64;
 
     use super::{
-        TextEdit, UiEffect, UiError, UiEvent, UiFormField, UiFormKind, UiFormState, UiHumanState,
-        UiInput, UiInteraction, UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind,
-        UiInteractionModal, UiInteractionResponse, UiModel, UiProject, UiProjectAction,
-        UiProjectInteraction, UiProjectResourceCheck, UiSize, UiSnapshot,
-        apply_project_interaction_input, edit_text, normalize_path_input,
-        refresh_project_interaction, update,
+        TextEdit, UiAgent, UiAgentLifecycle, UiAgentStatus, UiEffect, UiError, UiEvent,
+        UiFormField, UiFormKind, UiFormState, UiHumanState, UiInput, UiInteraction,
+        UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind, UiInteractionModal,
+        UiInteractionResponse, UiMailboxDraftPane, UiMailboxDraftTarget, UiModel, UiProject,
+        UiProjectAction, UiProjectAssignment, UiProjectInteraction, UiProjectResourceCheck,
+        UiProjectThread, UiSize, UiSnapshot, apply_project_interaction_input, edit_text,
+        normalize_path_input, refresh_project_interaction, update,
     };
 
     #[test]
@@ -9768,6 +9848,68 @@ mod tests {
     }
 
     #[test]
+    fn project_draft_recipient_uses_the_exact_thread_owner() {
+        let mut release = project("release");
+        release.assignment = Some(project_assignment([7; 32]));
+        release.threads.push(UiProjectThread {
+            agent_id: [8; 32],
+            provider: "codex".to_owned(),
+            session: "historical-session".to_owned(),
+            thread_id: [9; 32],
+        });
+        let mut model = model();
+        model.snapshot = Some(UiSnapshot {
+            revision: 1,
+            human_state: UiHumanState::Ready,
+            inbox_rows: Vec::new(),
+            sent_rows: Vec::new(),
+            archived_rows: Vec::new(),
+            agent_rows: Vec::new(),
+            project_rows: Vec::new(),
+            direct_targets: Vec::new(),
+            providers: Vec::new(),
+            agents: vec![agent([7; 32], "bob"), agent([8; 32], "alice")],
+            projects: vec![release],
+        });
+        model.mailbox_draft = Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::Project {
+                project_id: [1; 32],
+                thread_id: Some([9; 32]),
+            },
+        });
+
+        assert_eq!(model.draft_recipient_name(), Some("alice"));
+    }
+
+    #[test]
+    fn new_project_draft_recipient_uses_the_current_assignment() {
+        let mut release = project("release");
+        release.assignment = Some(project_assignment([7; 32]));
+        let mut model = model();
+        model.snapshot = Some(UiSnapshot {
+            revision: 1,
+            human_state: UiHumanState::Ready,
+            inbox_rows: Vec::new(),
+            sent_rows: Vec::new(),
+            archived_rows: Vec::new(),
+            agent_rows: Vec::new(),
+            project_rows: Vec::new(),
+            direct_targets: Vec::new(),
+            providers: Vec::new(),
+            agents: vec![agent([7; 32], "alice")],
+            projects: vec![release],
+        });
+        model.mailbox_draft = Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::Project {
+                project_id: [1; 32],
+                thread_id: None,
+            },
+        });
+
+        assert_eq!(model.draft_recipient_name(), Some("alice"));
+    }
+
+    #[test]
     fn clean_close_requires_confirmation_but_not_force() {
         let project = project("release");
         let mut model = UiModel::new(UiSize {
@@ -9929,6 +10071,33 @@ mod tests {
             head: [3; 32],
             input_sequence: 0,
             resources: Vec::new(),
+        }
+    }
+
+    fn project_assignment(agent_id: [u8; 32]) -> UiProjectAssignment {
+        UiProjectAssignment {
+            assignment_id: [6; 32],
+            agent_id,
+            provider: "codex".to_owned(),
+            session: Some("current-session".to_owned()),
+            phase: "runnable".to_owned(),
+            thread_id: Some([10; 32]),
+            launch_directory: Some("/workspace/release".to_owned()),
+            blocked: None,
+            cardinality_conflicted: false,
+            runnable: true,
+        }
+    }
+
+    fn agent(agent_id: [u8; 32], name: &str) -> UiAgent {
+        UiAgent {
+            agent_id,
+            names: vec![name.to_owned()],
+            mailboxes: Vec::new(),
+            lifecycle: UiAgentLifecycle::Active,
+            runnable: true,
+            status: UiAgentStatus::Unassigned,
+            sessions: Vec::new(),
         }
     }
 

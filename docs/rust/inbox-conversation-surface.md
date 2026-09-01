@@ -282,7 +282,7 @@ Below 40 columns or 10 rows, the existing bounded resize message remains appropr
 The draft remains the lower part of the Conversation pane and uses the same content origin:
 
 ```text
-─ Message Alice · saved ────────────────────── release ─
+─ Message · saved ─────────────── To: Alice · Project: release ─
 Let's check the ignored files too.
 
 Enter send · Esc save and close
@@ -290,8 +290,8 @@ Enter send · Esc save and close
 
 Opening a draft reduces transcript height but does not hide its selected conversation. The divider
 is the only box edge. Draft target, persistence state, and validation stay in its header/footer;
-the transcript does not repeat them. A project-bound draft keeps the current project name on the
-upper-right border. A new project conversation also installs a local typed Inbox row and empty
+the transcript does not repeat them. The upper-right border names the exact recipient and, for a
+project-bound draft, the current project. A new project conversation also installs a local typed Inbox row and empty
 Conversation view immediately; the authoritative project-thread row replaces that local context
 after the first message commits and appears in a snapshot.
 
@@ -341,7 +341,7 @@ The implementation should add roles rather than hard-code colors in `render.rs`:
 | --- | --- |
 | `conversation.author.self` | `You` author label |
 | `conversation.author.participant` | Named or fallback counterparty author label |
-| `conversation.project.context` | Neutral project name retained on the composer border |
+| `conversation.project.context` | Neutral recipient and project context retained on the composer border |
 | `conversation.activity` | Neutral/running compact activity |
 | `conversation.activity.success` | Successful compact activity |
 | `conversation.activity.warning` | Interrupted or caution activity |

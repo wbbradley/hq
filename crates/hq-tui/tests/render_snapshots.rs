@@ -1028,8 +1028,11 @@ fn project_composer_keeps_orange_project_context_on_its_upper_right_border() {
         width: 120,
         height: 24,
     };
-    let opening = update(project_model(size), UiEvent::Input(UiInput::Activate))
-        .expect("start project conversation");
+    let opening = update(
+        project_model_with_assignment(size, true),
+        UiEvent::Input(UiInput::Activate),
+    )
+    .expect("start project conversation");
     let (effect_id, target) = opening
         .effects
         .iter()
@@ -1058,7 +1061,12 @@ fn project_composer_keeps_orange_project_context_on_its_upper_right_border() {
         Style::new().fg(orange).add_modifier(Modifier::BOLD),
     );
     let buffer = render_buffer_with_theme(&model, &theme);
-    let project_title = find_text_starts(&buffer, "release")
+    let rendered = snapshot_text(&buffer);
+    assert!(
+        rendered.contains("To: agent-5 · Project: release"),
+        "draft recipient and project are absent from composer:\n{rendered}"
+    );
+    let project_title = find_text_starts(&buffer, "To: agent-5")
         .into_iter()
         .find(|(x, y)| *x > size.width / 2 && *y > size.height / 2)
         .unwrap_or_else(|| {
