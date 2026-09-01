@@ -6,6 +6,7 @@
 mod support;
 
 use std::{
+    io::Read as _,
     path::Path,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -35,12 +36,12 @@ fn foreground_daemon_closes_an_inherited_nonstandard_descriptor() {
             .arg("run")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("foreground daemon starts"),
     ));
     drop(write_end);
-    wait_for_path(runtime.readiness_file());
+    child.wait_for_path(runtime.readiness_file(), Duration::from_secs(10));
 
     let mut byte = [0_u8; 1];
     assert_eq!(
@@ -73,17 +74,30 @@ fn initialize(root: &Path) -> StatePaths {
     state
 }
 
-fn wait_for_path(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !path.exists() {
-        assert!(Instant::now() < deadline, "daemon readiness timed out");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 struct ChildGuard(Option<Child>);
 
 impl ChildGuard {
+    fn wait_for_path(&mut self, path: &Path, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if path.exists() {
+                return;
+            }
+            let child = self.0.as_mut().expect("guarded child");
+            if let Some(status) = child.try_wait().expect("child status") {
+                let mut stderr = String::new();
+                if let Some(mut stream) = child.stderr.take() {
+                    stream
+                        .read_to_string(&mut stderr)
+                        .expect("daemon stderr reads");
+                }
+                panic!("daemon exited before readiness with {status}: {stderr}");
+            }
+            assert!(Instant::now() < deadline, "daemon readiness timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn wait(&mut self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
