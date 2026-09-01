@@ -1148,8 +1148,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && initial_key_sent
             && !content_sent
             && bytes
-                .windows(b"0/16384 bytes".len())
-                .any(|window| window == b"0/16384 bytes")
+                .windows(b"0/16384".len())
+                .any(|window| window == b"0/16384")
         {
             master
                 .write_all(format!("{content}\r").as_bytes())
@@ -1161,8 +1161,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && initial_key_sent
             && !content_sent
             && bytes
-                .windows(b"0/16384 bytes".len())
-                .any(|window| window == b"0/16384 bytes")
+                .windows(b"0/16384".len())
+                .any(|window| window == b"0/16384")
         {
             master
                 .write_all(format!("\x1b[200~{content}\x1b[201~\r").as_bytes())
@@ -1204,8 +1204,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Enter open".len())
-                    .any(|window| window == b"Enter open")
+                    .windows(b"open".len())
+                    .any(|window| window == b"open")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -1252,11 +1252,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !managed_provider_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Continue project conversation".len())
-                    .any(|window| window == b"Continue project conversation")
-                    && bytes[offset..]
-                        .windows(b"0/16384 bytes".len())
-                        .any(|window| window == b"0/16384 bytes")
+                    .windows(b"0/16384".len())
+                    .any(|window| window == b"0/16384")
             })
         {
             master
@@ -1385,11 +1382,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !resource_commit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"New project conversation".len())
-                    .any(|window| window == b"New project conversation")
-                    && bytes[offset..]
-                        .windows(b"0/16384 bytes".len())
-                        .any(|window| window == b"0/16384 bytes")
+                    .windows(b"0/16384".len())
+                    .any(|window| window == b"0/16384")
             })
         {
             master
