@@ -88,6 +88,47 @@ fn live_polling_persists_source_order_and_releases_closed_workers() {
 }
 
 #[test]
+fn closed_worker_interrupts_a_running_agent_turn_before_releasing_ownership() {
+    let agent = AgentId::from_bytes([0x47; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let session_id = ProviderSessionId::new("interrupted-session").expect("session validates");
+    let provider = Arc::new(ProviderState::default());
+    provider.queue([
+        Ok(HarnessEventPoll::Event(HarnessEvent::Activity(agent_turn(
+            1,
+            ActivityStatus::Running,
+            "Agent is working",
+        )))),
+        Ok(HarnessEventPoll::Closed),
+    ]);
+    let state = Arc::new(MemoryState::default());
+    let persistence = Arc::new(MemoryPersistence::available());
+    let runtime = supervisor(dependencies(
+        registry(provider_id.clone(), session_id, provider),
+        state.clone(),
+        persistence.clone(),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    ));
+    runtime
+        .launch(launch(agent, provider_id, HarnessSessionRequest::Start))
+        .expect("worker starts");
+
+    assert_eq!(runtime.poll_events().expect("turn starts").events_polled, 1);
+    let closed = runtime.poll_events().expect("closure terminalizes turn");
+
+    assert_eq!(closed.workers_closed, 1);
+    assert!(closed.failures.is_empty());
+    assert!(state.snapshot().leases.is_empty());
+    let activities = persistence.activities.lock().expect("activities lock");
+    assert_eq!(activities.len(), 2);
+    assert_eq!(activities[1].operation_id, activities[0].operation_id);
+    assert_eq!(activities[1].kind, ActivityKind::AgentTurn);
+    assert_eq!(activities[1].sequence.get(), 2);
+    assert_eq!(activities[1].status, ActivityStatus::Interrupted);
+}
+
+#[test]
 fn saturation_stages_durable_values_and_coalesces_only_exact_snapshots() {
     let agent = AgentId::from_bytes([42; 32]);
     let provider_id = ProviderId::new("scripted").expect("provider validates");
@@ -218,12 +259,84 @@ fn restart_replay_recovers_a_polled_value_after_persistence_outage() {
 }
 
 #[test]
+fn recovery_interrupts_a_running_turn_left_by_the_previous_owner() {
+    let agent = AgentId::from_bytes([0x48; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let session_id = ProviderSessionId::new("recovered-session").expect("session validates");
+    let provider = Arc::new(ProviderState::default());
+    provider.queue([Ok(HarnessEventPoll::Event(HarnessEvent::Activity(
+        agent_turn(1, ActivityStatus::Running, "Agent is working"),
+    )))]);
+    let state = Arc::new(MemoryState::default());
+    let persistence = Arc::new(MemoryPersistence::available());
+    let first = supervisor(dependencies(
+        registry(
+            provider_id.clone(),
+            session_id.clone(),
+            Arc::clone(&provider),
+        ),
+        state.clone(),
+        persistence.clone(),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    ));
+    first
+        .launch(launch(
+            agent,
+            provider_id.clone(),
+            HarnessSessionRequest::Start,
+        ))
+        .expect("first owner starts");
+    assert_eq!(first.poll_events().expect("turn starts").events_polled, 1);
+    drop(first);
+
+    let restarted = supervisor(dependencies(
+        registry(provider_id.clone(), session_id.clone(), provider),
+        state,
+        persistence.clone(),
+        Arc::new(TestClock::new(2_000)),
+        Arc::new(TestTokens(AtomicUsize::new(1))),
+    ));
+    restarted
+        .recover(launch(
+            agent,
+            provider_id,
+            HarnessSessionRequest::Resume { session_id },
+        ))
+        .expect("new owner resumes");
+
+    let activities = persistence.activities.lock().expect("activities lock");
+    assert_eq!(activities.len(), 2);
+    assert_eq!(activities[1].status, ActivityStatus::Interrupted);
+    assert_eq!(activities[1].sequence.get(), 2);
+    drop(activities);
+    restarted.shutdown().expect("restart shuts down");
+    assert_eq!(
+        persistence
+            .activities
+            .lock()
+            .expect("activities lock")
+            .len(),
+        2,
+        "terminal reconciliation is idempotent"
+    );
+}
+
+#[test]
 fn provider_poll_failure_is_redacted_and_releases_exact_worker_ownership() {
     let agent = AgentId::from_bytes([44; 32]);
     let provider_id = ProviderId::new("scripted").expect("provider validates");
     let provider = Arc::new(ProviderState::default());
-    provider.queue([Err(HarnessError::new(HarnessErrorClass::TransportClosed))]);
+    provider.queue([
+        Ok(HarnessEventPoll::Event(HarnessEvent::Activity(agent_turn(
+            1,
+            ActivityStatus::Running,
+            "Agent is working",
+        )))),
+        Err(HarnessError::new(HarnessErrorClass::TransportClosed)),
+    ]);
     let state = Arc::new(MemoryState::default());
+    let persistence = Arc::new(MemoryPersistence::available());
     let runtime = supervisor(dependencies(
         registry(
             provider_id.clone(),
@@ -231,19 +344,23 @@ fn provider_poll_failure_is_redacted_and_releases_exact_worker_ownership() {
             provider,
         ),
         state.clone(),
-        Arc::new(MemoryPersistence::available()),
+        persistence.clone(),
         Arc::new(TestClock::new(10)),
         Arc::new(TestTokens::default()),
     ));
     runtime
         .launch(launch(agent, provider_id, HarnessSessionRequest::Start))
         .expect("worker starts");
+    assert_eq!(runtime.poll_events().expect("turn starts").events_polled, 1);
     let report = runtime.poll_events().expect("failure is contained");
     assert_eq!(report.workers_failed, 1);
     assert_eq!(report.live_workers, 0);
     assert_eq!(report.failures, [HarnessErrorClass::TransportClosed]);
     assert!(!format!("{report:?}").contains("provider diagnostic"));
     assert!(state.snapshot().leases.is_empty());
+    let activities = persistence.activities.lock().expect("activities lock");
+    assert_eq!(activities.len(), 2);
+    assert_eq!(activities[1].status, ActivityStatus::Interrupted);
 }
 
 #[test]
@@ -958,6 +1075,14 @@ fn activity(sequence: u64, status: ActivityStatus, content: &str) -> HarnessActi
     }
 }
 
+fn agent_turn(sequence: u64, status: ActivityStatus, content: &str) -> HarnessActivity {
+    HarnessActivity {
+        kind: ActivityKind::AgentTurn,
+        logical_key: ShortText::new("turn").expect("key validates"),
+        ..activity(sequence, status, content)
+    }
+}
+
 fn interactive_request(
     identity: u8,
     kind: HarnessRequestKind,
@@ -1279,6 +1404,7 @@ fn exact_owner(
 struct MemoryPersistence {
     outputs: Mutex<BTreeMap<MessageId, HarnessOutput>>,
     activities: Mutex<Vec<HarnessActivity>>,
+    activity_contexts: Mutex<Vec<(AgentId, ProviderId, ProviderSessionId, HarnessActivity)>>,
     calls: Mutex<Vec<&'static str>>,
     persisted: Mutex<Vec<String>>,
     attributions: Mutex<Vec<Option<HarnessDeliveryRecord>>>,
@@ -1299,6 +1425,7 @@ impl MemoryPersistence {
         Self {
             outputs: Mutex::new(BTreeMap::new()),
             activities: Mutex::new(Vec::new()),
+            activity_contexts: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             persisted: Mutex::new(Vec::new()),
             attributions: Mutex::new(Vec::new()),
@@ -1314,6 +1441,49 @@ impl MemoryPersistence {
 }
 
 impl HarnessPersistencePort for MemoryPersistence {
+    fn running_agent_turns(
+        &self,
+        agent_id: AgentId,
+        provider_id: &ProviderId,
+        session_id: &ProviderSessionId,
+        limit: usize,
+    ) -> Result<Vec<HarnessActivity>, HarnessError> {
+        let activities = self
+            .activity_contexts
+            .lock()
+            .expect("activity contexts lock");
+        let mut latest = BTreeMap::new();
+        for (_, _, _, activity) in
+            activities
+                .iter()
+                .filter(|(agent, provider, session, activity)| {
+                    *agent == agent_id
+                        && provider == provider_id
+                        && session == session_id
+                        && activity.kind == ActivityKind::AgentTurn
+                })
+        {
+            latest
+                .entry((
+                    activity.operation_id,
+                    activity.item.clone(),
+                    activity.logical_key.clone(),
+                    activity.runtime.clone(),
+                ))
+                .and_modify(|current: &mut HarnessActivity| {
+                    if activity.sequence > current.sequence {
+                        *current = activity.clone();
+                    }
+                })
+                .or_insert_with(|| activity.clone());
+        }
+        Ok(latest
+            .into_values()
+            .filter(|activity| activity.status == ActivityStatus::Running)
+            .take(limit)
+            .collect())
+    }
+
     fn persist_output(
         &self,
         _agent_id: AgentId,
@@ -1350,9 +1520,9 @@ impl HarnessPersistencePort for MemoryPersistence {
 
     fn persist_activity(
         &self,
-        _agent_id: AgentId,
-        _provider_id: &ProviderId,
-        _session_id: &ProviderSessionId,
+        agent_id: AgentId,
+        provider_id: &ProviderId,
+        session_id: &ProviderSessionId,
         delivery: Option<&HarnessDeliveryRecord>,
         activity: &HarnessActivity,
     ) -> Result<(), HarnessError> {
@@ -1375,6 +1545,20 @@ impl HarnessPersistencePort for MemoryPersistence {
                 .lock()
                 .expect("persisted locks")
                 .push(format!("activity:{}", activity.content.as_str()));
+        }
+        drop(activities);
+        let context = (
+            agent_id,
+            provider_id.clone(),
+            session_id.clone(),
+            activity.clone(),
+        );
+        let mut contexts = self
+            .activity_contexts
+            .lock()
+            .expect("activity contexts lock");
+        if !contexts.contains(&context) {
+            contexts.push(context);
         }
         Ok(())
     }

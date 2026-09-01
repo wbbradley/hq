@@ -128,7 +128,9 @@ Shutdown is ordered and bounded for every worker even if a sibling fails:
 5. flush already accepted normalized events;
 6. request adapter drain with the configured maximum wait;
 7. force-stop when drain is pending or failed, and close the runtime capability idempotently; and
-8. release only the worker's exact lease token.
+8. persist `Interrupted` successors for every projected `Running` agent turn in the exact owned
+   provider session; and
+9. release only the worker's exact lease token.
 
 The supervisor report counts released and forced workers and retains only closed failure classes.
 Pending accepted work or a persistence failure is reported; an interrupted provider is exactly
@@ -136,6 +138,13 @@ resumed and may replay normalized values through stable idempotent identities an
 checkpoints. It is never silently treated as completed. The node lifecycle closes application
 intake before invoking this sequence and maps any reported pending work or failure to escalation
 evidence.
+
+Exact resume performs the same reconciliation after acquiring the worker lease and before opening
+the provider session. It loads only latest `Running` `AgentTurn` projections for that
+agent/provider/session and advances each exact activity key by one semantic sequence with
+`Interrupted`. A committed retry is naturally absent from the next query, so response loss and
+repeated teardown cannot duplicate the terminal state. Already-terminal operations and other
+provider sessions are never inferred or terminalized.
 
 ## Boundaries
 

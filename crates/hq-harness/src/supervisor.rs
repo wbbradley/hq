@@ -10,8 +10,8 @@ use std::{
 };
 
 use hq_domain::{
-    ActivityKind, ActivityStatus, AgentId, AssignmentId, CommandDigest, DispatchId, MessageId,
-    OperationId, ProjectId, ProviderId, ProviderSessionId, ThreadId,
+    ActivityKind, ActivityStatus, AgentId, AssignmentId, CommandDigest, ContentText, DispatchId,
+    MessageId, OperationId, ProjectId, ProviderId, ProviderSessionId, ThreadId,
 };
 use sha2::{Digest, Sha256};
 
@@ -329,6 +329,15 @@ pub trait HarnessStatePort: Send + Sync {
 
 /// Consumer-owned canonical persistence capability for normalized values.
 pub trait HarnessPersistencePort: Send + Sync {
+    /// Loads the bounded latest running agent turns for one exact owned provider session.
+    fn running_agent_turns(
+        &self,
+        agent_id: AgentId,
+        provider_id: &ProviderId,
+        session_id: &ProviderSessionId,
+        limit: usize,
+    ) -> Result<Vec<HarnessActivity>, HarnessError>;
+
     /// Idempotently persists one exact output or rejects an unequal stable identity.
     fn persist_output(
         &self,
@@ -726,6 +735,24 @@ impl HarnessSupervisor {
             })?;
         if outcome != HarnessLeaseOutcome::Acquired {
             return Err(HarnessError::new(HarnessErrorClass::OwnershipConflict));
+        }
+        if let HarnessSessionRequest::Resume { session_id } = &request.session
+            && let Err(error) = interrupt_running_agent_turns(
+                &self.config,
+                &self.dependencies,
+                request.agent_id,
+                &request.provider_id,
+                session_id,
+            )
+        {
+            let _ = self
+                .dependencies
+                .state
+                .apply(HarnessStateMutation::ReleaseLease {
+                    agent_id: request.agent_id,
+                    owner_token: token,
+                });
+            return Err(error);
         }
         let opened = self.dependencies.registry.open_session(
             &request.provider_id,
@@ -1806,6 +1833,15 @@ fn stop_worker(
     if let Err(error) = worker.session.force_stop() {
         retain_failure(&mut report, error.class, config.max_workers);
     }
+    if let Err(error) = interrupt_running_agent_turns(
+        config,
+        dependencies,
+        agent_id,
+        &worker.provider_id,
+        &worker.session_id,
+    ) {
+        retain_failure(&mut report, error.class, config.max_workers);
+    }
     match dependencies
         .state
         .apply(HarnessStateMutation::ReleaseLease {
@@ -1821,6 +1857,49 @@ fn stop_worker(
         Err(error) => retain_failure(&mut report, error.class, config.max_workers),
     }
     report
+}
+
+fn interrupt_running_agent_turns(
+    config: &HarnessSupervisorConfig,
+    dependencies: &HarnessSupervisorDependencies,
+    agent_id: AgentId,
+    provider_id: &ProviderId,
+    session_id: &ProviderSessionId,
+) -> Result<(), HarnessError> {
+    let turns = dependencies.persistence.running_agent_turns(
+        agent_id,
+        provider_id,
+        session_id,
+        config.state_query_items,
+    )?;
+    for turn in turns {
+        let sequence = turn
+            .sequence
+            .get()
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+            .ok_or_else(|| HarnessError::new(HarnessErrorClass::PersistenceCollision))?;
+        let delivery = dependencies
+            .state
+            .delivery_for_operation(agent_id, turn.operation_id)?;
+        let interrupted = HarnessActivity {
+            sequence,
+            status: ActivityStatus::Interrupted,
+            content: ContentText::new("Agent was interrupted")
+                .map_err(|_| HarnessError::new(HarnessErrorClass::InvalidInput))?,
+            truncated: false,
+            completed: None,
+            ..turn
+        };
+        dependencies.persistence.persist_activity(
+            agent_id,
+            provider_id,
+            session_id,
+            delivery.as_ref(),
+            &interrupted,
+        )?;
+    }
+    Ok(())
 }
 
 fn merge_report(

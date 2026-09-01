@@ -5,8 +5,9 @@ use std::{collections::BTreeSet, fmt, sync::Arc};
 use hq_application::{
     ApplicationError, ApplicationErrorCode, CommitFacts, FactMutation, HarnessActivityFactRequest,
     HarnessAuthoringAuthority, HarnessOutputFactRequest, LocalFactInputs, MutationAttempt,
-    MutationDecision, MutationOutcome, ProjectHarnessAuthoringAuthority, plan_harness_activity,
-    plan_harness_output, plan_project_harness_activity, plan_project_harness_output,
+    MutationDecision, MutationOutcome, ProjectHarnessAuthoringAuthority, QueryDomain,
+    plan_harness_activity, plan_harness_output, plan_project_harness_activity,
+    plan_project_harness_output,
 };
 use hq_domain::{
     ActivityKind, ActivityStatus, AgentId, AssignmentBinding, AuthorityReference, AuthorityRole,
@@ -16,7 +17,7 @@ use hq_domain::{
 };
 use hq_harness::{
     HarnessActivity, HarnessClock, HarnessDeliveryRecord, HarnessError, HarnessErrorClass,
-    HarnessOutput, HarnessOutputKind, HarnessPersistencePort,
+    HarnessOutput, HarnessOutputKind, HarnessPersistencePort, MAX_HARNESS_SUPERVISOR_STATE_ITEMS,
 };
 use hq_reducer::{
     ActivityKey, AgentLifecycle, AgentProjection, AgentProjectionKey, AuthorityProjection,
@@ -50,7 +51,55 @@ impl<P> CanonicalHarnessPersistence<P> {
     }
 }
 
-impl<P: CommitFacts + Send + Sync> HarnessPersistencePort for CanonicalHarnessPersistence<P> {
+impl<P: CommitFacts + QueryDomain + Send + Sync> HarnessPersistencePort
+    for CanonicalHarnessPersistence<P>
+{
+    fn running_agent_turns(
+        &self,
+        agent_id: AgentId,
+        provider_id: &ProviderId,
+        session_id: &ProviderSessionId,
+        limit: usize,
+    ) -> Result<Vec<HarnessActivity>, HarnessError> {
+        if limit == 0 || limit > MAX_HARNESS_SUPERVISOR_STATE_ITEMS {
+            return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
+        }
+        let snapshot = self
+            .ports
+            .authoritative_snapshot()
+            .map_err(|_| unavailable())?;
+        let domain = snapshot.domain();
+        let source = source_mailbox(domain, self.home, agent_id).map_err(|_| collision())?;
+        Ok(domain
+            .conversation()
+            .projections()
+            .values()
+            .filter_map(|projection| {
+                let ConversationProjection::Activity(activity) = projection else {
+                    return None;
+                };
+                (activity.source == source
+                    && activity.correlation.provider() == provider_id
+                    && activity.correlation.session() == session_id
+                    && activity.kind == ActivityKind::AgentTurn
+                    && activity.status == ActivityStatus::Running)
+                    .then(|| HarnessActivity {
+                        operation_id: activity.correlation.operation(),
+                        item: activity.item.clone(),
+                        kind: activity.kind,
+                        logical_key: activity.logical_key.clone(),
+                        runtime: activity.runtime.clone(),
+                        sequence: activity.sequence,
+                        status: activity.status.clone(),
+                        content: activity.content.clone(),
+                        truncated: activity.truncated,
+                        completed: activity.completed.clone().map(Box::new),
+                    })
+            })
+            .take(limit)
+            .collect())
+    }
+
     fn persist_output(
         &self,
         agent_id: AgentId,
@@ -712,9 +761,9 @@ mod tests {
     };
     use hq_harness::{HarnessDeliveryState, HarnessProjectDelivery, HarnessSubmission};
     use hq_reducer::{
-        AgentView, AuthorityProjection, InstallationView, MailboxView, ProjectAssignmentPhase,
-        ProjectAssignmentView, ProjectDispatchView, ProjectInputView, ProjectLifecycle,
-        ProjectProjectionKey, ProjectView, SessionBindingView,
+        ActivityView, AgentView, AuthorityProjection, ConversationProjectionKey, InstallationView,
+        MailboxView, ProjectAssignmentPhase, ProjectAssignmentView, ProjectDispatchView,
+        ProjectInputView, ProjectLifecycle, ProjectProjectionKey, ProjectView, SessionBindingView,
     };
 
     use super::*;
@@ -753,6 +802,28 @@ mod tests {
                     )))
                 }
             }
+        }
+    }
+
+    impl QueryDomain for Ports {
+        fn authoritative_snapshot(
+            &self,
+        ) -> Result<hq_application::AuthoritativeSnapshot, ApplicationError> {
+            Ok(hq_application::AuthoritativeSnapshot::new(
+                Revision::new(1),
+                self.0.snapshot.clone(),
+            ))
+        }
+
+        fn conversation_entries(
+            &self,
+            _key: &hq_reducer::ConversationKey,
+            _limit: usize,
+            _cursor: Option<&hq_domain::PageCursor>,
+        ) -> Result<hq_domain::Page<hq_application::ConversationEntry>, ApplicationError> {
+            Err(ApplicationError::new(
+                ApplicationErrorCode::AdapterUnavailable,
+            ))
         }
     }
 
@@ -886,6 +957,85 @@ mod tests {
 
     fn empty_conversation() -> ConversationProjectionSnapshot {
         ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
+    }
+
+    fn with_conversation(
+        fixture: Fixture,
+        conversation: ConversationProjectionSnapshot,
+    ) -> Fixture {
+        let snapshot = DomainSnapshot::new(
+            fixture.ports.0.snapshot.authority().clone(),
+            conversation,
+            fixture.ports.0.snapshot.agent().clone(),
+            fixture.ports.0.snapshot.project().clone(),
+        );
+        let ports = Ports(Arc::new(PortsState {
+            snapshot,
+            retained: Mutex::new(BTreeMap::new()),
+        }));
+        let persistence = CanonicalHarnessPersistence::new(
+            ports.clone(),
+            fixture.source.installation_id(),
+            MailboxId::from_bytes([2; 32]),
+            Arc::new(Clock),
+        );
+        Fixture {
+            ports,
+            persistence,
+            ..fixture
+        }
+    }
+
+    #[test]
+    fn running_agent_turns_loads_the_exact_projected_session_state() {
+        let fixture = fixture(true);
+        let operation_id = OperationId::from_bytes([0x41; 32]);
+        let correlation = OperationCorrelation::new(
+            fixture.provider.clone(),
+            fixture.session.clone(),
+            operation_id,
+        );
+        let key = ActivityKey {
+            source: fixture.source,
+            correlation: correlation.clone(),
+            item: None,
+            kind: ActivityKind::AgentTurn,
+            logical_key: ShortText::new("turn").expect("key"),
+            runtime: ShortText::new("codex").expect("runtime"),
+        };
+        let conversation = ConversationProjectionSnapshot::new(
+            BTreeMap::new(),
+            BTreeMap::from([(
+                ConversationProjectionKey::Activity(key),
+                ConversationProjection::Activity(Box::new(ActivityView {
+                    fact_id: FactId::from_bytes([0x42; 32]),
+                    source: fixture.source,
+                    correlation,
+                    item: None,
+                    kind: ActivityKind::AgentTurn,
+                    sequence: NonZeroU64::new(7).expect("sequence"),
+                    logical_key: ShortText::new("turn").expect("key"),
+                    runtime: ShortText::new("codex").expect("runtime"),
+                    occurred_at: Timestamp::from_unix_millis(100),
+                    status: ActivityStatus::Running,
+                    content: ContentText::new("Codex is working").expect("content"),
+                    truncated: false,
+                    completed: None,
+                })),
+            )]),
+            BTreeMap::new(),
+        );
+        let fixture = with_conversation(fixture, conversation);
+
+        let turns = fixture
+            .persistence
+            .running_agent_turns(fixture.agent, &fixture.provider, &fixture.session, 8)
+            .expect("running turns load");
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].operation_id, operation_id);
+        assert_eq!(turns[0].sequence.get(), 7);
+        assert_eq!(turns[0].status, ActivityStatus::Running);
     }
 
     fn empty_project() -> ProjectProjectionSnapshot {

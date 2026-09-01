@@ -488,6 +488,16 @@ impl AgentSessionCanonicalPort for UnavailableAgentSessionCanonical {
 }
 
 impl HarnessPersistencePort for UnavailableHarnessPersistence {
+    fn running_agent_turns(
+        &self,
+        _agent_id: hq_domain::AgentId,
+        _provider_id: &hq_domain::ProviderId,
+        _session_id: &hq_domain::ProviderSessionId,
+        _limit: usize,
+    ) -> Result<Vec<HarnessActivity>, HarnessError> {
+        Err(HarnessError::new(HarnessErrorClass::Unavailable))
+    }
+
     fn persist_output(
         &self,
         _agent_id: hq_domain::AgentId,
@@ -1434,6 +1444,16 @@ mod tests {
     }
 
     impl HarnessPersistencePort for CountingPersistence {
+        fn running_agent_turns(
+            &self,
+            _agent_id: AgentId,
+            _provider_id: &ProviderId,
+            _session_id: &ProviderSessionId,
+            _limit: usize,
+        ) -> Result<Vec<HarnessActivity>, HarnessError> {
+            Ok(Vec::new())
+        }
+
         fn persist_output(
             &self,
             _agent_id: AgentId,

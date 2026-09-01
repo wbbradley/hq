@@ -63,6 +63,12 @@ flowchart TB
 
 The durable session selection is separate from runtime presence. A session is selected only after the app-server handshake and `thread/start` or `thread/resume` return a non-empty, matching thread ID, and after any project binding succeeds. A failed or mismatched resume never silently creates or selects a replacement. Explicit rotation is required.
 
+After acquiring exact worker ownership and before reopening a resumed provider session, HQ
+terminalizes any durable `Running` agent turn left by the prior owner as `Interrupted`. Provider
+EOF, poll failure, explicit stop, and shutdown perform the same reconciliation before releasing
+ownership. This prevents a dead operation from remaining as live conversation state while keeping
+terminalization scoped to the exact agent, provider, session, operation, and activity key.
+
 An operation begins when `turn/start` accepts a new turn or `turn/steer` accepts input for the active turn. `turn/started` and `turn/completed` update the adapter's active-operation view. A completed `item/completed` notification is authoritative for an output item; deltas and reasoning are not persisted as messages.
 
 ## Connection and session lifecycle
