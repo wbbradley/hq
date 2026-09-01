@@ -3300,7 +3300,7 @@ fn with_draft_context_title<'a>(
     let maximum_width = usize::from(width.saturating_sub(4) / 2);
     let context = clipped_preview_line(&context, maximum_width);
     block.title(Line::styled(
-        format!(" {context} "),
+        format!("{context} "),
         theme.style(UiThemeRole::ConversationProjectContext),
     ))
 }

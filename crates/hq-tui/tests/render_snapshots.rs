@@ -1085,6 +1085,14 @@ fn project_composer_keeps_orange_recipient_context_on_its_upper_left_border() {
     let cell = buffer.cell(project_title).expect("project title cell");
     assert_eq!(cell.fg, orange);
     assert!(cell.modifier.contains(Modifier::BOLD));
+    let preceding = buffer
+        .cell((project_title.0.saturating_sub(1), project_title.1))
+        .expect("cell before project title");
+    assert_ne!(
+        preceding.symbol(),
+        " ",
+        "recipient title should begin immediately after the left border"
+    );
 }
 
 #[test]
