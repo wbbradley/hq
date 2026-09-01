@@ -27,6 +27,60 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
+### Keep Inbox details revision-coherent
+
+Eliminate the transient `Loading messages…` detail pane and stale list/detail combinations by
+treating the Inbox rows and the selected conversation's bounded first page as one revisioned
+presentation. The daemon already owns the reduced canonical state; the TUI observation path should
+deliver that usable state instead of discarding a subscribed snapshot, issuing another snapshot
+request, and then loading the selected conversation separately.
+
+- Stop reducing `ClientEvent::Snapshot` to revision-only `TuiClientObservation::Invalidated` in
+  `crates/hq-node/src/tui_client.rs`. Carry a typed materialized observation into the reducer without
+  giving the observation adapter mailbox mutation authority or sharing its transport with the
+  command worker.
+- Extend the unshipped local API v1 subscription contract in `crates/hq-local-api` so initial
+  activation and later updates can include the authoritative snapshot and the bounded first page of
+  one explicitly selected conversation at the same revision. Selection must use the stable typed
+  `ConversationKeyDto`, not a presentation row ID, title, list position, or message body.
+- Let the TUI update its selected-conversation interest over the existing bidirectional daemon
+  connection. Coalesce rapid selection changes to the latest value, ignore stale projection
+  responses, and preserve independent command progress and observation shutdown behavior.
+- Build the combined projection in the daemon from one actor-owned reduced-state boundary. Do not
+  duplicate canonical conversation reduction in the TUI, infer coherence from timestamps, or turn
+  broad invalidation frames into unbounded message-body notifications. Keep ordinary CLI snapshot
+  and explicit older-page queries available.
+- Retain bounded conversation pages in `UiModel` by stable conversation identity. Apply a new list
+  and its selected detail atomically; while a newer projection is in flight, keep displaying the
+  last coherent matching view. If the selected Inbox row disappears after a reply, choose its
+  deterministic successor and install that row's detail in the same transition rather than briefly
+  showing an empty/loading detail pane.
+- Reserve on-demand pagination for an explicit request for older history. Startup, reconnect,
+  automatic refresh, send acknowledgement, row reordering, and ordinary Inbox navigation must not
+  paint `Loading messages…` in the passive detail area.
+- Add protocol/client/server tests for activation ordering, exact revision agreement, selection
+  replacement, coalescing, reconnect, response loss, stale/out-of-order updates, bounds, and clean
+  cancellation. Add model/executor/installed-PTY tests for rapid navigation, a selected row
+  disappearing after send, simultaneous activity updates, and list/detail convergence without a
+  loading flash or duplicate sent row.
+- Update `docs/design.md`, `docs/protocol/local-api-v1.md`, and
+  `docs/rust/{tui,node-lifecycle,acceptance-scenarios,behavior-ledger}.md` with the materialized
+  observation boundary, revision coherence, bounded retention, and the distinction between current
+  detail projection and explicit older-history pagination.
+
+Acceptance criteria:
+
+- The Inbox list and selected first-page detail shown in one frame come from one authoritative
+  revision and stable conversation identity.
+- The passive detail pane never flashes `Loading messages…` during startup convergence, navigation,
+  reconnect, invalidation repair, or message submission; only explicit older-history pagination may
+  show loading progress.
+- A subscribed snapshot is not thrown away and fetched again, and one daemon change does not require
+  an invalidation-to-snapshot-to-conversation request chain before the selected detail is current.
+- Rapid selection, row disappearance, duplicated updates, response loss, and reconnect cannot show
+  the wrong conversation, regress revision, duplicate a message, or grow retained pages without a
+  bound.
+
 ### Acknowledge mailbox messages before project delivery
 
 Give immediate, truthful send feedback and move project sequencing/runtime delivery out of the
