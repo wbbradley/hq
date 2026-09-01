@@ -130,6 +130,11 @@ activity and refreshes with status and final output in place. Those agent-author
 eligible for project input. Ordinary messaging exposes no manual dispatch step; retry appears only
 as a typed recovery action when canonical stalled-delivery evidence exists.
 
+When a visible running agent turn becomes newly succeeded, failed, or interrupted and no other
+agent turn remains running, the model opens the same exact continuation draft automatically. Direct
+conversations target their latest replyable message. Initial views of completed history do not
+trigger composition, and an existing draft is retained unchanged.
+
 The same transition that emits a message command closes composition focus onto one local-human
 `Pending` row anchored by the effect identity. The exact draft, target, action, and random draft/message
 identity remain retained until a definite result. A durable ordinary-message receipt upgrades that

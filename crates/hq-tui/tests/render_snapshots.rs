@@ -1015,7 +1015,8 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
             .expect("render composer");
         assert_eq!(model, before);
         let rendered = snapshot_text(terminal.backend().buffer());
-        assert!(rendered.contains("Self-note · saved"));
+        assert!(rendered.contains("To: You"), "{size:?}:\n{rendered}");
+        assert!(rendered.contains("saved"), "{size:?}:\n{rendered}");
         assert!(
             rendered.contains("bounded **draft** text"),
             "{size:?}:\n{rendered}"
@@ -1026,7 +1027,7 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
 }
 
 #[test]
-fn project_composer_keeps_orange_project_context_on_its_upper_right_border() {
+fn project_composer_keeps_orange_recipient_context_on_its_upper_left_border() {
     let size = UiSize {
         width: 120,
         height: 24,
@@ -1066,12 +1067,12 @@ fn project_composer_keeps_orange_project_context_on_its_upper_right_border() {
     let buffer = render_buffer_with_theme(&model, &theme);
     let rendered = snapshot_text(&buffer);
     assert!(
-        rendered.contains("To: agent-5 · Project: release"),
+        rendered.contains("To: agent-5 · release"),
         "draft recipient and project are absent from composer:\n{rendered}"
     );
     let project_title = find_text_starts(&buffer, "To: agent-5")
         .into_iter()
-        .find(|(x, y)| *x > size.width / 2 && *y > size.height / 2)
+        .find(|(x, y)| *x < size.width / 2 && *y > size.height / 2)
         .unwrap_or_else(|| {
             panic!(
                 "project title is absent from composer:\n{}",

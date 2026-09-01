@@ -2574,6 +2574,288 @@ fn live_agent_status_stays_at_the_presentation_tail_after_new_authoritative_outp
 }
 
 #[test]
+fn terminal_agent_turn_automatically_opens_the_exact_project_continuation_draft() {
+    let project_id = [5; 32];
+    let thread_id = [6; 32];
+    let mut initial = snapshot(1, &["thread-a"]);
+    initial.inbox_rows[0].conversation_target = Some(UiConversationTarget::Project {
+        project_id,
+        thread_id,
+        root_message: [7; 32],
+    });
+    let mut running = entry("turn-running", true);
+    running.presentation = UiConversationEntryPresentation::Activity {
+        kind: UiConversationActivityKind::AgentTurn,
+        status: UiActivityStatus::Running,
+        summary: "Agent is working…".to_owned(),
+        detail: "turn running".to_owned(),
+        truncated: false,
+        completed: None,
+    };
+    let opened = materialized_transition(
+        initial,
+        UiConversationPage {
+            title: "Alice".to_owned(),
+            context: Some("hq".to_owned()),
+            row_id: "thread-a".to_owned(),
+            entries: vec![entry("question", false), running],
+            next_cursor: None,
+        },
+    );
+
+    let mut terminal = entry("turn-finished", true);
+    terminal.presentation = UiConversationEntryPresentation::Activity {
+        kind: UiConversationActivityKind::AgentTurn,
+        status: UiActivityStatus::Succeeded,
+        summary: "Agent finished".to_owned(),
+        detail: "turn completed".to_owned(),
+        truncated: false,
+        completed: None,
+    };
+    let mut refreshed = snapshot(2, &["thread-a"]);
+    refreshed.inbox_rows[0].conversation_target = Some(UiConversationTarget::Project {
+        project_id,
+        thread_id,
+        root_message: [7; 32],
+    });
+    let finished = update(
+        opened.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: refreshed,
+                conversation: Some(UiConversationPage {
+                    title: "Alice".to_owned(),
+                    context: Some("hq".to_owned()),
+                    row_id: "thread-a".to_owned(),
+                    entries: vec![entry("question", false), terminal],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("terminal turn observed");
+
+    assert_eq!(finished.model.focus(), UiFocus::Draft);
+    assert!(matches!(
+        finished.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::Project {
+                project_id: selected_project,
+                thread_id: Some(selected_thread),
+            },
+        }) if *selected_project == project_id && *selected_thread == thread_id
+    ));
+    assert!(finished.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::OpenDraft {
+            target: UiMailboxDraftTarget::Project {
+                project_id: selected_project,
+                thread_id: Some(selected_thread),
+            },
+            ..
+        } if *selected_project == project_id && *selected_thread == thread_id
+    )));
+}
+
+#[test]
+fn initially_opening_an_already_finished_turn_does_not_open_a_draft() {
+    let mut terminal = entry("turn-finished", true);
+    terminal.presentation = UiConversationEntryPresentation::Activity {
+        kind: UiConversationActivityKind::AgentTurn,
+        status: UiActivityStatus::Succeeded,
+        summary: "Agent finished".to_owned(),
+        detail: "turn completed".to_owned(),
+        truncated: false,
+        completed: None,
+    };
+    let opened = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
+            row_id: "thread-a".to_owned(),
+            entries: vec![entry("question", false), terminal],
+            next_cursor: None,
+        },
+    );
+
+    assert!(opened.model.mailbox_draft().is_none());
+    assert!(
+        opened
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::OpenDraft { .. }))
+    );
+}
+
+#[test]
+fn terminal_agent_turn_automatically_replies_to_the_latest_direct_message() {
+    let message_id = [8; 32];
+    let opened = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
+            row_id: "thread-a".to_owned(),
+            entries: vec![
+                actionable_entry("alice-message", message_id),
+                agent_turn_entry("turn-running", UiActivityStatus::Running),
+            ],
+            next_cursor: None,
+        },
+    );
+    let finished = update(
+        opened.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a"]),
+                conversation: Some(UiConversationPage {
+                    title: "Alice".to_owned(),
+                    context: None,
+                    row_id: "thread-a".to_owned(),
+                    entries: vec![
+                        actionable_entry("alice-message", message_id),
+                        agent_turn_entry("turn-finished", UiActivityStatus::Succeeded),
+                    ],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("terminal direct turn observed");
+
+    assert!(matches!(
+        finished.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::Reply {
+                message_id: selected_message,
+            },
+        }) if *selected_message == message_id
+    ));
+}
+
+#[test]
+fn terminal_agent_turn_does_not_replace_an_existing_draft() {
+    let message_id = [8; 32];
+    let opened = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
+            row_id: "thread-a".to_owned(),
+            entries: vec![
+                actionable_entry("alice-message", message_id),
+                agent_turn_entry("turn-running", UiActivityStatus::Running),
+            ],
+            next_cursor: None,
+        },
+    );
+    let composing = update(opened.model, UiEvent::Input(UiInput::Character('N')))
+        .expect("open existing note draft");
+    let finished = update(
+        composing.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a"]),
+                conversation: Some(UiConversationPage {
+                    title: "Alice".to_owned(),
+                    context: None,
+                    row_id: "thread-a".to_owned(),
+                    entries: vec![
+                        actionable_entry("alice-message", message_id),
+                        agent_turn_entry("turn-finished", UiActivityStatus::Succeeded),
+                    ],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("terminal turn observed while composing");
+
+    assert!(matches!(
+        finished.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::SelfNote,
+        })
+    ));
+    assert!(
+        finished
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::OpenDraft { .. }))
+    );
+}
+
+#[test]
+fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
+    let message_id = [8; 32];
+    let opened = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
+            row_id: "thread-a".to_owned(),
+            entries: vec![
+                actionable_entry("alice-message", message_id),
+                agent_turn_entry("turn-a-running", UiActivityStatus::Running),
+                agent_turn_entry("turn-b-running", UiActivityStatus::Running),
+            ],
+            next_cursor: None,
+        },
+    );
+    let one_finished = update(
+        opened.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a"]),
+                conversation: Some(UiConversationPage {
+                    title: "Alice".to_owned(),
+                    context: None,
+                    row_id: "thread-a".to_owned(),
+                    entries: vec![
+                        actionable_entry("alice-message", message_id),
+                        agent_turn_entry("turn-a-finished", UiActivityStatus::Succeeded),
+                        agent_turn_entry("turn-b-running", UiActivityStatus::Running),
+                    ],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("one terminal turn observed");
+    assert!(one_finished.model.mailbox_draft().is_none());
+
+    let all_finished = update(
+        one_finished.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(3, &["thread-a"]),
+                conversation: Some(UiConversationPage {
+                    title: "Alice".to_owned(),
+                    context: None,
+                    row_id: "thread-a".to_owned(),
+                    entries: vec![
+                        actionable_entry("alice-message", message_id),
+                        agent_turn_entry("turn-a-finished", UiActivityStatus::Succeeded),
+                        agent_turn_entry("turn-b-finished", UiActivityStatus::Interrupted),
+                    ],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("all terminal turns observed");
+    assert!(matches!(
+        all_finished.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::Reply {
+                message_id: selected_message,
+            },
+        }) if *selected_message == message_id
+    ));
+}
+
+#[test]
 fn project_reply_continues_the_exact_selected_conversation() {
     let project_id = [5; 32];
     let mut initial = snapshot(1, &["existing"]);
@@ -5262,6 +5544,19 @@ fn actionable_entry(id: &str, message_id: [u8; 32]) -> UiConversationEntry {
         }),
         ..entry(id, false)
     }
+}
+
+fn agent_turn_entry(id: &str, status: UiActivityStatus) -> UiConversationEntry {
+    let mut value = entry(id, true);
+    value.presentation = UiConversationEntryPresentation::Activity {
+        kind: UiConversationActivityKind::AgentTurn,
+        status,
+        summary: format!("{id} summary"),
+        detail: format!("{id} detail"),
+        truncated: false,
+        completed: None,
+    };
+    value
 }
 
 fn direct_target(label: &str, byte: u8) -> UiDirectTarget {

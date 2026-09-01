@@ -285,7 +285,7 @@ Below 40 columns or 10 rows, the existing bounded resize message remains appropr
 The draft remains the lower part of the Conversation pane and uses the same content origin:
 
 ```text
-─ Message · saved ─────────────── To: Alice · Project: release ─
+─ To: Alice · release ───────────────────── saved · 0/16384 bytes ─
 Let's check the ignored files too.
 
 Enter send · Esc save and close
@@ -293,10 +293,17 @@ Enter send · Esc save and close
 
 Opening a draft reduces transcript height but does not hide its selected conversation. The divider
 is the only box edge. Draft target, persistence state, and validation stay in its header/footer;
-the transcript does not repeat them. The upper-right border names the exact recipient and, for a
-project-bound draft, the current project. A new project conversation also installs a local typed Inbox row and empty
-Conversation view immediately; the authoritative project-thread row replaces that local context
-after the first message commits and appears in a snapshot.
+the transcript does not repeat them. The upper-left border names the exact recipient and appends an
+unlabeled project name for a project-bound draft; persistence and byte state stay right-aligned. A
+guided new project conversation resolves its recipient from the selected agent before the eventual
+assignment exists. It also installs a local typed Inbox row and empty Conversation view immediately;
+the authoritative project-thread row replaces that local context after the first message commits
+and appears in a snapshot.
+
+When the selected conversation changes from a running agent turn to a newly terminal turn, Inbox
+opens a follow-up draft for that exact project thread or latest replyable direct message. Loading an
+already-finished conversation does not open one, another running agent turn defers it, and an
+existing draft is never replaced.
 
 ## Focus, selection, and scrolling
 

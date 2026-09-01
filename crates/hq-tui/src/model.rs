@@ -2733,7 +2733,14 @@ impl UiModel {
                     .find(|thread| thread.thread_id == thread_id)?
                     .agent_id
             }
-            None => project.assignment.as_ref()?.agent_id,
+            None => match &self.guided_pending {
+                Some(UiGuidedPending::Instruction(submission))
+                    if submission.project_id == project_id =>
+                {
+                    submission.agent_id
+                }
+                _ => project.assignment.as_ref()?.agent_id,
+            },
         };
         let agent = snapshot
             .agents
@@ -3919,6 +3926,10 @@ fn materialized_view_observed(
     {
         return Ok(());
     }
+    let agent_finished = view
+        .conversation
+        .as_ref()
+        .is_some_and(|page| agent_turn_just_finished(model.conversation.as_ref(), page));
 
     model.pending_snapshot = None;
     model.retry_timer = None;
@@ -3954,6 +3965,9 @@ fn materialized_view_observed(
         model.required_revision = None;
     }
     apply_completion_context(model);
+    if agent_finished {
+        open_automatic_followup_draft(model, effects)?;
+    }
     effects.push(UiEffect::RequestRedraw);
     Ok(())
 }
@@ -8420,6 +8434,8 @@ fn conversation_loaded(
     {
         return Ok(());
     }
+    let agent_finished =
+        pending.cursor.is_none() && agent_turn_just_finished(model.conversation.as_ref(), &page);
     let previous_anchor = model.conversation_anchor.clone();
     let previous_message = previous_anchor.as_deref().and_then(|anchor| {
         model
@@ -8486,7 +8502,83 @@ fn conversation_loaded(
     }
     model.conversation_failure = None;
     model.last_failure = None;
+    if agent_finished {
+        open_automatic_followup_draft(model, effects)?;
+    }
     effects.push(UiEffect::RequestRedraw);
+    Ok(())
+}
+
+fn agent_turn_just_finished(previous: Option<&UiConversation>, next: &UiConversationPage) -> bool {
+    let Some(previous) = previous.filter(|conversation| conversation.row_id == next.row_id) else {
+        return false;
+    };
+    let was_running = previous.entries.iter().any(is_running_agent_turn);
+    let remains_running = next.entries.iter().any(is_running_agent_turn);
+    let has_new_terminal_turn = next.entries.iter().any(|entry| {
+        is_terminal_agent_turn(entry)
+            && !previous
+                .entries
+                .iter()
+                .any(|candidate| candidate.id == entry.id && is_terminal_agent_turn(candidate))
+    });
+    was_running && !remains_running && has_new_terminal_turn
+}
+
+fn is_running_agent_turn(entry: &UiConversationEntry) -> bool {
+    matches!(
+        entry.presentation,
+        UiConversationEntryPresentation::Activity {
+            kind: UiConversationActivityKind::AgentTurn,
+            status: UiActivityStatus::Running,
+            ..
+        }
+    )
+}
+
+fn is_terminal_agent_turn(entry: &UiConversationEntry) -> bool {
+    matches!(
+        entry.presentation,
+        UiConversationEntryPresentation::Activity {
+            kind: UiConversationActivityKind::AgentTurn,
+            status: UiActivityStatus::Succeeded
+                | UiActivityStatus::Failed { .. }
+                | UiActivityStatus::Interrupted,
+            ..
+        }
+    )
+}
+
+fn open_automatic_followup_draft(
+    model: &mut UiModel,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    if model.mailbox_draft.is_some() || model.pending_mailbox.is_some() {
+        return Ok(());
+    }
+    let target = match selected_conversation_target(model) {
+        Some(UiConversationTarget::Project {
+            project_id,
+            thread_id,
+            ..
+        }) => Some(UiMailboxDraftTarget::Project {
+            project_id,
+            thread_id: Some(thread_id),
+        }),
+        None => model.conversation.as_ref().and_then(|conversation| {
+            conversation.entries.iter().rev().find_map(|entry| {
+                entry
+                    .message_target
+                    .filter(|target| target.reply_allowed)
+                    .map(|target| UiMailboxDraftTarget::Reply {
+                        message_id: target.message_id,
+                    })
+            })
+        }),
+    };
+    if let Some(target) = target {
+        model.open_draft(target, effects)?;
+    }
     Ok(())
 }
 
@@ -9703,12 +9795,13 @@ mod tests {
 
     use super::{
         TextEdit, UiAgent, UiAgentLifecycle, UiAgentStatus, UiEffect, UiError, UiEvent,
-        UiFormField, UiFormKind, UiFormState, UiHumanState, UiInput, UiInteraction,
-        UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind, UiInteractionModal,
-        UiInteractionResponse, UiMailboxDraftPane, UiMailboxDraftTarget, UiModel, UiProject,
-        UiProjectAction, UiProjectAssignment, UiProjectInteraction, UiProjectResourceCheck,
-        UiProjectThread, UiSize, UiSnapshot, apply_project_interaction_input, edit_text,
-        normalize_path_input, refresh_project_interaction, update,
+        UiFormField, UiFormKind, UiFormState, UiGuidedPending, UiGuidedSubmission, UiHumanState,
+        UiInput, UiInteraction, UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind,
+        UiInteractionModal, UiInteractionResponse, UiMailboxDraftPane, UiMailboxDraftTarget,
+        UiModel, UiProject, UiProjectAction, UiProjectAssignment, UiProjectInteraction,
+        UiProjectResourceCheck, UiProjectThread, UiSize, UiSnapshot,
+        apply_project_interaction_input, edit_text, normalize_path_input,
+        refresh_project_interaction, update,
     };
 
     #[test]
@@ -9948,6 +10041,37 @@ mod tests {
             agents: vec![agent([7; 32], "alice")],
             projects: vec![release],
         });
+        model.mailbox_draft = Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::Project {
+                project_id: [1; 32],
+                thread_id: None,
+            },
+        });
+
+        assert_eq!(model.draft_recipient_name(), Some("alice"));
+    }
+
+    #[test]
+    fn new_project_draft_recipient_uses_the_guided_agent_before_assignment_exists() {
+        let mut model = model();
+        model.snapshot = Some(UiSnapshot {
+            revision: 1,
+            human_state: UiHumanState::Ready,
+            inbox_rows: Vec::new(),
+            sent_rows: Vec::new(),
+            archived_rows: Vec::new(),
+            agent_rows: Vec::new(),
+            project_rows: Vec::new(),
+            direct_targets: Vec::new(),
+            providers: Vec::new(),
+            agents: vec![agent([7; 32], "alice")],
+            projects: vec![project("release")],
+        });
+        model.guided_pending = Some(UiGuidedPending::Instruction(UiGuidedSubmission {
+            project_id: [1; 32],
+            agent_id: [7; 32],
+            provider: "codex".to_owned(),
+        }));
         model.mailbox_draft = Some(UiMailboxDraftPane::Loading {
             target: UiMailboxDraftTarget::Project {
                 project_id: [1; 32],

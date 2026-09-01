@@ -3209,7 +3209,7 @@ fn render_draft_pane(
                 Block::new()
                     .borders(borders)
                     .border_style(theme.style(UiThemeRole::BorderFocused))
-                    .title(" Draft "),
+                    .title(Line::from(" loading draft ").right_aligned()),
                 model,
                 theme,
                 area.width,
@@ -3243,12 +3243,14 @@ fn render_draft_pane(
                     } else {
                         UiThemeRole::BorderUnfocused
                     }))
-                    .title(format!(
-                        " {} · {status} · {}/{} bytes ",
-                        draft_target_label(&draft.target),
-                        draft.content.len(),
-                        MAX_DRAFT_BYTES
-                    )),
+                    .title(
+                        Line::from(format!(
+                            " {status} · {}/{} bytes ",
+                            draft.content.len(),
+                            MAX_DRAFT_BYTES
+                        ))
+                        .right_aligned(),
+                    ),
                 model,
                 theme,
                 area.width,
@@ -3297,20 +3299,17 @@ fn with_draft_context_title<'a>(
     };
     let maximum_width = usize::from(width.saturating_sub(4) / 2);
     let context = clipped_preview_line(&context, maximum_width);
-    block.title(
-        Line::styled(
-            format!(" {context} "),
-            theme.style(UiThemeRole::ConversationProjectContext),
-        )
-        .right_aligned(),
-    )
+    block.title(Line::styled(
+        format!(" {context} "),
+        theme.style(UiThemeRole::ConversationProjectContext),
+    ))
 }
 
 fn draft_context_label(recipient: Option<&str>, project: Option<&str>) -> Option<String> {
     match (recipient, project) {
-        (Some(recipient), Some(project)) => Some(format!("To: {recipient} · Project: {project}")),
+        (Some(recipient), Some(project)) => Some(format!("To: {recipient} · {project}")),
         (Some(recipient), None) => Some(format!("To: {recipient}")),
-        (None, Some(project)) => Some(format!("Project: {project}")),
+        (None, Some(project)) => Some(project.to_owned()),
         (None, None) => None,
     }
 }
@@ -4615,7 +4614,7 @@ mod tests {
     fn draft_context_names_the_recipient_beside_the_project() {
         assert_eq!(
             draft_context_label(Some("alice"), Some("release")),
-            Some("To: alice · Project: release".to_owned())
+            Some("To: alice · release".to_owned())
         );
         assert_eq!(
             draft_context_label(Some("alice"), None),
