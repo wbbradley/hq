@@ -143,8 +143,9 @@ it says `Agent is working…` until useful uncompleted progress exists, then use
 New human input suppresses earlier progress until the provider advances, and terminal lifecycle
 evidence replaces running state rather than coexisting.
 Failure and interruption remain visible. Completed commands show separately retained command text,
-up to three output lines, exit/failure state, and explicit omission markers; file changes, tools,
-and searches use their typed path/name/query fields.
+up to three output lines, exit/failure state, and an explicit `… +N lines (t to view full output)`
+disclosure; when the provider already truncated evidence, the disclosure promises only the retained
+output. File changes, tools, and searches use their typed path/name/query fields.
 
 Raw executable paths, shell wrappers, complete bounded stdout/stderr, provider lifecycle text,
 and stable failure reasons belong in an expandable activity inspector. That inspector may show the
@@ -174,7 +175,9 @@ transcript. `t` opens an in-pane inspector for the selected item. On a wide term
 bounded lower region of the Conversation pane; on a compact terminal it is an ordinary secondary
 screen with `h`/Left/Esc returning to the same transcript item. The inspector contains the existing
 typed routing, semantics, evidence, and activity sections, including exact IDs and raw activity
-detail.
+detail. For a completed command it includes every retained command and output line plus the exit
+status. `j`/`k` scroll that detail, while `t`, `h`, Left, or Esc closes it without moving the
+conversation selection.
 
 The inspector is visually and behaviorally distinct from the modeless draft. Opening technical
 details never closes or overwrites a saved draft. If the draft needs the same lower region, the

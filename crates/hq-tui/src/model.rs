@@ -2281,6 +2281,7 @@ struct UiSectionWorkspace {
     conversation: Option<UiConversation>,
     conversation_anchor: Option<String>,
     technical_visible: bool,
+    technical_scroll: u16,
     focus: UiFocus,
     conversation_failure: Option<ConversationFailure>,
 }
@@ -2321,6 +2322,7 @@ pub struct UiModel {
     observation_mode: UiObservationMode,
     conversation_anchor: Option<String>,
     technical_visible: bool,
+    technical_scroll: u16,
     mailbox_modal: Option<UiMailboxModal>,
     mailbox_draft: Option<UiMailboxDraftPane>,
     agent_modal: Option<UiAgentModal>,
@@ -2385,6 +2387,7 @@ impl UiModel {
             observation_mode: UiObservationMode::SnapshotFallback,
             conversation_anchor: None,
             technical_visible: false,
+            technical_scroll: 0,
             mailbox_modal: None,
             mailbox_draft: None,
             agent_modal: None,
@@ -2655,6 +2658,11 @@ impl UiModel {
     /// Reports whether typed technical disclosure is expanded.
     pub const fn technical_visible(&self) -> bool {
         self.technical_visible
+    }
+
+    /// Returns the selected detail inspector's logical vertical scroll offset.
+    pub const fn technical_scroll(&self) -> u16 {
+        self.technical_scroll
     }
 
     /// Borrows the current mailbox interaction, when a modal is open.
@@ -3184,6 +3192,7 @@ impl UiModel {
             conversation: self.conversation.clone(),
             conversation_anchor: self.conversation_anchor.clone(),
             technical_visible: self.technical_visible,
+            technical_scroll: self.technical_scroll,
             focus: self.focus,
             conversation_failure: self.conversation_failure.clone(),
         });
@@ -3196,6 +3205,7 @@ impl UiModel {
             self.conversation = workspace.conversation;
             self.conversation_anchor = workspace.conversation_anchor;
             self.technical_visible = workspace.technical_visible;
+            self.technical_scroll = workspace.technical_scroll;
             self.focus = workspace.focus;
             self.conversation_failure = workspace.conversation_failure;
         } else {
@@ -3203,6 +3213,7 @@ impl UiModel {
             self.conversation = None;
             self.conversation_anchor = None;
             self.technical_visible = false;
+            self.technical_scroll = 0;
             self.focus = UiFocus::Navigation;
             self.conversation_failure = None;
         }
@@ -3300,6 +3311,38 @@ impl UiModel {
         } else {
             self.conversation_anchor = Some(selected);
             self.technical_visible = false;
+            self.technical_scroll = 0;
+            true
+        }
+    }
+
+    fn toggle_technical_details(&mut self) -> bool {
+        if self.focus != UiFocus::Conversation || self.conversation_anchor.is_none() {
+            return false;
+        }
+        self.technical_visible = !self.technical_visible;
+        self.technical_scroll = 0;
+        true
+    }
+
+    fn close_technical_details(&mut self) {
+        self.technical_visible = false;
+        self.technical_scroll = 0;
+    }
+
+    fn scroll_technical_details(&mut self, forward: bool) -> bool {
+        if !self.technical_visible {
+            return false;
+        }
+        let next = if forward {
+            self.technical_scroll.saturating_add(1)
+        } else {
+            self.technical_scroll.saturating_sub(1)
+        };
+        if next == self.technical_scroll {
+            false
+        } else {
+            self.technical_scroll = next;
             true
         }
     }
@@ -3316,7 +3359,7 @@ impl UiModel {
     fn close_conversation(&mut self) {
         self.conversation = None;
         self.conversation_anchor = None;
-        self.technical_visible = false;
+        self.close_technical_details();
         self.pending_conversation = None;
         if self.focus == UiFocus::Conversation {
             self.focus = UiFocus::Content;
@@ -3500,7 +3543,7 @@ impl UiModel {
             next_cursor: None,
         });
         self.conversation_anchor = None;
-        self.technical_visible = false;
+        self.close_technical_details();
     }
 
     fn clear_project_filter(&mut self) {
@@ -4180,7 +4223,7 @@ fn apply_input(
         UiInput::MoveCursorLeft => match model.focus {
             UiFocus::Conversation => {
                 if model.technical_visible {
-                    model.technical_visible = false;
+                    model.close_technical_details();
                 } else {
                     model.focus = UiFocus::Content;
                 }
@@ -4201,6 +4244,9 @@ fn apply_input(
             UiFocus::Draft => false,
         },
         UiInput::NextItem => match model.focus {
+            UiFocus::Conversation if model.technical_visible => {
+                model.scroll_technical_details(true)
+            }
             UiFocus::Conversation => model.move_conversation_anchor(true),
             UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
                 model.change_section(model.section.next());
@@ -4210,6 +4256,9 @@ fn apply_input(
             UiFocus::Draft => false,
         },
         UiInput::PreviousItem => match model.focus {
+            UiFocus::Conversation if model.technical_visible => {
+                model.scroll_technical_details(false)
+            }
             UiFocus::Conversation => model.move_conversation_anchor(false),
             UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
                 model.change_section(model.section.previous());
@@ -8055,7 +8104,7 @@ fn mailbox_shortcut(
         'h' => {
             match model.focus {
                 UiFocus::Conversation if model.technical_visible => {
-                    model.technical_visible = false;
+                    model.close_technical_details();
                 }
                 UiFocus::Conversation => model.focus = UiFocus::Content,
                 UiFocus::Content => model.focus = UiFocus::Navigation,
@@ -8066,6 +8115,7 @@ fn mailbox_shortcut(
             }
             Ok(true)
         }
+        't' => Ok(model.toggle_technical_details()),
         'l' => match model.focus {
             UiFocus::Navigation if model.viewport.width < WIDE_WIDTH => {
                 model.change_section(model.section.next());
@@ -8201,8 +8251,7 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
         return Ok(true);
     }
     if model.focus == UiFocus::Conversation && model.conversation_anchor.is_some() {
-        model.technical_visible = !model.technical_visible;
-        return Ok(true);
+        return Ok(model.toggle_technical_details());
     }
     if model.section == UiSection::Agents {
         let Some(agent) = selected_agent(model).cloned() else {
@@ -8252,7 +8301,7 @@ fn load_more(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, U
 
 fn escape(model: &mut UiModel) -> bool {
     if model.technical_visible {
-        model.technical_visible = false;
+        model.close_technical_details();
         true
     } else if model.conversation.is_some() {
         model.close_conversation();
@@ -8768,7 +8817,7 @@ fn append_pending_message(
     place_live_activity_at_tail(&mut conversation.entries);
     model.conversation_anchor = Some(id.clone());
     model.focus = UiFocus::Conversation;
-    model.technical_visible = false;
+    model.close_technical_details();
     Some(id)
 }
 
@@ -8800,7 +8849,7 @@ fn reconcile_committed_message(
         }
         model.conversation_anchor = Some(existing_id);
         model.focus = UiFocus::Conversation;
-        model.technical_visible = false;
+        model.close_technical_details();
         return;
     }
     let id = format!("committed-message:{message_id:?}");
@@ -8825,7 +8874,7 @@ fn reconcile_committed_message(
         });
         model.conversation_anchor = Some(id);
         model.focus = UiFocus::Conversation;
-        model.technical_visible = false;
+        model.close_technical_details();
         return;
     }
     conversation.entries.push(UiConversationEntry {
@@ -8849,7 +8898,7 @@ fn reconcile_committed_message(
     place_live_activity_at_tail(&mut conversation.entries);
     model.conversation_anchor = Some(id);
     model.focus = UiFocus::Conversation;
-    model.technical_visible = false;
+    model.close_technical_details();
 }
 
 fn mailbox_command_failed(

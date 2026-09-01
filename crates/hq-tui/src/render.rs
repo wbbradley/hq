@@ -3656,18 +3656,34 @@ fn render_technical_inspector(
         UiConversationEntryPresentation::Activity { .. } => "Activity details",
     };
     let mut lines = vec![Line::styled(heading, theme.style(UiThemeRole::Heading))];
-    if let UiConversationEntryPresentation::Activity { detail, .. } = &entry.presentation {
+    if let UiConversationEntryPresentation::Activity {
+        detail, completed, ..
+    } = &entry.presentation
+    {
         lines.push(Line::from(detail.clone()));
+        if let Some(completed) = completed {
+            lines.extend(
+                completed_item_detail_lines(completed)
+                    .into_iter()
+                    .map(Line::from),
+            );
+        }
     }
     for section in &entry.technical {
         append_technical_section(&mut lines, section, theme);
     }
     lines.push(Line::default());
     lines.push(Line::styled(
-        "h/← close details · ? help",
+        "j/k scroll · t/h/← close details · ? help",
         theme.style(UiThemeRole::TextMuted),
     ));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let maximum_scroll = paragraph
+        .line_count(inner.width)
+        .saturating_sub(usize::from(inner.height));
+    let scroll = usize::from(model.technical_scroll()).min(maximum_scroll);
+    let scroll = u16::try_from(scroll).unwrap_or(u16::MAX);
+    frame.render_widget(paragraph.scroll((scroll, 0)), inner);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3957,7 +3973,14 @@ fn activity_preview(entry: &UiConversationEntry, width: u16) -> Vec<String> {
                 lines.push(format!("{}{}", if index == 0 { "$ " } else { "  " }, line));
             }
             if *command_truncated || command_lines.len() > PREVIEW_LINES {
-                lines.push("  … command truncated".to_owned());
+                lines.push(format!(
+                    "  {}",
+                    preview_omission(
+                        command_lines.len().saturating_sub(PREVIEW_LINES),
+                        *command_truncated,
+                        "command"
+                    )
+                ));
             }
             if let Some(output) = output {
                 let output_lines = output.lines().collect::<Vec<_>>();
@@ -3968,7 +3991,14 @@ fn activity_preview(entry: &UiConversationEntry, width: u16) -> Vec<String> {
                         .map(|line| format!("│ {line}")),
                 );
                 if *output_truncated || output_lines.len() > PREVIEW_LINES {
-                    lines.push("│ … output truncated".to_owned());
+                    lines.push(format!(
+                        "│ {}",
+                        preview_omission(
+                            output_lines.len().saturating_sub(PREVIEW_LINES),
+                            *output_truncated,
+                            "output"
+                        )
+                    ));
                 }
             }
         }
@@ -4001,6 +4031,59 @@ fn activity_preview(entry: &UiConversationEntry, width: u16) -> Vec<String> {
         .into_iter()
         .map(|line| clipped_preview_line(&line, usize::from(width)))
         .collect()
+}
+
+fn preview_omission(known_lines: usize, source_truncated: bool, subject: &str) -> String {
+    if known_lines == 0 {
+        return format!("… more {subject} omitted (t to view retained {subject})");
+    }
+    let noun = if known_lines == 1 { "line" } else { "lines" };
+    if source_truncated {
+        format!("… +{known_lines} or more {noun} (t to view retained {subject})")
+    } else {
+        format!("… +{known_lines} {noun} (t to view full {subject})")
+    }
+}
+
+fn completed_item_detail_lines(completed: &UiCompletedItemPresentation) -> Vec<String> {
+    let UiCompletedItemPresentation::Command {
+        command,
+        output,
+        exit_code,
+        command_truncated,
+        output_truncated,
+    } = completed
+    else {
+        return Vec::new();
+    };
+    let mut lines = vec!["Command".to_owned()];
+    lines.extend(
+        command
+            .lines()
+            .enumerate()
+            .map(|(index, line)| format!("{}{}", if index == 0 { "$ " } else { "  " }, line)),
+    );
+    if *command_truncated {
+        lines.push("… command truncated at the provider boundary".to_owned());
+    }
+    lines.push("Output".to_owned());
+    if let Some(output) = output {
+        if output.is_empty() {
+            lines.push("(no output)".to_owned());
+        } else {
+            lines.extend(output.lines().map(|line| format!("│ {line}")));
+        }
+    } else {
+        lines.push("(no output)".to_owned());
+    }
+    if *output_truncated {
+        lines.push("… output truncated at the provider boundary".to_owned());
+    }
+    lines.push(exit_code.map_or_else(
+        || "Exit code: unavailable".to_owned(),
+        |code| format!("Exit code: {code}"),
+    ));
+    lines
 }
 
 fn clipped_preview_line(value: &str, width: usize) -> String {
@@ -4297,12 +4380,12 @@ fn conversation_footer(model: &UiModel) -> String {
         conversation.entries.iter().find(|entry| entry.id == anchor)
     });
     if model.technical_visible() {
-        return " h/← close details · ? help".to_owned();
+        return " j/k scroll · t/h/← close details · ? help".to_owned();
     }
     let mut controls = vec![if model.viewport().width >= WIDE_WIDTH {
         "↑/↓ or j/k message"
     } else {
-        "j/k msg"
+        "j/k"
     }];
     if matches!(
         model
@@ -4324,9 +4407,9 @@ fn conversation_footer(model: &UiModel) -> String {
         Some((_, UiMessageState::Rejected)) | None => {}
     }
     controls.push(if model.viewport().width >= WIDE_WIDTH {
-        "Enter details"
+        "t/Enter details"
     } else {
-        "Enter info"
+        "t/Enter info"
     });
     controls.push("h/← Inbox");
     controls.push("? help");
@@ -4435,8 +4518,8 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
 #[cfg(test)]
 mod tests {
     use super::{
-        activity_preview, conversation_entry_layout, display_prefix, display_suffix,
-        draft_context_label, inbox_list_width, inert_draft_source,
+        activity_preview, completed_item_detail_lines, conversation_entry_layout, display_prefix,
+        display_suffix, draft_context_label, inbox_list_width, inert_draft_source,
         interaction_supersedes_live_tail, navigation_width, text_field_line,
         visible_conversation_entries,
     };
@@ -4624,7 +4707,7 @@ mod tests {
         );
         assert_eq!(
             preview.last().map(String::as_str),
-            Some("│ … output truncated")
+            Some("│ … +1 line (t to view full output)")
         );
 
         let mut cache = super::UiRenderCache::new();
@@ -4633,6 +4716,32 @@ mod tests {
             u16::try_from(preview.len())
                 .unwrap_or(u16::MAX)
                 .saturating_add(1)
+        );
+    }
+
+    #[test]
+    fn completed_command_details_include_every_retained_output_line() {
+        let completed = UiCompletedItemPresentation::Command {
+            command: "printf one\nprintf two".to_owned(),
+            output: Some("one\ntwo\nthree\nfour".to_owned()),
+            exit_code: Some(17),
+            command_truncated: false,
+            output_truncated: false,
+        };
+
+        assert_eq!(
+            completed_item_detail_lines(&completed),
+            [
+                "Command",
+                "$ printf one",
+                "  printf two",
+                "Output",
+                "│ one",
+                "│ two",
+                "│ three",
+                "│ four",
+                "Exit code: 17",
+            ]
         );
     }
 

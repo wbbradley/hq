@@ -87,7 +87,10 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
     ));
     assert!(archived.contains("u restore"));
     assert!(!archived.contains("a archive"));
-    assert!(archived.contains("u restore · Enter info · h/← Inbox · ? help"));
+    assert!(
+        archived.contains("u restore · t/Enter info · h/← Inbox · ? help"),
+        "{archived}"
+    );
 
     let confirmation = update(
         conversation_model(UiSize {

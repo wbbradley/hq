@@ -1758,6 +1758,27 @@ fn inbox_back_closes_technical_details_before_leaving_the_conversation() {
 }
 
 #[test]
+fn t_toggles_selected_details_and_jk_scroll_the_full_output() {
+    let model = opened_conversation(vec![entry("message-1", false)]);
+
+    let details =
+        update(model, UiEvent::Input(UiInput::Character('t'))).expect("open details with t");
+    assert!(details.model.technical_visible());
+    assert_eq!(details.model.technical_scroll(), 0);
+
+    let scrolled = update(details.model, UiEvent::Input(UiInput::Character('j')))
+        .expect("scroll details down");
+    assert_eq!(scrolled.model.technical_scroll(), 1);
+    let restored =
+        update(scrolled.model, UiEvent::Input(UiInput::Character('k'))).expect("scroll details up");
+    assert_eq!(restored.model.technical_scroll(), 0);
+
+    let closed = update(restored.model, UiEvent::Input(UiInput::Character('t')))
+        .expect("close details with t");
+    assert!(!closed.model.technical_visible());
+}
+
+#[test]
 fn older_page_failure_preserves_transcript_anchor_and_retry_cursor() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),

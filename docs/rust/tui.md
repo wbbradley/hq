@@ -233,7 +233,10 @@ Returned message/activity unions remain in reducer order. The page mapper classi
 never become routing authority. It maps the closed status, agent-turn, progress, plan, diff, and
 completed-item activity kinds without parsing content. The current live row shows the latest
 non-empty progress text or `Agent is working…`; typed command rows show command source, up to three
-terminal-safe output lines, exit/failure state, and omission markers. File, tool, and web-search
+terminal-safe output lines, exit/failure state, and a `… +N lines (t to view full output)`
+disclosure. A selected command's scrollable inspector shows every retained command and output line
+plus its exit status; provider-boundary truncation is identified as retained rather than complete.
+File, tool, and web-search
 rows show typed path counts/names/queries while preserving exact bounded detail and complete
 correlation metadata in the inspector. Activity remains non-actionable. The mapper also exposes only uniquely
 named, uniquely bound, non-retired agent mailboxes as passive direct-target candidates. The protocol
@@ -533,8 +536,10 @@ Inbox draft, one opens the exact conversation, and many shows the visible projec
 Manage project exposes only labeled actions valid for the typed lifecycle and selected object;
 ordinary delivery is automatic and raw provider sessions never stand in for conversations.
 
-Technical evidence is preserved, not translated away. Detail views and the `?` then `t` page label
-project, resource, assignment, message, request, provider/session, thread, revision, frontier,
+Technical evidence is preserved, not translated away. In a focused conversation, plain `t`
+toggles the selected item's scrollable detail and `j`/`k` scroll it; inside contextual help, `t`
+instead selects the technical-reference page. Those detail surfaces project, resource, assignment,
+message, request, provider/session, thread, revision, frontier,
 runtime, and recovery values as technical. Exceptional outcomes lead with `still finishing`,
 `could not make this change`, or `could not confirm whether the change finished`, then show the
 exact state/category/code, request identity, retained external state, and retry guidance. Routine
