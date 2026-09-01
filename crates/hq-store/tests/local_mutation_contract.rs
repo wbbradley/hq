@@ -27,7 +27,7 @@ use support::{
 fn committed_retry_conflict_and_remote_ingest_share_one_canonical_engine() {
     let local_directory = TestDirectory::new();
     let remote_directory = TestDirectory::new();
-    let (local, invalidations) = Store::open_with_invalidations(
+    let (local, mut invalidations) = Store::open_with_invalidations(
         local_directory.database_path(),
         NonZeroUsize::new(4).expect("capacity is nonzero"),
     )
@@ -126,7 +126,7 @@ fn committed_retry_conflict_and_remote_ingest_share_one_canonical_engine() {
 fn rejection_is_atomic_replayable_and_signing_failure_leaves_no_trace() {
     let directory = TestDirectory::new();
     let database = directory.database_path();
-    let (store, invalidations) = Store::open_with_invalidations(
+    let (store, mut invalidations) = Store::open_with_invalidations(
         &database,
         NonZeroUsize::new(4).expect("capacity is nonzero"),
     )

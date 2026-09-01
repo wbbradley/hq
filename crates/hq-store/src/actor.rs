@@ -5,11 +5,7 @@ use std::{
     fmt,
     num::NonZeroUsize,
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, SyncSender, TryRecvError},
-    },
+    sync::mpsc::{self, Receiver, SyncSender},
     thread::{self, JoinHandle},
 };
 
@@ -22,6 +18,7 @@ use hq_domain::{
 };
 use hq_protocol::VerifiedSemanticFact;
 use hq_reducer::{AuthorityPolicy, ConversationKey};
+use tokio::sync::watch;
 
 use crate::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
@@ -55,33 +52,53 @@ impl IngestOutcome {
     }
 }
 
-/// Capacity-one coalesced post-commit revision observer.
+/// Latest-value coalesced post-commit revision observer.
 #[derive(Debug)]
 pub struct RevisionInvalidations {
-    wakes: Receiver<()>,
-    latest: Arc<AtomicU64>,
+    revisions: watch::Receiver<u64>,
 }
 
 impl RevisionInvalidations {
     /// Returns the latest committed revision when one or more wakes are pending.
-    pub fn try_revision(&self) -> Option<Revision> {
-        match self.wakes.try_recv() {
-            Ok(()) => Some(Revision::new(self.latest.load(Ordering::Acquire))),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+    pub fn try_revision(&mut self) -> Option<Revision> {
+        match self.revisions.has_changed() {
+            Ok(true) => Some(Revision::new(*self.revisions.borrow_and_update())),
+            Ok(false) | Err(_) => None,
         }
+    }
+
+    /// Waits until a later committed revision is available or the store worker closes.
+    pub async fn next_revision(&mut self) -> Option<Revision> {
+        self.revisions.changed().await.ok()?;
+        Some(Revision::new(*self.revisions.borrow_and_update()))
     }
 }
 
 struct InvalidationEmitter {
-    wakes: SyncSender<()>,
-    latest: Arc<AtomicU64>,
+    revisions: watch::Sender<u64>,
 }
 
 impl InvalidationEmitter {
     fn publish(&self, revision: Revision) {
-        self.latest.store(revision.value(), Ordering::Release);
-        let _ = self.wakes.try_send(());
+        let next = revision.value();
+        self.revisions.send_if_modified(|current| {
+            if next <= *current {
+                return false;
+            }
+            *current = next;
+            true
+        });
     }
+}
+
+fn revision_channel() -> (InvalidationEmitter, RevisionInvalidations) {
+    let (revisions, receiver) = watch::channel(0);
+    (
+        InvalidationEmitter { revisions },
+        RevisionInvalidations {
+            revisions: receiver,
+        },
+    )
 }
 
 /// Complete reducer-ready facts reconstructed from the immutable corpus.
@@ -884,7 +901,7 @@ impl Store {
         Self::open_with_invalidations(path, capacity).map(|(store, _)| store)
     }
 
-    /// Opens storage and returns its capacity-one coalesced post-commit observer.
+    /// Opens storage and returns its latest-value coalesced post-commit observer.
     pub fn open_with_invalidations(
         path: impl AsRef<Path>,
         capacity: NonZeroUsize,
@@ -892,12 +909,7 @@ impl Store {
         let path = path.as_ref().to_path_buf();
         let (requests, receiver) = mpsc::sync_channel(capacity.get());
         let (started, startup) = mpsc::sync_channel(1);
-        let (wakes, wake_receiver) = mpsc::sync_channel(1);
-        let latest = Arc::new(AtomicU64::new(0));
-        let emitter = InvalidationEmitter {
-            wakes,
-            latest: Arc::clone(&latest),
-        };
+        let (emitter, invalidations) = revision_channel();
         let worker = thread::Builder::new()
             .name("hq-store".to_owned())
             .spawn(move || run(&path, &receiver, &started, &emitter))
@@ -908,10 +920,7 @@ impl Store {
                     requests,
                     worker: Some(worker),
                 },
-                RevisionInvalidations {
-                    wakes: wake_receiver,
-                    latest,
-                },
+                invalidations,
             )),
             Ok(Err(error)) => {
                 let _ = worker.join();
@@ -1528,7 +1537,9 @@ mod tests {
         thread,
     };
 
-    use super::{Request, Store};
+    use hq_domain::Revision;
+
+    use super::{Request, Store, revision_channel};
     use crate::StoreErrorClass;
 
     #[test]
@@ -1536,6 +1547,45 @@ mod tests {
         let (sender, _receiver) = sync_channel(1);
         sender.try_send(1).expect("first request fits");
         assert_eq!(sender.try_send(2), Err(TrySendError::Full(2)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn revision_observer_delivers_preexisting_and_concurrent_wakes_without_loss() {
+        let (emitter, mut invalidations) = revision_channel();
+        emitter.publish(Revision::new(2));
+        assert_eq!(invalidations.next_revision().await, Some(Revision::new(2)));
+
+        let publish = async {
+            tokio::task::yield_now().await;
+            emitter.publish(Revision::new(3));
+        };
+        let observe = invalidations.next_revision();
+        let ((), revision) = tokio::join!(publish, observe);
+        assert_eq!(revision, Some(Revision::new(3)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn revision_observer_coalesces_to_the_greatest_revision_and_closes() {
+        let (emitter, mut invalidations) = revision_channel();
+        emitter.publish(Revision::new(4));
+        emitter.publish(Revision::new(6));
+        emitter.publish(Revision::new(5));
+        assert_eq!(invalidations.next_revision().await, Some(Revision::new(6)));
+        assert_eq!(invalidations.try_revision(), None);
+
+        drop(emitter);
+        assert_eq!(invalidations.next_revision().await, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_shutdown_closes_its_revision_observer() {
+        let (root, database) = test_path();
+        let (store, mut invalidations) =
+            Store::open_with_invalidations(&database, NonZeroUsize::MIN).expect("store opens");
+
+        store.close().expect("store closes");
+        assert_eq!(invalidations.next_revision().await, None);
+        fs::remove_dir_all(root).expect("test state cleans up");
     }
 
     #[test]

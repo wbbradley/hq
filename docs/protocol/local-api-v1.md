@@ -321,6 +321,12 @@ Each active subscriber has one nonblocking coalescing wake slot. New wakes union
 retain the greatest revision, and set `full_snapshot` if any coalesced wake requires it. A slow or
 nonreading subscriber never blocks a commit.
 
+The store-to-server wake has the same bounded shape before fanout: the synchronous store worker
+replaces one latest committed revision without blocking, and the local-session pump awaits that
+value directly alongside listener and session readiness. The pump publishes the greatest revision
+to the subscription hub and attempts at most one coalesced invalidation per active session at that
+safe point. Normal delivery has no polling interval, and the wire notification remains body-free.
+
 After reconnect, a client renegotiates and derives a new registration ID from its stable local
 subscription seed plus the server's ephemeral session ID. It accepts the registration
 acknowledgement's authoritative full snapshot as a fresh base and only then treats invalidations as

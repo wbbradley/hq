@@ -7,6 +7,8 @@ mod support;
 
 use std::{num::NonZeroUsize, os::unix::net::UnixStream};
 
+use hq_application::{ObserveRevisions, SubscriptionRequest, SubscriptionTopic};
+use hq_domain::{InstallationId, MailboxId, OperationId, Revision};
 use hq_local_api::{
     RevisionHub,
     protocol::v1::{BuildMetadata, ClientHello, Id32, V1, VersionRange, WireMessage},
@@ -16,6 +18,8 @@ use hq_node::{
     LocalSessionPumpEvent, LocalSessionPumpStartError, LocalSessionRegistryConfig, NodeFoundation,
     NodeFoundationConfig, RuntimeArtifactErrorClass, RuntimePaths, StateDirectoryOwner, StatePaths,
 };
+use hq_protocol::{Bip340Signer, DispatchOutcome, VerifiedSemanticFact};
+use hq_reducer::AuthorityPolicy;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use support::{TestDirectory, UnavailableLifecycle, unavailable_application};
@@ -75,6 +79,61 @@ fn config(session_capacity: usize) -> LocalSessionPumpConfig {
         },
         boot_nonce: Id32::new([121; 32]),
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn committed_revision_wins_one_dispatch_then_listener_pressure_progresses() {
+    let directory = TestDirectory::new();
+    let (mut foundation, runtime) = foundation(&directory);
+    let hub = RevisionHub::new(2).expect("hub capacity");
+    let subscription_id = OperationId::from_bytes([91; 32]);
+    hub.register_subscription(
+        &SubscriptionRequest::new(subscription_id, [SubscriptionTopic::All])
+            .expect("subscription request"),
+    )
+    .expect("subscription registers");
+    hub.activate_subscription(subscription_id)
+        .expect("subscription activates");
+    let application = unavailable_application(hub.clone());
+    let mut pump = LocalSessionPump::start(&mut foundation, config(1), hub.clone(), build())
+        .expect("session pump starts");
+
+    let drive = pump.drive_next(&application, &UnavailableLifecycle);
+    let publish_and_connect = async {
+        tokio::task::yield_now().await;
+        let outcome = foundation
+            .store()
+            .expect("store remains owned")
+            .ingest_verified(store_wake_fixture(), store_wake_policy())
+            .expect("fixture commits");
+        (outcome.revision(), connect(&runtime))
+    };
+    let (event, (revision, client)) = tokio::join!(drive, publish_and_connect);
+    assert!(matches!(
+        event,
+        LocalSessionPumpEvent::StoreInvalidated {
+            revision: observed,
+            ..
+        } if observed == revision && observed == Revision::new(1)
+    ));
+    let notice = hub
+        .take(subscription_id)
+        .expect("subscription remains known")
+        .expect("revision reaches active subscriber");
+    assert_eq!(notice.revision(), Revision::new(1));
+    assert_eq!(notice.topics().len(), 1);
+    assert!(notice.topics().contains(&SubscriptionTopic::All));
+    assert!(notice.full_snapshot());
+    assert!(matches!(
+        pump.drive_next(&application, &UnavailableLifecycle).await,
+        LocalSessionPumpEvent::Accepted { .. }
+    ));
+
+    drop(client);
+    let report = pump.shutdown().await;
+    assert_eq!(report.sessions.closed_sessions, 1);
+    assert_eq!(report.sessions.joined_tasks, 1);
+    foundation.shutdown().expect("foundation cleanup");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -294,4 +353,33 @@ async fn listener_transfer_is_once_only_and_invalid_nonce_does_not_consume_it() 
     let report = pump.shutdown().await;
     assert!(report.listener_closed);
     foundation.shutdown().expect("foundation cleanup");
+}
+
+fn store_wake_policy() -> AuthorityPolicy {
+    AuthorityPolicy::new(
+        InstallationId::from_bytes([0x11; 32]),
+        MailboxId::from_bytes([0x33; 32]),
+    )
+}
+
+fn store_wake_fixture() -> VerifiedSemanticFact {
+    const CONTENT: &str = r#"{"p":"hq/canonical","v":1,"f":1,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":0,"scope":["local","1111111111111111111111111111111111111111111111111111111111111111"],"parents":[],"auth":[],"body":{"installation":"1111111111111111111111111111111111111111111111111111111111111111","signing":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","encryption":"2222222222222222222222222222222222222222222222222222222222222222","label":"wake-test"}}"#;
+    let signer = Bip340Signer::from_secret_bytes({
+        let mut secret = [0_u8; 32];
+        secret[31] = 1;
+        secret
+    })
+    .expect("fixture signer");
+    let event = signer
+        .sign(0, CONTENT.as_bytes(), [7; 32])
+        .expect("fixture signs");
+    let DispatchOutcome::Supported(supported) = event.dispatch().expect("fixture dispatches")
+    else {
+        panic!("fixture protocol is supported");
+    };
+    supported
+        .decode_v1()
+        .expect("fixture DTO verifies")
+        .into_semantic_fact()
+        .expect("fixture converts")
 }

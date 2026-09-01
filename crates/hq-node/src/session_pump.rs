@@ -1,6 +1,6 @@
 //! Fair asynchronous listener and local-session event pumping.
 
-use std::{error::Error, fmt, num::NonZeroU64, time::Duration};
+use std::{error::Error, fmt, num::NonZeroU64};
 
 use hq_application::{Application, ApplicationPorts, SubscriptionTopic};
 use hq_domain::Revision;
@@ -17,8 +17,6 @@ use crate::{
     LocalSessionShutdownReport, NodeFoundation, RuntimeArtifactErrorClass,
     local_transport::BoundLocalListener,
 };
-
-const STORE_INVALIDATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Plain fixed capacities and boot-local identity seed for one listener/session pump.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,7 +127,7 @@ pub struct LocalSessionPump {
     listener: Option<AsyncFd<BoundLocalListener>>,
     sessions: LocalSessionRegistry,
     revisions: RevisionHub,
-    store_invalidations: RevisionInvalidations,
+    store_invalidations: Option<RevisionInvalidations>,
     boot_nonce: Id32,
     next_connection: Option<NonZeroU64>,
     prefer_listener: bool,
@@ -159,7 +157,7 @@ impl LocalSessionPump {
             listener: Some(listener),
             sessions,
             revisions: hub,
-            store_invalidations,
+            store_invalidations: Some(store_invalidations),
             boot_nonce: config.boot_nonce,
             next_connection: NonZeroU64::new(1),
             prefer_listener: true,
@@ -179,43 +177,52 @@ impl LocalSessionPump {
         enum Ready {
             Listener(Result<AcceptedLocalStream, RuntimeArtifactErrorClass>),
             Session(Option<LocalSessionDispatch>),
-            StoreInvalidation,
+            StoreInvalidation(Option<Revision>),
         }
 
         loop {
             if let Some(invalidation) = self.forward_store_invalidation() {
                 return invalidation;
             }
-            let store_poll = tokio::time::sleep(STORE_INVALIDATION_POLL_INTERVAL);
-            tokio::pin!(store_poll);
-            let ready = match (self.listener.as_ref(), self.sessions.task_count()) {
-                (None, 0) => return LocalSessionPumpEvent::Idle,
-                (Some(listener), 0) => tokio::select! {
-                    accepted = wait_for_peer(listener) => Ready::Listener(accepted),
-                    () = &mut store_poll => Ready::StoreInvalidation,
-                },
-                (None, _) => tokio::select! {
-                    dispatch = self.sessions.dispatch_next(application, lifecycle) => {
-                        Ready::Session(dispatch)
+            let ready = {
+                let store_ready = async {
+                    match self.store_invalidations.as_mut() {
+                        Some(invalidations) => invalidations.next_revision().await,
+                        None => std::future::pending::<Option<Revision>>().await,
                     }
-                    () = &mut store_poll => Ready::StoreInvalidation,
-                },
-                (Some(listener), _) if self.prefer_listener => tokio::select! {
-                    biased;
-                    accepted = wait_for_peer(listener) => Ready::Listener(accepted),
-                    dispatch = self.sessions.dispatch_next(application, lifecycle) => {
-                        Ready::Session(dispatch)
-                    }
-                    () = &mut store_poll => Ready::StoreInvalidation,
-                },
-                (Some(listener), _) => tokio::select! {
-                    biased;
-                    dispatch = self.sessions.dispatch_next(application, lifecycle) => {
-                        Ready::Session(dispatch)
-                    }
-                    accepted = wait_for_peer(listener) => Ready::Listener(accepted),
-                    () = &mut store_poll => Ready::StoreInvalidation,
-                },
+                };
+                tokio::pin!(store_ready);
+                match (self.listener.as_ref(), self.sessions.task_count()) {
+                    (None, 0) => return LocalSessionPumpEvent::Idle,
+                    (Some(listener), 0) => tokio::select! {
+                        biased;
+                        revision = &mut store_ready => Ready::StoreInvalidation(revision),
+                        accepted = wait_for_peer(listener) => Ready::Listener(accepted),
+                    },
+                    (None, _) => tokio::select! {
+                        biased;
+                        revision = &mut store_ready => Ready::StoreInvalidation(revision),
+                        dispatch = self.sessions.dispatch_next(application, lifecycle) => {
+                            Ready::Session(dispatch)
+                        }
+                    },
+                    (Some(listener), _) if self.prefer_listener => tokio::select! {
+                        biased;
+                        revision = &mut store_ready => Ready::StoreInvalidation(revision),
+                        accepted = wait_for_peer(listener) => Ready::Listener(accepted),
+                        dispatch = self.sessions.dispatch_next(application, lifecycle) => {
+                            Ready::Session(dispatch)
+                        }
+                    },
+                    (Some(listener), _) => tokio::select! {
+                        biased;
+                        revision = &mut store_ready => Ready::StoreInvalidation(revision),
+                        dispatch = self.sessions.dispatch_next(application, lifecycle) => {
+                            Ready::Session(dispatch)
+                        }
+                        accepted = wait_for_peer(listener) => Ready::Listener(accepted),
+                    },
+                }
             };
 
             match ready {
@@ -245,20 +252,29 @@ impl LocalSessionPump {
                     };
                 }
                 Ready::Session(None) => return LocalSessionPumpEvent::Idle,
-                Ready::StoreInvalidation => {}
+                Ready::StoreInvalidation(Some(revision)) => {
+                    return self.publish_store_invalidation(revision);
+                }
+                Ready::StoreInvalidation(None) => {
+                    self.store_invalidations = None;
+                }
             }
         }
     }
 
     fn forward_store_invalidation(&mut self) -> Option<LocalSessionPumpEvent> {
-        let revision = self.store_invalidations.try_revision()?;
+        let revision = self.store_invalidations.as_mut()?.try_revision()?;
+        Some(self.publish_store_invalidation(revision))
+    }
+
+    fn publish_store_invalidation(&mut self, revision: Revision) -> LocalSessionPumpEvent {
         let _ = self
             .revisions
             .publish(revision, [SubscriptionTopic::All], true);
-        Some(LocalSessionPumpEvent::StoreInvalidated {
+        LocalSessionPumpEvent::StoreInvalidated {
             revision,
             invalidations: self.sessions.flush_invalidations(),
-        })
+        }
     }
 
     /// Drops listener readiness and closes future registry admission without closing live sessions.

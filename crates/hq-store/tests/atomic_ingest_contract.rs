@@ -18,7 +18,7 @@ use support::{
 fn ingest_materializes_every_package_and_duplicate_replay_is_an_exact_noop() {
     let directory = TestDirectory::new();
     let database = directory.database_path();
-    let (store, invalidations) = Store::open_with_invalidations(
+    let (store, mut invalidations) = Store::open_with_invalidations(
         &database,
         NonZeroUsize::new(4).expect("capacity is nonzero"),
     )

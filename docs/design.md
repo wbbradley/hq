@@ -135,6 +135,12 @@ after the acknowledgement response is written; queued changes at or below that r
 discarded and every newer coalesced revision wakes the client. Per-subscriber queues have size one,
 socket writes happen outside the commit path, and disconnect removes the subscription.
 
+The synchronous store actor publishes each committed revision by replacing one latest-value wake;
+publication neither waits for Tokio nor allocates per subscriber. The daemon's sole local-session
+pump awaits that observer directly alongside listener and session readiness, publishes the greatest
+revision into the shared subscription hub, and performs one bounded nonblocking socket-delivery
+pass. There is no timer between a normal store commit and daemon invalidation delivery.
+
 The TUI and Codex bridge subscribe before their initial snapshots. CLI `ask` and `wait` do the same.
 All reload authoritative state on invalidation or reconnect and keep a five-minute periodic repair
 fallback. TUI drafts, focus, and selection survive reloads.

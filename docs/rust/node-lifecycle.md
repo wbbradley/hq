@@ -253,11 +253,15 @@ foundation retains the socket pathname and device/inode cleanup identity. Founda
 unlinks the socket while that lease is live. Normal pump drain drops the readiness owner first, so
 the subsequent foundation cleanup can remove only its exact now-closed socket.
 
-The sole pump selects between listener readiness and registry progress without a polling or accept
-task. When both are ready, it alternates preference so sustained connection pressure cannot starve
-session dispatch and a busy session cannot starve accept. Readiness is cleared through Tokio's
-`try_io` contract only after a nonblocking accept reports `WouldBlock`. Every accepted descriptor is
-kernel-validated before the pump derives its connection identity or attempts registry admission.
+The sole pump selects between store-revision, listener, and registry readiness without a polling or
+accept task. The synchronous store worker replaces one latest-revision Tokio wake after commit and
+never waits for a runtime or subscriber. A ready store wake receives one bounded dispatch, publishes
+the greatest revision to the shared hub, and attempts one nonblocking invalidation pass; once
+consumed it is no longer ready. Listener and session readiness otherwise alternate preference so
+sustained connection pressure cannot starve session dispatch and a busy session cannot starve
+accept. Readiness is cleared through Tokio's `try_io` contract only after a nonblocking accept
+reports `WouldBlock`. Every accepted descriptor is kernel-validated before the pump derives its
+connection identity or attempts registry admission.
 
 Connection IDs combine the fresh nonzero boot nonce with a checked nonzero monotonic counter. They
 are unique only within that process generation and grant no authority. A full or closed registry
