@@ -1,30 +1,5 @@
 # HQ
 
-## Product direction
-
-Design the TUI for people who have never seen HQ and do not know its internal vocabulary. Every
-screen and dialog must make clear what the user is looking at, why HQ needs their input, what they
-can do next, and what will happen afterward. Prefer user intentions and ordinary language over
-authority, reducer, provider-session, assignment, thread, reconciliation, and other implementation
-terms. Preserve exact technical evidence behind contextual details and recovery views.
-
-Keep these user workflows distinct and composable:
-
-- Projects define work and authoritative ownership of resources. Resource ownership is a core HQ
-  concern; Git worktree creation and lifecycle management are not the product's center and should
-  remain optional, progressively disclosed conveniences. Agents may eventually manage worktrees
-  themselves.
-- Agents are named workers that can be assigned to project work and contacted through
-  conversations. Starting work should hide routine provider-session and assignment mechanics.
-- Direct messaging, including future communication with other humans in the HQ network, remains a
-  first-class path rather than an awkward special case of project work.
-- Personal notes remain available without competing with the primary collaboration actions.
-
-Never require a user to guess a valid identifier, namespace, state transition, or recovery command
-when HQ already has enough typed information to present valid choices. Use progressive disclosure:
-ordinary screens explain goals and next actions; details screens expose stable IDs, causal evidence,
-provider/session identities, and recovery diagnostics.
-
 ## Next Up
 
 ### Keep Inbox details revision-coherent
@@ -87,8 +62,6 @@ Give immediate, truthful send feedback and move project sequencing/runtime deliv
 mailbox command response path. A human message is first shown locally as pending; its durable commit
 is acknowledged independently of later project reconciliation and provider submission.
 
-This task depends on **Keep TUI invalidation observation independent from commands**.
-
 - Enrich pending mailbox state in `crates/hq-tui/src/model.rs` so submitting a draft immediately
   places an optimistic local-human entry in the open conversation, anchored by the effect identity
   and labeled `Pending` before any daemon response. Preserve the exact draft body, target, and
@@ -130,67 +103,11 @@ Acceptance criteria:
 - Definite rejection preserves editable text; response loss and duplicate invalidations never
   author the message twice.
 
-#### Implementation plan
-
-1. Add pure-model tests in `crates/hq-tui/tests/model.rs` before changing submission state. Pin the
-   same-transition optimistic local-human row for reply, direct, self-note, and project drafts; its
-   effect-identity anchor, exact body/target retention, `Pending` delivery, conversation focus, and
-   live-activity tail ordering; committed canonical identity replacement with `Sent` for ordinary
-   messages and queued `Pending` for project messages; duplicate/stale completions; definite
-   rejection restoring the exact editable draft and removing only its optimistic row; and uncertain
-   completion retaining pending text without making a second authored row.
-2. Replace the copy-only `PendingMailbox` marker in `crates/hq-tui/src/model.rs` with submission state
-   that retains the draft, typed action, and optional optimistic entry identity. Insert the
-   optimistic entry before emitting `SubmitMailboxCommand`. Reconcile that exact row in place on a
-   committed receipt, preserve its logical anchor through reload, and let authoritative conversation
-   pages replace it by canonical message identity. Keep archive/restore state-only commands and
-   autosave/open-draft paths free of optimistic message rows.
-3. Add a project-component wake capability and test-first worker contracts in
-   `crates/hq-node/src/project_component.rs` and `crates/hq-node/tests/project_node_component.rs`.
-   Move reconciliation over shared immutable worker/input capabilities into one named component-owned
-   thread. A condition-variable latest-value signal must coalesce concurrent wakes, serialize each
-   reconciliation pass, continue immediately when a bounded pass truncates, retry durable failures
-   on the next wake or periodic repair, and perform a final pass before deterministic drain/join.
-   Startup repair must precede admission, and forced stop must wake and join without inventing
-   successful delivery evidence.
-4. Refactor `NodeApplicationPorts` in `crates/hq-node/src/components.rs` so a committed project
-   mailbox receipt schedules the reconciliation worker and returns immediately. Apply the same wake
-   to later relevant canonical commits instead of running project reconciliation in the request
-   dispatcher. Add component tests with a deliberately blocked project reconciler proving the
-   mailbox mutation receipt returns first, duplicate wakes coalesce, unrelated/noncommitted mailbox
-   outcomes do not schedule work, and wake failure after commit cannot rewrite the durable receipt.
-5. Retain the existing canonical project-input and dispatch planners unchanged. Add worker tests for
-   unrunnable inputs, delayed runtime/provider acceptance, rejected automatic commands, failure then
-   wake retry, truncation, startup recovery, periodic repair, and shutdown with a wake in flight.
-   The background owner must derive every retry from durable state; the in-memory wake carries no
-   message body, project identity, or provider payload.
-6. Extend `crates/hq-node/tests/tui_effect_executor.rs` and the installed PTY scenarios in
-   `crates/hq-node/tests/unix_tui_terminal.rs` so sending paints the local-human row before a blocked
-   command/provider path completes, terminal input and redraw remain responsive, the durable receipt
-   changes ordinary delivery to sent while project delivery stays queued, and authoritative
-   convergence produces no duplicate transcript row.
-7. Update `docs/projects.md`, `docs/protocol/local-api-v1.md`, and
-   `docs/rust/{tui,acceptance-scenarios,behavior-ledger}.md` with the distinct optimistic submission,
-   durable mailbox commit, accepted project input, dispatch, and provider-delivery evidence. Run
-   formatting, architecture and qualification validation, strict workspace Clippy, focused
-   model/component/executor/PTY tests, and the complete locked all-target/all-feature workspace
-   suite. Commit with a Conventional Commit, remove this task from `PLAN.md`, and append its
-   implementation summary plus this complete original entry to `COMPLETED.md`.
-
-Risks and open questions: an optimistic row has no canonical message identity until the receipt and
-must never be mistaken for action authority; response loss must retain one stable in-flight command
-without enabling a duplicate submission; a wake can be lost after commit or during process death so
-startup/periodic repair must remain sufficient; the background worker shares command/input adapters
-with foreground project operations and therefore requires explicit serialization/thread-safety
-bounds; and shutdown must not deadlock when reconciliation is blocked in a bounded provider call.
-
 ### Let humans resolve provider requests
 
 Expose provider-neutral questions, command/file approvals, permission requests, and MCP
 elicitations through the local API and TUI. When no explicitly registered responder can receive
 them, fail closed immediately instead of leaving an agent blocked invisibly.
-
-This task depends on **Keep TUI invalidation observation independent from commands**.
 
 - Keep `hq-harness` as the provider-neutral request/response owner, but add application-level
   passive interaction records and query/control ports instead of importing provider or supervisor
@@ -281,34 +198,3 @@ Acceptance criteria:
   terminal lifecycle evidence determines the tail.
 - Canonical facts and bounded technical evidence remain retained when ordinary presentation stops
   treating them as live.
-
-## Post-Plan Execution Steps
-
-Execute these steps in order:
-
-### Implement
-Execute the plan above.
-
-**Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
-make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
-`Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
-
-### Verify
-
-1. Run the project's build/lint command. Fix all warnings.
-2. Run the project's test suite.
-3. If tests fail, fix them before proceeding.
-4. If test coverage for the new work is insufficient, add tests.
-
-### Commit
-
-Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
-
-### Update the plan file
-
-Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
-
-1. A brief summary, written now, of what was actually implemented.
-2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
-
-If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
