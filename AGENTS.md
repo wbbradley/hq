@@ -24,6 +24,11 @@ actions, while detail views expose stable IDs, causal evidence, provider/session
 recovery diagnostics.
 
 Keep `PLAN.md` limited to unfinished, task-specific work. Put durable repository guidance here.
+Plan entries should state the concrete problem, scope, dependencies, invariants, and observable
+completion condition. Do not repeat repository-wide implementation ceremony, generic engineering
+advice, or speculative criteria in every task; remove details that no longer affect unfinished
+work.
+
 When completing a planned task:
 
 1. Implement test-first and run formatting, strict linting, and relevant tests; run the full suite
