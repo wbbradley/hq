@@ -1,7 +1,7 @@
 //! Exact-owner managed-runtime supervision over consumer-owned durable and persistence ports.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     num::{NonZeroU64, NonZeroUsize},
     sync::atomic::{AtomicBool, Ordering},
@@ -11,7 +11,7 @@ use std::{
 
 use hq_domain::{
     ActivityKind, ActivityStatus, AgentId, AssignmentId, CommandDigest, DispatchId, MessageId,
-    ProjectId, ProviderId, ProviderSessionId, ThreadId,
+    OperationId, ProjectId, ProviderId, ProviderSessionId, ThreadId,
 };
 use sha2::{Digest, Sha256};
 
@@ -26,6 +26,32 @@ use crate::{
 
 /// Maximum state rows inspected by one supervisor repair pass.
 pub const MAX_HARNESS_SUPERVISOR_STATE_ITEMS: usize = 1_024;
+
+/// Opaque stable identity for one active interactive-response capability.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct HarnessResponderId([u8; 32]);
+
+impl HarnessResponderId {
+    /// Constructs a responder identity, rejecting the absent identity.
+    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, HarnessError> {
+        if bytes == [0; 32] {
+            Err(HarnessError::new(HarnessErrorClass::InvalidInput))
+        } else {
+            Ok(Self(bytes))
+        }
+    }
+
+    /// Borrows the exact opaque bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for HarnessResponderId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HarnessResponderId([redacted])")
+    }
+}
 
 /// Opaque stable capability identifying one exact logical worker owner.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -444,6 +470,8 @@ pub struct HarnessEventPumpReport {
     pub snapshots_replaced: usize,
     /// Interactive requests retained for later exact response.
     pub interactive_requests: usize,
+    /// Interactive requests terminally failed closed because no responder was active.
+    pub interactive_requests_failed_closed: usize,
     /// Workers whose provider stream closed normally in this pass.
     pub workers_closed: usize,
     /// Workers whose provider poll failed in this pass.
@@ -458,6 +486,7 @@ pub struct HarnessEventPumpReport {
 
 struct HarnessWorker {
     token: HarnessOwnerToken,
+    project_id: Option<ProjectId>,
     provider_id: ProviderId,
     session_id: ProviderSessionId,
     session: Box<dyn HarnessSession>,
@@ -466,11 +495,27 @@ struct HarnessWorker {
     requests: VecDeque<HarnessInteractiveRequest>,
 }
 
+/// Complete memory-only provider request with its exact live owner context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HarnessPendingInteraction {
+    /// Named agent awaiting the response.
+    pub agent_id: AgentId,
+    /// Optional project supplied when the worker launched.
+    pub project_id: Option<ProjectId>,
+    /// Neutral provider namespace.
+    pub provider_id: ProviderId,
+    /// Exact live provider session.
+    pub session_id: ProviderSessionId,
+    /// Source-ordered normalized request.
+    pub request: HarnessInteractiveRequest,
+}
+
 /// Sole synchronous owner of named-agent provider workers and recovery checkpoints.
 pub struct HarnessSupervisor {
     config: HarnessSupervisorConfig,
     dependencies: HarnessSupervisorDependencies,
     workers: Mutex<BTreeMap<AgentId, HarnessWorker>>,
+    responders: Mutex<BTreeSet<HarnessResponderId>>,
     accepting: AtomicBool,
 }
 
@@ -495,6 +540,7 @@ impl HarnessSupervisor {
             config,
             dependencies,
             workers: Mutex::new(BTreeMap::new()),
+            responders: Mutex::new(BTreeSet::new()),
             accepting: AtomicBool::new(true),
         })
     }
@@ -719,6 +765,7 @@ impl HarnessSupervisor {
             request.agent_id,
             HarnessWorker {
                 token,
+                project_id: request.project_id,
                 provider_id: request.provider_id,
                 session_id: opened.session_id,
                 session: opened.session,
@@ -835,6 +882,8 @@ impl HarnessSupervisor {
 
     /// Polls every live worker once without blocking and retains every accepted value.
     pub fn poll_events(&self) -> Result<HarnessEventPumpReport, HarnessError> {
+        let responders = self.lock_responders()?;
+        let responder_available = !responders.is_empty();
         let mut workers = self.lock_workers()?;
         let agents: Vec<_> = workers.keys().copied().collect();
         let mut report = HarnessEventPumpReport::default();
@@ -843,7 +892,13 @@ impl HarnessSupervisor {
             let worker = workers
                 .get_mut(&agent_id)
                 .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
-            let pass = pump_worker(&self.config, &self.dependencies, agent_id, worker);
+            let pass = pump_worker(
+                &self.config,
+                &self.dependencies,
+                agent_id,
+                worker,
+                responder_available,
+            );
             report.events_polled = report.events_polled.saturating_add(pass.events_polled);
             report.snapshots_replaced = report
                 .snapshots_replaced
@@ -851,6 +906,9 @@ impl HarnessSupervisor {
             report.interactive_requests = report
                 .interactive_requests
                 .saturating_add(pass.interactive_requests);
+            report.interactive_requests_failed_closed = report
+                .interactive_requests_failed_closed
+                .saturating_add(pass.interactive_requests_failed_closed);
             for failure in pass.failures {
                 retain_pump_failure(&mut report, failure, self.config.max_workers);
             }
@@ -887,7 +945,33 @@ impl HarnessSupervisor {
             })
             .sum();
         report.live_workers = workers.len();
+        drop(responders);
         Ok(report)
+    }
+
+    /// Activates one exact interactive responder capability idempotently.
+    pub fn register_responder(
+        &self,
+        responder_id: HarnessResponderId,
+    ) -> Result<bool, HarnessError> {
+        self.ensure_accepting()?;
+        Ok(self.lock_responders()?.insert(responder_id))
+    }
+
+    /// Removes one responder and fails closed all retained requests when it was the last.
+    pub fn unregister_responder(
+        &self,
+        responder_id: HarnessResponderId,
+    ) -> Result<usize, HarnessError> {
+        let mut responders = self.lock_responders()?;
+        if !responders.remove(&responder_id) || !responders.is_empty() {
+            return Ok(0);
+        }
+        let mut failed_closed = 0usize;
+        for worker in self.lock_workers()?.values_mut() {
+            failed_closed = failed_closed.saturating_add(fail_closed_retained_requests(worker)?);
+        }
+        Ok(failed_closed)
     }
 
     /// Drains provider streams after intake closure for at most one explicit bounded wait.
@@ -930,6 +1014,33 @@ impl HarnessSupervisor {
             .get(&agent_id)
             .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
         Ok(worker.requests.iter().take(limit).cloned().collect())
+    }
+
+    /// Loads one bounded stable view of pending requests across every live worker.
+    pub fn pending_interactions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<HarnessPendingInteraction>, HarnessError> {
+        if limit == 0 || limit > MAX_HARNESS_SUPERVISOR_STATE_ITEMS {
+            return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
+        }
+        let workers = self.lock_workers()?;
+        Ok(workers
+            .iter()
+            .flat_map(|(agent_id, worker)| {
+                worker
+                    .requests
+                    .iter()
+                    .map(move |request| HarnessPendingInteraction {
+                        agent_id: *agent_id,
+                        project_id: worker.project_id,
+                        provider_id: worker.provider_id.clone(),
+                        session_id: worker.session_id.clone(),
+                        request: request.clone(),
+                    })
+            })
+            .take(limit)
+            .collect())
     }
 
     /// Answers one structured request through its sole live session owner.
@@ -1023,6 +1134,14 @@ impl HarnessSupervisor {
             .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))
     }
 
+    fn lock_responders(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, BTreeSet<HarnessResponderId>>, HarnessError> {
+        self.responders
+            .lock()
+            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))
+    }
+
     fn ensure_accepting(&self) -> Result<(), HarnessError> {
         if self.accepting.load(Ordering::Acquire) {
             Ok(())
@@ -1043,6 +1162,7 @@ struct WorkerPump {
     events_polled: usize,
     snapshots_replaced: usize,
     interactive_requests: usize,
+    interactive_requests_failed_closed: usize,
     failures: Vec<HarnessErrorClass>,
     terminal: Option<WorkerTerminal>,
 }
@@ -1052,6 +1172,7 @@ fn pump_worker(
     dependencies: &HarnessSupervisorDependencies,
     agent_id: AgentId,
     worker: &mut HarnessWorker,
+    responder_available: bool,
 ) -> WorkerPump {
     let mut report = WorkerPump::default();
     if let Err(error) = renew_worker(config, dependencies, agent_id, worker) {
@@ -1062,10 +1183,11 @@ fn pump_worker(
         report.failures.push(error.class);
     }
     if let Some(staged) = worker.staged.take() {
-        match admit_polled_event(config, worker, staged) {
+        match admit_polled_event(config, worker, staged, responder_available) {
             Ok(admission) => account_admission(&mut report, admission),
-            Err(staged) => {
-                worker.staged = Some(*staged);
+            Err(failure) => {
+                account_failed_closed(&mut report, failure.failed_closed);
+                worker.staged = Some(*failure.event);
                 return report;
             }
         }
@@ -1076,9 +1198,12 @@ fn pump_worker(
     match worker.session.poll_event(Duration::ZERO) {
         Ok(HarnessEventPoll::Event(event)) => {
             report.events_polled = 1;
-            match admit_polled_event(config, worker, event) {
+            match admit_polled_event(config, worker, event, responder_available) {
                 Ok(admission) => account_admission(&mut report, admission),
-                Err(staged) => worker.staged = Some(*staged),
+                Err(failure) => {
+                    account_failed_closed(&mut report, failure.failed_closed);
+                    worker.staged = Some(*failure.event);
+                }
             }
             if let Err(error) = drain_events(dependencies, agent_id, worker) {
                 report.failures.push(error.class);
@@ -1093,34 +1218,98 @@ fn pump_worker(
 
 #[derive(Clone, Copy)]
 enum EventAdmission {
-    Value(HarnessBufferPush),
+    Value {
+        push: HarnessBufferPush,
+        failed_closed: usize,
+    },
     Interactive,
     DuplicateInteractive,
+    InteractiveFailedClosed,
+}
+
+struct EventAdmissionFailure {
+    event: Box<HarnessEvent>,
+    failed_closed: usize,
 }
 
 fn admit_polled_event(
     config: &HarnessSupervisorConfig,
     worker: &mut HarnessWorker,
     event: HarnessEvent,
-) -> Result<EventAdmission, Box<HarnessEvent>> {
+    responder_available: bool,
+) -> Result<EventAdmission, EventAdmissionFailure> {
     match event {
         HarnessEvent::Output(output) => {
+            let failed_closed = if output.kind == HarnessOutputKind::FinalAnswer {
+                fail_closed_operation_requests(worker, output.operation_id).map_err(|_| {
+                    EventAdmissionFailure {
+                        event: Box::new(HarnessEvent::Output(output.clone())),
+                        failed_closed: 0,
+                    }
+                })?
+            } else {
+                0
+            };
             let buffered = buffered_output(output.clone());
             worker
                 .events
                 .push(buffered)
-                .map(EventAdmission::Value)
-                .map_err(|_| Box::new(HarnessEvent::Output(output)))
+                .map(|push| EventAdmission::Value {
+                    push,
+                    failed_closed,
+                })
+                .map_err(|_| EventAdmissionFailure {
+                    event: Box::new(HarnessEvent::Output(output)),
+                    failed_closed,
+                })
         }
         HarnessEvent::Activity(activity) => {
+            let failed_closed = if activity.kind == ActivityKind::AgentTurn
+                && matches!(
+                    activity.status,
+                    ActivityStatus::Succeeded
+                        | ActivityStatus::Failed(_)
+                        | ActivityStatus::Interrupted
+                ) {
+                fail_closed_operation_requests(worker, activity.operation_id).map_err(|_| {
+                    EventAdmissionFailure {
+                        event: Box::new(HarnessEvent::Activity(activity.clone())),
+                        failed_closed: 0,
+                    }
+                })?
+            } else {
+                0
+            };
             let buffered = buffered_activity(activity.clone());
             worker
                 .events
                 .push(buffered)
-                .map(EventAdmission::Value)
-                .map_err(|_| Box::new(HarnessEvent::Activity(activity)))
+                .map(|push| EventAdmission::Value {
+                    push,
+                    failed_closed,
+                })
+                .map_err(|_| EventAdmissionFailure {
+                    event: Box::new(HarnessEvent::Activity(activity)),
+                    failed_closed,
+                })
         }
         HarnessEvent::InteractiveRequest(request) => {
+            if !responder_available {
+                let answer = HarnessInteractiveAnswer {
+                    request_id: request.request_id,
+                    response: crate::HarnessInteractiveResponse::Cancelled,
+                };
+                return match worker.session.answer_interactive(answer) {
+                    Ok(()) => Ok(EventAdmission::InteractiveFailedClosed),
+                    Err(error) if error.class == HarnessErrorClass::InteractiveAlreadyAnswered => {
+                        Ok(EventAdmission::InteractiveFailedClosed)
+                    }
+                    Err(_) => Err(EventAdmissionFailure {
+                        event: Box::new(HarnessEvent::InteractiveRequest(request)),
+                        failed_closed: 0,
+                    }),
+                };
+            }
             if let Some(prior) = worker
                 .requests
                 .iter()
@@ -1129,11 +1318,17 @@ fn admit_polled_event(
                 return if prior == &request {
                     Ok(EventAdmission::DuplicateInteractive)
                 } else {
-                    Err(Box::new(HarnessEvent::InteractiveRequest(request)))
+                    Err(EventAdmissionFailure {
+                        event: Box::new(HarnessEvent::InteractiveRequest(request)),
+                        failed_closed: 0,
+                    })
                 };
             }
             if worker.requests.len() == config.event_capacity.get() {
-                return Err(Box::new(HarnessEvent::InteractiveRequest(request)));
+                return Err(EventAdmissionFailure {
+                    event: Box::new(HarnessEvent::InteractiveRequest(request)),
+                    failed_closed: 0,
+                });
             }
             worker.requests.push_back(request);
             Ok(EventAdmission::Interactive)
@@ -1143,15 +1338,30 @@ fn admit_polled_event(
 
 fn account_admission(report: &mut WorkerPump, admission: EventAdmission) {
     match admission {
-        EventAdmission::Value(HarnessBufferPush::Accepted)
-        | EventAdmission::DuplicateInteractive => {}
-        EventAdmission::Value(HarnessBufferPush::Replaced) => {
-            report.snapshots_replaced = report.snapshots_replaced.saturating_add(1);
+        EventAdmission::Value {
+            push,
+            failed_closed,
+        } => {
+            account_failed_closed(report, failed_closed);
+            if push == HarnessBufferPush::Replaced {
+                report.snapshots_replaced = report.snapshots_replaced.saturating_add(1);
+            }
         }
+        EventAdmission::DuplicateInteractive => {}
         EventAdmission::Interactive => {
             report.interactive_requests = report.interactive_requests.saturating_add(1);
         }
+        EventAdmission::InteractiveFailedClosed => {
+            report.interactive_requests_failed_closed =
+                report.interactive_requests_failed_closed.saturating_add(1);
+        }
     }
+}
+
+fn account_failed_closed(report: &mut WorkerPump, count: usize) {
+    report.interactive_requests_failed_closed = report
+        .interactive_requests_failed_closed
+        .saturating_add(count);
 }
 
 fn buffered_output(output: HarnessOutput) -> HarnessBufferedEvent {
@@ -1445,8 +1655,8 @@ fn drain_owned_values(
     let Some(staged) = worker.staged.take() else {
         return Ok(());
     };
-    if let Err(staged) = admit_polled_event(config, worker, staged) {
-        worker.staged = Some(*staged);
+    if let Err(failure) = admit_polled_event(config, worker, staged, true) {
+        worker.staged = Some(*failure.event);
         return Err(HarnessError::new(HarnessErrorClass::Backpressure));
     }
     drain_events(dependencies, agent_id, worker)
@@ -1639,6 +1849,9 @@ fn merge_pump_report(
     target.interactive_requests = target
         .interactive_requests
         .saturating_add(source.interactive_requests);
+    target.interactive_requests_failed_closed = target
+        .interactive_requests_failed_closed
+        .saturating_add(source.interactive_requests_failed_closed);
     target.workers_closed = target.workers_closed.saturating_add(source.workers_closed);
     target.workers_failed = target.workers_failed.saturating_add(source.workers_failed);
     target.pending_values = source.pending_values;
@@ -1646,6 +1859,50 @@ fn merge_pump_report(
     for failure in source.failures {
         retain_pump_failure(target, failure, limit);
     }
+}
+
+fn fail_closed_retained_requests(worker: &mut HarnessWorker) -> Result<usize, HarnessError> {
+    let mut terminal = 0usize;
+    while let Some(request) = worker.requests.front().cloned() {
+        let answer = HarnessInteractiveAnswer {
+            request_id: request.request_id,
+            response: crate::HarnessInteractiveResponse::Cancelled,
+        };
+        match worker.session.answer_interactive(answer) {
+            Ok(()) => {}
+            Err(error) if error.class == HarnessErrorClass::InteractiveAlreadyAnswered => {}
+            Err(error) => return Err(error),
+        }
+        let _ = worker.requests.pop_front();
+        terminal = terminal.saturating_add(1);
+    }
+    Ok(terminal)
+}
+
+fn fail_closed_operation_requests(
+    worker: &mut HarnessWorker,
+    operation_id: OperationId,
+) -> Result<usize, HarnessError> {
+    let mut terminal = 0usize;
+    let mut index = 0usize;
+    while let Some(request) = worker.requests.get(index).cloned() {
+        if request.operation_id != operation_id {
+            index = index.saturating_add(1);
+            continue;
+        }
+        let answer = HarnessInteractiveAnswer {
+            request_id: request.request_id,
+            response: crate::HarnessInteractiveResponse::Cancelled,
+        };
+        match worker.session.answer_interactive(answer) {
+            Ok(()) => {}
+            Err(error) if error.class == HarnessErrorClass::InteractiveAlreadyAnswered => {}
+            Err(error) => return Err(error),
+        }
+        let _ = worker.requests.remove(index);
+        terminal = terminal.saturating_add(1);
+    }
+    Ok(terminal)
 }
 
 fn retain_pump_failure(

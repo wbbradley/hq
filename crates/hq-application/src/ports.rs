@@ -727,5 +727,7 @@ pub trait ApplicationPorts:
     + crate::RetireAgents
     + InspectResource
     + ObserveRevisions
+    + crate::QueryInteractions
+    + crate::ControlInteractions
 {
 }

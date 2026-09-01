@@ -8,10 +8,11 @@ use crate::protocol::v1::{
     ConversationKeyDto, ConversationPageDto, ConversationPageRequest, ConversationPageSelectionDto,
     ConversationParticipantDto, DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto,
     EffectRequestDto, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, HealthDomainDto, Id32,
-    InvalidationTopic, MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS,
-    MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto,
-    MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto, MailboxDraftDto,
-    MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+    InteractionAnswerOutcomeDto, InteractionAnswerRequestDto, InteractionChoiceDto,
+    InteractionKindDto, InteractionResponseDto, InvalidationTopic, MAX_CANONICAL_EVIDENCE_BYTES,
+    MAX_CANONICAL_EVIDENCE_ITEMS, MailboxAddressDto, MailboxCommandActionDto,
+    MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto,
+    MailboxDraftDto, MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
     MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCommandStageDto, ProjectExternalStateWarningDto,
@@ -31,14 +32,16 @@ use hq_application::{
     ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage, ConversationContext,
     ConversationEntry, ConversationKey, ConversationPageSelection, ConversationParticipant,
     DomainHealth, EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation, HealthDomain,
+    InteractionAnswerOutcome, InteractionAnswerRequest, InteractionKind, InteractionResponse,
     LaunchEnvironment, MailboxCommandAction, MailboxCommandRequest, MailboxDraft,
     MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
     MailboxDraftSaveRequest, MailboxDraftTarget, MutationAttempt, MutationDecision,
-    MutationOutcome, MutationReceipt, ProjectCommandAction, ProjectCommandOutcome,
-    ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest, ProviderCatalog,
-    RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
-    ResourceInspectionResult, SessionControl, StateHealth, StateRepairReport, SubscriptionRequest,
-    SubscriptionTopic, SynchronizationRequest, WorktreeProvisioningRequest,
+    MutationOutcome, MutationReceipt, PendingInteraction, ProjectCommandAction,
+    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest,
+    ProviderCatalog, RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus,
+    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, StateHealth,
+    StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
+    WorktreeProvisioningRequest,
 };
 
 /// Converts one bounded neutral provider catalog into its local wire representation.
@@ -62,12 +65,82 @@ pub fn provider_catalog_to_v1(catalog: &ProviderCatalog) -> Result<ProviderCatal
     )
 }
 use hq_domain::{
-    ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, FactId,
-    InstallationId, MailboxAddress, MailboxId, MessagePurpose, OperationId, Page, PageCursor,
-    PresentationKind, ProjectExternalStateWarning, ProjectId, ProviderId, ProviderSessionId,
-    RESOURCE_LOCATOR_MAX_BYTES, RemoteCommandResult, ResourceHealth, ResourceId, ResourceLocator,
-    ResourceScheme, Revision, RuntimeObservation, ShortText, ThreadId, Timestamp,
+    ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ContentText, ErrorCategory,
+    FactId, InstallationId, MailboxAddress, MailboxId, MessagePurpose, OperationId, Page,
+    PageCursor, PresentationKind, ProjectExternalStateWarning, ProjectId, ProviderId,
+    ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RemoteCommandResult, ResourceHealth, ResourceId,
+    ResourceLocator, ResourceScheme, Revision, RuntimeObservation, ShortText, ThreadId, Timestamp,
 };
+
+/// Converts bounded pending interaction values into local API v1 DTOs.
+pub fn pending_interactions_to_v1(
+    interactions: &[PendingInteraction],
+) -> Vec<crate::protocol::v1::PendingInteractionDto> {
+    interactions
+        .iter()
+        .map(|interaction| crate::protocol::v1::PendingInteractionDto {
+            agent_id: id32(interaction.agent_id.as_bytes()),
+            project_id: interaction
+                .project_id
+                .map(|project_id| id32(project_id.as_bytes())),
+            provider: interaction.provider.as_str().to_owned(),
+            session: interaction.session.as_str().to_owned(),
+            request_id: id32(interaction.request_id.as_bytes()),
+            operation_id: id32(interaction.operation_id.as_bytes()),
+            kind: match interaction.kind {
+                InteractionKind::Question => InteractionKindDto::Question,
+                InteractionKind::CommandApproval => InteractionKindDto::CommandApproval,
+                InteractionKind::FileApproval => InteractionKindDto::FileApproval,
+                InteractionKind::Permission => InteractionKindDto::Permission,
+                InteractionKind::McpUrl => InteractionKindDto::McpUrl,
+                InteractionKind::McpForm => InteractionKindDto::McpForm,
+            },
+            prompt: interaction.prompt.as_str().to_owned(),
+            choices: interaction
+                .choices
+                .as_slice()
+                .iter()
+                .map(|choice| InteractionChoiceDto {
+                    value: choice.value.as_str().to_owned(),
+                    label: choice.label.as_str().to_owned(),
+                })
+                .collect(),
+            allow_text: interaction.allow_text,
+        })
+        .collect()
+}
+
+/// Converts one exact local API response command into its application value.
+pub fn interaction_answer_from_v1(
+    request: InteractionAnswerRequestDto,
+) -> Result<InteractionAnswerRequest, ValueError> {
+    let response = match request.response {
+        InteractionResponseDto::Text(value) => {
+            InteractionResponse::Text(ContentText::new(value).map_err(|_| ValueError::InvalidText)?)
+        }
+        InteractionResponseDto::Choice(value) => {
+            InteractionResponse::Choice(ShortText::new(value).map_err(|_| ValueError::InvalidText)?)
+        }
+        InteractionResponseDto::Approval(value) => InteractionResponse::Approval(value),
+        InteractionResponseDto::Cancelled => InteractionResponse::Cancelled,
+    };
+    Ok(InteractionAnswerRequest::new(
+        OperationId::from_bytes(request.command_id.bytes()),
+        AgentId::from_bytes(request.agent_id.bytes()),
+        hq_application::InteractionId::from_bytes(request.request_id.bytes()),
+        response,
+    ))
+}
+
+/// Converts one terminal answer outcome to local API v1.
+pub const fn interaction_answer_to_v1(
+    outcome: InteractionAnswerOutcome,
+) -> InteractionAnswerOutcomeDto {
+    match outcome {
+        InteractionAnswerOutcome::Answered => InteractionAnswerOutcomeDto::Answered,
+        InteractionAnswerOutcome::Stale => InteractionAnswerOutcomeDto::Stale,
+    }
+}
 
 /// Converts bounded exact canonical evidence into its wire representation.
 pub fn canonical_evidence_to_v1(

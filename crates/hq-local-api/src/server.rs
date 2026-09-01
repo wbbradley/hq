@@ -7,16 +7,17 @@ use hq_domain::OperationId;
 
 use crate::conversion::{
     agent_effect_from_v1, agent_effect_to_v1, agent_retirement_from_v1, agent_retirement_to_v1,
-    empty_effect_to_v1, mailbox_command_from_v1, mailbox_draft_delete_from_v1,
-    mailbox_draft_delete_to_v1, mailbox_draft_save_from_v1, mailbox_draft_save_to_v1,
-    mailbox_drafts_to_v1, project_command_from_v1, project_command_to_v1, relay_effect_from_v1,
-    relay_status_to_v1, resource_effect_from_v1, resource_effect_to_v1, state_health_to_v1,
-    state_repair_to_v1, synchronization_effect_from_v1,
+    empty_effect_to_v1, interaction_answer_from_v1, interaction_answer_to_v1,
+    mailbox_command_from_v1, mailbox_draft_delete_from_v1, mailbox_draft_delete_to_v1,
+    mailbox_draft_save_from_v1, mailbox_draft_save_to_v1, mailbox_drafts_to_v1,
+    pending_interactions_to_v1, project_command_from_v1, project_command_to_v1,
+    relay_effect_from_v1, relay_status_to_v1, resource_effect_from_v1, resource_effect_to_v1,
+    state_health_to_v1, state_repair_to_v1, synchronization_effect_from_v1,
 };
 use crate::protocol::v1::{
-    BuildMetadata, ErrorClass, ErrorResponse, Id32, LifecycleRequest, LifecycleStatus, Request,
-    RequestEnvelope, ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello, V1,
-    VersionRange, VersionRejected, WireMessage, negotiate,
+    BuildMetadata, ErrorClass, ErrorResponse, Id32, InteractionResponderAcknowledgement,
+    LifecycleRequest, LifecycleStatus, Request, RequestEnvelope, ResponseEnvelope, ResponseResult,
+    RevisionInvalidation, ServerHello, V1, VersionRange, VersionRejected, WireMessage, negotiate,
 };
 use crate::{
     RevisionHub, application_error_to_v1, authoritative_conversation_view_to_v1,
@@ -70,6 +71,7 @@ impl OutboundMessage {
 enum AfterWrite {
     None,
     Activate(OperationId),
+    ActivateResponder(OperationId),
     Close,
 }
 
@@ -118,6 +120,7 @@ pub struct ServerSession {
     next_ticket: u64,
     writes: BTreeMap<WriteTicket, AfterWrite>,
     subscriptions: BTreeSet<OperationId>,
+    responders: BTreeMap<OperationId, Box<dyn hq_application::InteractionResponderLease>>,
 }
 
 impl fmt::Debug for ServerSession {
@@ -130,6 +133,7 @@ impl fmt::Debug for ServerSession {
             .field("disconnected", &self.disconnected)
             .field("pending_writes", &self.writes.len())
             .field("subscriptions", &self.subscriptions)
+            .field("responder_count", &self.responders.len())
             .finish_non_exhaustive()
     }
 }
@@ -147,6 +151,7 @@ impl ServerSession {
             next_ticket: 1,
             writes: BTreeMap::new(),
             subscriptions: BTreeSet::new(),
+            responders: BTreeMap::new(),
         }
     }
 
@@ -193,6 +198,15 @@ impl ServerSession {
                 }
                 Ok(ServerWriteDisposition::Continue)
             }
+            AfterWrite::ActivateResponder(responder_id) => {
+                let Some(responder) = self.responders.get_mut(&responder_id) else {
+                    return Err(ServerSessionError::ProtocolOrder);
+                };
+                responder
+                    .activate()
+                    .map_err(ServerSessionError::Activation)?;
+                Ok(ServerWriteDisposition::Continue)
+            }
             AfterWrite::Close => {
                 self.disconnect();
                 Ok(ServerWriteDisposition::Close)
@@ -231,6 +245,7 @@ impl ServerSession {
             let _ = self.hub.cancel_subscription(operation_id);
         }
         self.writes.clear();
+        self.responders.clear();
         self.disconnected = true;
         self.closing = true;
     }
@@ -399,6 +414,41 @@ impl ServerSession {
             Request::RetireAgent(request) => application
                 .retire_agent(agent_retirement_from_v1(*request))
                 .map(|outcome| ResponseResult::AgentRetirement(agent_retirement_to_v1(&outcome))),
+            Request::PendingInteractions(request) => application
+                .pending_interactions(usize::from(request.limit))
+                .map(|interactions| {
+                    ResponseResult::PendingInteractions(pending_interactions_to_v1(&interactions))
+                }),
+            Request::AnswerInteraction(request) => interaction_answer_from_v1(request)
+                .map_err(|_| invalid_request_error())
+                .and_then(|request| application.answer_interaction(request))
+                .map(|outcome| {
+                    ResponseResult::InteractionAnswer(interaction_answer_to_v1(outcome))
+                }),
+            Request::RegisterInteractionResponder { responder_id } => {
+                let responder_id = OperationId::from_bytes(responder_id.bytes());
+                match self.responders.entry(responder_id) {
+                    std::collections::btree_map::Entry::Occupied(_) => Err(ApplicationError::new(
+                        hq_application::ApplicationErrorCode::StateIdentityConflict,
+                    )),
+                    std::collections::btree_map::Entry::Vacant(entry) => application
+                        .prepare_interaction_responder(responder_id)
+                        .map(|responder| {
+                            entry.insert(responder);
+                            after = AfterWrite::ActivateResponder(responder_id);
+                            ResponseResult::InteractionResponder(
+                                InteractionResponderAcknowledgement {
+                                    responder_id: Id32::new(*responder_id.as_bytes()),
+                                },
+                            )
+                        }),
+                }
+            }
+            Request::CancelInteractionResponder { responder_id } => {
+                self.responders
+                    .remove(&OperationId::from_bytes(responder_id.bytes()));
+                Ok(ResponseResult::Empty)
+            }
             Request::Subscribe(request) => {
                 let selection = conversation_selection_from_v1(request.conversation.clone())
                     .map_err(|_| invalid_request_error());

@@ -119,7 +119,13 @@ work. A new key at capacity also backpressures. Capacity bounds pending work, ex
 currently being persisted; raw reasoning, model payloads, token deltas, spinners, and unsupported
 provider noise normalize to no work and never enter the buffer.
 
-Every supported blocking request receives exactly one JSON-RPC response. Structured questions are correlated by session, operation, item, and request ID. Secret-input requests are rejected without persisting their prompt fields. Cancellation releases any claimed answer, cancels remaining questions, and returns a fail-closed response. An interactive request may block its own operation while waiting for a human, but remains cancelable during shutdown.
+Every supported blocking request receives exactly one JSON-RPC response. Structured questions are
+correlated by agent, provider session, operation, item, and request ID. The supervisor retains a
+bounded request only while at least one explicitly registered responder is active. Arrival without
+a responder, loss of the last responder, provider EOF, agent stop, and shutdown immediately send
+the adapter's fail-closed cancellation or denial in source order. Secret-input requests are
+rejected without retaining their prompt fields. Pending prompts remain memory-only; body-free
+`operations` invalidations wake clients to query their replacement view.
 
 Unknown additive notifications are non-fatal and are ignored by handlers that do not recognize them. Malformed payloads for recognized notifications are also ignored by the relevant projection; malformed JSON-RPC envelopes remain fatal. Unsupported blocking server requests receive `-32601` and terminate the transport with a compatibility error because guessing a response could grant authority.
 

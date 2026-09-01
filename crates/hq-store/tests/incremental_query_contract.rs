@@ -13,9 +13,9 @@ mod support;
 
 use support::{
     TestDirectory, TestStoreExt, authored_agent_activity, authored_conversation_entry,
-    authored_durable_conversation_entry, authored_project_input, authority_policy, open_store,
-    seed_canonical_corpus, verified_account, verified_child, verified_fact,
-    verified_incomplete_peer_question, verified_question,
+    authored_durable_conversation_entry, authored_local_message, authored_project_input,
+    authority_policy, open_store, seed_canonical_corpus, verified_account, verified_child,
+    verified_fact, verified_incomplete_peer_question, verified_question,
 };
 
 #[test]
@@ -101,6 +101,156 @@ fn active_operation_has_one_latest_progress_tail_and_terminal_replaces_it() {
         [ConversationEntry::Activity(activity)]
             if activity.kind == hq_domain::ActivityKind::AgentTurn
                 && activity.status == hq_domain::ActivityStatus::Succeeded
+    ));
+}
+
+#[test]
+fn completed_item_output_is_history_and_running_turn_becomes_the_live_tail() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let root = verified_fact();
+    let root_id = root.verified_event().event_id();
+    store.append_verified(root).expect("authority root ingests");
+    store
+        .append_verified(verified_child(root_id))
+        .expect("activity source mailbox ingests");
+    let operation = hq_domain::OperationId::from_bytes([0x93; 32]);
+    for fact in [
+        authored_agent_activity(
+            1,
+            operation,
+            None,
+            hq_domain::ActivityKind::AgentTurn,
+            "operation",
+            1,
+            hq_domain::ActivityStatus::Running,
+            "working",
+        ),
+        authored_agent_activity(
+            2,
+            operation,
+            Some("tests"),
+            hq_domain::ActivityKind::Progress,
+            "tests-progress",
+            2,
+            hq_domain::ActivityStatus::Running,
+            "error: test failed, to rerun pass -p hq-node",
+        ),
+        authored_agent_activity(
+            3,
+            operation,
+            Some("tests"),
+            hq_domain::ActivityKind::CompletedItem,
+            "tests-completed",
+            3,
+            hq_domain::ActivityStatus::Failed(
+                hq_domain::ErrorCode::new("test_failed").expect("failure code"),
+            ),
+            "tests failed",
+        ),
+    ] {
+        store.append_verified(fact).expect("activity ingests");
+    }
+    let key = ConversationKey::ProviderSession {
+        counterparty: MailboxAddress::new(
+            authority_policy().local_installation(),
+            authority_policy().local_human_mailbox(),
+        ),
+        provider: ProviderId::new("paged-provider").expect("provider validates"),
+        session: ProviderSessionId::new("paged-session").expect("session validates"),
+    };
+
+    let page = store
+        .load_conversation_entries(&key, 10, None)
+        .expect("conversation loads");
+    assert!(matches!(
+        page.items(),
+        [ConversationEntry::Activity(completed), ConversationEntry::Activity(live)]
+            if completed.kind == hq_domain::ActivityKind::CompletedItem
+                && completed.item.as_ref().map(hq_domain::ShortText::as_str) == Some("tests")
+                && live.kind == hq_domain::ActivityKind::AgentTurn
+                && live.status == hq_domain::ActivityStatus::Running
+    ));
+}
+
+#[test]
+fn newer_human_input_hides_old_progress_until_provider_activity_advances() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let root = verified_fact();
+    let root_id = root.verified_event().event_id();
+    store.append_verified(root).expect("authority root ingests");
+    store
+        .append_verified(verified_child(root_id))
+        .expect("activity source mailbox ingests");
+    let operation = hq_domain::OperationId::from_bytes([0x94; 32]);
+    for fact in [
+        authored_agent_activity(
+            1,
+            operation,
+            None,
+            hq_domain::ActivityKind::AgentTurn,
+            "operation",
+            1,
+            hq_domain::ActivityStatus::Running,
+            "working",
+        ),
+        authored_agent_activity(
+            2,
+            operation,
+            Some("tests"),
+            hq_domain::ActivityKind::Progress,
+            "tests-progress",
+            2,
+            hq_domain::ActivityStatus::Running,
+            "error: test failed",
+        ),
+        authored_local_message(3, operation, "Are you still working on this?"),
+    ] {
+        store
+            .append_verified(fact)
+            .expect("conversation fact ingests");
+    }
+    let key = ConversationKey::ProviderSession {
+        counterparty: MailboxAddress::new(
+            authority_policy().local_installation(),
+            authority_policy().local_human_mailbox(),
+        ),
+        provider: ProviderId::new("paged-provider").expect("provider validates"),
+        session: ProviderSessionId::new("paged-session").expect("session validates"),
+    };
+
+    let waiting = store
+        .load_conversation_entries(&key, 10, None)
+        .expect("waiting conversation loads");
+    assert!(matches!(
+        waiting.items(),
+        [ConversationEntry::Message(message), ConversationEntry::Activity(live)]
+            if message.message.content.body.as_str() == "Are you still working on this?"
+                && live.kind == hq_domain::ActivityKind::AgentTurn
+                && live.content.as_str() == "working"
+    ));
+
+    store
+        .append_verified(authored_agent_activity(
+            4,
+            operation,
+            Some("analysis"),
+            hq_domain::ActivityKind::Progress,
+            "fresh-progress",
+            3,
+            hq_domain::ActivityStatus::Running,
+            "checking the failure",
+        ))
+        .expect("fresh progress ingests");
+    let advanced = store
+        .load_conversation_entries(&key, 10, None)
+        .expect("advanced conversation loads");
+    assert!(matches!(
+        advanced.items().last(),
+        Some(ConversationEntry::Activity(live))
+            if live.kind == hq_domain::ActivityKind::Progress
+                && live.content.as_str() == "checking the failure"
     ));
 }
 

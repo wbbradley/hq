@@ -459,6 +459,17 @@ impl ReplicationHandle {
 }
 
 impl ApplicationStateHandle {
+    /// Returns the monotonic revision of the last committed relevant change.
+    pub fn current_revision(&self) -> Result<Revision, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::CurrentRevision { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Loads every bounded installation-local mailbox draft in stable identity order.
     pub fn load_mailbox_drafts(&self) -> Result<Vec<MailboxDraft>, StoreError> {
         let (reply, response) = mpsc::sync_channel(1);

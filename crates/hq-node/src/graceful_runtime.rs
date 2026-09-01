@@ -4,7 +4,8 @@ use std::{cell::Cell, error::Error, fmt, future::Future, time::Duration};
 
 use hq_application::{
     Application, ApplicationError, ApplicationErrorCode, ConfigureRelays, ControlHarness,
-    ControlProjects, InspectResource, PublishWake, RetireAgents,
+    ControlInteractions, ControlProjects, InspectResource, PublishWake, QueryInteractions,
+    RetireAgents,
 };
 use hq_local_api::{
     LifecycleControl,
@@ -98,7 +99,11 @@ impl<L, R, H, P> LocalNodeRuntime<L, R, H, P>
 where
     L: NodeComponent,
     R: NodeComponent + PublishWake + ConfigureRelays,
-    H: NodeComponent + ControlHarness + hq_application::QueryProviders,
+    H: NodeComponent
+        + ControlHarness
+        + hq_application::QueryProviders
+        + QueryInteractions
+        + ControlInteractions,
     P: NodeComponent
         + InspectResource
         + ControlProjects

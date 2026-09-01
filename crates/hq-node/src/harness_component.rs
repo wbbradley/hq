@@ -1,22 +1,29 @@
 //! Concrete node lifecycle and application control around the neutral harness supervisor.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
 use std::thread::{self, JoinHandle};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use hq_application::{
-    AgentSessionResult, ApplicationError, ApplicationErrorCode, ControlHarness, EffectOutcome,
-    EffectRequest, ProviderAvailability, ProviderCatalog, QueryProviders, SessionControl,
+    AgentSessionResult, ApplicationError, ApplicationErrorCode, ControlHarness,
+    ControlInteractions, EffectOutcome, EffectRequest, InteractionAnswerOutcome,
+    InteractionAnswerRequest, InteractionChoice, InteractionId, InteractionKind,
+    InteractionResponderLease, InteractionResponse, PendingInteraction, ProviderAvailability,
+    ProviderCatalog, QueryInteractions, QueryProviders, SessionControl,
 };
 use hq_harness::{
     HarnessActivity, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEnvironment,
-    HarnessError, HarnessErrorClass, HarnessLaunchRequest, HarnessOutput, HarnessOwnerToken,
-    HarnessPersistencePort, HarnessProjectDelivery, HarnessRegistry, HarnessSessionControlOutcome,
-    HarnessSessionOperation, HarnessSessionOperationKind, HarnessSessionOperationState,
-    HarnessSessionRequest, HarnessSubmission, HarnessSupervisor, HarnessSupervisorConfig,
-    HarnessSupervisorDependencies, HarnessTokenSource,
+    HarnessError, HarnessErrorClass, HarnessInteractiveAnswer, HarnessInteractiveResponse,
+    HarnessLaunchRequest, HarnessOutput, HarnessOwnerToken, HarnessPersistencePort,
+    HarnessProjectDelivery, HarnessRegistry, HarnessRequestKind, HarnessResponderId,
+    HarnessSessionControlOutcome, HarnessSessionOperation, HarnessSessionOperationKind,
+    HarnessSessionOperationState, HarnessSessionRequest, HarnessSubmission, HarnessSupervisor,
+    HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessTokenSource,
 };
 use hq_projects::{ProjectRuntimeDelivery, ProjectRuntimePort, ProjectRuntimeRequest};
 use hq_store::Store;
@@ -41,7 +48,18 @@ struct HarnessNodeInner {
     event_task: Mutex<Option<JoinHandle<Result<(), HarnessError>>>>,
     event_stop: AtomicBool,
     accepting: AtomicBool,
+    interaction_answers: Mutex<BTreeMap<hq_domain::OperationId, InteractionCommandRecord>>,
+    application_state: hq_store::ApplicationStateHandle,
+    revisions: Mutex<Option<hq_local_api::RevisionHub>>,
 }
+
+#[derive(Clone)]
+struct InteractionCommandRecord {
+    digest: hq_domain::CommandDigest,
+    outcome: InteractionAnswerOutcome,
+}
+
+const MAX_INTERACTION_COMMANDS: usize = 1_024;
 
 enum CanonicalPreparation {
     Ready(Option<Box<PreparedAgentSessionSelection>>),
@@ -99,6 +117,9 @@ impl HarnessNodeComponent {
                 event_task: Mutex::new(None),
                 event_stop: AtomicBool::new(false),
                 accepting: AtomicBool::new(false),
+                interaction_answers: Mutex::new(BTreeMap::new()),
+                application_state: store.application_state_handle(),
+                revisions: Mutex::new(None),
             }),
         }
     }
@@ -335,6 +356,58 @@ impl HarnessNodeComponent {
     }
 }
 
+struct HarnessInteractionResponderLease {
+    inner: Weak<HarnessNodeInner>,
+    responder_id: HarnessResponderId,
+    active: bool,
+}
+
+impl InteractionResponderLease for HarnessInteractionResponderLease {
+    fn activate(&mut self) -> Result<(), ApplicationError> {
+        if self.active {
+            return Ok(());
+        }
+        let inner = self
+            .inner
+            .upgrade()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?;
+        if !inner.accepting.load(Ordering::Acquire) {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::AdapterUnavailable,
+            ));
+        }
+        let supervisor = inner
+            .supervisor
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?;
+        supervisor
+            .as_ref()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?
+            .register_responder(self.responder_id)
+            .map_err(map_harness_error)?;
+        self.active = true;
+        Ok(())
+    }
+}
+
+impl Drop for HarnessInteractionResponderLease {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let Ok(supervisor) = inner.supervisor.lock() else {
+            return;
+        };
+        if let Some(supervisor) = supervisor.as_ref() {
+            let _ = supervisor.unregister_responder(self.responder_id);
+        }
+        publish_interaction_invalidation(&inner);
+    }
+}
+
 fn run_harness_events(
     inner: &HarnessNodeInner,
     cancellation: &CancellationToken,
@@ -345,13 +418,24 @@ fn run_harness_events(
                 .supervisor
                 .lock()
                 .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?;
-            if let Err(error) = supervisor
+            let report = supervisor
                 .as_ref()
                 .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?
-                .poll_events()
-            {
-                inner.accepting.store(false, Ordering::Release);
-                return Err(error);
+                .poll_events();
+            match report {
+                Ok(report)
+                    if report.interactive_requests > 0
+                        || report.interactive_requests_failed_closed > 0
+                        || report.workers_closed > 0
+                        || report.workers_failed > 0 =>
+                {
+                    publish_interaction_invalidation(inner);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    inner.accepting.store(false, Ordering::Release);
+                    return Err(error);
+                }
             }
         }
         thread::park_timeout(inner.config.event_poll_interval);
@@ -462,6 +546,12 @@ impl std::fmt::Debug for HarnessNodeComponent {
 }
 
 impl NodeComponent for HarnessNodeComponent {
+    fn configure_revision_hub(&mut self, revisions: hq_local_api::RevisionHub) {
+        if let Ok(mut configured) = self.inner.revisions.lock() {
+            *configured = Some(revisions);
+        }
+    }
+
     fn start(&mut self, cancellation: CancellationToken) -> Result<(), ComponentError> {
         let mut supervisor = self
             .inner
@@ -595,6 +685,140 @@ impl QueryProviders for HarnessNodeComponent {
         }
         ProviderCatalog::new(providers, self.inner.default_provider.clone())
             .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvariantViolation))
+    }
+}
+
+impl QueryInteractions for HarnessNodeComponent {
+    fn pending_interactions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PendingInteraction>, ApplicationError> {
+        if limit == 0 || limit > hq_application::MAX_PENDING_INTERACTIONS {
+            return Err(ApplicationError::new(ApplicationErrorCode::InvalidRequest));
+        }
+        self.with_supervisor(|supervisor| supervisor.pending_interactions(limit))?
+            .into_iter()
+            .map(|pending| {
+                let kind = match pending.request.kind {
+                    HarnessRequestKind::Question => InteractionKind::Question,
+                    HarnessRequestKind::CommandApproval => InteractionKind::CommandApproval,
+                    HarnessRequestKind::FileApproval => InteractionKind::FileApproval,
+                    HarnessRequestKind::Permission => InteractionKind::Permission,
+                    HarnessRequestKind::McpUrl => InteractionKind::McpUrl,
+                    HarnessRequestKind::McpForm => InteractionKind::McpForm,
+                };
+                let choices =
+                    hq_domain::BoundedVec::new(pending.request.choices.into_vec().into_iter().map(
+                        |choice| InteractionChoice {
+                            value: choice.value,
+                            label: choice.label,
+                        },
+                    ))
+                    .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvariantViolation))?;
+                Ok(PendingInteraction {
+                    agent_id: pending.agent_id,
+                    project_id: pending.project_id,
+                    provider: pending.provider_id,
+                    session: pending.session_id,
+                    request_id: InteractionId::from_bytes(*pending.request.request_id.as_bytes()),
+                    operation_id: pending.request.operation_id,
+                    kind,
+                    prompt: pending.request.prompt,
+                    choices,
+                    allow_text: pending.request.allow_text,
+                })
+            })
+            .collect()
+    }
+}
+
+impl ControlInteractions for HarnessNodeComponent {
+    fn answer_interaction(
+        &self,
+        request: InteractionAnswerRequest,
+    ) -> Result<InteractionAnswerOutcome, ApplicationError> {
+        let mut commands = self
+            .inner
+            .interaction_answers
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?;
+        if let Some(prior) = commands.get(&request.command_id()) {
+            return if prior.digest == request.request_digest() {
+                Ok(prior.outcome)
+            } else {
+                Err(ApplicationError::new(
+                    ApplicationErrorCode::CommandIdentityConflict,
+                ))
+            };
+        }
+        if commands.len() == MAX_INTERACTION_COMMANDS {
+            return Err(ApplicationError::new(ApplicationErrorCode::IntakeFull));
+        }
+        let response = match request.response().clone() {
+            InteractionResponse::Text(value) => HarnessInteractiveResponse::Text(value),
+            InteractionResponse::Choice(value) => HarnessInteractiveResponse::Choice(value),
+            InteractionResponse::Approval(value) => HarnessInteractiveResponse::Approval(value),
+            InteractionResponse::Cancelled => HarnessInteractiveResponse::Cancelled,
+        };
+        let answer = HarnessInteractiveAnswer {
+            request_id: hq_harness::HarnessRequestId::from_bytes(*request.request_id().as_bytes()),
+            response,
+        };
+        let outcome = match self
+            .with_supervisor(|supervisor| supervisor.answer(request.agent_id(), answer))
+        {
+            Ok(()) => InteractionAnswerOutcome::Answered,
+            Err(error)
+                if matches!(
+                    error.code(),
+                    ApplicationErrorCode::InvalidRequest
+                        | ApplicationErrorCode::ItemNotFound
+                        | ApplicationErrorCode::StateIdentityConflict
+                ) =>
+            {
+                InteractionAnswerOutcome::Stale
+            }
+            Err(error) => return Err(error),
+        };
+        commands.insert(
+            request.command_id(),
+            InteractionCommandRecord {
+                digest: request.request_digest(),
+                outcome,
+            },
+        );
+        publish_interaction_invalidation(&self.inner);
+        self.wake_event_task();
+        Ok(outcome)
+    }
+
+    fn prepare_interaction_responder(
+        &self,
+        responder_id: hq_domain::OperationId,
+    ) -> Result<Box<dyn InteractionResponderLease>, ApplicationError> {
+        let responder_id =
+            HarnessResponderId::from_bytes(*responder_id.as_bytes()).map_err(map_harness_error)?;
+        Ok(Box::new(HarnessInteractionResponderLease {
+            inner: Arc::downgrade(&self.inner),
+            responder_id,
+            active: false,
+        }))
+    }
+}
+
+fn publish_interaction_invalidation(inner: &HarnessNodeInner) {
+    let Ok(revision) = inner.application_state.current_revision() else {
+        return;
+    };
+    let Ok(revisions) = inner.revisions.lock() else {
+        return;
+    };
+    if let Some(revisions) = revisions.as_ref() {
+        let _ = revisions.publish(
+            revision,
+            [hq_application::SubscriptionTopic::Operations],
+            false,
+        );
     }
 }
 
@@ -816,14 +1040,16 @@ mod tests {
     };
 
     use hq_domain::{
-        AgentId, AssignmentBinding, AssignmentId, CommandDigest, ContentText, MessageId,
-        OperationId, ProjectId, ProviderId, ProviderSessionId, ThreadId, Timestamp,
+        AgentId, AssignmentBinding, AssignmentId, BoundedVec, CommandDigest, ContentText,
+        MessageId, OperationId, ProjectId, ProviderId, ProviderSessionId, ShortText, ThreadId,
+        Timestamp,
     };
     use hq_harness::{
         HarnessCapabilities, HarnessCapability, HarnessDrainOutcome, HarnessEvent,
         HarnessEventPoll, HarnessFactory, HarnessInstance, HarnessInstanceRequest,
-        HarnessInteractiveAnswer, HarnessOutputKind, HarnessSession, HarnessSubmissionLookup,
-        HarnessSubmissionOutcome, OpenedHarnessSession,
+        HarnessInteractiveAnswer, HarnessInteractiveRequest, HarnessOutputKind,
+        HarnessRequestChoice, HarnessRequestId, HarnessRequestKind, HarnessSession,
+        HarnessSubmissionLookup, HarnessSubmissionOutcome, OpenedHarnessSession,
     };
 
     use super::*;
@@ -956,6 +1182,7 @@ mod tests {
             ))),
             Ok(HarnessEventPoll::Closed),
         ])));
+        let answers = Arc::new(Mutex::new(Vec::new()));
         let mut registry = HarnessRegistry::new();
         registry
             .register(
@@ -971,6 +1198,7 @@ mod tests {
                 Arc::new(EventFactory {
                     session_id: session_id.clone(),
                     events,
+                    answers,
                 }),
             )
             .expect("provider registers");
@@ -1047,6 +1275,137 @@ mod tests {
         );
     }
 
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn interaction_answers_replay_equal_commands_and_reject_changed_reuse() {
+        let database = TestDatabase::new();
+        let store = Store::open(&database.path, NonZeroUsize::MIN).expect("store opens");
+        let provider_id = ProviderId::new("event-provider").expect("provider");
+        let session_id = ProviderSessionId::new("event-session").expect("session");
+        let agent_id = AgentId::from_bytes([81; 32]);
+        let request_id = HarnessRequestId::from_bytes([82; 32]);
+        let events = Arc::new(Mutex::new(VecDeque::from([Ok(HarnessEventPoll::Event(
+            HarnessEvent::InteractiveRequest(HarnessInteractiveRequest {
+                request_id,
+                operation_id: OperationId::from_bytes([83; 32]),
+                kind: HarnessRequestKind::CommandApproval,
+                prompt: ContentText::new("Run tests?").expect("prompt"),
+                choices: BoundedVec::new([HarnessRequestChoice {
+                    value: ShortText::new("accept").expect("value"),
+                    label: ShortText::new("Allow once").expect("label"),
+                }])
+                .expect("choices"),
+                allow_text: false,
+            }),
+        ))])));
+        let answers = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = HarnessRegistry::new();
+        registry
+            .register(
+                provider_id.clone(),
+                HarnessCapabilities {
+                    supported: [
+                        HarnessCapability::StartSessions,
+                        HarnessCapability::SubmissionLookup,
+                        HarnessCapability::InteractiveRequests,
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+                Arc::new(EventFactory {
+                    session_id,
+                    events,
+                    answers: Arc::clone(&answers),
+                }),
+            )
+            .expect("provider registers");
+        let mut component = HarnessNodeComponent::new(
+            HarnessSupervisorConfig {
+                event_poll_interval: Duration::from_millis(1),
+                ..HarnessSupervisorConfig::default()
+            },
+            &store,
+            Arc::new(registry),
+            Arc::new(CountingPersistence::default()),
+            Arc::new(SystemHarnessClock),
+            Arc::new(RandomHarnessTokens),
+            Arc::new(UnavailableAgentSessionCanonical),
+        );
+        let cancellation = CancellationToken::new();
+        component
+            .start(cancellation.child())
+            .expect("component starts");
+        let mut responder = component
+            .prepare_interaction_responder(OperationId::from_bytes([84; 32]))
+            .expect("responder prepared");
+        responder.activate().expect("responder activates");
+        component
+            .inner
+            .supervisor
+            .lock()
+            .expect("supervisor locks")
+            .as_ref()
+            .expect("supervisor started")
+            .launch(HarnessLaunchRequest {
+                agent_id,
+                project_id: None,
+                launch_directory: None,
+                provider_id,
+                session: HarnessSessionRequest::Start,
+                environment: HarnessEnvironment::default(),
+            })
+            .expect("worker launches");
+        component.wake_event_task();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while component
+            .pending_interactions(1)
+            .expect("pending query")
+            .is_empty()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let command_id = OperationId::from_bytes([85; 32]);
+        let request = InteractionAnswerRequest::new(
+            command_id,
+            agent_id,
+            InteractionId::from_bytes(*request_id.as_bytes()),
+            InteractionResponse::Choice(ShortText::new("accept").expect("choice")),
+        );
+        assert_eq!(
+            component
+                .answer_interaction(request.clone())
+                .expect("first answer"),
+            InteractionAnswerOutcome::Answered
+        );
+        assert_eq!(
+            component
+                .answer_interaction(request)
+                .expect("equal retry replays"),
+            InteractionAnswerOutcome::Answered
+        );
+        let changed = InteractionAnswerRequest::new(
+            command_id,
+            agent_id,
+            InteractionId::from_bytes(*request_id.as_bytes()),
+            InteractionResponse::Cancelled,
+        );
+        assert_eq!(
+            component
+                .answer_interaction(changed)
+                .expect_err("changed command identity conflicts")
+                .code(),
+            ApplicationErrorCode::CommandIdentityConflict
+        );
+        assert_eq!(answers.lock().expect("answers lock").len(), 1);
+
+        drop(responder);
+        component.stop_intake().expect("intake closes");
+        cancellation.cancel();
+        assert_eq!(component.drain(), Ok(ComponentDrain::Complete));
+    }
+
     fn delivery_request() -> EffectRequest<ProjectRuntimeDelivery> {
         EffectRequest {
             operation_id: OperationId::from_bytes([1; 32]),
@@ -1102,6 +1461,7 @@ mod tests {
     struct EventFactory {
         session_id: ProviderSessionId,
         events: Arc<Mutex<VecDeque<Result<HarnessEventPoll, HarnessError>>>>,
+        answers: Arc<Mutex<Vec<HarnessInteractiveAnswer>>>,
     }
 
     impl HarnessFactory for EventFactory {
@@ -1112,6 +1472,7 @@ mod tests {
             Ok(Box::new(EventInstance {
                 session_id: self.session_id.clone(),
                 events: Arc::clone(&self.events),
+                answers: Arc::clone(&self.answers),
             }))
         }
     }
@@ -1119,6 +1480,7 @@ mod tests {
     struct EventInstance {
         session_id: ProviderSessionId,
         events: Arc<Mutex<VecDeque<Result<HarnessEventPoll, HarnessError>>>>,
+        answers: Arc<Mutex<Vec<HarnessInteractiveAnswer>>>,
     }
 
     impl HarnessInstance for EventInstance {
@@ -1130,6 +1492,7 @@ mod tests {
                 session_id: self.session_id,
                 session: Box::new(EventSession {
                     events: self.events,
+                    answers: self.answers,
                 }),
             })
         }
@@ -1137,6 +1500,7 @@ mod tests {
 
     struct EventSession {
         events: Arc<Mutex<VecDeque<Result<HarnessEventPoll, HarnessError>>>>,
+        answers: Arc<Mutex<Vec<HarnessInteractiveAnswer>>>,
     }
 
     impl HarnessSession for EventSession {
@@ -1171,8 +1535,9 @@ mod tests {
 
         fn answer_interactive(
             &mut self,
-            _answer: HarnessInteractiveAnswer,
+            answer: HarnessInteractiveAnswer,
         ) -> Result<(), HarnessError> {
+            self.answers.lock().expect("answers lock").push(answer);
             Ok(())
         }
 

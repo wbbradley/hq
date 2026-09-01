@@ -246,6 +246,30 @@ where
         self.ports.provider_catalog()
     }
 
+    /// Loads one bounded passive view of pending provider interactions.
+    pub fn pending_interactions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::PendingInteraction>, ApplicationError> {
+        self.ports.pending_interactions(limit)
+    }
+
+    /// Executes or reconciles one exact terminal provider-interaction response.
+    pub fn answer_interaction(
+        &self,
+        request: crate::InteractionAnswerRequest,
+    ) -> Result<crate::InteractionAnswerOutcome, ApplicationError> {
+        self.ports.answer_interaction(request)
+    }
+
+    /// Prepares a session-owned responder lease pending its written acknowledgement.
+    pub fn prepare_interaction_responder(
+        &self,
+        responder_id: OperationId,
+    ) -> Result<Box<dyn crate::InteractionResponderLease>, ApplicationError> {
+        self.ports.prepare_interaction_responder(responder_id)
+    }
+
     /// Inspects an external project resource without treating database intent as observation.
     pub fn inspect_resource(
         &self,

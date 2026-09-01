@@ -501,6 +501,7 @@ mod adapter {
                 74,
                 HarnessInteractiveResponse::Text(ContentText::new("{\"name\":\"HQ\"}")?),
             ),
+            (75, HarnessInteractiveResponse::Cancelled),
         ] {
             let HarnessEventPoll::Event(HarnessEvent::InteractiveRequest(request)) =
                 opened.session.poll_event(Duration::from_secs(1))?
@@ -538,6 +539,10 @@ mod adapter {
         assert_eq!(
             response_result(&observed, 74),
             Some(&json!({"action":"accept","content":{"name":"HQ"}}))
+        );
+        assert_eq!(
+            response_result(&observed, 75),
+            Some(&json!({"action":"cancel","content":null}))
         );
         drop(observed);
         opened.session.force_stop()?;
@@ -1011,6 +1016,7 @@ mod adapter {
             json!({"id":72,"method":"item/permissions/requestApproval","params":{"threadId":"thr-test","turnId":"turn-open","itemId":"permission","cwd":"/tmp","reason":"test","permissions":{"network":true}}}),
             json!({"id":73,"method":"mcpServer/elicitation/request","params":{"threadId":"thr-test","turnId":"turn-open","serverName":"example","mode":"url","message":"Open sign-in","url":"https://example.test/sign-in","elicitationId":"elicit-url"}}),
             json!({"id":74,"method":"mcpServer/elicitation/request","params":{"threadId":"thr-test","turnId":"turn-open","serverName":"example","mode":"form","message":"Enter a name","requestedSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}}}),
+            json!({"id":75,"method":"mcpServer/elicitation/request","params":{"threadId":"thr-test","turnId":"turn-open","serverName":"example","mode":"form","message":"Enter another name","requestedSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}}}),
         ]
     }
 

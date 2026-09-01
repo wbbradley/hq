@@ -570,6 +570,102 @@ pub struct UiProvider {
     pub configured_default: bool,
 }
 
+/// Closed provider-neutral interaction class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiInteractionKind {
+    /// Ask for text or one offered choice.
+    Question,
+    /// Approve command execution.
+    CommandApproval,
+    /// Approve file changes.
+    FileApproval,
+    /// Grant a permission scope.
+    Permission,
+    /// Resolve an MCP URL request.
+    McpUrl,
+    /// Supply an MCP form response.
+    McpForm,
+}
+
+/// One untouched stable choice with a human-facing label.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiInteractionChoice {
+    /// Stable value returned to the provider adapter.
+    pub value: String,
+    /// Human-facing label.
+    pub label: String,
+}
+
+/// One pending provider interaction and its technical correlation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiInteraction {
+    /// Named agent identity.
+    pub agent_id: [u8; 32],
+    /// Resolved ordinary agent name.
+    pub agent_name: String,
+    /// Stable project identity when this blocks project work.
+    pub project_id: Option<[u8; 32]>,
+    /// Resolved ordinary project name when this blocks project work.
+    pub project_name: Option<String>,
+    /// Neutral provider namespace.
+    pub provider: String,
+    /// Exact provider session.
+    pub session: String,
+    /// Provider-originated request identity.
+    pub request_id: [u8; 32],
+    /// Blocked operation identity.
+    pub operation_id: [u8; 32],
+    /// Typed request family.
+    pub kind: UiInteractionKind,
+    /// Exact bounded prompt.
+    pub prompt: String,
+    /// Source-ordered stable choices.
+    pub choices: Vec<UiInteractionChoice>,
+    /// Whether bounded free text is accepted.
+    pub allow_text: bool,
+}
+
+/// Closed typed terminal response emitted by the pure model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiInteractionResponse {
+    /// Bounded free text or structured form content.
+    Text(String),
+    /// Untouched stable offered value.
+    Choice(String),
+    /// Explicit approval or denial.
+    Approval(bool),
+    /// Explicit cancellation.
+    Cancelled,
+}
+
+/// Terminal answer result returned by the local API.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiInteractionAnswerOutcome {
+    /// The response reached the provider-session owner.
+    Answered,
+    /// Another responder or lifecycle transition already ended the request.
+    Stale,
+}
+
+/// Current actionable provider interaction dialog.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiInteractionModal {
+    /// Awaiting a human choice, text response, or cancellation.
+    Prompt {
+        /// Complete request.
+        interaction: UiInteraction,
+        /// Selected offered choice.
+        selected: usize,
+        /// Bounded free-text draft.
+        text: String,
+    },
+    /// One exact response command is in flight.
+    Submitting {
+        /// Complete request retained for recovery.
+        interaction: UiInteraction,
+    },
+}
+
 /// Closed named-agent lifecycle supplied by the authoritative mapper.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiAgentLifecycle {
@@ -1885,6 +1981,25 @@ pub enum UiEvent {
         /// Coherent passive view from one serialized daemon revision.
         view: UiMaterializedConversationView,
     },
+    /// The complete bounded pending-interaction queue changed.
+    InteractionsObserved {
+        /// Source-owner ordered pending requests.
+        interactions: Vec<UiInteraction>,
+    },
+    /// One exact interaction response reached a terminal outcome.
+    InteractionAnswered {
+        /// Identity of the completed response effect.
+        effect_id: EffectId,
+        /// Typed terminal outcome.
+        outcome: UiInteractionAnswerOutcome,
+    },
+    /// One interaction response could not reach a terminal outcome.
+    InteractionAnswerFailed {
+        /// Identity of the failed response effect.
+        effect_id: EffectId,
+        /// Stable actionable failure.
+        failure: UiFailure,
+    },
     /// One reducer-ordered conversation page request completed.
     ConversationLoaded {
         /// Identity of the completed page effect.
@@ -2022,6 +2137,15 @@ pub enum UiEffect {
     ObserveConversation {
         /// Stable summary-row identity, or no selected detail when outside the Inbox.
         row_id: Option<String>,
+    },
+    /// Execute or reconcile one exact terminal provider-interaction response.
+    AnswerInteraction {
+        /// Identity required on the completion event.
+        id: EffectId,
+        /// Complete request correlation.
+        interaction: UiInteraction,
+        /// Typed terminal human response.
+        response: UiInteractionResponse,
     },
     /// Load one applicable draft by semantic target, creating it when absent.
     OpenDraft {
@@ -2200,6 +2324,9 @@ pub struct UiModel {
     mailbox_modal: Option<UiMailboxModal>,
     mailbox_draft: Option<UiMailboxDraftPane>,
     agent_modal: Option<UiAgentModal>,
+    interactions: VecDeque<UiInteraction>,
+    interaction_modal: Option<UiInteractionModal>,
+    pending_interaction: Option<EffectId>,
     project_interaction: Option<UiProjectInteraction>,
     project_summary: Option<UiProjectSummary>,
     project_workspace_level: UiProjectWorkspaceLevel,
@@ -2261,6 +2388,9 @@ impl UiModel {
             mailbox_modal: None,
             mailbox_draft: None,
             agent_modal: None,
+            interactions: VecDeque::new(),
+            interaction_modal: None,
+            pending_interaction: None,
             project_interaction: None,
             project_summary: None,
             project_workspace_level: UiProjectWorkspaceLevel::List,
@@ -2590,6 +2720,16 @@ impl UiModel {
     /// Borrows the current named-agent interaction.
     pub const fn agent_modal(&self) -> Option<&UiAgentModal> {
         self.agent_modal.as_ref()
+    }
+
+    /// Borrows the current provider-interaction dialog.
+    pub const fn interaction_modal(&self) -> Option<&UiInteractionModal> {
+        self.interaction_modal.as_ref()
+    }
+
+    /// Borrows the current highest-priority live interaction.
+    pub fn current_interaction(&self) -> Option<&UiInteraction> {
+        self.interactions.front()
     }
 
     /// Borrows the current project interaction.
@@ -3541,6 +3681,15 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         UiEvent::MaterializedViewObserved { view } => {
             materialized_view_observed(&mut model, view, &mut effects)?;
         }
+        UiEvent::InteractionsObserved { interactions } => {
+            interactions_observed(&mut model, interactions, &mut effects);
+        }
+        UiEvent::InteractionAnswered { effect_id, outcome } => {
+            interaction_answered(&mut model, effect_id, outcome, &mut effects);
+        }
+        UiEvent::InteractionAnswerFailed { effect_id, failure } => {
+            interaction_answer_failed(&mut model, effect_id, failure, &mut effects);
+        }
         UiEvent::ConversationLoaded { effect_id, page } => {
             conversation_loaded(&mut model, effect_id, page, &mut effects)?;
         }
@@ -3685,6 +3834,109 @@ fn materialized_view_observed(
     apply_completion_context(model);
     effects.push(UiEffect::RequestRedraw);
     Ok(())
+}
+
+fn interactions_observed(
+    model: &mut UiModel,
+    interactions: Vec<UiInteraction>,
+    effects: &mut Vec<UiEffect>,
+) {
+    model.interactions = interactions.into();
+    match model.interaction_modal.take() {
+        Some(UiInteractionModal::Submitting { interaction }) => {
+            model.interaction_modal = Some(UiInteractionModal::Submitting { interaction });
+        }
+        Some(UiInteractionModal::Prompt {
+            interaction,
+            selected,
+            text,
+        }) => {
+            if let Some(current) = model
+                .interactions
+                .iter()
+                .find(|candidate| candidate.request_id == interaction.request_id)
+                .cloned()
+            {
+                model.interaction_modal = Some(UiInteractionModal::Prompt {
+                    selected: selected.min(current.choices.len().saturating_sub(1)),
+                    interaction: current,
+                    text,
+                });
+            } else {
+                show_next_interaction(model);
+            }
+        }
+        None => show_next_interaction(model),
+    }
+    effects.push(UiEffect::RequestRedraw);
+}
+
+fn show_next_interaction(model: &mut UiModel) {
+    model.interaction_modal =
+        model
+            .interactions
+            .front()
+            .cloned()
+            .map(|interaction| UiInteractionModal::Prompt {
+                interaction,
+                selected: 0,
+                text: String::new(),
+            });
+}
+
+fn interaction_answered(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    outcome: UiInteractionAnswerOutcome,
+    effects: &mut Vec<UiEffect>,
+) {
+    if model.pending_interaction != Some(effect_id) {
+        return;
+    }
+    model.pending_interaction = None;
+    let request_id = match model.interaction_modal.take() {
+        Some(UiInteractionModal::Submitting { interaction }) => Some(interaction.request_id),
+        other => {
+            model.interaction_modal = other;
+            None
+        }
+    };
+    if let Some(request_id) = request_id {
+        model
+            .interactions
+            .retain(|interaction| interaction.request_id != request_id);
+    }
+    if outcome == UiInteractionAnswerOutcome::Stale {
+        model.last_failure = Some(UiFailure {
+            code: "interaction_already_resolved".to_owned(),
+            action:
+                "review the next request; another responder or the agent already ended this one"
+                    .to_owned(),
+        });
+    }
+    show_next_interaction(model);
+    effects.push(UiEffect::RequestRedraw);
+}
+
+fn interaction_answer_failed(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    failure: UiFailure,
+    effects: &mut Vec<UiEffect>,
+) {
+    if model.pending_interaction != Some(effect_id) {
+        return;
+    }
+    model.pending_interaction = None;
+    if let Some(UiInteractionModal::Submitting { interaction }) = model.interaction_modal.take() {
+        model.interaction_modal = Some(UiInteractionModal::Prompt {
+            interaction,
+            selected: 0,
+            text: String::new(),
+        });
+    }
+    model.last_failure = Some(failure);
+    effects.push(UiEffect::RequestRedraw);
 }
 
 fn reconcile_pending_mailbox_view(
@@ -4399,6 +4651,15 @@ fn normalize_vim_navigation(model: &UiModel, input: &UiInput) -> UiInput {
 }
 
 fn text_input_is_active(model: &UiModel) -> bool {
+    if matches!(
+        model.interaction_modal,
+        Some(UiInteractionModal::Prompt {
+            ref interaction,
+            ..
+        }) if interaction.allow_text
+    ) {
+        return true;
+    }
     if model.new_modal.is_some() {
         return false;
     }
@@ -4443,6 +4704,9 @@ fn apply_open_modal_input(
     input: &UiInput,
     effects: &mut Vec<UiEffect>,
 ) -> Result<Option<bool>, UiError> {
+    if model.interaction_modal.is_some() {
+        return apply_interaction_modal_input(model, input.clone(), effects).map(Some);
+    }
     if model.new_modal.is_some() {
         return apply_new_modal_input(model, input.clone(), effects).map(Some);
     }
@@ -4459,6 +4723,82 @@ fn apply_open_modal_input(
         return apply_draft_input(model, input.clone(), effects).map(Some);
     }
     Ok(None)
+}
+
+fn apply_interaction_modal_input(
+    model: &mut UiModel,
+    input: UiInput,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    let Some(interaction_state) = model.interaction_modal.take() else {
+        return Ok(false);
+    };
+    let UiInteractionModal::Prompt {
+        interaction,
+        mut selected,
+        mut text,
+    } = interaction_state
+    else {
+        model.interaction_modal = Some(interaction_state);
+        return Ok(false);
+    };
+    let response = match input {
+        UiInput::Escape => Some(UiInteractionResponse::Cancelled),
+        UiInput::NextItem if !interaction.choices.is_empty() => {
+            selected = (selected + 1) % interaction.choices.len();
+            None
+        }
+        UiInput::PreviousItem if !interaction.choices.is_empty() => {
+            selected = (selected + interaction.choices.len() - 1) % interaction.choices.len();
+            None
+        }
+        UiInput::Activate if interaction.allow_text && !text.trim().is_empty() => {
+            Some(UiInteractionResponse::Text(text.clone()))
+        }
+        UiInput::Activate => interaction
+            .choices
+            .get(selected)
+            .map(|choice| UiInteractionResponse::Choice(choice.value.clone())),
+        UiInput::Character(value) if interaction.allow_text => {
+            if text.len().saturating_add(value.len_utf8()) <= MAX_DRAFT_BYTES {
+                text.push(value);
+            }
+            None
+        }
+        UiInput::Paste(value) if interaction.allow_text => {
+            for value in value.chars() {
+                if text.len().saturating_add(value.len_utf8()) > MAX_DRAFT_BYTES {
+                    break;
+                }
+                text.push(value);
+            }
+            None
+        }
+        UiInput::Backspace if interaction.allow_text => {
+            text.pop();
+            None
+        }
+        _ => None,
+    };
+    if let Some(response) = response {
+        let id = model.allocate_effect()?;
+        model.pending_interaction = Some(id);
+        model.interaction_modal = Some(UiInteractionModal::Submitting {
+            interaction: interaction.clone(),
+        });
+        effects.push(UiEffect::AnswerInteraction {
+            id,
+            interaction,
+            response,
+        });
+    } else {
+        model.interaction_modal = Some(UiInteractionModal::Prompt {
+            interaction,
+            selected,
+            text,
+        });
+    }
+    Ok(true)
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
@@ -9235,8 +9575,10 @@ mod tests {
 
     use super::{
         TextEdit, UiEffect, UiError, UiEvent, UiFormField, UiFormKind, UiFormState, UiHumanState,
-        UiInput, UiModel, UiProject, UiProjectAction, UiProjectInteraction, UiProjectResourceCheck,
-        UiSize, UiSnapshot, apply_project_interaction_input, edit_text, normalize_path_input,
+        UiInput, UiInteraction, UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind,
+        UiInteractionModal, UiInteractionResponse, UiModel, UiProject, UiProjectAction,
+        UiProjectInteraction, UiProjectResourceCheck, UiSize, UiSnapshot,
+        apply_project_interaction_input, edit_text, normalize_path_input,
         refresh_project_interaction, update,
     };
 
@@ -9266,6 +9608,163 @@ mod tests {
             update(started.model, UiEvent::Started),
             Err(UiError::AlreadyStarted)
         );
+    }
+
+    #[test]
+    fn pending_interaction_opens_and_submits_the_exact_stable_choice() {
+        let interaction = interaction(1, false, &[("accept", "Allow once"), ("decline", "Deny")]);
+        let observed = update(
+            model(),
+            UiEvent::InteractionsObserved {
+                interactions: vec![interaction.clone()],
+            },
+        )
+        .expect("interaction observed");
+        assert!(matches!(
+            observed.model.interaction_modal,
+            Some(UiInteractionModal::Prompt { ref interaction, selected: 0, .. })
+                if interaction.request_id == [1; 32]
+        ));
+
+        let selected = update(observed.model, UiEvent::Input(UiInput::NextItem))
+            .expect("second choice selected");
+        let submitted =
+            update(selected.model, UiEvent::Input(UiInput::Activate)).expect("choice submitted");
+        assert!(submitted.effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::AnswerInteraction {
+                interaction: submitted_interaction,
+                response: UiInteractionResponse::Choice(value),
+                ..
+            } if submitted_interaction == &interaction && value == "decline"
+        )));
+    }
+
+    #[test]
+    fn free_text_interaction_submits_the_complete_draft() {
+        let observed = update(
+            model(),
+            UiEvent::InteractionsObserved {
+                interactions: vec![interaction(2, true, &[])],
+            },
+        )
+        .expect("interaction observed");
+        let typed = update(
+            observed.model,
+            UiEvent::Input(UiInput::Paste("release now".to_owned())),
+        )
+        .expect("text entered");
+        let submitted =
+            update(typed.model, UiEvent::Input(UiInput::Activate)).expect("text submitted");
+        assert!(submitted.effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::AnswerInteraction {
+                response: UiInteractionResponse::Text(value),
+                ..
+            } if value == "release now"
+        )));
+    }
+
+    #[test]
+    fn escape_explicitly_cancels_an_interaction() {
+        let observed = update(
+            model(),
+            UiEvent::InteractionsObserved {
+                interactions: vec![interaction(3, false, &[])],
+            },
+        )
+        .expect("interaction observed");
+        let submitted = update(observed.model, UiEvent::Input(UiInput::Escape))
+            .expect("cancellation submitted");
+        assert!(submitted.effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::AnswerInteraction {
+                response: UiInteractionResponse::Cancelled,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn stale_interaction_advances_to_the_next_request() {
+        let observed = update(
+            model(),
+            UiEvent::InteractionsObserved {
+                interactions: vec![
+                    interaction(4, false, &[("accept", "Allow")]),
+                    interaction(5, false, &[("accept", "Allow")]),
+                ],
+            },
+        )
+        .expect("interactions observed");
+        let submitted =
+            update(observed.model, UiEvent::Input(UiInput::Activate)).expect("first submitted");
+        let effect_id = submitted
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::AnswerInteraction { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("answer effect");
+        let resolved = update(
+            submitted.model,
+            UiEvent::InteractionAnswered {
+                effect_id,
+                outcome: UiInteractionAnswerOutcome::Stale,
+            },
+        )
+        .expect("stale handled");
+        assert!(matches!(
+            resolved.model.interaction_modal,
+            Some(UiInteractionModal::Prompt { ref interaction, .. })
+                if interaction.request_id == [5; 32]
+        ));
+        assert_eq!(
+            resolved
+                .model
+                .last_failure
+                .as_ref()
+                .map(|failure| failure.code.as_str()),
+            Some("interaction_already_resolved")
+        );
+    }
+
+    #[test]
+    fn failed_interaction_answer_restores_the_prompt() {
+        let observed = update(
+            model(),
+            UiEvent::InteractionsObserved {
+                interactions: vec![interaction(6, false, &[("accept", "Allow")])],
+            },
+        )
+        .expect("interaction observed");
+        let submitted =
+            update(observed.model, UiEvent::Input(UiInput::Activate)).expect("submitted");
+        let effect_id = submitted
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::AnswerInteraction { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("answer effect");
+        let failed = update(
+            submitted.model,
+            UiEvent::InteractionAnswerFailed {
+                effect_id,
+                failure: super::UiFailure {
+                    code: "transport_lost".to_owned(),
+                    action: "retry".to_owned(),
+                },
+            },
+        )
+        .expect("failure handled");
+        assert!(matches!(
+            failed.model.interaction_modal,
+            Some(UiInteractionModal::Prompt { ref interaction, .. })
+                if interaction.request_id == [6; 32]
+        ));
     }
 
     #[test]
@@ -9384,6 +9883,36 @@ mod tests {
         ));
         assert_eq!(value, "é");
         assert!(form.errors.contains_key(&UiFormField::AgentName));
+    }
+
+    fn model() -> UiModel {
+        UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        })
+    }
+
+    fn interaction(identity: u8, allow_text: bool, choices: &[(&str, &str)]) -> UiInteraction {
+        UiInteraction {
+            agent_id: [9; 32],
+            agent_name: "alice".to_owned(),
+            project_id: Some([8; 32]),
+            project_name: Some("release".to_owned()),
+            provider: "codex".to_owned(),
+            session: "session-1".to_owned(),
+            request_id: [identity; 32],
+            operation_id: [7; 32],
+            kind: UiInteractionKind::CommandApproval,
+            prompt: "Run the command?".to_owned(),
+            choices: choices
+                .iter()
+                .map(|(value, label)| UiInteractionChoice {
+                    value: (*value).to_owned(),
+                    label: (*label).to_owned(),
+                })
+                .collect(),
+            allow_text,
+        }
     }
 
     fn project(name: &str) -> UiProject {

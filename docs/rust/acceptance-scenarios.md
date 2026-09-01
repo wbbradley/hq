@@ -120,6 +120,8 @@ outcome without specifying those representations.
 | ACT-010 | live-progress-tail | Running turn has progress on several item keys across a page boundary | Page, refresh, continuation, reopen, repair | Exactly one final live row uses latest canonical non-empty progress; no durable page duplicates it | Presentation tail |
 | ACT-011 | terminal-replaces-live | Terminal turn arrives for one of sequential/concurrent fully correlated operations | Reduce and page | Its live row disappears and one typed terminal row remains without affecting another operation | Lifecycle isolation |
 | ACT-012 | typed-completed-command | Failed multiline command has four output lines plus ANSI/OSC/control content | Normalize, protocol/store round trip, node/TUI render | Command/output/exit remain separate; three safe output lines and omission/failure cues render; exact bounded detail remains inspectable | Completed-item safety |
+| ACT-013 | completed-progress-human-follow-up | Running progress reports failed-test output, its exact item completes, then the human sends “Are you still working?” | Page, refresh, reopen, repair | Completed output stays in history; old progress is not pinned below the human message; running-turn fallback remains until newer provider activity | Live-tail freshness |
+| ACT-014 | provider-approval-responder | Fake Codex blocks a project turn on command approval while one subscribed TUI responder is active | Installed TUI / reconnect / server-session race | Prompt appears immediately, one stable human choice reaches Codex, output resumes, equal answer replay reconciles, and disconnect fail-closes stale requests | Interactive authority |
 | AGT-001 | unique-agent-name | One name claim for one local agent mailbox | Reduce | Active named agent and permanent reservation | Named agents |
 | AGT-002 | concurrent-name-claims | Two mailboxes claim one name concurrently | Reduce | Name conflicted/reserved and neither is runnable under it | Unique identity conflict |
 | AGT-003 | session-binding-reassignment | Same provider/session is bound to two mailboxes | Reduce | Binding conflict; no silent reassignment | Session identity |
@@ -235,7 +237,8 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Negotiation chooses the highest common nonzero version, reports disjoint ranges explicitly, and
   carries bounded diagnostic build metadata without using build identity as authority.
 - Every lifecycle, query, fact mutation, relay/sync effect, neutral agent-session effect, resource
-  inspection, typed project command/progress, subscription, response, error, and invalidation
+  inspection, typed project command/progress, pending-interaction, responder, subscription,
+  response, error, and invalidation
   family round-trips through the one v1
   codec; decoded values reapply all constructor bounds.
 - Pre-release protocol and persistence corrections remain in v1 in place: tests assert the v1
@@ -252,6 +255,9 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   intent only and never contain projection rows or message bodies.
 - Architecture verification allows `hq-local-api` to depend inward on domain, canonical protocol,
   and application only; no storage dependency or SQLite vocabulary is present.
+- Responder registration activates only after its acknowledgement is written, drops on disconnect,
+  re-registers with a fresh session-derived identity, and refreshes pending interactions on a
+  body-free operations notification even when the durable revision is unchanged.
 
 ## Inbox composition gates
 

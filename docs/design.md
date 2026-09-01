@@ -147,9 +147,14 @@ pass. There is no timer between a normal store commit and daemon invalidation de
 The TUI activates a dedicated subscribed local connection before it opens the independent ordinary
 connection used for snapshots and commands. One observation thread remains blocked in the
 subscribed socket read while the command thread may wait on snapshots, project work, or provider
-round trips. A committed revision therefore reaches the model without waiting for command
-completion or a client polling interval. Shutdown interrupts the exact active observation socket
-and joins both owners. The Codex bridge, CLI `ask`, and CLI `wait` retain their own subscription
+round trips. That observation session also owns the acknowledged provider-interaction responder.
+Provider request appearance or termination publishes a body-free `operations` wake, including when
+the durable revision is unchanged; the client immediately queries the bounded memory-only prompt
+view. Its exact-once answer travels through the ordinary command connection. A committed revision
+or provider request therefore reaches the model without waiting for command completion or a client
+polling interval. Disconnect drops responder ownership and fail-closes outstanding requests.
+Shutdown interrupts the exact active observation socket and joins both owners. The Codex bridge,
+CLI `ask`, and CLI `wait` retain their own subscription
 composition. The reconnecting client can replace its desired conversation while one materialized
 refresh is in flight; it suppresses the stale selection, coalesces invalidations, and requests only
 the latest interest. Unselected subscribers and ordinary clients retain explicit snapshot and

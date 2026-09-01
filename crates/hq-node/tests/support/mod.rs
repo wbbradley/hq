@@ -165,6 +165,9 @@ impl hq_application::QueryProviders for UnavailableNodeComponent {
     }
 }
 
+impl hq_application::QueryInteractions for UnavailableNodeComponent {}
+impl hq_application::ControlInteractions for UnavailableNodeComponent {}
+
 impl InspectResource for UnavailableNodeComponent {
     fn inspect_resource(
         &self,
@@ -331,6 +334,8 @@ impl ObserveRevisions for UnavailableApplicationPorts {
 }
 
 impl ApplicationPorts for UnavailableApplicationPorts {}
+impl hq_application::QueryInteractions for UnavailableApplicationPorts {}
+impl hq_application::ControlInteractions for UnavailableApplicationPorts {}
 impl ControlMailbox for UnavailableApplicationPorts {}
 
 pub fn unavailable_application(hub: RevisionHub) -> Application<UnavailableApplicationPorts> {

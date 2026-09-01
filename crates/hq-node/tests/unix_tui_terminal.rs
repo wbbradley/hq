@@ -585,7 +585,7 @@ fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation()
     let provider_bin = directory.path().join("provider-bin");
     std::fs::create_dir(&worktree).expect("guided working tree");
     std::fs::create_dir(&provider_bin).expect("provider bin directory");
-    install_fake_codex(&provider_bin);
+    install_fake_codex(&provider_bin, false);
     let inherited_path = std::env::var("PATH").unwrap_or_default();
     let search_path = format!("{}:{inherited_path}", provider_bin.display());
 
@@ -606,6 +606,7 @@ fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation()
             agent,
             content,
             search_path: &search_path,
+            approval: false,
         },
     );
     assert!(run.status.success(), "guided TUI failed: {:?}", run.bytes);
@@ -664,6 +665,66 @@ fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation()
     );
     assert!(mailbox_contains(&state_root, follow_up));
     assert!(mailbox_contains(&state_root, "finished-turn-2"));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn installed_fake_codex_approval_round_trips_through_the_tui() {
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let worktree = directory.path().join("approval-worktree");
+    let provider_bin = directory.path().join("provider-bin");
+    std::fs::create_dir(&worktree).expect("guided working tree");
+    std::fs::create_dir(&provider_bin).expect("provider bin directory");
+    install_fake_codex(&provider_bin, true);
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let search_path = format!("{}:{inherited_path}", provider_bin.display());
+
+    initialize_identity(&state_root);
+    let _daemon = start_foreground_daemon(&state_root, &search_path, &provider_bin.join("codex"));
+    let human = hq_output_with_search_path(&state_root, &["human", "create"], &search_path);
+    assert!(human.status.success(), "human create failed: {human:?}");
+
+    let content = "run work that needs approval";
+    let run = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::CreateGuidedProjectWork {
+            name: "approval-project",
+            path: worktree.to_str().expect("UTF-8 guided path"),
+            agent: "approval-agent",
+            content,
+            search_path: &search_path,
+            approval: true,
+        },
+    );
+    assert!(run.status.success(), "approval TUI failed: {:?}", run.bytes);
+    assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+    assert!(
+        run.bytes
+            .windows(b"Command approval needed".len())
+            .any(|window| window == b"Command approval needed"),
+        "approval prompt was not rendered: {:?}",
+        run.bytes
+    );
+    assert!(mailbox_contains(&state_root, content));
+    assert!(mailbox_contains(&state_root, "finished-turn-1"));
+    let calls = std::fs::read_to_string(provider_bin.join("calls.log"))
+        .expect("provider calls are recorded");
+    assert!(
+        calls.lines().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line).is_ok_and(|value| {
+                value.get("id").and_then(serde_json::Value::as_u64) == Some(901)
+                    && value
+                        .get("result")
+                        .and_then(|result| result.get("decision"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("accept")
+            })
+        }),
+        "provider did not receive the TUI approval: {calls}"
+    );
 }
 
 #[test]
@@ -849,6 +910,7 @@ enum PtyInteraction<'content> {
         agent: &'content str,
         content: &'content str,
         search_path: &'content str,
+        approval: bool,
     },
     AddProjectResource {
         name: &'content str,
@@ -929,6 +991,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
     let mut managed_action_sent = false;
     let mut managed_provider_sent = false;
     let mut resource_commit_sent = false;
+    let mut interaction_answer_sent = false;
     let mut exit_sent = false;
     let mut next_state_probe_at = Instant::now();
     let status = loop {
@@ -1336,6 +1399,20 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             resource_commit_sent = true;
             completion_offset = Some(bytes.len());
         }
+        if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
+            && resource_commit_sent
+            && !interaction_answer_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Command approval needed".len())
+                    .any(|window| window == b"Command approval needed")
+            })
+        {
+            master.write_all(b"\r").expect("approval choice writes");
+            master.flush().expect("approval choice flushes");
+            interaction_answer_sent = true;
+            completion_offset = Some(bytes.len());
+        }
         if let PtyInteraction::CreateWorktreeProject {
             name,
             source,
@@ -1597,8 +1674,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 exit_sent = true;
             }
         }
-        if let PtyInteraction::CreateGuidedProjectWork { name, .. } = interaction
+        if let PtyInteraction::CreateGuidedProjectWork { name, approval, .. } = interaction
             && resource_commit_sent
+            && (!approval || interaction_answer_sent)
             && !exit_sent
             && Instant::now() >= next_state_probe_at
             && completion_offset.is_some_and(|offset| {
@@ -1609,6 +1687,18 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         {
             next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
             if project_is_runnable_with_one_dispatch(state_root, name) {
+                master.write_all(&[0x03]).expect("Ctrl-C writes");
+                master.flush().expect("Ctrl-C flushes");
+                exit_sent = true;
+            }
+        }
+        if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
+            && interaction_answer_sent
+            && !exit_sent
+            && Instant::now() >= next_state_probe_at
+        {
+            next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
+            if mailbox_contains(state_root, "finished-turn-1") {
                 master.write_all(&[0x03]).expect("Ctrl-C writes");
                 master.flush().expect("Ctrl-C flushes");
                 exit_sent = true;
@@ -1823,7 +1913,11 @@ fn hq_output_with_search_path(
         .expect("installed HQ command runs with provider search path")
 }
 
-fn install_fake_codex(directory: &Path) {
+fn install_fake_codex(directory: &Path, request_approval: bool) {
+    if request_approval {
+        std::fs::write(directory.join("request-approval"), b"enabled")
+            .expect("approval marker writes");
+    }
     let executable = directory.join("codex");
     std::fs::write(
         &executable,
@@ -1856,6 +1950,16 @@ for line in sys.stdin:
         turn = {"id": turn_id, "status": "inProgress", "items": []}
         print(json.dumps({"method": "turn/started", "params": {"threadId": thread_id, "turn": turn}}), flush=True)
         print(json.dumps({"id": request_id, "result": {"turn": turn}}), flush=True)
+        if os.path.exists(os.path.join(os.path.dirname(__file__), "request-approval")):
+            approval_id = 900 + turn_number
+            approval = {"id": approval_id, "method": "item/commandExecution/requestApproval", "params": {"threadId": thread_id, "turnId": turn_id, "itemId": f"command-{turn_number}", "command": "cargo test", "cwd": os.getcwd(), "reason": "Run the test command?"}}
+            print(json.dumps(approval), flush=True)
+            for answer_line in sys.stdin:
+                with open(os.path.join(os.path.dirname(__file__), "calls.log"), "a") as log:
+                    log.write(answer_line)
+                answer = json.loads(answer_line)
+                if answer.get("id") == approval_id:
+                    break
         time.sleep(0.25)
         item = {"type": "agentMessage", "id": f"answer-{turn_number}", "text": f"finished-turn-{turn_number}", "phase": "final_answer"}
         print(json.dumps({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": item}}), flush=True)

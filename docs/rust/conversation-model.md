@@ -96,12 +96,14 @@ file paths/diffs, tool name, and query remain separate bounded fields with trunc
 consumers therefore never infer kind or field boundaries from provider prose.
 
 Ordinary conversation pages omit replaceable progress and running `AgentTurn` records from durable
-history. The store derives one live tail below pagination: for each fully qualified running
-operation it selects the canonically latest non-empty progress winner across item keys, falling back
-to the running turn, then exposes the canonically latest active operation as the final row. A
-terminal turn removes that operation from live selection and remains once in canonical history.
-Continuation pages never carry a second copy, while the TUI retains and repositions the typed live
-row after appended durable entries.
+history. The store derives one live tail below pagination. For each fully qualified running
+operation it selects progress by source sequence, excluding an item when a later typed completed
+record exists for that exact source/provider/session/operation/item. A newer locally authored human
+message suppresses older progress until provider activity advances after it; the typed running turn
+is the fallback. The newest remaining active operation becomes the final row. A terminal turn
+removes that operation from live selection and remains once in canonical history. Continuation
+pages never carry a second copy. A memory-only pending provider interaction supersedes ordinary
+running/progress presentation in the TUI without discarding canonical history.
 
 Canonical activity facts are permanent. The disposable view retains snapshot winners, every
 completed record, and the canonically newest 200 progress winners per source/provider session.

@@ -1154,6 +1154,9 @@ fn connect_runner<L: NodeLauncher>(
                 vec![InvalidationTopic::All],
             )
             .map_err(|_| LocalNodeClientError::Client)?;
+        client
+            .configure_interaction_responder(Id32::new(*installation_id.as_bytes()))
+            .map_err(|_| LocalNodeClientError::Client)?;
     }
     let runner = BlockingClientRunner::new(
         BlockingClientConfig {

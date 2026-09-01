@@ -107,7 +107,8 @@ The crate tests hash the pinned schema, characterize representative fixtures and
 exercise exact start/resume, copied environment, redacted diagnostics, and child teardown through
 fake stdio/process behavior, and run all 14 reusable neutral harness scenarios through the real
 adapter seam. Node tests cover foreground launch resolution, exact project-directory propagation,
-provider registration, and clean replacement of a drained foreground generation. The
+provider registration, a fake-Codex command-approval round trip through the installed TUI, and
+clean replacement of a drained foreground generation. The
 installed-provider smoke is deliberately opt-in because it starts an
 authenticated Codex thread:
 

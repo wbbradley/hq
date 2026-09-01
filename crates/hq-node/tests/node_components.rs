@@ -204,6 +204,9 @@ impl hq_application::QueryProviders for FakeComponent {
     }
 }
 
+impl hq_application::QueryInteractions for FakeComponent {}
+impl hq_application::ControlInteractions for FakeComponent {}
+
 impl InspectResource for FakeComponent {
     fn inspect_resource(
         &self,

@@ -14,13 +14,14 @@ use hq_local_api::protocol::v1::{
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeConversationViewDto,
     AuthoritativeSnapshotDto, BuildMetadata, ClientHello, ConversationKeyDto, ConversationPageDto,
     ConversationPageSelectionDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse,
-    Id32, InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest, LifecycleState,
-    LifecycleStatus, MailboxCommandActionDto, MailboxCommandRequestDto, MutationAttemptDto,
-    MutationRequest, ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
-    ProjectCreationRequestDto, Request, RequestId, ResourceLocatorDto, ResourceSchemeDto,
-    ResponseEnvelope, ResponseResult, RevisionInvalidation, SelectedConversationPageDto,
-    ServerHello, SessionControlDto, SubscriptionAcknowledgement, V1, VersionRange, VersionRejected,
-    WireMessage, agent_session_request_digest,
+    Id32, InteractionResponderAcknowledgement, InvalidationTopic, LaunchEnvironmentDto,
+    LifecycleRequest, LifecycleState, LifecycleStatus, MailboxCommandActionDto,
+    MailboxCommandRequestDto, MutationAttemptDto, MutationRequest, ProjectCommandActionDto,
+    ProjectCommandOutcomeDto, ProjectCommandRequestDto, ProjectCreationRequestDto, Request,
+    RequestId, ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope, ResponseResult,
+    RevisionInvalidation, SelectedConversationPageDto, ServerHello, SessionControlDto,
+    SubscriptionAcknowledgement, V1, VersionRange, VersionRejected, WireMessage,
+    agent_session_request_digest,
 };
 use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientAction,
@@ -1043,6 +1044,152 @@ fn lost_subscription_acknowledgement_is_discarded_and_registered_fresh() {
             .events
             .is_empty()
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn interaction_responder_refreshes_immediately_and_registers_fresh_after_reconnect() {
+    let mut client = client();
+    client
+        .configure_interaction_responder(Id32::new([60; 32]))
+        .expect("responder intent");
+    client
+        .configure_subscription(Id32::new([61; 32]), vec![InvalidationTopic::All])
+        .expect("subscription intent");
+    let (generation, _) = only_connect(&client.start().expect("start").actions);
+    let _ = client.connected(generation).expect("connect");
+    let negotiated = client
+        .receive_frame(
+            generation,
+            &WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([62; 32])))
+                .encode_frame()
+                .expect("hello"),
+        )
+        .expect("negotiated");
+    let mut responder = None;
+    let mut subscription = None;
+    for action in &negotiated.actions {
+        let ClientAction::Write { frame, .. } = action else {
+            continue;
+        };
+        let WireMessage::Request(envelope) = WireMessage::decode_frame(frame).expect("request")
+        else {
+            panic!("expected request")
+        };
+        match envelope.request {
+            Request::RegisterInteractionResponder { responder_id } => {
+                responder = Some((envelope.id, responder_id));
+            }
+            Request::Subscribe(request) => subscription = Some((envelope.id, request)),
+            _ => {}
+        }
+    }
+    let (responder_request, first_responder_id) = responder.expect("responder registration");
+    let (subscription_request, subscription) = subscription.expect("subscription registration");
+
+    let view = AuthoritativeConversationViewDto::new(
+        AuthoritativeSnapshotDto::new(7, Vec::new()).expect("snapshot"),
+        None,
+    )
+    .expect("view");
+    let subscription_ack = WireMessage::Response(ResponseEnvelope::success(
+        subscription_request,
+        ResponseResult::Subscription(SubscriptionAcknowledgement::new(
+            subscription.subscription_id,
+            view,
+        )),
+    ))
+    .encode_frame()
+    .expect("subscription acknowledgement");
+    let _ = client
+        .receive_frame(generation, &subscription_ack)
+        .expect("subscription active");
+
+    let responder_ack = WireMessage::Response(ResponseEnvelope::success(
+        responder_request,
+        ResponseResult::InteractionResponder(InteractionResponderAcknowledgement {
+            responder_id: first_responder_id,
+        }),
+    ))
+    .encode_frame()
+    .expect("responder acknowledgement");
+    let initial_refresh = client
+        .receive_frame(generation, &responder_ack)
+        .expect("responder active");
+    let (_, pending_frame) = only_write(&initial_refresh.actions);
+    let WireMessage::Request(pending_request) =
+        WireMessage::decode_frame(&pending_frame).expect("pending request")
+    else {
+        panic!("expected pending-interaction request")
+    };
+    assert!(matches!(
+        pending_request.request,
+        Request::PendingInteractions(_)
+    ));
+    let pending_response = WireMessage::Response(ResponseEnvelope::success(
+        pending_request.id,
+        ResponseResult::PendingInteractions(Vec::new()),
+    ))
+    .encode_frame()
+    .expect("pending response");
+    let observed = client
+        .receive_frame(generation, &pending_response)
+        .expect("pending response accepted");
+    assert!(matches!(
+        observed.events.as_slice(),
+        [ClientEvent::Response {
+            result: ResponseResult::PendingInteractions(interactions),
+            ..
+        }] if interactions.is_empty()
+    ));
+
+    let invalidation = WireMessage::Invalidation(
+        RevisionInvalidation::new(
+            subscription.subscription_id,
+            7,
+            vec![InvalidationTopic::Operations],
+            false,
+        )
+        .expect("invalidation"),
+    )
+    .encode_frame()
+    .expect("invalidation frame");
+    let immediate = client
+        .receive_frame(generation, &invalidation)
+        .expect("operations wake");
+    assert!(immediate.actions.iter().any(|action| matches!(
+        action,
+        ClientAction::Write { frame, .. }
+            if matches!(WireMessage::decode_frame(frame), Ok(WireMessage::Request(envelope))
+                if matches!(envelope.request, Request::PendingInteractions(_)))
+    )));
+
+    let reconnect = client.disconnected(generation).expect("disconnect");
+    let (next_generation, _) = only_connect(&reconnect.actions);
+    let _ = client.connected(next_generation).expect("reconnect");
+    let next = client
+        .receive_frame(
+            next_generation,
+            &WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([63; 32])))
+                .encode_frame()
+                .expect("next hello"),
+        )
+        .expect("reregistered");
+    let next_responder_id = next
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            ClientAction::Write { frame, .. } => match WireMessage::decode_frame(frame).ok()? {
+                WireMessage::Request(envelope) => match envelope.request {
+                    Request::RegisterInteractionResponder { responder_id } => Some(responder_id),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("fresh responder registration");
+    assert_ne!(first_responder_id, next_responder_id);
 }
 
 #[test]

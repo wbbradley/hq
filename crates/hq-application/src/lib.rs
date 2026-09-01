@@ -5,6 +5,7 @@ mod authority_admin;
 mod error;
 mod harness;
 mod human;
+mod interactions;
 mod mailbox;
 mod messaging;
 mod mutation;
@@ -41,6 +42,11 @@ pub use human::{
     HumanDeviceGrantRequest, HumanDeviceRevokeRequest, LocalFactInputs, LocalInstallationAuthority,
     plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
     plan_human_device_grant, plan_human_device_revoke, plan_human_mailbox_creation,
+};
+pub use interactions::{
+    ControlInteractions, InteractionAnswerOutcome, InteractionAnswerRequest, InteractionChoice,
+    InteractionId, InteractionKind, InteractionResponderLease, InteractionResponse,
+    MAX_INTERACTION_CHOICES, MAX_PENDING_INTERACTIONS, PendingInteraction, QueryInteractions,
 };
 pub use mailbox::{
     MAX_MAILBOX_DRAFTS, MailboxCommandAction, MailboxCommandRequest, MailboxDraft,

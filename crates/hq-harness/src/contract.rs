@@ -208,10 +208,16 @@ impl HarnessRequestId {
 pub enum HarnessRequestKind {
     /// Ask for bounded non-secret human text or a selected choice.
     Question,
-    /// Request explicit approval or denial.
-    Approval,
+    /// Request approval to execute one command.
+    CommandApproval,
+    /// Request approval to change files.
+    FileApproval,
     /// Request one bounded permission scope.
     Permission,
+    /// Request approval to open one MCP-provided URL.
+    McpUrl,
+    /// Request bounded structured MCP form input.
+    McpForm,
 }
 
 /// One stable value and display label in a structured request.
@@ -236,6 +242,8 @@ pub struct HarnessInteractiveRequest {
     pub prompt: ContentText,
     /// Bounded structured choices; empty means free text or boolean response.
     pub choices: BoundedVec<HarnessRequestChoice, MAX_INTERACTIVE_CHOICES>,
+    /// Whether bounded free-text input is permitted in addition to any choices.
+    pub allow_text: bool,
 }
 
 /// Neutral non-secret response shape.

@@ -5,13 +5,15 @@ use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroUsize};
 use hq_application::{
     AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest, AgentSessionResult,
     ApplicationError, ApplicationPorts, AuthoritativeConversationView, CanonicalEvidence,
-    CommitFacts, ConfigureRelays, ControlHarness, ControlMailbox, ControlProjects, EffectOutcome,
-    EffectRequest, EvidenceIngestOutcome, FactMutation, InspectResource, MailboxCommandRequest,
-    MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
-    MailboxDraftSaveRequest, MutationAttempt, ObserveRevisions, ProjectCommandOutcome,
-    ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration, RelayStatus,
-    ResourceInspectionRequest, ResourceInspectionResult, RetireAgents, StateHealth,
-    StateRepairReport, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
+    CommitFacts, ConfigureRelays, ControlHarness, ControlInteractions, ControlMailbox,
+    ControlProjects, EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation,
+    InspectResource, InteractionAnswerOutcome, InteractionAnswerRequest, InteractionResponderLease,
+    MailboxCommandRequest, MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest,
+    MailboxDraftSaveOutcome, MailboxDraftSaveRequest, MutationAttempt, ObserveRevisions,
+    PendingInteraction, ProjectCommandOutcome, ProjectCommandRequest, PublishWake, QueryDomain,
+    QueryInteractions, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
+    ResourceInspectionResult, RetireAgents, StateHealth, StateRepairReport, SubscriptionRequest,
+    SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{FactId, Page, PageCursor, Revision};
 use hq_local_api::RevisionHub;
@@ -73,6 +75,9 @@ pub enum ComponentDrain {
 
 /// Real ownership seam shared by deterministic fakes and later concrete adapters.
 pub trait NodeComponent {
+    /// Supplies the shared revision fanout before component startup when the component needs it.
+    fn configure_revision_hub(&mut self, _revisions: RevisionHub) {}
+
     /// Starts owned execution and returns only after readiness acknowledgement.
     fn start(&mut self, cancellation: CancellationToken) -> Result<(), ComponentError>;
     /// Stops accepting new work without discarding accepted items.
@@ -367,10 +372,35 @@ impl<R, H, P> ObserveRevisions for NodeApplicationPorts<'_, R, H, P> {
     }
 }
 
+impl<R, H: QueryInteractions, P> QueryInteractions for NodeApplicationPorts<'_, R, H, P> {
+    fn pending_interactions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PendingInteraction>, ApplicationError> {
+        self.harness.pending_interactions(limit)
+    }
+}
+
+impl<R, H: ControlInteractions, P> ControlInteractions for NodeApplicationPorts<'_, R, H, P> {
+    fn answer_interaction(
+        &self,
+        request: InteractionAnswerRequest,
+    ) -> Result<InteractionAnswerOutcome, ApplicationError> {
+        self.harness.answer_interaction(request)
+    }
+
+    fn prepare_interaction_responder(
+        &self,
+        responder_id: hq_domain::OperationId,
+    ) -> Result<Box<dyn InteractionResponderLease>, ApplicationError> {
+        self.harness.prepare_interaction_responder(responder_id)
+    }
+}
+
 impl<R, H, P> ApplicationPorts for NodeApplicationPorts<'_, R, H, P>
 where
     R: PublishWake + ConfigureRelays,
-    H: ControlHarness + hq_application::QueryProviders,
+    H: ControlHarness + hq_application::QueryProviders + QueryInteractions + ControlInteractions,
     P: InspectResource + ControlProjects + RetireAgents + ScheduleProjectReconciliation,
 {
 }
@@ -393,6 +423,9 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
         subscription_capacity: NonZeroUsize,
     ) -> Result<Self, NodeOwnerStartError> {
         let cancellation = CancellationToken::new();
+        let revisions = RevisionHub::new(subscription_capacity.get())
+            .map_err(|_| NodeOwnerStartError::Foundation)?;
+        components.harness.configure_revision_hub(revisions.clone());
         if start_one(&mut components.local, &cancellation).is_err() {
             return Err(NodeOwnerStartError::Component(ComponentKind::LocalSessions));
         }
@@ -417,10 +450,6 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
             rollback(&mut components, started);
             return Err(NodeOwnerStartError::Foundation);
         }
-        let revisions = RevisionHub::new(subscription_capacity.get()).map_err(|_| {
-            rollback(&mut components, started);
-            NodeOwnerStartError::Foundation
-        })?;
         Ok(Self {
             foundation: Some(foundation),
             components: Some(components),
@@ -459,7 +488,7 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
     ) -> Option<NodeApplicationPorts<'_, R, H, P>>
     where
         R: PublishWake + ConfigureRelays,
-        H: ControlHarness,
+        H: ControlHarness + QueryInteractions + ControlInteractions,
         P: InspectResource + ControlProjects + RetireAgents + ScheduleProjectReconciliation,
     {
         let foundation = self.foundation.as_ref()?;

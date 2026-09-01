@@ -13,22 +13,24 @@ use std::{
 };
 
 use hq_domain::{
-    ActivityKind, ActivityStatus, AgentId, AssignmentId, CommandDigest, ContentText, DispatchId,
-    MessageId, OperationId, ProjectId, ProviderId, ProviderSessionId, ShortText, ThreadId,
+    ActivityKind, ActivityStatus, AgentId, AssignmentId, BoundedVec, CommandDigest, ContentText,
+    DispatchId, MessageId, OperationId, ProjectId, ProviderId, ProviderSessionId, ShortText,
+    ThreadId,
 };
 use hq_harness::{
     HarnessActivity, HarnessBufferedEvent, HarnessCancellationOutcome, HarnessCapabilities,
     HarnessCapability, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState,
     HarnessDrainOutcome, HarnessEnvironment, HarnessError, HarnessErrorClass, HarnessEvent,
     HarnessEventCheckpoint, HarnessEventPoll, HarnessFactory, HarnessInstance,
-    HarnessInstanceRequest, HarnessInteractiveAnswer, HarnessLaunchRequest, HarnessLeaseOutcome,
-    HarnessOutput, HarnessOutputKind, HarnessOwnerToken, HarnessPersistencePort,
-    HarnessProjectDelivery, HarnessReadySession, HarnessRegistry, HarnessSession,
-    HarnessSessionControlOutcome, HarnessSessionOperation, HarnessSessionOperationKind,
-    HarnessSessionOperationState, HarnessSessionRequest, HarnessStateMutation, HarnessStatePort,
-    HarnessStateSnapshot, HarnessSubmission, HarnessSubmissionLookup, HarnessSubmissionOutcome,
-    HarnessSupervisor, HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessTokenSource,
-    HarnessWorkerLease, OpenedHarnessSession,
+    HarnessInstanceRequest, HarnessInteractiveAnswer, HarnessInteractiveRequest,
+    HarnessInteractiveResponse, HarnessLaunchRequest, HarnessLeaseOutcome, HarnessOutput,
+    HarnessOutputKind, HarnessOwnerToken, HarnessPersistencePort, HarnessProjectDelivery,
+    HarnessReadySession, HarnessRegistry, HarnessRequestId, HarnessRequestKind, HarnessResponderId,
+    HarnessSession, HarnessSessionControlOutcome, HarnessSessionOperation,
+    HarnessSessionOperationKind, HarnessSessionOperationState, HarnessSessionRequest,
+    HarnessStateMutation, HarnessStatePort, HarnessStateSnapshot, HarnessSubmission,
+    HarnessSubmissionLookup, HarnessSubmissionOutcome, HarnessSupervisor, HarnessSupervisorConfig,
+    HarnessSupervisorDependencies, HarnessTokenSource, HarnessWorkerLease, OpenedHarnessSession,
 };
 
 #[test]
@@ -242,6 +244,236 @@ fn provider_poll_failure_is_redacted_and_releases_exact_worker_ownership() {
     assert_eq!(report.failures, [HarnessErrorClass::TransportClosed]);
     assert!(!format!("{report:?}").contains("provider diagnostic"));
     assert!(state.snapshot().leases.is_empty());
+}
+
+#[test]
+fn request_without_an_active_responder_fails_closed_immediately() {
+    let agent = AgentId::from_bytes([0x51; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let provider = Arc::new(ProviderState::default());
+    let request = interactive_request(
+        0x52,
+        HarnessRequestKind::CommandApproval,
+        "Run the command?",
+    );
+    provider.queue([Ok(HarnessEventPoll::Event(
+        HarnessEvent::InteractiveRequest(request.clone()),
+    ))]);
+    let runtime = supervisor(dependencies(
+        registry(
+            provider_id.clone(),
+            ProviderSessionId::new("interactive-session").expect("session"),
+            Arc::clone(&provider),
+        ),
+        Arc::new(MemoryState::default()),
+        Arc::new(MemoryPersistence::available()),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    ));
+    runtime
+        .launch(launch(agent, provider_id, HarnessSessionRequest::Start))
+        .expect("worker starts");
+
+    let report = runtime.poll_events().expect("request fails closed");
+
+    assert_eq!(report.interactive_requests, 0);
+    assert_eq!(report.interactive_requests_failed_closed, 1);
+    assert!(
+        runtime
+            .interactive_requests(agent, 2)
+            .expect("query works")
+            .is_empty()
+    );
+    assert_eq!(
+        provider.answers.lock().expect("answers lock").as_slice(),
+        [HarnessInteractiveAnswer {
+            request_id: request.request_id,
+            response: HarnessInteractiveResponse::Cancelled,
+        }]
+    );
+}
+
+#[test]
+fn losing_the_last_responder_fails_closed_retained_requests_in_source_order() {
+    let agent = AgentId::from_bytes([0x53; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let provider = Arc::new(ProviderState::default());
+    let first = interactive_request(0x54, HarnessRequestKind::Question, "Pick one");
+    let second = interactive_request(0x55, HarnessRequestKind::Permission, "Allow access?");
+    provider.queue([
+        Ok(HarnessEventPoll::Event(HarnessEvent::InteractiveRequest(
+            first.clone(),
+        ))),
+        Ok(HarnessEventPoll::Event(HarnessEvent::InteractiveRequest(
+            second.clone(),
+        ))),
+    ]);
+    let runtime = supervisor(dependencies(
+        registry(
+            provider_id.clone(),
+            ProviderSessionId::new("interactive-session").expect("session"),
+            Arc::clone(&provider),
+        ),
+        Arc::new(MemoryState::default()),
+        Arc::new(MemoryPersistence::available()),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    ));
+    runtime
+        .launch(launch(agent, provider_id, HarnessSessionRequest::Start))
+        .expect("worker starts");
+    let responder = HarnessResponderId::from_bytes([0x56; 32]).expect("responder validates");
+    assert!(runtime.register_responder(responder).expect("registers"));
+    assert!(
+        !runtime
+            .register_responder(responder)
+            .expect("retry reconciles")
+    );
+    runtime.poll_events().expect("first request retains");
+    runtime.poll_events().expect("second request retains");
+    assert_eq!(
+        runtime.interactive_requests(agent, 2).expect("query works"),
+        [first.clone(), second.clone()]
+    );
+
+    assert_eq!(
+        runtime
+            .unregister_responder(responder)
+            .expect("unregisters"),
+        2
+    );
+    assert!(
+        runtime
+            .interactive_requests(agent, 2)
+            .expect("query works")
+            .is_empty()
+    );
+    assert_eq!(
+        provider.answers.lock().expect("answers lock").as_slice(),
+        [
+            HarnessInteractiveAnswer {
+                request_id: first.request_id,
+                response: HarnessInteractiveResponse::Cancelled,
+            },
+            HarnessInteractiveAnswer {
+                request_id: second.request_id,
+                response: HarnessInteractiveResponse::Cancelled,
+            },
+        ]
+    );
+    assert_eq!(
+        runtime
+            .unregister_responder(responder)
+            .expect("retry reconciles"),
+        0
+    );
+}
+
+#[test]
+fn terminal_evidence_fails_closed_only_requests_for_its_exact_operation() {
+    let agent = AgentId::from_bytes([0x57; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let provider = Arc::new(ProviderState::default());
+    let terminal_operation = OperationId::from_bytes([46; 32]);
+    let other_operation = OperationId::from_bytes([0x58; 32]);
+    let terminal_request = interactive_request(
+        0x59,
+        HarnessRequestKind::CommandApproval,
+        "Run the command?",
+    );
+    let mut other_request = interactive_request(
+        0x5a,
+        HarnessRequestKind::Permission,
+        "Allow another operation?",
+    );
+    other_request.operation_id = other_operation;
+    provider.queue([
+        Ok(HarnessEventPoll::Event(HarnessEvent::InteractiveRequest(
+            terminal_request.clone(),
+        ))),
+        Ok(HarnessEventPoll::Event(HarnessEvent::InteractiveRequest(
+            other_request.clone(),
+        ))),
+        Ok(HarnessEventPoll::Event(HarnessEvent::Output(
+            HarnessOutput {
+                output_id: MessageId::from_bytes([0x5b; 32]),
+                operation_id: terminal_operation,
+                kind: HarnessOutputKind::FinalAnswer,
+                status: ActivityStatus::Succeeded,
+                body: ContentText::new("Done").expect("body validates"),
+            },
+        ))),
+        Ok(HarnessEventPoll::Event(HarnessEvent::Activity(
+            HarnessActivity {
+                operation_id: other_operation,
+                item: None,
+                kind: ActivityKind::AgentTurn,
+                logical_key: ShortText::new("turn").expect("key validates"),
+                runtime: ShortText::new("scripted").expect("runtime validates"),
+                sequence: NonZeroU64::new(1).expect("sequence is positive"),
+                status: ActivityStatus::Interrupted,
+                content: ContentText::new("Stopped").expect("content validates"),
+                truncated: false,
+                completed: None,
+            },
+        ))),
+    ]);
+    let runtime = supervisor(dependencies(
+        registry(
+            provider_id.clone(),
+            ProviderSessionId::new("interactive-session").expect("session"),
+            Arc::clone(&provider),
+        ),
+        Arc::new(MemoryState::default()),
+        Arc::new(MemoryPersistence::available()),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    ));
+    runtime
+        .launch(launch(agent, provider_id, HarnessSessionRequest::Start))
+        .expect("worker starts");
+    let responder = HarnessResponderId::from_bytes([0x5c; 32]).expect("responder validates");
+    assert!(runtime.register_responder(responder).expect("registers"));
+    runtime.poll_events().expect("terminal request retains");
+    runtime.poll_events().expect("other request retains");
+
+    let report = runtime.poll_events().expect("terminal output polls");
+
+    assert_eq!(report.interactive_requests_failed_closed, 1);
+    assert_eq!(
+        runtime.interactive_requests(agent, 2).expect("query works"),
+        [other_request.clone()]
+    );
+    assert_eq!(
+        provider.answers.lock().expect("answers lock").as_slice(),
+        [HarnessInteractiveAnswer {
+            request_id: terminal_request.request_id,
+            response: HarnessInteractiveResponse::Cancelled,
+        }]
+    );
+
+    let report = runtime.poll_events().expect("terminal turn polls");
+
+    assert_eq!(report.interactive_requests_failed_closed, 1);
+    assert!(
+        runtime
+            .interactive_requests(agent, 2)
+            .expect("query works")
+            .is_empty()
+    );
+    assert_eq!(
+        provider.answers.lock().expect("answers lock").as_slice(),
+        [
+            HarnessInteractiveAnswer {
+                request_id: terminal_request.request_id,
+                response: HarnessInteractiveResponse::Cancelled,
+            },
+            HarnessInteractiveAnswer {
+                request_id: other_request.request_id,
+                response: HarnessInteractiveResponse::Cancelled,
+            },
+        ]
+    );
 }
 
 #[test]
@@ -726,6 +958,24 @@ fn activity(sequence: u64, status: ActivityStatus, content: &str) -> HarnessActi
     }
 }
 
+fn interactive_request(
+    identity: u8,
+    kind: HarnessRequestKind,
+    prompt: &str,
+) -> HarnessInteractiveRequest {
+    HarnessInteractiveRequest {
+        request_id: HarnessRequestId::from_bytes([identity; 32]),
+        operation_id: OperationId::from_bytes([46; 32]),
+        kind,
+        prompt: ContentText::new(prompt).expect("prompt validates"),
+        choices: BoundedVec::new([]).expect("empty choices validate"),
+        allow_text: matches!(
+            kind,
+            HarnessRequestKind::Question | HarnessRequestKind::McpForm
+        ),
+    }
+}
+
 #[derive(Default)]
 struct MemoryState {
     inner: Mutex<MemoryStateData>,
@@ -1172,6 +1422,7 @@ struct ProviderState {
     drain_pending: AtomicBool,
     force_stops: AtomicUsize,
     events: Mutex<VecDeque<Result<HarnessEventPoll, HarnessError>>>,
+    answers: Mutex<Vec<HarnessInteractiveAnswer>>,
 }
 
 impl ProviderState {
@@ -1285,10 +1536,12 @@ impl HarnessSession for TestSession {
             .unwrap_or(Ok(HarnessEventPoll::TimedOut))
     }
 
-    fn answer_interactive(
-        &mut self,
-        _answer: HarnessInteractiveAnswer,
-    ) -> Result<(), HarnessError> {
+    fn answer_interactive(&mut self, answer: HarnessInteractiveAnswer) -> Result<(), HarnessError> {
+        self.state
+            .answers
+            .lock()
+            .expect("answers lock")
+            .push(answer);
         Ok(())
     }
 

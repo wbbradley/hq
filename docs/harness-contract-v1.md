@@ -72,8 +72,11 @@ Adapters MUST NOT require consumers to parse prose to determine output kind, act
 correlation, or truncation. Provider event identifiers and transport messages remain private.
 
 Interactive requests are bounded, structured, non-secret values with a stable opaque request ID.
+They carry a closed question, command approval, file approval, permission, MCP URL, or MCP form
+kind, exact operation identity, source-ordered stable choices, and explicit free-text capability.
 Each request accepts at most one answer. Duplicate or unknown answers fail closed. Cancellation may
-release an outstanding request. Passwords, tokens, authentication challenges, or other
+release an outstanding request and must use the adapter's method-specific closed response shape.
+Passwords, tokens, authentication challenges, or other
 secret-bearing input MUST NOT cross or be persisted at this neutral boundary; such a request returns
 `SecretInputRejected` without retaining its content.
 

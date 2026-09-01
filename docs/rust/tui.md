@@ -493,9 +493,14 @@ ordinary footer with a plain failure statement and recovery action; their stable
 technical help. The Agents and Projects footers expose their
 
 Transient activity is already consolidated below this model. Refresh replaces the one live tail
-entry in place; terminal evidence removes it, continuation pages cannot duplicate it, and a typed
-tail-placement pass keeps it below newly appended durable rows. A reader following the tail moves
-to the replacement; a reader on another fact keeps that stable fact anchor.
+entry in place; terminal evidence removes it and continuation pages cannot duplicate it. A newer
+human message prevents an older progress snapshot from being moved beneath that message. Pending
+provider questions and approvals arrive over the subscribed connection and open one highest-priority
+dialog with the ordinary agent name, exact prompt, humanized stable choices, optional bounded text,
+and explicit cancel. Submission retains the request until an answered or stale outcome; transport
+failure restores the prompt. Exact provider/session/operation evidence remains visible as technical
+detail. A reader following the tail moves to a genuine replacement; a reader on another fact keeps
+that stable fact anchor.
 primary inspect, create, search, and help controls; responsive tests cover wide and compact
 modeless-draft, agent-detail, and managed-switch rendering. Styling
 supplements these text markers and is not the sole carrier of state.

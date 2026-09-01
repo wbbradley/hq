@@ -585,6 +585,10 @@ impl CodexSession {
                         })
                     })
                     .collect::<Result<Vec<_>, HarnessError>>()?;
+                let allow_text = question
+                    .get("isOther")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(neutral_choices.is_empty());
                 self.pending_requests.insert(
                     request_id,
                     PendingRequest {
@@ -592,10 +596,7 @@ impl CodexSession {
                         question_id: Some(question_id),
                         kind: PendingKind::Question,
                         choices: choices.into_iter().collect(),
-                        allow_text: question
-                            .get("isOther")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(neutral_choices.is_empty()),
+                        allow_text,
                     },
                 );
                 normalized.push(HarnessInteractiveRequest {
@@ -605,6 +606,7 @@ impl CodexSession {
                     prompt: bounded_content(&prompt)?,
                     choices: BoundedVec::new(neutral_choices)
                         .map_err(|_| HarnessError::new(HarnessErrorClass::InvalidInput))?,
+                    allow_text,
                 });
             }
             return Ok(normalized);
@@ -635,7 +637,7 @@ impl CodexSession {
                     );
                 }
                 (
-                    HarnessRequestKind::Approval,
+                    HarnessRequestKind::CommandApproval,
                     PendingKind::Approval,
                     approval_prompt("Command approval", params),
                     choices,
@@ -643,7 +645,7 @@ impl CodexSession {
                 )
             }
             "item/fileChange/requestApproval" => (
-                HarnessRequestKind::Approval,
+                HarnessRequestKind::FileApproval,
                 PendingKind::Approval,
                 approval_prompt("File-change approval", params),
                 vec![
@@ -682,7 +684,7 @@ impl CodexSession {
                         return Ok(Vec::new());
                     }
                     (
-                        HarnessRequestKind::Question,
+                        HarnessRequestKind::McpForm,
                         PendingKind::McpForm,
                         message,
                         Vec::new(),
@@ -693,7 +695,7 @@ impl CodexSession {
                     && string_field(params, "elicitationId").is_some_and(|value| !value.is_empty())
                 {
                     (
-                        HarnessRequestKind::Approval,
+                        HarnessRequestKind::McpUrl,
                         PendingKind::McpUrl,
                         format!(
                             "{}\nURL: {}",
@@ -750,6 +752,7 @@ impl CodexSession {
             prompt: bounded_content(&prompt)?,
             choices: BoundedVec::new(neutral_choices)
                 .map_err(|_| HarnessError::new(HarnessErrorClass::InvalidInput))?,
+            allow_text,
         }])
     }
 
@@ -1488,7 +1491,9 @@ fn completed_group_result(group: &PendingGroup) -> Result<Value, HarnessError> {
                 .get("decision")
                 .cloned()
                 .unwrap_or(Value::Null);
-            if mode == "form"
+            if answer.as_str() == Some("cancel") {
+                Ok(json!({"action": "cancel", "content": null}))
+            } else if mode == "form"
                 && valid_mcp_form_answer(group.original.get("requestedSchema"), &answer)
             {
                 Ok(json!({"action": "accept", "content": answer}))

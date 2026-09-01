@@ -18,10 +18,12 @@ use hq_local_api::{
         CompletedItemPresentationDto, ConversationActivityDto, ConversationActivityKindDto,
         ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationMessageDto,
         ConversationPageRequest, ConversationPageSelectionDto, ConversationParticipantDto, Id32,
-        MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDto,
-        MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
-        MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, PresentationKindDto,
-        ProviderCatalogDto, Request, ResponseResult, SnapshotItem,
+        InteractionAnswerOutcomeDto, InteractionAnswerRequestDto, InteractionKindDto,
+        InteractionResponseDto, MailboxAddressDto, MailboxCommandActionDto,
+        MailboxCommandRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
+        MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto,
+        MutationOutcomeDto, PendingInteractionDto, PresentationKindDto, ProviderCatalogDto,
+        Request, ResponseResult, SnapshotItem,
     },
 };
 use hq_tui::{
@@ -31,14 +33,17 @@ use hq_tui::{
     UiConnectionState, UiConversationActivityKind, UiConversationAuthor, UiConversationEntry,
     UiConversationEntryPresentation, UiConversationPage, UiConversationTarget, UiDirectTarget,
     UiEffect, UiEvent, UiFailure, UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus,
-    UiHumanSelectionEvidence, UiHumanState, UiMailboxAction, UiMailboxCommandResult,
-    UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiManagedSessionResult, UiMaterializedConversationView, UiMessageDelivery, UiMessageState,
-    UiMessageTarget, UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning,
-    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
-    UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
-    UiSnapshot, UiTechnicalSection, UiTimerKind,
+    UiHumanSelectionEvidence, UiHumanState, UiInteraction, UiInteractionAnswerOutcome,
+    UiInteractionChoice, UiInteractionKind, UiInteractionResponse, UiMailboxAction,
+    UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction,
+    UiManagedSessionOutcome, UiManagedSessionResult, UiMaterializedConversationView,
+    UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject, UiProjectAction,
+    UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome, UiProjectResource,
+    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectThread,
+    UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection,
+    UiTimerKind,
 };
+use sha2::{Digest, Sha256};
 
 use crate::{
     LocalNodeClient, LocalNodeClientError, LocalNodeEventClient, StatePaths, UnixClientInterrupt,
@@ -85,6 +90,8 @@ impl TuiClock for MonotonicTuiClock {
 pub enum TuiClientObservation {
     /// One subscribed snapshot and selected first page became current together.
     MaterializedView(Box<UiMaterializedConversationView>),
+    /// Complete bounded pending provider interactions.
+    Interactions(Vec<UiInteraction>),
     /// A later authoritative revision is available.
     Invalidated {
         /// Greatest observed revision.
@@ -117,6 +124,18 @@ pub trait TuiClientPort: Send {
         row_id: &str,
         cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure>;
+
+    /// Executes or reconciles one exact terminal provider-interaction response.
+    fn answer_interaction(
+        &mut self,
+        _interaction: UiInteraction,
+        _response: UiInteractionResponse,
+    ) -> Result<UiInteractionAnswerOutcome, UiFailure> {
+        Err(UiFailure {
+            code: "interaction_response_unavailable".to_owned(),
+            action: "reconnect to HQ and try the response again".to_owned(),
+        })
+    }
 
     /// Loads one applicable durable draft, creating an empty draft when absent.
     fn open_draft(&mut self, target: UiMailboxDraftTarget)
@@ -161,6 +180,29 @@ pub trait TuiClientPort: Send {
             action: "restart HQ with support for project changes".to_owned(),
         })
     }
+}
+
+fn interaction_response_command_id(
+    interaction: &UiInteraction,
+    response: &InteractionResponseDto,
+) -> Id32 {
+    let mut digest = Sha256::new();
+    digest.update(b"hq-tui-interaction-command-v1\0");
+    digest.update(interaction.agent_id);
+    digest.update(interaction.request_id);
+    match response {
+        InteractionResponseDto::Text(value) => {
+            digest.update([1]);
+            digest.update(value.as_bytes());
+        }
+        InteractionResponseDto::Choice(value) => {
+            digest.update([2]);
+            digest.update(value.as_bytes());
+        }
+        InteractionResponseDto::Approval(value) => digest.update([3, u8::from(*value)]),
+        InteractionResponseDto::Cancelled => digest.update([4]),
+    }
+    Id32::new(digest.finalize().into())
 }
 
 /// Cross-thread capability that wakes one blocking observation read during shutdown.
@@ -244,6 +286,8 @@ struct TuiPresentationData {
     conversation_keys: BTreeMap<String, ConversationKeyDto>,
     conversation_presentations: BTreeMap<String, ConversationPresentationContext>,
     providers: ProviderCatalogDto,
+    agent_names: BTreeMap<[u8; 32], String>,
+    project_names: BTreeMap<[u8; 32], String>,
 }
 
 impl Default for TuiPresentationData {
@@ -255,6 +299,8 @@ impl Default for TuiPresentationData {
                 providers: Vec::new(),
                 default_provider: None,
             },
+            agent_names: BTreeMap::new(),
+            project_names: BTreeMap::new(),
         }
     }
 }
@@ -293,6 +339,32 @@ impl SharedTuiPresentation {
                 _ => None,
             })
             .collect();
+        presentation.agent_names = snapshot
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SnapshotItem::Agent {
+                    agent_id, names, ..
+                } => Some((
+                    agent_id.bytes(),
+                    names.first().map_or_else(
+                        || format!("Agent {}", short_id(*agent_id)),
+                        |name| terminal_text(name),
+                    ),
+                )),
+                _ => None,
+            })
+            .collect();
+        presentation.project_names = snapshot
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SnapshotItem::Project {
+                    project_id, name, ..
+                } => Some((project_id.bytes(), terminal_text(name))),
+                _ => None,
+            })
+            .collect();
     }
 
     fn replace_providers(&self, providers: ProviderCatalogDto) {
@@ -320,6 +392,22 @@ impl SharedTuiPresentation {
             presentation.conversation_keys.get(row_id)?.clone(),
             presentation.conversation_presentations.get(row_id)?.clone(),
         ))
+    }
+
+    fn agent_name(&self, agent_id: [u8; 32]) -> String {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|presentation| presentation.agent_names.get(&agent_id).cloned())
+            .unwrap_or_else(|| format!("Agent {}", short_id(Id32::new(agent_id))))
+    }
+
+    fn project_name(&self, project_id: [u8; 32]) -> String {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|presentation| presentation.project_names.get(&project_id).cloned())
+            .unwrap_or_else(|| format!("Project {}", short_id(Id32::new(project_id))))
     }
 }
 
@@ -359,6 +447,8 @@ impl LocalTuiClient {
                         providers: Vec::new(),
                         default_provider: None,
                     },
+                    agent_names: BTreeMap::new(),
+                    project_names: BTreeMap::new(),
                 })),
             },
         }
@@ -463,7 +553,25 @@ impl LocalTuiObserver {
             Ok(Some(ClientEvent::AuthoritativeConversationView(view))) => {
                 self.map_authoritative_conversation_view(view, state, observations);
             }
-            Ok(Some(ClientEvent::IncompatibleVersion) | None) => {}
+            Ok(Some(ClientEvent::Response {
+                result: ResponseResult::PendingInteractions(interactions),
+                ..
+            })) => observations.push(TuiClientObservation::Interactions(
+                interactions
+                    .into_iter()
+                    .map(|interaction| tui_interaction(interaction, &self.presentation))
+                    .collect(),
+            )),
+            Ok(
+                Some(
+                    ClientEvent::Response {
+                        result: ResponseResult::InteractionResponder(_),
+                        ..
+                    }
+                    | ClientEvent::IncompatibleVersion,
+                )
+                | None,
+            ) => {}
             Ok(Some(
                 ClientEvent::Mutation(_)
                 | ClientEvent::ProjectCommand { .. }
@@ -694,6 +802,54 @@ fn conversation_selection(
     ConversationPageSelectionDto::new(key, 100).map_err(|_| observation_control_failure())
 }
 
+fn tui_interaction(
+    interaction: PendingInteractionDto,
+    presentation: &SharedTuiPresentation,
+) -> UiInteraction {
+    let agent_id = interaction.agent_id.bytes();
+    let project_id = interaction.project_id.map(Id32::bytes);
+    UiInteraction {
+        agent_id,
+        agent_name: presentation.agent_name(agent_id),
+        project_id,
+        project_name: project_id.map(|project_id| presentation.project_name(project_id)),
+        provider: terminal_text(&interaction.provider),
+        session: terminal_text(&interaction.session),
+        request_id: interaction.request_id.bytes(),
+        operation_id: interaction.operation_id.bytes(),
+        kind: match interaction.kind {
+            InteractionKindDto::Question => UiInteractionKind::Question,
+            InteractionKindDto::CommandApproval => UiInteractionKind::CommandApproval,
+            InteractionKindDto::FileApproval => UiInteractionKind::FileApproval,
+            InteractionKindDto::Permission => UiInteractionKind::Permission,
+            InteractionKindDto::McpUrl => UiInteractionKind::McpUrl,
+            InteractionKindDto::McpForm => UiInteractionKind::McpForm,
+        },
+        prompt: terminal_text(&interaction.prompt),
+        choices: interaction
+            .choices
+            .into_iter()
+            .map(|choice| UiInteractionChoice {
+                label: interaction_choice_label(&choice.value, &choice.label),
+                value: choice.value,
+            })
+            .collect(),
+        allow_text: interaction.allow_text,
+    }
+}
+
+fn interaction_choice_label(value: &str, provider_label: &str) -> String {
+    match value {
+        "accept" => "Allow once".to_owned(),
+        "acceptForSession" | "grantSession" => "Allow for this session".to_owned(),
+        "acceptWithExecpolicyAmendment" => "Allow with the proposed command rule".to_owned(),
+        "decline" => "Deny".to_owned(),
+        "cancel" => "Cancel".to_owned(),
+        "grantTurn" => "Allow for this turn".to_owned(),
+        _ => terminal_text(provider_label),
+    }
+}
+
 fn request_provider_catalog(client: &mut LocalNodeClient) -> Result<ProviderCatalogDto, UiFailure> {
     let ClientEvent::Response {
         result: ResponseResult::ProviderCatalog(providers),
@@ -775,6 +931,43 @@ impl TuiClientPort for LocalTuiClient {
             _ => Err(UiFailure {
                 code: "conversation_response_invalid".to_owned(),
                 action: "reload the Inbox and select the conversation again".to_owned(),
+            }),
+        }
+    }
+
+    fn answer_interaction(
+        &mut self,
+        interaction: UiInteraction,
+        response: UiInteractionResponse,
+    ) -> Result<UiInteractionAnswerOutcome, UiFailure> {
+        let response = match response {
+            UiInteractionResponse::Text(value) => InteractionResponseDto::Text(value),
+            UiInteractionResponse::Choice(value) => InteractionResponseDto::Choice(value),
+            UiInteractionResponse::Approval(value) => InteractionResponseDto::Approval(value),
+            UiInteractionResponse::Cancelled => InteractionResponseDto::Cancelled,
+        };
+        let command_id = interaction_response_command_id(&interaction, &response);
+        let event = self
+            .client
+            .request(Request::AnswerInteraction(InteractionAnswerRequestDto {
+                command_id,
+                agent_id: Id32::new(interaction.agent_id),
+                request_id: Id32::new(interaction.request_id),
+                response,
+            }))
+            .map_err(|error| client_failure(&error))?;
+        match event {
+            ClientEvent::Response {
+                result: ResponseResult::InteractionAnswer(InteractionAnswerOutcomeDto::Answered),
+                ..
+            } => Ok(UiInteractionAnswerOutcome::Answered),
+            ClientEvent::Response {
+                result: ResponseResult::InteractionAnswer(InteractionAnswerOutcomeDto::Stale),
+                ..
+            } => Ok(UiInteractionAnswerOutcome::Stale),
+            _ => Err(UiFailure {
+                code: "interaction_response_invalid".to_owned(),
+                action: "reload pending requests and try again".to_owned(),
             }),
         }
     }
@@ -1255,6 +1448,11 @@ enum WorkerCommand {
         row_id: String,
         cursor: Option<String>,
     },
+    AnswerInteraction {
+        id: EffectId,
+        interaction: UiInteraction,
+        response: UiInteractionResponse,
+    },
     OpenDraft {
         id: EffectId,
         target: UiMailboxDraftTarget,
@@ -1400,6 +1598,20 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                 }
                 UiEffect::ObserveConversation { row_id } => {
                     self.observation_control.select_conversation(row_id);
+                }
+                UiEffect::AnswerInteraction {
+                    id,
+                    interaction,
+                    response,
+                } => {
+                    self.enqueue_client_effect(
+                        id,
+                        WorkerCommand::AnswerInteraction {
+                            id,
+                            interaction,
+                            response,
+                        },
+                    )?;
                 }
                 UiEffect::OpenDraft { id, target } => {
                     self.enqueue_client_effect(id, WorkerCommand::OpenDraft { id, target })?;
@@ -1560,6 +1772,8 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             | UiEvent::SnapshotFailed { effect_id, .. }
             | UiEvent::ConversationLoaded { effect_id, .. }
             | UiEvent::ConversationFailed { effect_id, .. }
+            | UiEvent::InteractionAnswered { effect_id, .. }
+            | UiEvent::InteractionAnswerFailed { effect_id, .. }
             | UiEvent::DraftLoaded { effect_id, .. }
             | UiEvent::DraftSaved { effect_id, .. }
             | UiEvent::DraftFailed { effect_id, .. }
@@ -1576,6 +1790,7 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             | UiEvent::Resized(_)
             | UiEvent::TimerElapsed { .. }
             | UiEvent::MaterializedViewObserved { .. }
+            | UiEvent::InteractionsObserved { .. }
             | UiEvent::Invalidated { .. }
             | UiEvent::ConnectionObserved { .. }
             | UiEvent::ClientFailed { .. } => None,
@@ -1662,6 +1877,25 @@ fn client_worker<P: TuiClientPort>(
                         page,
                     },
                     Err(failure) => UiEvent::ConversationFailed {
+                        effect_id: id,
+                        failure,
+                    },
+                };
+                if events.send(event).is_err() {
+                    break;
+                }
+            }
+            Ok(WorkerCommand::AnswerInteraction {
+                id,
+                interaction,
+                response,
+            }) => {
+                let event = match client.answer_interaction(interaction, response) {
+                    Ok(outcome) => UiEvent::InteractionAnswered {
+                        effect_id: id,
+                        outcome,
+                    },
+                    Err(failure) => UiEvent::InteractionAnswerFailed {
                         effect_id: id,
                         failure,
                     },
@@ -1782,6 +2016,9 @@ fn observation_worker<O: TuiObservationPort>(
             let event = match observation {
                 TuiClientObservation::MaterializedView(view) => {
                     UiEvent::MaterializedViewObserved { view: *view }
+                }
+                TuiClientObservation::Interactions(interactions) => {
+                    UiEvent::InteractionsObserved { interactions }
                 }
                 TuiClientObservation::Invalidated { revision } => UiEvent::Invalidated { revision },
                 TuiClientObservation::Connection { generation, state } => {

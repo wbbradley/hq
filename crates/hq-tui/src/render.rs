@@ -14,15 +14,16 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentAttentionReason, UiAgentModal,
     UiAgentProjectAssignment, UiAgentStatus, UiCompletedItemPresentation, UiConnectionState,
-    UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiFocus,
-    UiHelpPage, UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanState,
-    UiMailboxAction, UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiMessageDelivery, UiMessageState, UiModel,
-    UiNewChoice, UiNewModal, UiProjectAction, UiProjectAssignedAgentStatus,
-    UiProjectCreationChoice, UiProjectFolderAction, UiProjectFolderOwnership, UiProjectFormField,
-    UiProjectInteraction, UiProjectLifecycle, UiProjectManagementAction, UiProjectOutcome,
-    UiProjectRecoverySummary, UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel,
-    UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, UiTheme, UiThemeRole,
+    UiConversationActivityKind, UiConversationAuthor, UiConversationEntry,
+    UiConversationEntryPresentation, UiFocus, UiHelpPage, UiHumanIssue, UiHumanMembershipEvidence,
+    UiHumanMembershipStatus, UiHumanState, UiInteractionKind, UiInteractionModal, UiMailboxAction,
+    UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
+    UiManagedSessionOutcome, UiMessageDelivery, UiMessageState, UiModel, UiNewChoice, UiNewModal,
+    UiProjectAction, UiProjectAssignedAgentStatus, UiProjectCreationChoice, UiProjectFolderAction,
+    UiProjectFolderOwnership, UiProjectFormField, UiProjectInteraction, UiProjectLifecycle,
+    UiProjectManagementAction, UiProjectOutcome, UiProjectRecoverySummary, UiProjectSummaryFocus,
+    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
+    UiTechnicalSection, UiTheme, UiThemeRole,
     message_markdown::{MessageRenderCache, RenderedMessage},
     model::WIDE_WIDTH,
 };
@@ -112,7 +113,109 @@ pub fn render_with_cache(
     render_mailbox_modal(frame, model, theme, content);
     render_agent_modal(frame, model, theme, content);
     render_project_interaction(frame, model, theme, content, true);
+    render_interaction_modal(frame, model, theme, content);
     render_help(frame, model, theme, content);
+}
+
+fn render_interaction_modal(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    available: Rect,
+) {
+    let Some(dialog) = model.interaction_modal() else {
+        return;
+    };
+    let (interaction, submitting, selected, text) = match dialog {
+        UiInteractionModal::Prompt {
+            interaction,
+            selected,
+            text,
+        } => (interaction, false, *selected, text.as_str()),
+        UiInteractionModal::Submitting { interaction } => (interaction, true, 0, ""),
+    };
+    let width = available.width.saturating_sub(4).clamp(1, 82);
+    let height = available.height.clamp(1, 22);
+    let area = Rect {
+        x: available.x + available.width.saturating_sub(width) / 2,
+        y: available.y + available.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    let title = match interaction.kind {
+        UiInteractionKind::Question => format!(" {} needs an answer ", interaction.agent_name),
+        UiInteractionKind::CommandApproval => " Command approval needed ".to_owned(),
+        UiInteractionKind::FileApproval => " File approval needed ".to_owned(),
+        UiInteractionKind::Permission => " Permission needed ".to_owned(),
+        UiInteractionKind::McpUrl => " Link approval needed ".to_owned(),
+        UiInteractionKind::McpForm => format!(" {} needs information ", interaction.agent_name),
+    };
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .title(Span::styled(title, theme.style(UiThemeRole::ModalTitle)))
+        .border_style(theme.style(UiThemeRole::ModalBorder))
+        .style(theme.style(UiThemeRole::ModalSurface));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut lines = vec![
+        Line::styled(
+            interaction.project_name.as_ref().map_or_else(
+                || format!("{} is waiting for you", interaction.agent_name),
+                |project| {
+                    format!(
+                        "{} is waiting for you while working on {project}",
+                        interaction.agent_name
+                    )
+                },
+            ),
+            theme.style(UiThemeRole::Accent),
+        ),
+        Line::default(),
+        Line::from(interaction.prompt.clone()),
+        Line::default(),
+    ];
+    for (index, choice) in interaction.choices.iter().enumerate() {
+        lines.push(Line::styled(
+            format!(
+                "{} {}",
+                if index == selected { "›" } else { " " },
+                choice.label
+            ),
+            if index == selected {
+                theme.style(UiThemeRole::SelectionFocused)
+            } else {
+                theme.style(UiThemeRole::Text)
+            },
+        ));
+    }
+    if interaction.allow_text {
+        lines.push(Line::default());
+        lines.push(Line::from(format!("Your answer: {text}")));
+    }
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        format!(
+            "Technical: provider={} · session={} · operation={}{}",
+            interaction.provider,
+            interaction.session,
+            short_identity(interaction.operation_id),
+            interaction
+                .project_id
+                .map_or_else(String::new, |project_id| {
+                    format!(" · project={}", short_identity(project_id))
+                })
+        ),
+        theme.style(UiThemeRole::TextMuted),
+    ));
+    lines.push(Line::from(if submitting {
+        "Sending your response…"
+    } else if interaction.allow_text {
+        "Type an answer or choose with ↑/↓ · Enter send · Esc cancel"
+    } else {
+        "↑/↓ choose · Enter confirm · Esc cancel"
+    }));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3443,6 +3546,12 @@ fn render_conversation(
                 theme.style(UiThemeRole::TextMuted),
             ));
         }
+        if let Some(interaction) = model.current_interaction() {
+            header.push(Line::styled(
+                format!("● {} needs an answer", interaction.agent_name),
+                theme.style(UiThemeRole::Attention),
+            ));
+        }
         if model.conversation_older_loading() {
             header.push(Line::styled(
                 "Loading older messages…",
@@ -3686,8 +3795,20 @@ fn render_conversation_entries(
     if area.width == 0 || area.height == 0 || conversation.entries.is_empty() {
         return;
     }
-    let layouts = conversation
-        .entries
+    let visible_entries = if model.current_interaction().is_some_and(|interaction| {
+        conversation
+            .entries
+            .last()
+            .is_some_and(|entry| interaction_supersedes_live_tail(interaction, entry))
+    }) {
+        &conversation.entries[..conversation.entries.len() - 1]
+    } else {
+        &conversation.entries
+    };
+    if visible_entries.is_empty() {
+        return;
+    }
+    let layouts = visible_entries
         .iter()
         .map(|entry| conversation_entry_layout(entry, area.width, theme, cache))
         .collect::<Vec<_>>();
@@ -3697,12 +3818,7 @@ fn render_conversation_entries(
         .collect::<Vec<_>>();
     let selected_index = model
         .conversation_anchor()
-        .and_then(|anchor| {
-            conversation
-                .entries
-                .iter()
-                .position(|entry| entry.id == anchor)
-        })
+        .and_then(|anchor| visible_entries.iter().position(|entry| entry.id == anchor))
         .unwrap_or(0);
     let visible = visible_conversation_entries(&heights, selected_index, area.height);
     let mut y = area.y;
@@ -3711,7 +3827,7 @@ fn render_conversation_entries(
         if y >= bottom {
             break;
         }
-        let entry = &conversation.entries[index];
+        let entry = &visible_entries[index];
         let layout = &layouts[index];
         let height = layout.height.min(bottom - y);
         render_conversation_entry(
@@ -3729,6 +3845,36 @@ fn render_conversation_entries(
         );
         y = y.saturating_add(height);
     }
+}
+
+fn interaction_supersedes_live_tail(
+    interaction: &crate::UiInteraction,
+    entry: &UiConversationEntry,
+) -> bool {
+    if !matches!(
+        &entry.presentation,
+        UiConversationEntryPresentation::Activity {
+            kind: UiConversationActivityKind::AgentTurn | UiConversationActivityKind::Progress,
+            status: UiActivityStatus::Running,
+            ..
+        }
+    ) {
+        return false;
+    }
+    let operation = full_identity(interaction.operation_id);
+    entry.technical.iter().any(|section| {
+        matches!(
+            section,
+            UiTechnicalSection::Activity {
+                provider,
+                session,
+                operation: candidate,
+                ..
+            } if provider == &interaction.provider
+                && session == &interaction.session
+                && candidate == &operation
+        )
+    })
 }
 
 struct ConversationEntryLayout {
@@ -4279,13 +4425,13 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
 mod tests {
     use super::{
         activity_preview, conversation_entry_layout, display_prefix, display_suffix,
-        inbox_list_width, inert_draft_source, navigation_width, text_field_line,
-        visible_conversation_entries,
+        inbox_list_width, inert_draft_source, interaction_supersedes_live_tail, navigation_width,
+        text_field_line, visible_conversation_entries,
     };
     use crate::{
         UiActivityStatus, UiCompletedItemPresentation, UiConversationActivityKind,
-        UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiMessageState,
-        UiTheme,
+        UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiInteraction,
+        UiInteractionKind, UiMessageState, UiTechnicalSection, UiTheme,
     };
     use unicode_width::UnicodeWidthStr;
 
@@ -4295,6 +4441,58 @@ mod tests {
         let longest_row_width = u16::try_from(longest_row.width()).unwrap_or(u16::MAX);
 
         assert_eq!(navigation_width(), longest_row_width + 2);
+    }
+
+    #[test]
+    fn pending_interaction_supersedes_only_its_exact_running_tail() {
+        let interaction = UiInteraction {
+            agent_id: [1; 32],
+            agent_name: "alice".to_owned(),
+            project_id: Some([2; 32]),
+            project_name: Some("release".to_owned()),
+            provider: "codex".to_owned(),
+            session: "session-1".to_owned(),
+            request_id: [3; 32],
+            operation_id: [4; 32],
+            kind: UiInteractionKind::CommandApproval,
+            prompt: "Run tests?".to_owned(),
+            choices: Vec::new(),
+            allow_text: false,
+        };
+        let mut entry = UiConversationEntry {
+            id: "tail".to_owned(),
+            presentation: UiConversationEntryPresentation::Activity {
+                kind: UiConversationActivityKind::Progress,
+                status: UiActivityStatus::Running,
+                summary: "running tests".to_owned(),
+                detail: "running tests".to_owned(),
+                truncated: false,
+                completed: None,
+            },
+            message_state: None,
+            delivery: None,
+            message_target: None,
+            technical: vec![UiTechnicalSection::Activity {
+                sequence: 1,
+                source_installation: "source".to_owned(),
+                source_mailbox: "mailbox".to_owned(),
+                provider: "codex".to_owned(),
+                session: "session-1".to_owned(),
+                operation: super::full_identity([4; 32]),
+                item: Some("tests".to_owned()),
+                logical_key: "tests".to_owned(),
+                runtime: "codex".to_owned(),
+                occurred_at_unix_ms: 1,
+                status: UiActivityStatus::Running,
+                truncated: false,
+            }],
+        };
+        assert!(interaction_supersedes_live_tail(&interaction, &entry));
+
+        if let UiConversationEntryPresentation::Activity { status, .. } = &mut entry.presentation {
+            *status = UiActivityStatus::Succeeded;
+        }
+        assert!(!interaction_supersedes_live_tail(&interaction, &entry));
     }
 
     #[test]

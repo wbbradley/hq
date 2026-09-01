@@ -1564,6 +1564,114 @@ pub struct CanonicalEvidenceRequestDto {
     pub roots: Vec<Id32>,
 }
 
+/// Closed provider-neutral interaction class.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionKindDto {
+    /// Ask for text or one offered choice.
+    Question,
+    /// Approve command execution.
+    CommandApproval,
+    /// Approve file changes.
+    FileApproval,
+    /// Grant a permission scope.
+    Permission,
+    /// Resolve an MCP URL request.
+    McpUrl,
+    /// Supply an MCP form response.
+    McpForm,
+}
+
+/// One stable response value and human-facing label.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InteractionChoiceDto {
+    /// Untouched stable value.
+    pub value: String,
+    /// Human-facing label.
+    pub label: String,
+}
+
+/// One pending memory-only provider interaction.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingInteractionDto {
+    /// Named agent awaiting the response.
+    pub agent_id: Id32,
+    /// Project whose work is blocked, when present.
+    pub project_id: Option<Id32>,
+    /// Neutral provider namespace.
+    pub provider: String,
+    /// Exact live provider session.
+    pub session: String,
+    /// Provider-originated request identity.
+    pub request_id: Id32,
+    /// Operation blocked by the request.
+    pub operation_id: Id32,
+    /// Typed request family.
+    pub kind: InteractionKindDto,
+    /// Exact bounded non-secret prompt.
+    pub prompt: String,
+    /// Source-ordered bounded choices.
+    pub choices: Vec<InteractionChoiceDto>,
+    /// Whether bounded free-text input is permitted.
+    pub allow_text: bool,
+}
+
+/// Bounded pending-interaction query.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingInteractionsRequestDto {
+    /// Inclusive maximum rows requested.
+    pub limit: u16,
+}
+
+/// Closed non-secret terminal response shape.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum InteractionResponseDto {
+    /// Bounded free text or encoded structured form content.
+    Text(String),
+    /// One untouched stable offered value.
+    Choice(String),
+    /// Explicit approval or denial.
+    Approval(bool),
+    /// Explicit cancellation.
+    Cancelled,
+}
+
+/// Exact-once interaction answer command.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InteractionAnswerRequestDto {
+    /// Caller-selected command identity.
+    pub command_id: Id32,
+    /// Named agent owning the request.
+    pub agent_id: Id32,
+    /// Provider-originated request identity.
+    pub request_id: Id32,
+    /// Complete typed terminal response.
+    pub response: InteractionResponseDto,
+}
+
+/// Terminal response command outcome.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionAnswerOutcomeDto {
+    /// The sole provider-session owner accepted the response.
+    Answered,
+    /// The request was already absent or terminal.
+    Stale,
+}
+
+/// Written acknowledgement for one pending responder registration.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InteractionResponderAcknowledgement {
+    /// Stable session-owned responder identity.
+    pub responder_id: Id32,
+}
+
 /// Result of one reverified idempotent evidence import.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1625,6 +1733,20 @@ pub enum Request {
     ControlProject(Box<ProjectCommandRequestDto>),
     /// Execute or reconcile one exact node-owned named-agent retirement.
     RetireAgent(Box<AgentRetirementRequestDto>),
+    /// Load one bounded passive pending-interaction view.
+    PendingInteractions(PendingInteractionsRequestDto),
+    /// Execute or reconcile one exact terminal interaction response.
+    AnswerInteraction(InteractionAnswerRequestDto),
+    /// Prepare a responder registration pending its written acknowledgement.
+    RegisterInteractionResponder {
+        /// Stable session-owned responder identity.
+        responder_id: Id32,
+    },
+    /// Cancel one pending or active responder registration idempotently.
+    CancelInteractionResponder {
+        /// Stable session-owned responder identity.
+        responder_id: Id32,
+    },
     /// Register a revision invalidation subscription.
     Subscribe(SubscriptionRequestDto),
     /// Cancel one pending or active subscription idempotently.
@@ -2781,6 +2903,12 @@ pub enum ResponseResult {
     ProjectCommand(ProjectCommandOutcomeDto),
     /// Named-agent retirement progress or terminal result.
     AgentRetirement(AgentRetirementOutcomeDto),
+    /// Bounded passive pending interactions.
+    PendingInteractions(Vec<PendingInteractionDto>),
+    /// Exact interaction-answer terminal outcome.
+    InteractionAnswer(InteractionAnswerOutcomeDto),
+    /// Pending responder acknowledgement.
+    InteractionResponder(InteractionResponderAcknowledgement),
     /// Pending subscription acknowledgement.
     Subscription(SubscriptionAcknowledgement),
     /// Successful operation without a value.
@@ -3027,6 +3155,10 @@ impl WireMessage {
                         .as_ref()
                         .map_or(Ok(()), ConversationPageSelectionDto::validate)
                 }
+                Request::PendingInteractions(request) => validate_pending_interactions(*request),
+                Request::AnswerInteraction(request) => {
+                    validate_interaction_response(&request.response)
+                }
                 Request::ConfigureRelay(request) => validate_locator(&request.body.endpoint),
                 Request::Synchronize(request) => match &request.body {
                     SynchronizationRequestDto::All => Ok(()),
@@ -3057,6 +3189,8 @@ impl WireMessage {
                 | Request::RelayStatus
                 | Request::StateHealth
                 | Request::RepairState { .. }
+                | Request::RegisterInteractionResponder { .. }
+                | Request::CancelInteractionResponder { .. }
                 | Request::CancelSubscription { .. } => Ok(()),
             },
             Self::Invalidation(invalidation) => {
@@ -3217,7 +3351,29 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
         Response::Success(ResponseResult::AgentRetirement(outcome)) => {
             validate_agent_retirement_outcome(outcome)
         }
-        Response::Success(ResponseResult::Empty) => Ok(()),
+        Response::Success(ResponseResult::PendingInteractions(interactions)) => {
+            if interactions.len() > hq_application::MAX_PENDING_INTERACTIONS {
+                return Err(ValueError::TooManyItems);
+            }
+            for interaction in interactions {
+                validate_text(&interaction.provider, PROVIDER_ID_MAX_BYTES)?;
+                validate_text(&interaction.session, PROVIDER_SESSION_ID_MAX_BYTES)?;
+                validate_text(&interaction.prompt, CONTENT_MAX_BYTES)?;
+                if interaction.choices.len() > hq_application::MAX_INTERACTION_CHOICES {
+                    return Err(ValueError::TooManyItems);
+                }
+                for choice in &interaction.choices {
+                    validate_text(&choice.value, SHORT_TEXT_MAX_BYTES)?;
+                    validate_text(&choice.label, SHORT_TEXT_MAX_BYTES)?;
+                }
+            }
+            Ok(())
+        }
+        Response::Success(
+            ResponseResult::InteractionAnswer(_)
+            | ResponseResult::InteractionResponder(_)
+            | ResponseResult::Empty,
+        ) => Ok(()),
         Response::Success(ResponseResult::ResourceInspection(outcome)) => match outcome {
             EffectOutcomeDto::Accepted(result) => {
                 if let Some(observed) = &result.observed_canonical {
@@ -3238,6 +3394,22 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
             }
             Ok(())
         }
+    }
+}
+
+fn validate_pending_interactions(request: PendingInteractionsRequestDto) -> Result<(), ValueError> {
+    if request.limit == 0 || usize::from(request.limit) > hq_application::MAX_PENDING_INTERACTIONS {
+        Err(ValueError::TooManyItems)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_interaction_response(response: &InteractionResponseDto) -> Result<(), ValueError> {
+    match response {
+        InteractionResponseDto::Text(value) => validate_text(value, CONTENT_MAX_BYTES),
+        InteractionResponseDto::Choice(value) => validate_text(value, SHORT_TEXT_MAX_BYTES),
+        InteractionResponseDto::Approval(_) | InteractionResponseDto::Cancelled => Ok(()),
     }
 }
 

@@ -26,6 +26,7 @@ use crate::protocol::v1::{
 pub const MAX_IN_FLIGHT_RETRYABLE_COMMANDS: usize = 256;
 
 const SUBSCRIPTION_ID_DOMAIN: &[u8] = b"hq-local-api-client-subscription-v1\0";
+const RESPONDER_ID_DOMAIN: &[u8] = b"hq-local-api-client-interaction-responder-v1\0";
 
 /// Initial authoritative-view behavior selected for one reconnecting client.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -368,6 +369,10 @@ enum PendingRequest {
         subscription_id: Id32,
         conversation: Option<ConversationPageSelectionDto>,
     },
+    InteractionResponder {
+        responder_id: Id32,
+    },
+    Interactions,
     Snapshot,
     AuthoritativeConversationView {
         conversation: Option<ConversationPageSelectionDto>,
@@ -402,12 +407,15 @@ pub struct ReconnectingClient {
     completed_capacity: usize,
     pending_requests: BTreeMap<RequestId, PendingRequest>,
     subscription: Option<SubscriptionIntent>,
+    responder_seed: Option<Id32>,
     initial_view: InitialView,
     active_subscription_id: Option<Id32>,
+    active_responder_id: Option<Id32>,
     current_revision: Option<u64>,
     newest_invalidation: u64,
     view_current: bool,
     refresh_in_flight: bool,
+    interactions_refresh_in_flight: bool,
 }
 
 impl ReconnectingClient {
@@ -437,12 +445,15 @@ impl ReconnectingClient {
             completed_capacity: completed_identity_capacity,
             pending_requests: BTreeMap::new(),
             subscription: None,
+            responder_seed: None,
             initial_view,
             active_subscription_id: None,
+            active_responder_id: None,
             current_revision: None,
             newest_invalidation: 0,
             view_current: false,
             refresh_in_flight: false,
+            interactions_refresh_in_flight: false,
         })
     }
 
@@ -472,6 +483,18 @@ impl ReconnectingClient {
             topics,
             conversation,
         });
+        Ok(())
+    }
+
+    /// Configures one reconnecting session-scoped interaction responder before startup.
+    pub fn configure_interaction_responder(&mut self, seed: Id32) -> Result<(), ClientError> {
+        if self.phase != Phase::Idle {
+            return Err(ClientError::AlreadyStarted);
+        }
+        if seed == Id32::new([0; 32]) {
+            return Err(ClientError::InvalidSubscription);
+        }
+        self.responder_seed = Some(seed);
         Ok(())
     }
 
@@ -885,6 +908,27 @@ impl ReconnectingClient {
         matches!(self.phase, Phase::Active(_))
     }
 
+    fn begin_responder_registration(
+        &mut self,
+        generation: ConnectionGeneration,
+        server_session: Id32,
+    ) -> Result<Option<ClientAction>, ClientError> {
+        let Some(seed) = self.responder_seed else {
+            return Ok(None);
+        };
+        let responder_id = derive_responder_id(seed, server_session);
+        let request_id = self.allocate_request_id()?;
+        let frame = request_frame(
+            request_id,
+            Request::RegisterInteractionResponder { responder_id },
+        )?;
+        self.pending_requests.insert(
+            request_id,
+            PendingRequest::InteractionResponder { responder_id },
+        );
+        Ok(Some(ClientAction::Write { generation, frame }))
+    }
+
     fn handle_negotiation(
         &mut self,
         generation: ConnectionGeneration,
@@ -895,11 +939,18 @@ impl ReconnectingClient {
                 self.phase = Phase::Active(generation);
                 self.pending_requests.clear();
                 self.active_subscription_id = None;
+                self.active_responder_id = None;
                 self.current_revision = None;
                 self.newest_invalidation = 0;
                 self.view_current = false;
                 self.refresh_in_flight = false;
+                self.interactions_refresh_in_flight = false;
                 let mut transition = ClientTransition::default();
+                if let Some(action) =
+                    self.begin_responder_registration(generation, hello.session_id)?
+                {
+                    transition.actions.push(action);
+                }
                 if let Some(subscription) = self.subscription.clone() {
                     let subscription_id =
                         derive_subscription_id(subscription.seed, hello.session_id);
@@ -992,8 +1043,21 @@ impl ReconnectingClient {
                     return Ok(ClientTransition::default());
                 }
                 self.newest_invalidation = self.newest_invalidation.max(invalidation.revision);
+                let mut actions = Vec::new();
+                if invalidation.topics.iter().any(|topic| {
+                    matches!(
+                        topic,
+                        InvalidationTopic::All | InvalidationTopic::Operations
+                    )
+                }) && !self.interactions_refresh_in_flight
+                {
+                    actions.push(self.begin_interactions_refresh(generation)?);
+                }
                 if self.current_revision.is_none() {
-                    return Ok(ClientTransition::default());
+                    return Ok(ClientTransition {
+                        actions,
+                        events: Vec::new(),
+                    });
                 }
                 if self
                     .current_revision
@@ -1001,13 +1065,13 @@ impl ReconnectingClient {
                 {
                     self.view_current = false;
                     if !self.refresh_in_flight {
-                        return Ok(ClientTransition {
-                            actions: vec![self.begin_refresh(generation)?],
-                            events: Vec::new(),
-                        });
+                        actions.push(self.begin_refresh(generation)?);
                     }
                 }
-                Ok(ClientTransition::default())
+                Ok(ClientTransition {
+                    actions,
+                    events: Vec::new(),
+                })
             }
             WireMessage::ClientHello(_)
             | WireMessage::ServerHello(_)
@@ -1120,6 +1184,30 @@ impl ReconnectingClient {
                     }
                     self.accept_authoritative_conversation_view(generation, acknowledgement.view)
                 }
+                ResponseResult::InteractionResponder(acknowledgement) => {
+                    let Some(PendingRequest::InteractionResponder {
+                        responder_id: expected,
+                    }) = self.pending_requests.remove(&response.id)
+                    else {
+                        return Err(ClientError::ProtocolOrder);
+                    };
+                    if acknowledgement.responder_id != expected {
+                        return Err(ClientError::ProtocolOrder);
+                    }
+                    self.active_responder_id = Some(expected);
+                    let actions = if self.interactions_refresh_in_flight {
+                        Vec::new()
+                    } else {
+                        vec![self.begin_interactions_refresh(generation)?]
+                    };
+                    Ok(ClientTransition {
+                        actions,
+                        events: vec![ClientEvent::Response {
+                            request_id: response.id,
+                            result: ResponseResult::InteractionResponder(acknowledgement),
+                        }],
+                    })
+                }
                 ResponseResult::AuthoritativeSnapshot(snapshot) => {
                     if self.pending_requests.remove(&response.id) != Some(PendingRequest::Snapshot)
                     {
@@ -1153,6 +1241,21 @@ impl ReconnectingClient {
                         });
                     }
                     self.accept_authoritative_conversation_view(generation, view)
+                }
+                ResponseResult::PendingInteractions(interactions) => {
+                    if self.pending_requests.remove(&response.id)
+                        != Some(PendingRequest::Interactions)
+                    {
+                        return Err(ClientError::ProtocolOrder);
+                    }
+                    self.interactions_refresh_in_flight = false;
+                    Ok(ClientTransition {
+                        actions: Vec::new(),
+                        events: vec![ClientEvent::Response {
+                            request_id: response.id,
+                            result: ResponseResult::PendingInteractions(interactions),
+                        }],
+                    })
                 }
                 ResponseResult::ProjectCommand(outcome) => {
                     let Some(command_id) = project_command else {
@@ -1238,6 +1341,7 @@ impl ReconnectingClient {
                 | ResponseResult::StateHealth(_)
                 | ResponseResult::StateRepair(_)
                 | ResponseResult::ResourceInspection(_)
+                | ResponseResult::InteractionAnswer(_)
                 | ResponseResult::Empty => {
                     if self.pending_requests.remove(&response.id) != Some(PendingRequest::Ordinary)
                     {
@@ -1316,7 +1420,9 @@ impl ReconnectingClient {
             PendingRequest::AuthoritativeConversationView { .. } => {
                 ClientOperation::AuthoritativeConversationView
             }
-            PendingRequest::Ordinary => ClientOperation::Ordinary,
+            PendingRequest::InteractionResponder { .. }
+            | PendingRequest::Interactions
+            | PendingRequest::Ordinary => ClientOperation::Ordinary,
         };
         let mut transition = error_transition(request_id, operation, error);
         if matches!(
@@ -1431,6 +1537,24 @@ impl ReconnectingClient {
         Ok(ClientAction::Write { generation, frame })
     }
 
+    fn begin_interactions_refresh(
+        &mut self,
+        generation: ConnectionGeneration,
+    ) -> Result<ClientAction, ClientError> {
+        let request_id = self.allocate_request_id()?;
+        let frame = request_frame(
+            request_id,
+            Request::PendingInteractions(crate::protocol::v1::PendingInteractionsRequestDto {
+                limit: u16::try_from(hq_application::MAX_PENDING_INTERACTIONS)
+                    .map_err(|_| ClientError::Codec)?,
+            }),
+        )?;
+        self.pending_requests
+            .insert(request_id, PendingRequest::Interactions);
+        self.interactions_refresh_in_flight = true;
+        Ok(ClientAction::Write { generation, frame })
+    }
+
     fn prepare_reconnect(&mut self) -> Result<ClientTransition, ClientError> {
         let lost = self
             .pending_requests
@@ -1442,10 +1566,12 @@ impl ReconnectingClient {
             .collect::<Vec<_>>();
         self.pending_requests.clear();
         self.active_subscription_id = None;
+        self.active_responder_id = None;
         self.current_revision = None;
         self.newest_invalidation = 0;
         self.view_current = false;
         self.refresh_in_flight = false;
+        self.interactions_refresh_in_flight = false;
         let delay = self.reconnect.delay(self.failures);
         self.failures = self.failures.saturating_add(1);
         let mut transition = self.schedule_connection(delay)?;
@@ -2186,6 +2312,14 @@ fn error_transition(
 fn derive_subscription_id(seed: Id32, server_session: Id32) -> Id32 {
     let mut digest = Sha256::new();
     digest.update(SUBSCRIPTION_ID_DOMAIN);
+    digest.update(seed.bytes());
+    digest.update(server_session.bytes());
+    Id32::new(digest.finalize().into())
+}
+
+fn derive_responder_id(seed: Id32, server_session: Id32) -> Id32 {
+    let mut digest = Sha256::new();
+    digest.update(RESPONDER_ID_DOMAIN);
     digest.update(seed.bytes());
     digest.update(server_session.bytes());
     Id32::new(digest.finalize().into())

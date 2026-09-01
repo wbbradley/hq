@@ -108,6 +108,8 @@ Request methods are closed and typed:
 - exact node-owned named-agent retirement;
 - read-only resource inspection;
 - exact typed project control, including remote-home routing;
+- bounded pending provider-interaction query and exact-once answer command;
+- session-owned interaction-responder registration and idempotent cancellation;
 - subscription registration; and
 - idempotent subscription cancellation.
 
@@ -116,7 +118,8 @@ plus optional selected first page, conversation page,
 mutation attempt, canonical evidence, evidence-ingest outcomes, empty external effect,
 relay status, four-domain state health, explicit repair report, provider catalog, agent-session effect,
 resource-inspection effect, typed project-command progress, named-agent-retirement progress,
-subscription acknowledgement, and empty acknowledgement. Errors carry a closed class, stable code,
+pending interactions, interaction-answer outcome, responder acknowledgement, subscription
+acknowledgement, and empty acknowledgement. Errors carry a closed class, stable code,
 and optional bounded inert detail. Machine behavior depends on class/code, never detail text.
 
 The provider catalog is node-local, passive presentation metadata rather than canonical domain
@@ -309,6 +312,27 @@ Because HQ has not shipped and has no standing installations, these request/resu
 the draft table were added directly to local API v1 and the current clean-sheet schema. There is no
 protocol/storage version bump, migration, compatibility reader, or parallel stored draft type.
 
+## Interactive responder sessions
+
+Pending interactions are bounded memory-only records carrying exact agent, optional project, provider, session,
+operation, request, kind, prompt, source-ordered choices, and free-text capability. Prompts and
+choices are validated as bounded non-secret text. Answers are a closed text, stable choice,
+approval boolean, or cancellation value. A caller-selected command ID binds the agent, request,
+and complete response through an application-derived digest: an equal retry returns the retained
+terminal outcome, changed reuse conflicts, and the first terminal provider answer wins.
+
+A responder registration is owned by one negotiated server session. It remains pending until its
+acknowledgement frame is confirmed written, becomes active at that exact boundary, and is dropped
+on disconnect or cancellation. The last active responder disappearing fail-closes every retained
+provider request; a lost acknowledgement never briefly creates an unowned responder. Reconnecting
+clients derive a new responder ID from a stable local seed and the server's ephemeral session ID,
+register again, and immediately query the pending queue.
+
+Request appearance and termination publish body-free `operations` invalidations. The subscribed
+client performs a pending-interaction query for those notifications even when the durable store
+revision is unchanged, so provider-memory changes arrive over the bidirectional connection rather
+than a timer. Prompt bodies never enter the invalidation hub.
+
 ## Revision subscriptions
 
 Topics are broad: `all`, `authority`, `conversation`, `agent`, `project`, and `operations`. A
@@ -348,10 +372,12 @@ retains only the latest desired value: an in-flight response for the prior key i
 published, then one follow-up query asks for the latest key. The latest interest survives reconnect.
 The client never infers missed rows from a revision gap, and invalidations remain projection-free.
 
-The installed TUI uses two independently negotiated local connections. It first registers and
-acknowledges the broad subscription, then opens an ordinary command/query connection for explicit
+The installed TUI uses two independently negotiated local connections. Its subscribed owner
+registers and acknowledges both the broad subscription and its interaction responder, then opens
+an ordinary command/query connection for explicit
 snapshots, conversations, drafts, and mutations. The subscribed owner only reads acknowledgements,
-materialized refreshes, invalidations, and connection-generation transitions, so an in-flight
+materialized refreshes, pending-interaction views, invalidations, and connection-generation
+transitions, so an in-flight
 command cannot starve wire reads. Both connections reconnect with their own generation and
 correlation state. The
 observer hands revision-only events through a bounded process-local queue; it never forwards a

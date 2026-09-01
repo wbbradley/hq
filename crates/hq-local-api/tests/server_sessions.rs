@@ -2,19 +2,27 @@
 
 #![allow(clippy::expect_used)]
 
-use std::{cell::RefCell, collections::BTreeSet};
+use std::{
+    cell::RefCell,
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, Application, ApplicationError, ApplicationErrorCode,
     ApplicationPorts, AuthoritativeConversationView, AuthoritativeSnapshot, CanonicalEvidence,
-    CommitFacts, ConfigureRelays, ControlMailbox, ConversationKey, ConversationPageSelection,
-    DomainSnapshot, EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation,
-    InspectResource, MailboxCommandRequest, MailboxDraft, MailboxDraftDeleteOutcome,
-    MailboxDraftDeleteRequest, MailboxDraftSaveOutcome, MailboxDraftSaveRequest, MutationAttempt,
-    MutationOutcome, MutationReceipt, ObserveRevisions, ProjectCommandOutcome,
-    ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration, ResourceInspectionRequest,
-    ResourceInspectionResult, ResourceReleaseState, SelectedConversationPage, SubscriptionRequest,
-    SubscriptionTopic, SynchronizationRequest, WakeDisposition,
+    CommitFacts, ConfigureRelays, ControlInteractions, ControlMailbox, ConversationKey,
+    ConversationPageSelection, DomainSnapshot, EffectOutcome, EffectRequest, EvidenceIngestOutcome,
+    FactMutation, InspectResource, InteractionResponderLease, MailboxCommandRequest, MailboxDraft,
+    MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
+    MailboxDraftSaveRequest, MutationAttempt, MutationOutcome, MutationReceipt, ObserveRevisions,
+    ProjectCommandOutcome, ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration,
+    ResourceInspectionRequest, ResourceInspectionResult, ResourceReleaseState,
+    SelectedConversationPage, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
+    WakeDisposition,
 };
 use hq_domain::{
     BoundedSet, CausalReferences, CommandId, EncryptionPublicKey, FactId, FactScope,
@@ -42,6 +50,8 @@ struct Ports {
     hub: RevisionHub,
     trace: std::rc::Rc<RefCell<Vec<&'static str>>>,
     fail_view: bool,
+    responder_activations: Arc<AtomicUsize>,
+    responder_drops: Arc<AtomicUsize>,
 }
 
 impl Ports {
@@ -50,6 +60,8 @@ impl Ports {
             hub,
             trace: std::rc::Rc::new(RefCell::new(Vec::new())),
             fail_view: false,
+            responder_activations: Arc::new(AtomicUsize::new(0)),
+            responder_drops: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -58,6 +70,8 @@ impl Ports {
             hub,
             trace: std::rc::Rc::new(RefCell::new(Vec::new())),
             fail_view: true,
+            responder_activations: Arc::new(AtomicUsize::new(0)),
+            responder_drops: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -299,6 +313,37 @@ impl ObserveRevisions for Ports {
 }
 
 impl ApplicationPorts for Ports {}
+impl hq_application::QueryInteractions for Ports {}
+
+impl ControlInteractions for Ports {
+    fn prepare_interaction_responder(
+        &self,
+        _responder_id: OperationId,
+    ) -> Result<Box<dyn InteractionResponderLease>, ApplicationError> {
+        Ok(Box::new(TestResponderLease {
+            activations: Arc::clone(&self.responder_activations),
+            drops: Arc::clone(&self.responder_drops),
+        }))
+    }
+}
+
+struct TestResponderLease {
+    activations: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
+}
+
+impl InteractionResponderLease for TestResponderLease {
+    fn activate(&mut self) -> Result<(), ApplicationError> {
+        self.activations.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl Drop for TestResponderLease {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
 impl ControlMailbox for Ports {
     fn mailbox_drafts(&self) -> Result<Vec<MailboxDraft>, ApplicationError> {
         self.trace.borrow_mut().push("mailbox_drafts");
@@ -596,6 +641,89 @@ fn failed_materialized_subscription_read_releases_pending_registration() {
         WireMessage::Response(response) if matches!(response.response, Response::Error(_))
     ));
     assert_eq!(hub.len(), 0);
+}
+
+#[test]
+fn responder_is_inactive_until_acknowledged_and_drops_on_disconnect() {
+    let hub = RevisionHub::new(2).expect("capacity");
+    let (mut server, application) = session(hub);
+    negotiate(&mut server, &application);
+    let outbound = server
+        .receive(
+            request(
+                1,
+                Request::RegisterInteractionResponder {
+                    responder_id: Id32::new([0x61; 32]),
+                },
+            ),
+            &application,
+            &Lifecycle,
+        )
+        .expect("responder acknowledgement prepares");
+    assert_eq!(
+        application
+            .ports()
+            .responder_activations
+            .load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        application.ports().responder_drops.load(Ordering::SeqCst),
+        0
+    );
+
+    server
+        .confirm_written(outbound.ticket())
+        .expect("written acknowledgement activates responder");
+    assert_eq!(
+        application
+            .ports()
+            .responder_activations
+            .load(Ordering::SeqCst),
+        1
+    );
+    server.disconnect();
+    assert_eq!(
+        application.ports().responder_drops.load(Ordering::SeqCst),
+        1
+    );
+}
+
+#[test]
+fn lost_responder_acknowledgement_drops_the_pending_lease_without_activation() {
+    let hub = RevisionHub::new(2).expect("capacity");
+    let (mut server, application) = session(hub);
+    negotiate(&mut server, &application);
+    let outbound = server
+        .receive(
+            request(
+                1,
+                Request::RegisterInteractionResponder {
+                    responder_id: Id32::new([0x62; 32]),
+                },
+            ),
+            &application,
+            &Lifecycle,
+        )
+        .expect("responder acknowledgement prepares");
+
+    server.disconnect();
+
+    assert_eq!(
+        application
+            .ports()
+            .responder_activations
+            .load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        application.ports().responder_drops.load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        server.confirm_written(outbound.ticket()),
+        Err(ServerSessionError::UnknownWriteTicket)
+    );
 }
 
 #[test]

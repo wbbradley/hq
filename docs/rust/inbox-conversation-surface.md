@@ -137,9 +137,11 @@ line at column zero, separated by the same whitespace rhythm:
 ! Repository check failed · Review details
 ```
 
-The symbol, verb, and style all reflect typed activity status. Exactly one current live row occupies
-the conversation tail: it says `Agent is working…` until useful progress exists, then uses the
-latest canonical progress text. Terminal lifecycle evidence replaces it rather than coexisting.
+The symbol, verb, and style all reflect typed activity status. Exactly one current live state
+occupies the conversation tail: a pending provider question or approval takes precedence; otherwise
+it says `Agent is working…` until useful uncompleted progress exists, then uses that typed progress.
+New human input suppresses earlier progress until the provider advances, and terminal lifecycle
+evidence replaces running state rather than coexisting.
 Failure and interruption remain visible. Completed commands show separately retained command text,
 up to three output lines, exit/failure state, and explicit omission markers; file changes, tools,
 and searches use their typed path/name/query fields.

@@ -1256,10 +1256,11 @@ fn interactive_request_fixture(
     Ok(HarnessInteractiveRequest {
         request_id: HarnessRequestId::from_bytes([identity; 32]),
         operation_id: OperationId::from_bytes([12; 32]),
-        kind: HarnessRequestKind::Approval,
+        kind: HarnessRequestKind::CommandApproval,
         prompt: content("Allow this bounded action?", scenario)?,
         choices: BoundedVec::new([choice])
             .map_err(|_| failure(scenario, "fixed request choices were invalid"))?,
+        allow_text: false,
     })
 }
 

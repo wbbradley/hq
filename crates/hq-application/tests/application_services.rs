@@ -245,6 +245,8 @@ impl ObserveRevisions for ScriptedPorts {
 }
 
 impl ApplicationPorts for ScriptedPorts {}
+impl hq_application::QueryInteractions for ScriptedPorts {}
+impl hq_application::ControlInteractions for ScriptedPorts {}
 impl ControlMailbox for ScriptedPorts {}
 
 #[test]

@@ -392,6 +392,51 @@ pub fn authored_agent_activity(
     .expect("agent activity signs")
 }
 
+pub fn authored_local_message(
+    index: u16,
+    operation: OperationId,
+    body: &str,
+) -> VerifiedSemanticFact {
+    let root = FactId::from_bytes(verified_fact().verified_event().event_id());
+    let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        BoundedSet::new([root]).expect("one parent validates"),
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            root,
+        )],
+    )
+    .expect("local authority validates");
+    let local = MailboxAddress::new(
+        authority_policy().local_installation(),
+        authority_policy().local_human_mailbox(),
+    );
+    let mut auxiliary = [0_u8; 32];
+    auxiliary[0] = 10;
+    auxiliary[30..].copy_from_slice(&index.to_be_bytes());
+    CanonicalEventPlan::new(
+        authority_policy().local_installation(),
+        Timestamp::from_unix_millis(3_000 + i64::from(index)),
+        FactScope::InstallationPrivate(authority_policy().local_installation()),
+        causal,
+        SemanticPayload::QuestionAsked(MessageContent {
+            message_id: MessageId::from_bytes(indexed_id(0x94, index)),
+            sender: local,
+            recipient: Some(local),
+            body: ContentText::new(body).expect("body validates"),
+            purpose: MessagePurpose::Question,
+            presentation: PresentationKind::Message,
+            correlation: Some(OperationCorrelation::new(
+                ProviderId::new("paged-provider").expect("provider validates"),
+                ProviderSessionId::new("paged-session").expect("session validates"),
+                operation,
+            )),
+            project_id: None,
+        }),
+    )
+    .sign(&signer(1), auxiliary)
+    .expect("local message signs")
+}
+
 pub fn authored_project_input(
     index: u16,
     project_id: ProjectId,

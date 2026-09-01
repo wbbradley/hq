@@ -113,6 +113,12 @@ Application start, resume, stop, submission, structured-answer, and cancellation
 provider sessions only through the sole supervisor owner. The adapter contract retains exact
 operation cancellation semantics; cancellation never proves an uncertain delivery absent.
 
+Interactive request retention requires at least one explicit responder registration. Registration
+is idempotent by opaque identity. Arrival without a responder is answered fail-closed immediately;
+removing the last responder answers every retained request fail-closed in source order. Provider
+closure, worker stop, and shutdown use the same terminal path, so no request outlives its sole
+session owner.
+
 Shutdown is ordered and bounded for every worker even if a sibling fails:
 
 1. stop adapter intake;

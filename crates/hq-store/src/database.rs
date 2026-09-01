@@ -1897,12 +1897,33 @@ fn load_conversation_live_tail(
     type OperationKey = (MailboxAddress, String, String, OperationId);
     type Candidate = (i64, ActivityView);
 
+    #[derive(Default)]
+    struct OperationActivity {
+        latest_turn: Option<Candidate>,
+        progress: Vec<Candidate>,
+        completed_sequence_by_item: BTreeMap<Option<String>, std::num::NonZeroU64>,
+    }
+
+    let latest_local_human_message = connection
+        .query_row(
+            "SELECT max(ordered.position) \
+             FROM reduction_conversation_order ordered \
+             JOIN conversation_messages message ON message.fact_id = ordered.fact_id \
+             JOIN reduction_state state ON state.singleton = 1 \
+             WHERE ordered.key_digest = ?1 \
+               AND message.sender_installation = state.policy_installation \
+               AND message.sender_mailbox = state.policy_human_mailbox",
+            [key_digest.as_slice()],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(sql_error)?;
+
     let mut statement = connection
         .prepare(
             "SELECT ordered.position, ordered.fact_id \
              FROM reduction_conversation_order ordered \
              JOIN conversation_activities activity ON activity.fact_id = ordered.fact_id \
-             WHERE ordered.key_digest = ?1 AND activity.kind IN (2, 6) \
+             WHERE ordered.key_digest = ?1 AND activity.kind IN (2, 5, 6) \
              ORDER BY ordered.position",
         )
         .map_err(sql_error)?;
@@ -1911,7 +1932,7 @@ fn load_conversation_live_tail(
             Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
         .map_err(sql_error)?;
-    let mut operations = BTreeMap::<OperationKey, (Option<Candidate>, Option<Candidate>)>::new();
+    let mut operations = BTreeMap::<OperationKey, OperationActivity>::new();
     for row in rows {
         let (position, fact_id) = row.map_err(sql_error)?;
         let fact_id = FactId::from_bytes(fixed_bytes(fact_id)?);
@@ -1929,20 +1950,48 @@ fn load_conversation_live_tail(
         );
         let candidates = operations.entry(key).or_default();
         match (activity.kind, &activity.status) {
-            (hq_domain::ActivityKind::AgentTurn, hq_domain::ActivityStatus::Running) => {
-                candidates.0 = Some((position, activity));
+            (hq_domain::ActivityKind::AgentTurn, _) => {
+                if candidates.latest_turn.as_ref().is_none_or(|(_, current)| {
+                    (activity.sequence, activity.fact_id) > (current.sequence, current.fact_id)
+                }) {
+                    candidates.latest_turn = Some((position, activity));
+                }
             }
             (hq_domain::ActivityKind::Progress, hq_domain::ActivityStatus::Running)
                 if !activity.content.as_str().trim().is_empty() =>
             {
-                candidates.1 = Some((position, activity));
+                candidates.progress.push((position, activity));
+            }
+            (hq_domain::ActivityKind::CompletedItem, _) => {
+                let item = activity.item.as_ref().map(|item| item.as_str().to_owned());
+                candidates
+                    .completed_sequence_by_item
+                    .entry(item)
+                    .and_modify(|sequence| *sequence = (*sequence).max(activity.sequence))
+                    .or_insert(activity.sequence);
             }
             _ => {}
         }
     }
     Ok(operations
         .into_values()
-        .filter_map(|(running, progress)| running.map(|fallback| progress.unwrap_or(fallback)))
+        .filter_map(|operation| {
+            let fallback = operation
+                .latest_turn
+                .filter(|(_, turn)| turn.status == hq_domain::ActivityStatus::Running)?;
+            let progress = operation
+                .progress
+                .into_iter()
+                .filter(|(position, progress)| {
+                    latest_local_human_message.is_none_or(|boundary| *position > boundary)
+                        && operation
+                            .completed_sequence_by_item
+                            .get(&progress.item.as_ref().map(|item| item.as_str().to_owned()))
+                            .is_none_or(|completed| *completed <= progress.sequence)
+                })
+                .max_by_key(|(position, progress)| (progress.sequence, *position));
+            Some(progress.unwrap_or(fallback))
+        })
         .max_by_key(|(position, _)| *position)
         .map(|(_, activity)| activity))
 }
