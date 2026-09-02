@@ -2,6 +2,7 @@
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod agent_guidance;
+mod boundary_trace;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod cli;
 mod codex_component;
@@ -50,6 +51,9 @@ mod unix_frame;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use agent_guidance::AgentGuidanceTopic;
+pub use boundary_trace::{
+    BOUNDARY_TRACE_ENVIRONMENT, BoundaryIds, BoundaryKind, BoundaryProcess, BoundaryTrace,
+};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use cli::{
     AgentMailboxSelection, AgentMessageCommand, AuthorityAdminView, CliCommand, CliCompletion,

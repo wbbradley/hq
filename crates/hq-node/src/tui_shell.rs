@@ -1,6 +1,7 @@
 //! Crossterm terminal ownership around the pure TUI reducer and effect executor.
 
 use std::{
+    collections::BTreeSet,
     fmt,
     io::Stdout,
     os::fd::{AsFd, BorrowedFd},
@@ -28,10 +29,11 @@ use nix::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
-    IdentityError, IdentityErrorClass, LocalNodeClient, LocalNodeEventClient, MonotonicTuiClock,
-    StatePaths, TuiClientPort, TuiClock, TuiEffectExecutor, TuiObservationPort,
-    TuiThemeEnvironment, TuiThemeError, local_client::installed_local_client_config,
-    resolve_tui_theme, tui_client::compose_tui_clients,
+    BoundaryIds, BoundaryKind, BoundaryProcess, BoundaryTrace, IdentityError, IdentityErrorClass,
+    LocalNodeClient, LocalNodeEventClient, MonotonicTuiClock, StatePaths, TuiClientPort, TuiClock,
+    TuiEffectExecutor, TuiObservationPort, TuiThemeEnvironment, TuiThemeError,
+    local_client::installed_local_client_config, resolve_tui_theme,
+    tui_client::compose_tui_clients,
 };
 
 /// Passive terminal observation after backend-specific normalization.
@@ -369,6 +371,8 @@ where
     O: TuiObservationPort + 'static,
     C: TuiClock,
 {
+    let trace = BoundaryTrace::from_environment(BoundaryProcess::Tui);
+    let mut drawn_interactions = BTreeSet::new();
     let home_directory = current_user_home_directory();
     let mut observer = observer;
     let initial_view = observer.take_initial_view();
@@ -392,21 +396,37 @@ where
 
     while !executor.exit_requested() {
         while let Some(event) = executor.poll_event() {
+            trace_tui_event(&trace, BoundaryKind::TuiObservationReceived, &event);
             let transition = update(model, event).map_err(|_| TuiShellError::Model)?;
             model = transition.model;
+            trace_current_interaction(&trace, BoundaryKind::TuiModelUpdated, &model);
             executor
                 .execute(transition.effects)
                 .map_err(|_| TuiShellError::Executor)?;
         }
-        if executor.take_redraw_request()
-            && let Some(observation) = terminal.draw(&model)?
-        {
-            let transition = update(model, UiEvent::ConversationViewportObserved { observation })
-                .map_err(|_| TuiShellError::Model)?;
-            model = transition.model;
-            executor
-                .execute(transition.effects)
-                .map_err(|_| TuiShellError::Executor)?;
+        if executor.take_redraw_request() {
+            let observation = terminal.draw(&model)?;
+            if let Some(interaction) = model.current_interaction()
+                && drawn_interactions.insert(interaction.request_id)
+            {
+                trace.record(
+                    BoundaryKind::TuiDialogDrawn,
+                    BoundaryIds {
+                        operation: Some(interaction.operation_id),
+                        provider_request: Some(interaction.request_id),
+                        ..BoundaryIds::default()
+                    },
+                );
+            }
+            if let Some(observation) = observation {
+                let transition =
+                    update(model, UiEvent::ConversationViewportObserved { observation })
+                        .map_err(|_| TuiShellError::Model)?;
+                model = transition.model;
+                executor
+                    .execute(transition.effects)
+                    .map_err(|_| TuiShellError::Executor)?;
+            }
         }
         if executor.exit_requested() {
             break;
@@ -432,6 +452,77 @@ where
     executor.shutdown().map_err(|_| TuiShellError::Executor)?;
     terminal.finish()?;
     Ok(())
+}
+
+fn trace_tui_event(trace: &BoundaryTrace, kind: BoundaryKind, event: &UiEvent) {
+    match event {
+        UiEvent::InteractionsObserved { interactions } => {
+            for interaction in interactions {
+                trace.record(
+                    kind,
+                    BoundaryIds {
+                        operation: Some(interaction.operation_id),
+                        provider_request: Some(interaction.request_id),
+                        ..BoundaryIds::default()
+                    },
+                );
+            }
+        }
+        UiEvent::Invalidated { revision } => trace.record(
+            kind,
+            BoundaryIds {
+                revision: Some(*revision),
+                ..BoundaryIds::default()
+            },
+        ),
+        UiEvent::ConnectionObserved { generation, .. }
+        | UiEvent::ClientFailed { generation, .. } => {
+            trace.record(
+                kind,
+                BoundaryIds {
+                    subscription_generation: Some(*generation),
+                    ..BoundaryIds::default()
+                },
+            );
+        }
+        UiEvent::SnapshotLoaded { effect_id, .. }
+        | UiEvent::SnapshotFailed { effect_id, .. }
+        | UiEvent::ConversationLoaded { effect_id, .. }
+        | UiEvent::ConversationFailed { effect_id, .. }
+        | UiEvent::InteractionAnswered { effect_id, .. }
+        | UiEvent::InteractionAnswerFailed { effect_id, .. }
+        | UiEvent::DraftLoaded { effect_id, .. }
+        | UiEvent::DraftSaved { effect_id, .. }
+        | UiEvent::DraftFailed { effect_id, .. }
+        | UiEvent::MailboxCommandCommitted { effect_id, .. }
+        | UiEvent::MailboxCommandFailed { effect_id, .. }
+        | UiEvent::AgentCommandCommitted { effect_id, .. }
+        | UiEvent::AgentCommandFailed { effect_id, .. }
+        | UiEvent::ManagedSessionCompleted { effect_id, .. }
+        | UiEvent::ManagedSessionFailed { effect_id, .. }
+        | UiEvent::ProjectCommandCompleted { effect_id, .. }
+        | UiEvent::ProjectCommandFailed { effect_id, .. } => trace.record(
+            kind,
+            BoundaryIds {
+                tui_effect: Some(effect_id.value()),
+                ..BoundaryIds::default()
+            },
+        ),
+        _ => {}
+    }
+}
+
+fn trace_current_interaction(trace: &BoundaryTrace, kind: BoundaryKind, model: &UiModel) {
+    if let Some(interaction) = model.current_interaction() {
+        trace.record(
+            kind,
+            BoundaryIds {
+                operation: Some(interaction.operation_id),
+                provider_request: Some(interaction.request_id),
+                ..BoundaryIds::default()
+            },
+        );
+    }
 }
 
 fn current_user_home_directory() -> Option<String> {

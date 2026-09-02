@@ -20,6 +20,13 @@ pub(crate) const WIDE_WIDTH: u16 = 96;
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct EffectId(NonZeroU64);
 
+impl EffectId {
+    /// Returns the stable pure-model effect identity.
+    pub const fn value(self) -> u64 {
+        self.0.get()
+    }
+}
+
 /// Current shell connection state presented by the UI.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiConnectionState {

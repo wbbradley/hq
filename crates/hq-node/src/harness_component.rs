@@ -32,6 +32,7 @@ use hq_store::Store;
 use crate::{
     AgentSessionCanonicalPort, AgentSessionSelectionOutcome, CancellationToken, ComponentDrain,
     ComponentError, HarnessStoreAdapter, NodeComponent, PreparedAgentSessionSelection,
+    boundary_trace::{BoundaryIds, BoundaryKind, BoundaryProcess, BoundaryTrace},
 };
 
 /// Node lifecycle owner for the complete neutral managed-runtime supervisor.
@@ -53,6 +54,7 @@ struct HarnessNodeInner {
     interaction_answers: Mutex<BTreeMap<hq_domain::OperationId, InteractionCommandRecord>>,
     application_state: hq_store::ApplicationStateHandle,
     revisions: Mutex<Option<hq_local_api::RevisionHub>>,
+    trace: BoundaryTrace,
 }
 
 #[derive(Clone)]
@@ -125,8 +127,18 @@ impl HarnessNodeComponent {
                 interaction_answers: Mutex::new(BTreeMap::new()),
                 application_state: store.application_state_handle(),
                 revisions: Mutex::new(None),
+                trace: BoundaryTrace::disabled(BoundaryProcess::Node),
             }),
         }
+    }
+
+    /// Replaces the disabled diagnostic sink before this component is shared or started.
+    #[must_use]
+    pub fn with_boundary_trace(mut self, trace: BoundaryTrace) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.trace = trace;
+        }
+        self
     }
 
     /// Composes a durable supervisor with no registered providers for the foreground baseline.
@@ -431,6 +443,30 @@ fn run_harness_events(
                         || report.workers_closed > 0
                         || report.workers_failed > 0 =>
                 {
+                    if let Ok(pending) = supervisor
+                        .as_ref()
+                        .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?
+                        .pending_interactions(hq_application::MAX_PENDING_INTERACTIONS)
+                    {
+                        for pending in pending {
+                            inner.trace.record(
+                                BoundaryKind::ProviderEventReceived,
+                                BoundaryIds {
+                                    operation: Some(*pending.request.operation_id.as_bytes()),
+                                    provider_request: Some(*pending.request.request_id.as_bytes()),
+                                    ..BoundaryIds::default()
+                                },
+                            );
+                            inner.trace.record(
+                                BoundaryKind::InteractionPublished,
+                                BoundaryIds {
+                                    operation: Some(*pending.request.operation_id.as_bytes()),
+                                    provider_request: Some(*pending.request.request_id.as_bytes()),
+                                    ..BoundaryIds::default()
+                                },
+                            );
+                        }
+                    }
                     publish_interaction_invalidation(inner);
                 }
                 Ok(_) => {}
@@ -821,6 +857,13 @@ fn publish_interaction_invalidation(inner: &HarnessNodeInner) {
         return;
     };
     if let Some(revisions) = revisions.as_ref() {
+        inner.trace.record(
+            BoundaryKind::LocalInvalidationPublished,
+            BoundaryIds {
+                revision: Some(revision.value()),
+                ..BoundaryIds::default()
+            },
+        );
         let _ = revisions.publish(
             revision,
             [hq_application::SubscriptionTopic::Operations],
@@ -904,6 +947,24 @@ impl ProjectRuntimePort for HarnessNodeComponent {
         &self,
         request: &EffectRequest<ProjectRuntimeDelivery>,
     ) -> Result<EffectOutcome<()>, ApplicationError> {
+        self.inner.trace.record(
+            BoundaryKind::ProjectDispatched,
+            BoundaryIds {
+                message: Some(*request.body.submission_id.as_bytes()),
+                dispatch: Some(*request.body.dispatch_id.as_bytes()),
+                operation: Some(*request.operation_id.as_bytes()),
+                ..BoundaryIds::default()
+            },
+        );
+        self.inner.trace.record(
+            BoundaryKind::CodexSubmitted,
+            BoundaryIds {
+                message: Some(*request.body.submission_id.as_bytes()),
+                dispatch: Some(*request.body.dispatch_id.as_bytes()),
+                operation: Some(*request.operation_id.as_bytes()),
+                ..BoundaryIds::default()
+            },
+        );
         let outcome = self.with_supervisor(|supervisor| {
             let delivery = HarnessDeliveryRecord {
                 agent_id: request.body.binding.agent_id,

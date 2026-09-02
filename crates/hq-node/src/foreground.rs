@@ -13,13 +13,13 @@ use hq_local_api::protocol::v1::{BuildMetadata, Id32};
 use hq_reducer::AuthorityPolicy;
 
 use crate::{
-    ApplicationAgentSessionCanonicalPort, CancellationToken, CanonicalHarnessPersistence,
-    ComponentDrain, ComponentError, ForegroundCodexConfig, HarnessNodeComponent,
-    LocalConfiguration, LocalNodeRuntime, LocalNodeRuntimeConfig, LocalNodeRuntimeError,
-    LocalNodeRuntimeReport, LocalNodeRuntimeStartError, LocalSessionPumpConfig,
-    LocalSessionRegistryConfig, NodeComponent, NodeComponents, NodeFoundation,
-    NodeFoundationConfig, NodeOwner, NodeOwnerStartError, NodeStartupError, ProjectNodeConfig,
-    RelayNodeComponent, RelayNodeConfig, RuntimePaths, ShutdownIntent,
+    ApplicationAgentSessionCanonicalPort, BoundaryProcess, BoundaryTrace, CancellationToken,
+    CanonicalHarnessPersistence, ComponentDrain, ComponentError, ForegroundCodexConfig,
+    HarnessNodeComponent, LocalConfiguration, LocalNodeRuntime, LocalNodeRuntimeConfig,
+    LocalNodeRuntimeError, LocalNodeRuntimeReport, LocalNodeRuntimeStartError,
+    LocalSessionPumpConfig, LocalSessionRegistryConfig, NodeComponent, NodeComponents,
+    NodeFoundation, NodeFoundationConfig, NodeOwner, NodeOwnerStartError, NodeStartupError,
+    ProjectNodeConfig, RelayNodeComponent, RelayNodeConfig, RuntimePaths, ShutdownIntent,
     StandardProjectNodeComponent, StatePaths, WakingApplicationStore, compose_codex_registry,
     compose_standard_project_component,
 };
@@ -144,6 +144,7 @@ fn open_generation(
     >,
     ForegroundNodeError,
 > {
+    let trace = BoundaryTrace::from_environment(BoundaryProcess::Node);
     let foundation = NodeFoundation::open(NodeFoundationConfig::new(
         config.state.clone(),
         config.runtime.clone(),
@@ -158,10 +159,12 @@ fn open_generation(
         RelayNodeConfig::default(),
         policy,
         Arc::new(hq_relay::WebSocketRelayConnector::default()),
+        trace.clone(),
     )?;
     let store = foundation.store().ok_or(ForegroundNodeError::Composition)?;
     let gateway = hq_store::StoreGateway::new(store, policy, foundation.signer_handle());
-    let application = WakingApplicationStore::new(gateway.clone(), relay.clone());
+    let application = WakingApplicationStore::new(gateway.clone(), relay.clone())
+        .with_boundary_trace(trace.clone());
     let canonical = Arc::new(ApplicationAgentSessionCanonicalPort::new(
         application.clone(),
         foundation.public_identity().installation_id,
@@ -186,7 +189,8 @@ fn open_generation(
         persistence,
         canonical,
         foundation.configuration().default_provider.clone(),
-    );
+    )
+    .with_boundary_trace(trace.clone());
     let project = compose_standard_project_component(
         ProjectNodeConfig {
             recovery_limit: NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN),
@@ -198,6 +202,7 @@ fn open_generation(
         foundation.public_identity().installation_id,
         harness.clone(),
         relay.clone(),
+        trace,
     );
     let owner = NodeOwner::start(
         foundation,

@@ -1,5 +1,30 @@
 # Completed
 
+## 2026-09-01 — Privacy-safe interaction handoff tracing
+
+HQ now supports opt-in, append-only JSONL boundary tracing across relay ingest, project dispatch,
+provider interaction publication, local invalidation delivery, TUI reduction, and first dialog
+draw. Records use boot-monotonic timestamps and closed, body-free correlation identifiers; tracing
+is disabled by default and failures never affect application behavior. The installed fake-Codex PTY
+scenario verifies the correlated ordering, privacy constraints, and sub-500 ms notification hops
+after the provider event. Focused coverage, strict workspace Clippy, and the full workspace suite
+pass.
+
+### Original plan entry
+
+### Add privacy-safe handoff tracing and an installed latency scenario
+
+Add structured boundary records using stable message/fact, dispatch/operation, provider-request,
+local connection/subscription-generation, and TUI effect identities plus monotonic receive/emit
+instants. Record relay receipt/store commit, project wake/dispatch, Codex submission/provider event,
+interaction publication, local invalidation write/read, model update, and first dialog draw without
+prompt, message, command, environment, or secret bodies. Installed-daemon diagnostics must be
+recoverable for a rerun rather than discarded; records are observability only and never authority.
+Add an installed fake-Codex PTY trace asserting ordered boundary records and a small latency budget
+attributable only to scheduler/I/O rather than configured polling intervals.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-01 — Intersecting conversation entry slices
 
 Replaced whole-entry transcript budgeting with a continuous viewport slicer that paints every

@@ -32,6 +32,7 @@ use tokio::{runtime::Builder, sync::watch};
 use crate::{
     CancellationToken, ComponentDrain, ComponentError, NodeComponent, ProjectResourceAdapter,
     ProjectSagaStoreAdapter, RelayNodeComponent,
+    boundary_trace::{BoundaryIds, BoundaryKind, BoundaryProcess, BoundaryTrace},
 };
 
 /// Application store capability that schedules relay work after a committed canonical mutation.
@@ -39,12 +40,24 @@ use crate::{
 pub struct WakingApplicationStore<W> {
     store: StoreGateway,
     wake: W,
+    trace: BoundaryTrace,
 }
 
 impl<W> WakingApplicationStore<W> {
     /// Binds a durable application store capability to post-commit relay scheduling.
     pub const fn new(store: StoreGateway, wake: W) -> Self {
-        Self { store, wake }
+        Self {
+            store,
+            wake,
+            trace: BoundaryTrace::disabled(BoundaryProcess::Node),
+        }
+    }
+
+    /// Installs a best-effort boundary trace for committed local mutations.
+    #[must_use]
+    pub fn with_boundary_trace(mut self, trace: BoundaryTrace) -> Self {
+        self.trace = trace;
+        self
     }
 }
 
@@ -76,6 +89,13 @@ impl<W: PublishWake> CommitFacts for WakingApplicationStore<W> {
         if let MutationAttempt::Completed(receipt) = &attempt
             && matches!(receipt.outcome(), MutationOutcome::Committed)
         {
+            self.trace.record(
+                BoundaryKind::StoreCommitted,
+                BoundaryIds {
+                    revision: Some(receipt.revision().value()),
+                    ..BoundaryIds::default()
+                },
+            );
             let _ = self.wake.publish_wake(receipt.revision());
         }
         Ok(attempt)
@@ -128,6 +148,10 @@ pub trait ScheduleProjectReconciliation {
 }
 
 /// Composes the complete standard project worker without taking store or signer ownership.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "complete foreground capability composition"
+)]
 pub fn compose_standard_project_component<R: ProjectRuntimePort>(
     config: ProjectNodeConfig,
     store: &Store,
@@ -136,8 +160,10 @@ pub fn compose_standard_project_component<R: ProjectRuntimePort>(
     home: hq_domain::InstallationId,
     runtime: R,
     wake: RelayNodeComponent,
+    trace: BoundaryTrace,
 ) -> StandardProjectNodeComponent<R> {
-    let gateway = WakingApplicationStore::new(StoreGateway::new(store, policy, signer), wake);
+    let gateway = WakingApplicationStore::new(StoreGateway::new(store, policy, signer), wake)
+        .with_boundary_trace(trace.clone());
     let inputs = ApplicationProjectInputReconciler::new(gateway.clone(), home);
     let resources = ProjectResourceAdapter::system(home);
     let workflow = ProjectWorkflowManager::with_git(
@@ -159,6 +185,7 @@ pub fn compose_standard_project_component<R: ProjectRuntimePort>(
         inputs,
         store.subscribe_invalidations(),
     )
+    .with_boundary_trace(trace)
 }
 
 /// Passive bounded project-worker lifecycle configuration.
@@ -181,6 +208,7 @@ pub struct ProjectNodeComponent<W, F, I> {
     reconciliation_observer: Option<watch::Receiver<ProjectReconciliationSignal>>,
     store_invalidations: Option<RevisionInvalidations>,
     reconciliation_task: Option<JoinHandle<Result<(), ComponentError>>>,
+    trace: BoundaryTrace,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -226,7 +254,15 @@ impl<W, F, I> ProjectNodeComponent<W, F, I> {
             reconciliation_observer: Some(reconciliation_observer),
             store_invalidations,
             reconciliation_task: None,
+            trace: BoundaryTrace::disabled(BoundaryProcess::Node),
         }
+    }
+
+    /// Installs a best-effort diagnostic sink before component startup.
+    #[must_use]
+    pub fn with_boundary_trace(mut self, trace: BoundaryTrace) -> Self {
+        self.trace = trace;
+        self
     }
 
     fn ensure_accepting(&self) -> Result<(), ApplicationError> {
@@ -334,6 +370,10 @@ where
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "single owned reconciliation task boundary"
+)]
 async fn run_project_reconciliation<W, I>(
     worker: &Mutex<W>,
     inputs: &Mutex<I>,
@@ -342,6 +382,7 @@ async fn run_project_reconciliation<W, I>(
     scheduler: &watch::Sender<ProjectReconciliationSignal>,
     limit: usize,
     recovery_time: Timestamp,
+    trace: &BoundaryTrace,
 ) -> Result<(), ComponentError>
 where
     W: ProjectWorkerPort,
@@ -374,6 +415,7 @@ where
         if signal.force_stop {
             return Ok(());
         }
+        trace.record(BoundaryKind::ProjectWoken, BoundaryIds::default());
         let reconciliation = lock_capability(worker)
             .and_then(|worker| worker.repair_pending(recovery_time, limit))
             .and_then(|_| reconcile_shared(worker, inputs, limit))
@@ -434,6 +476,7 @@ where
         let scheduler = self.reconciliation.clone();
         let limit = self.config.recovery_limit.get();
         let recovery_time = self.config.recovery_time;
+        let trace = self.trace.clone();
         self.reconciliation_task = Some(
             thread::Builder::new()
                 .name("hq-project-reconciliation".to_owned())
@@ -446,6 +489,7 @@ where
                         &scheduler,
                         limit,
                         recovery_time,
+                        &trace,
                     ))
                 })
                 .map_err(|_| ComponentError::unavailable())?,
@@ -531,6 +575,8 @@ impl<W, F, I> ScheduleProjectReconciliation for ProjectNodeComponent<W, F, I> {
         if !self.accepting.load(Ordering::Acquire) {
             return;
         }
+        self.trace
+            .record(BoundaryKind::ProjectWoken, BoundaryIds::default());
         self.reconciliation.send_modify(|state| {
             if !state.stopping {
                 state.generation = state.generation.wrapping_add(1);

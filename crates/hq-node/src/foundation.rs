@@ -211,6 +211,7 @@ impl NodeFoundation {
         config: RelayNodeConfig,
         authority_policy: AuthorityPolicy,
         connector: Arc<dyn RelayConnector>,
+        trace: crate::BoundaryTrace,
     ) -> Result<RelayNodeComponent, NodeStartupError> {
         let store = self.store.as_ref().ok_or_else(|| NodeStartupError {
             diagnostic: StartupDiagnostic::new(
@@ -231,13 +232,14 @@ impl NodeFoundation {
                     self.runtime.paths().root().to_path_buf(),
                 ),
             })?;
-        Ok(RelayNodeComponent::new(
+        Ok(RelayNodeComponent::new_with_trace(
             config,
             store,
             envelope,
             self.identity.public_identity().installation_id,
             authority_policy,
             connector,
+            trace,
         ))
     }
 

@@ -31,6 +31,7 @@ use tokio::{runtime::Builder, sync::watch};
 
 use crate::{
     CancellationToken, ComponentDrain, ComponentError, NodeComponent, RelayStoreAdapter,
+    boundary_trace::{BoundaryIds, BoundaryKind, BoundaryProcess, BoundaryTrace},
     relay_store::map_store_error,
 };
 
@@ -114,6 +115,28 @@ impl RelayNodeComponent {
         authority_policy: AuthorityPolicy,
         connector: Arc<dyn RelayConnector>,
     ) -> Self {
+        Self::new_with_trace(
+            config,
+            store,
+            envelope,
+            local_installation,
+            authority_policy,
+            connector,
+            BoundaryTrace::disabled(BoundaryProcess::Node),
+        )
+    }
+
+    /// Composes the relay manager with a best-effort boundary trace.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_trace(
+        config: RelayNodeConfig,
+        store: &Store,
+        envelope: EnvelopeCodec,
+        local_installation: InstallationId,
+        authority_policy: AuthorityPolicy,
+        connector: Arc<dyn RelayConnector>,
+        trace: BoundaryTrace,
+    ) -> Self {
         let replication = store.replication_handle();
         let state: Arc<dyn RelayStatePort> = Arc::new(RelayStoreAdapter::new(store));
         let dependencies = hq_relay::RelaySessionDependencies {
@@ -125,6 +148,7 @@ impl RelayNodeComponent {
             ingest: Arc::new(StoreCanonicalIngest {
                 store: replication,
                 authority_policy,
+                trace,
             }),
             envelopes: Arc::new(envelope),
             clock: Arc::new(SystemRelayClock::new()),
@@ -454,6 +478,7 @@ impl RouteResolver for VerifiedRouteResolver {
 struct StoreCanonicalIngest {
     store: ReplicationHandle,
     authority_policy: AuthorityPolicy,
+    trace: BoundaryTrace,
 }
 
 impl CanonicalIngest for StoreCanonicalIngest {
@@ -461,10 +486,27 @@ impl CanonicalIngest for StoreCanonicalIngest {
         let fact = hq_protocol::decode_semantic_event(exact_canonical_bytes)
             .map_err(|_| RelayPortError::InvalidInput)?
             .ok_or(RelayPortError::InvalidInput)?;
-        self.store
+        let fact_id = *fact.fact().id().as_bytes();
+        self.trace.record(
+            BoundaryKind::RelayReceived,
+            BoundaryIds {
+                fact: Some(fact_id),
+                ..BoundaryIds::default()
+            },
+        );
+        let receipt = self
+            .store
             .ingest_verified(fact, self.authority_policy)
-            .map(|_| ())
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        self.trace.record(
+            BoundaryKind::RelayCommitted,
+            BoundaryIds {
+                fact: Some(fact_id),
+                revision: Some(receipt.revision().value()),
+                ..BoundaryIds::default()
+            },
+        );
+        Ok(())
     }
 }
 

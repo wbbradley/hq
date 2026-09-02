@@ -96,6 +96,8 @@ pub struct LocalSessionInvalidationFailure {
 pub struct LocalSessionInvalidationReport {
     /// Invalidation frames accepted by per-session write queues.
     pub delivered: usize,
+    /// Boot-local identities whose writer accepted an invalidation frame.
+    pub delivered_sessions: Vec<Id32>,
     /// Saturated or failed sessions closed by this pass.
     pub failures: Vec<LocalSessionInvalidationFailure>,
 }
@@ -286,7 +288,10 @@ impl LocalSessionRegistry {
                     .map(|message| slot.io.try_send_invalidation(&message))
             });
             match attempted {
-                Some(Ok(())) => report.delivered += 1,
+                Some(Ok(())) => {
+                    report.delivered += 1;
+                    report.delivered_sessions.push(session_id);
+                }
                 Some(Err(error)) => {
                     report
                         .failures

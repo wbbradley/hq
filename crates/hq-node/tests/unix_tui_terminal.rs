@@ -763,6 +763,7 @@ fn installed_fake_codex_approval_round_trips_through_the_tui() {
     let state_root = directory.path().join("state");
     let worktree = directory.path().join("approval-worktree");
     let provider_bin = directory.path().join("provider-bin");
+    let boundary_trace = directory.path().join("approval-boundaries.jsonl");
     std::fs::create_dir(&worktree).expect("guided working tree");
     std::fs::create_dir(&provider_bin).expect("provider bin directory");
     install_fake_codex(&provider_bin, true);
@@ -770,12 +771,17 @@ fn installed_fake_codex_approval_round_trips_through_the_tui() {
     let search_path = format!("{}:{inherited_path}", provider_bin.display());
 
     initialize_identity(&state_root);
-    let _daemon = start_foreground_daemon(&state_root, &search_path, &provider_bin.join("codex"));
+    let _daemon = start_foreground_daemon_with_trace(
+        &state_root,
+        &search_path,
+        &provider_bin.join("codex"),
+        Some(&boundary_trace),
+    );
     let human = hq_output_with_search_path(&state_root, &["human", "create"], &search_path);
     assert!(human.status.success(), "human create failed: {human:?}");
 
     let content = "run work that needs approval";
-    let run = run_in_pty(
+    let run = run_in_pty_with_trace(
         &state_root,
         true,
         PtyInteraction::CreateGuidedProjectWork {
@@ -786,6 +792,7 @@ fn installed_fake_codex_approval_round_trips_through_the_tui() {
             search_path: &search_path,
             approval: true,
         },
+        Some(&boundary_trace),
     );
     assert!(run.status.success(), "approval TUI failed: {:?}", run.bytes);
     assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
@@ -813,6 +820,7 @@ fn installed_fake_codex_approval_round_trips_through_the_tui() {
         }),
         "provider did not receive the TUI approval: {calls}"
     );
+    assert_approval_boundary_trace(&boundary_trace, content);
 }
 
 #[test]
@@ -1035,6 +1043,16 @@ enum PtyInteraction<'content> {
 
 #[allow(clippy::too_many_lines)]
 fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>) -> PtyRun {
+    run_in_pty_with_trace(state_root, explicit, interaction, None)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_in_pty_with_trace(
+    state_root: &Path,
+    explicit: bool,
+    interaction: PtyInteraction<'_>,
+    boundary_trace: Option<&Path>,
+) -> PtyRun {
     // Ratatui's differential output is not a screen transcript, so durable mutation completion
     // must synchronize against authoritative state instead of a possibly split rendered phrase.
     let agent_target = match interaction {
@@ -1068,6 +1086,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         .stdin(stdin)
         .stdout(stdout)
         .stderr(stderr);
+    if let Some(boundary_trace) = boundary_trace {
+        command.env(hq_node::BOUNDARY_TRACE_ENVIRONMENT, boundary_trace);
+    }
     if matches!(interaction, PtyInteraction::StartRejectedSession) {
         command.env("PATH", "/nonexistent");
     }
@@ -2141,6 +2162,85 @@ fn serial_scenario() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn assert_approval_boundary_trace(path: &Path, private_message: &str) {
+    let trace = std::fs::read_to_string(path).expect("installed boundary trace remains readable");
+    for private in [
+        private_message,
+        "cargo test",
+        "Run the test command?",
+        "PATH",
+    ] {
+        assert!(
+            !trace.contains(private),
+            "boundary trace leaked private text"
+        );
+    }
+    let mut records = trace
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("boundary JSONL record"))
+        .collect::<Vec<_>>();
+    assert!(!records.is_empty(), "installed boundary trace is empty");
+    assert!(
+        records
+            .iter()
+            .all(|record| record["schema"] == "hq.boundary.v1")
+    );
+    records.sort_by_key(|record| record["monotonic_ns"].as_u64().unwrap_or(u64::MAX));
+    let dialog = records
+        .iter()
+        .find(|record| record["kind"] == "tui_dialog_drawn")
+        .expect("dialog draw boundary");
+    let request_id = dialog["provider_request_id"]
+        .as_str()
+        .expect("dialog request identity")
+        .to_owned();
+    let expected = [
+        "project_woken",
+        "project_dispatched",
+        "codex_submitted",
+        "provider_event_received",
+        "interaction_published",
+        "local_invalidation_published",
+        "local_invalidation_written",
+        "tui_observation_received",
+        "tui_model_updated",
+        "tui_dialog_drawn",
+    ];
+    let mut selected = Vec::new();
+    let mut cursor = 0;
+    for kind in expected {
+        let relative = records[cursor..]
+            .iter()
+            .position(|record| {
+                if record["kind"] != kind {
+                    return false;
+                }
+                !matches!(
+                    kind,
+                    "provider_event_received"
+                        | "interaction_published"
+                        | "tui_observation_received"
+                        | "tui_model_updated"
+                        | "tui_dialog_drawn"
+                ) || record["provider_request_id"] == request_id
+            })
+            .unwrap_or_else(|| panic!("missing ordered boundary {kind}: {trace}"));
+        cursor += relative;
+        selected.push(
+            records[cursor]["monotonic_ns"]
+                .as_u64()
+                .expect("monotonic time"),
+        );
+        cursor += 1;
+    }
+    for pair in selected[3..].windows(2) {
+        assert!(
+            pair[1].saturating_sub(pair[0]) <= 500_000_000,
+            "HQ notification segment exceeded 500 ms: {selected:?}"
+        );
+    }
+}
+
 fn mailbox_contains(state_root: &Path, content: &str) -> bool {
     let output = hq_output(state_root, &["--output", "json", "list", "--all"]);
     output.status.success() && String::from_utf8_lossy(&output.stdout).contains(content)
@@ -2365,7 +2465,17 @@ fn start_foreground_daemon<'state>(
     search_path: &str,
     provider_executable: &Path,
 ) -> ForegroundDaemonGuard<'state> {
-    let child = Command::new(env!("CARGO_BIN_EXE_hq"))
+    start_foreground_daemon_with_trace(state_root, search_path, provider_executable, None)
+}
+
+fn start_foreground_daemon_with_trace<'state>(
+    state_root: &'state Path,
+    search_path: &str,
+    provider_executable: &Path,
+    boundary_trace: Option<&Path>,
+) -> ForegroundDaemonGuard<'state> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hq"));
+    command
         .arg("--state-root")
         .arg(state_root)
         .args(["daemon", "run"])
@@ -2373,9 +2483,11 @@ fn start_foreground_daemon<'state>(
         .env("CODEX_BIN", provider_executable)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("foreground daemon starts");
+        .stderr(Stdio::null());
+    if let Some(boundary_trace) = boundary_trace {
+        command.env(hq_node::BOUNDARY_TRACE_ENVIRONMENT, boundary_trace);
+    }
+    let child = command.spawn().expect("foreground daemon starts");
     let guard = ForegroundDaemonGuard {
         state_root,
         child: Some(child),

@@ -12,10 +12,10 @@ use hq_store::RevisionInvalidations;
 use tokio::io::unix::AsyncFd;
 
 use crate::{
-    AcceptedLocalStream, LocalSessionAdmissionError, LocalSessionDispatch,
-    LocalSessionInvalidationReport, LocalSessionRegistry, LocalSessionRegistryConfig,
-    LocalSessionShutdownReport, NodeFoundation, RuntimeArtifactErrorClass,
-    local_transport::BoundLocalListener,
+    AcceptedLocalStream, BoundaryIds, BoundaryKind, BoundaryProcess, BoundaryTrace,
+    LocalSessionAdmissionError, LocalSessionDispatch, LocalSessionInvalidationReport,
+    LocalSessionRegistry, LocalSessionRegistryConfig, LocalSessionShutdownReport, NodeFoundation,
+    RuntimeArtifactErrorClass, local_transport::BoundLocalListener,
 };
 
 /// Plain fixed capacities and boot-local identity seed for one listener/session pump.
@@ -139,6 +139,7 @@ pub struct LocalSessionPump {
     boot_nonce: Id32,
     next_connection: Option<NonZeroU64>,
     prefer_listener: bool,
+    trace: BoundaryTrace,
 }
 
 impl LocalSessionPump {
@@ -173,6 +174,7 @@ impl LocalSessionPump {
             boot_nonce: config.boot_nonce,
             next_connection: NonZeroU64::new(1),
             prefer_listener: true,
+            trace: BoundaryTrace::from_environment(BoundaryProcess::Node),
         })
     }
 
@@ -302,7 +304,17 @@ impl LocalSessionPump {
 
     fn flush_ready_invalidations(&mut self) -> LocalSessionInvalidationReport {
         self.revision_wakes.observe_current();
-        self.sessions.flush_invalidations()
+        let report = self.sessions.flush_invalidations();
+        for session_id in &report.delivered_sessions {
+            self.trace.record(
+                BoundaryKind::LocalInvalidationWritten,
+                BoundaryIds {
+                    connection: Some(session_id.bytes()),
+                    ..BoundaryIds::default()
+                },
+            );
+        }
+        report
     }
 
     fn flush_subscription_invalidations(&mut self) -> LocalSessionPumpEvent {
