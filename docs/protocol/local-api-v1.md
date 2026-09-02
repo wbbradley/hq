@@ -382,8 +382,8 @@ command cannot starve wire reads. Both connections reconnect with their own gene
 correlation state. The
 observer hands revision-only events through a bounded process-local queue; it never forwards a
 snapshot body as an invalidation. TUI shutdown closes the active subscribed Unix stream to wake its
-blocking read and joins that owner instead of waiting for a short poll deadline. The five-minute
-model refresh remains only a repair check for missed or buggy notification behavior.
+blocking read and joins that owner instead of waiting for a short poll deadline. Manual refresh is
+an explicit repair request; the installed client has no recurring model-refresh timer.
 
 ## Failure and close policy
 

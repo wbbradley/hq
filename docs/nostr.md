@@ -74,8 +74,9 @@ ID)`, so overlap, relay duplicates, restart, and catch-up are safe.
 The same session publishes ready outbox jobs. A positive `OK` or `duplicate:` response records relay
 acceptance; a negative response preserves retry state. Other relay hints remain eligible after one
 accepts. Connection loss uses bounded exponential backoff, and durable queued work survives node,
-host, or relay downtime. Config changes and lifecycle wake requests refresh sessions immediately;
-periodic polling repairs a missed wake.
+host, or relay downtime. Relay frames, committed outbox work, config changes, and lifecycle wake
+requests notify the engine directly. Startup and explicit `hq sync` repair from durable state;
+there is no recurring healthy-state repair poll.
 
 `hq sync` asks the node to wake its engine and run promptly; it does not make the CLI a relay worker.
 Normal mutating commands may request the same immediate synchronization after their local commit.
@@ -98,7 +99,11 @@ The node validates in this order:
    causal rules.
 9. In one SQLite transaction, insert wrapper audit data, append the canonical event, reduce,
    project, derive any new outbox work, increment the revision, and commit.
-10. Publish a lightweight local invalidation after commit.
+10. Publish the committed revision to the local-session and project-reconciliation wake owners.
+
+That final notification carries no event body. Project dispatch and subscribed local clients reread
+their bounded authoritative views when woken, so a relayed human message enters the same immediate
+pipeline as a local commit without waiting for another relay frame or a timer.
 
 Local and inbound canonical events therefore take the same reducer and projection path. Bad
 signatures, MACs, recipients, identities, schemas, sizes, or rights enter bounded quarantine.

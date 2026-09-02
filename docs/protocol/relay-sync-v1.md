@@ -18,7 +18,10 @@ transactions. Only `hq-node` maps between those boundaries.
 
 One session exclusively owns its connection, latest NIP-42 challenge, subscriptions, retry clock,
 and in-flight writes. A capacity-one wake is a work notification, not work itself. Durable state is
-always re-read after a wake, periodic repair tick, reconnect, or restart.
+always re-read after a wake, reconnect, restart, or explicit synchronization request. A session
+`tick` is one bounded nonblocking state-machine pass, not a time source. An idle healthy session
+waits on its wake descriptor and relay-socket readiness with no periodic deadline; only retained
+retry work or connection failure supplies an exact deadline or exponential backoff.
 
 Every independently ordered durable collection uses a typed keyset position: start, strictly after
 one stable key, or done. A page marks an exhausted collection done while other collections continue,

@@ -61,9 +61,11 @@ snapshots may coalesce only with the same operation/logical key already in the b
 snapshot is removed and the replacement is appended at the tail, preserving the order of all
 intervening work. A new snapshot key at capacity also backpressures.
 
-The node owns one joined polling task for the complete supervisor, not one detached task per
-provider. Every bounded pass polls each live session once with zero wait and in stable agent order.
-The normalized source event is admitted before that session is polled again. If a distinct durable
+The node owns one joined event task for the complete supervisor, not one detached task per
+provider. Every adapter shares the task's retained coalescing notifier. After a wake, every bounded
+pass drains each live session nonblockingly in stable agent order; exhausting the fairness budget
+self-signals an immediate continuation. The normalized source event is admitted before that session
+is drained again. If a distinct durable
 value arrives at capacity, the worker retains it in its single staging slot and stops polling that
 source until admission succeeds. Thus pressure is bounded to the configured FIFO plus one already
 polled value, durable values cannot disappear, and an exact snapshot may still replace its pending
@@ -74,7 +76,7 @@ The complete normalized value determines the checkpoint digest.
 Structured requests enter a separate bounded source-ordered queue and are removed only after the
 sole session owner accepts the exact answer. A full request queue uses the same staging rule, so a
 later output cannot cross an unretained authority-bearing request. Normal provider closure and
-typed poll failure both remove the exact worker through the ordinary bounded teardown path and
+typed drain failure both remove the exact worker through the ordinary bounded teardown path and
 release only its token. Failures retain only a closed neutral class.
 
 Canonical persistence is injected and idempotent by stable identity. Reusing an output identity
@@ -122,9 +124,9 @@ session owner.
 Shutdown is ordered and bounded for every worker even if a sibling fails:
 
 1. stop adapter intake;
-2. signal the component polling task only after every live adapter has observed intake closure;
-3. continue bounded polling so already accepted provider work reaches the FIFO or staging slot;
-4. join the sole polling task before moving or releasing the supervisor;
+2. signal the component event task only after every live adapter has observed intake closure;
+3. continue bounded ready drains so already accepted provider work reaches the FIFO or staging slot;
+4. join the sole event task before moving or releasing the supervisor;
 5. flush already accepted normalized events;
 6. request adapter drain with the configured maximum wait;
 7. force-stop when drain is pending or failed, and close the runtime capability idempotently; and

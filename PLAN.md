@@ -2,17 +2,6 @@
 
 ## Next Up
 
-### Document and audit the event-driven interaction pipeline
-
-Update `docs/design.md`, `docs/nostr.md`, `docs/projects.md`,
-`docs/harness-contract-v1.md`, `docs/harness-supervisor-v1.md`,
-`docs/protocol/local-api-v1.md`, and `docs/rust/tui.md` with the notification graph and the
-distinction between event wakes and failure backoff/deadlines. Repository checks must show that no
-recurring healthy-state poll interval remains in this pipeline. Verify end to end that a single
-local or relayed human message and every resulting provider interaction reach each idle downstream
-owner and the next TUI draw without any periodic poll, repair scan, unrelated I/O, or durable
-mutation.
-
 ### Smaller hand-added todos (each need some in-depth analysis)
 
 * Whenever the conversation view opens, place its selection at the tail and enable follow-tail so current and subsequent agent activity auto-scrolls. Restore the same state after approval or denial is submitted through the Codex permission dialog.

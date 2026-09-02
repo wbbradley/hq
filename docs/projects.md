@@ -333,9 +333,11 @@ the same input twice. Manual dispatch is not an ordinary messaging step; it is a
 action exposed only when stalled-delivery evidence requires intervention.
 
 Post-commit wakes contain no message or project payload and may coalesce. The worker rereads durable
-state, crosses the mailbox/projection handoff with one bounded follow-up pass, continues truncated
-work, retries failures on the next wake or five-minute repair, and performs a final pass during
-drain. A lost process-local wake therefore delays work but cannot lose a committed input.
+state, crosses the mailbox/projection handoff with one bounded immediate follow-up pass, and
+self-schedules an immediate continuation while bounded work remains. Startup, an explicit control
+operation, a later committed revision, or final drain also wakes reconciliation. A failed attempt
+remains durable for one of those explicit recovery triggers; no recurring repair scan drives normal
+dispatch.
 
 Agent output retains immutable agent, thread, and assignment-epoch provenance. The project mailbox
 remains the conversation address and reply target. UIs present dual attribution such as

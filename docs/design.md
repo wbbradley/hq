@@ -158,8 +158,32 @@ CLI `ask`, and CLI `wait` retain their own subscription
 composition. The reconnecting client can replace its desired conversation while one materialized
 refresh is in flight; it suppresses the stale selection, coalesces invalidations, and requests only
 the latest interest. Unselected subscribers and ordinary clients retain explicit snapshot and
-older-page queries. The TUI's five-minute periodic refresh is a repair assertion, not its
-notification path. TUI drafts, focus, and selection survive reloads.
+older-page queries. Manual refresh is an explicit repair operation; normal notification and redraw
+have no recurring refresh. TUI drafts, focus, and selection survive reloads.
+
+### Event-driven interaction graph
+
+The healthy-state path is a chain of retained or coalescing notifications, with durable state read
+at each authority boundary:
+
+1. A local canonical commit publishes its revision directly; a relay frame is validated and uses
+   the same commit observer after durable ingest.
+2. The revision wakes project reconciliation, which rereads pending project input and dispatches
+   stable work to the harness. A bounded immediate continuation handles truncation or the narrow
+   mailbox/projection handoff; neither is a recurring scan.
+3. Each provider adapter signals its registered notifier when a complete event becomes ready,
+   backpressure clears, or the source closes. The sole harness owner drains ready events
+   nonblockingly and publishes provider-interaction appearance or termination immediately.
+4. Store revisions and memory-only interaction changes wake the local session owner. Its subscribed
+   socket write wakes the TUI observation owner, which queries the authoritative materialized view
+   and enqueues a generation-scoped model event.
+5. Enqueuing that event makes the executor's Unix wake descriptor readable. The terminal loop
+   reduces all ready events and draws the resulting frame before blocking again.
+
+Reconnect delay, provider RPC and process termination limits, lease expiry, draft autosave,
+completion dismissal, and bounded shutdown waits are failure or lifecycle deadlines. They do not
+drive healthy delivery. Explicit `sync`, refresh, and startup repair reread durable authority on
+demand; they are not required for an already-running idle pipeline to make progress.
 
 ## SQLite data
 

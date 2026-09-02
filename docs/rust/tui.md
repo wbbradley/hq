@@ -220,8 +220,8 @@ adapter and observation client negotiate, block, reconnect, and join independent
 provider catalog and maps them into one presentation bundle containing Inbox, Sent, Archived,
 Agents, Projects, and typed provider choices. Section navigation selects an already
 mapped slice and performs no client request, so it never replaces visible content with a loading
-state. Invalidation and periodic repair load a replacement bundle in the background while the
-previous complete bundle remains visible. Conversation summaries carry store-derived open,
+state. Invalidation and explicit manual repair load a replacement bundle in the background while
+the previous complete bundle remains visible. Conversation summaries carry store-derived open,
 archived, and local-human-authored counts, the exact reserved local-human mailbox, a typed
 project/participant presentation context, and one sanitized bounded message preview. The node uses
 the typed context for participant-first list titles such as `Alice`, `Project agent`, `Other
@@ -281,8 +281,14 @@ The executor preserves snapshot effect identity, releases each timer once, coale
 requests, and joins both workers on explicit shutdown or drop. Shutdown sets shared cancellation,
 interrupts the exact active observation socket, drains bounded results while enqueueing the command
 stop, and joins both owners even when either panics. Saturated command or result queues cannot
-deadlock the join. The five-minute periodic refresh remains a repair assertion and is not used for
-ordinary notification latency.
+deadlock the join. Its only timers are exact reconnect retry, draft-autosave, and
+completion-dismissal deadlines; there is no recurring snapshot or redraw timer.
+
+When either worker enqueues a model event or exits unexpectedly, it writes the executor's
+nonblocking Unix wake pair. The outer shell waits on terminal input, that descriptor, or the next
+exact UI deadline. It drains and reduces every ready event, then redraws before sleeping again.
+Consequently an interaction notification already received on the subscribed socket cannot wait for
+terminal input, command completion, or a sampling interval before its first dialog frame.
 
 The command worker allocates command/message identities, semantic time, and auxiliary randomness
 once, then the reconnecting runner retains and replays that exact command frame until a durable

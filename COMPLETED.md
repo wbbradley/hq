@@ -1,5 +1,30 @@
 # Completed
 
+## 2026-09-02 — Event-driven interaction pipeline audit
+
+The architecture and subsystem specifications now document the direct notification graph from
+local or relayed commit through project dispatch, provider readiness, local subscription delivery,
+TUI reduction, and first redraw. Stale periodic-repair and five-minute-refresh descriptions were
+removed, and exact lifecycle/failure deadlines are distinguished from healthy-state wakes. A new
+repository regression test rejects recurring timer primitives and removed poll controls across the
+relay, project, harness, local-session, and TUI owners. Strict workspace Clippy and the complete
+all-feature workspace suite pass.
+
+### Original plan entry
+
+### Document and audit the event-driven interaction pipeline
+
+Update `docs/design.md`, `docs/nostr.md`, `docs/projects.md`,
+`docs/harness-contract-v1.md`, `docs/harness-supervisor-v1.md`,
+`docs/protocol/local-api-v1.md`, and `docs/rust/tui.md` with the notification graph and the
+distinction between event wakes and failure backoff/deadlines. Repository checks must show that no
+recurring healthy-state poll interval remains in this pipeline. Verify end to end that a single
+local or relayed human message and every resulting provider interaction reach each idle downstream
+owner and the next TUI draw without any periodic poll, repair scan, unrelated I/O, or durable
+mutation.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-01 — Privacy-safe interaction handoff tracing
 
 HQ now supports opt-in, append-only JSONL boundary tracing across relay ingest, project dispatch,

@@ -18,7 +18,7 @@ acknowledged a nonempty durable identity. `Resume` MUST open exactly the request
 NOT create a replacement when that identity is absent. If an adapter acknowledges a different
 identity, the registry force-stops the returned owner and rejects readiness.
 
-The contract grants one mutable owner for submission, event polling, interactive responses,
+The contract grants one mutable owner for submission, event draining, interactive responses,
 cancellation, and shutdown. Sharing, leasing, persistence, and scheduling of that owner belong to
 the supervisor, not the adapter contract.
 
@@ -62,9 +62,13 @@ supervisor responsibilities specified by `docs/harness-supervisor-v1.md`.
 
 ## Events and interactive requests
 
-The adapter emits indivisible `HarnessEvent` values in provider source order through a bounded
-poll. `TimedOut` means no event arrived before the supplied duration; it is not a session failure.
-`Closed` follows all preceding events after normal termination.
+The adapter emits indivisible `HarnessEvent` values in provider source order. Before use, its sole
+owner registers one `HarnessEventNotifier`; registration immediately signals already-ready input.
+The adapter signals again when input changes from empty to ready, when backpressure release exposes
+more input, and when the source closes. Repeated unconsumed signals may coalesce. After a signal the
+owner calls `next_event` as a nonblocking bounded drain: `Pending` means no complete event is ready,
+and `Closed` follows all preceding events after normal termination. The notifier is readiness only;
+the event remains owned by the adapter until drained.
 
 Output and activity use bounded domain values and typed fields. Output is actionable user-facing
 content. Activity is non-actionable status/history and carries a positive semantic sequence.
