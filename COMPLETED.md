@@ -10543,6 +10543,34 @@ If upcoming plan items need modifications due to a change during this implementa
 
 <!-- End of archived plan entry. -->
 
+## 2026-09-01 — Event-driven project reconciliation
+
+The store now retains a revision broadcaster and creates independent latest-value subscriptions for
+the local API and project worker. Standard project composition subscribes before component startup,
+and its dedicated reconciliation thread selects directly over durable revision wakes, explicit
+work, and lifecycle signals. The five-minute repair scan is gone; bounded results self-schedule
+until quiescent, bursts coalesce, and shutdown interrupts and joins the idle worker.
+
+Relay canonical ingest now owns only verification and persistence. The project subscriber performs
+both input acceptance and automatic dispatch, eliminating the partial relay-side sequencing path.
+Deterministic contracts prove independent subscriber fanout, idle revision-to-dispatch progress,
+coalescing, retry-on-next-event, and orderly drain. Strict workspace Clippy and the complete
+all-feature workspace suite pass.
+
+### Original plan entry
+
+### Make store revisions wake every project consumer
+
+Turn committed store revisions into a multi-consumer, latest-value notification source. Subscribe
+project reconciliation before startup is acknowledged, treat notifications as body-free hints, and
+drain authoritative state to a fixed point. Remove the project's five-minute repair scan and the
+relay-ingest adapter's partial/direct project sequencing so a local or relayed human message wakes
+input acceptance and automatic dispatch without another command, socket event, or timer. Add
+deterministic no-sleep tests that park project reconciliation idle and prove local and relay inputs
+reach managed dispatch, including publication/waiter races, coalesced bursts, and shutdown.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-01 — Materialized Inbox details without loading flashes
 
 The installed TUI now retains the subscription acknowledgement and consumes revision-coherent

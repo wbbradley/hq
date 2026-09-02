@@ -3,10 +3,11 @@
 #![allow(clippy::expect_used)]
 
 use std::{
+    fs,
     num::NonZeroUsize,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -17,8 +18,10 @@ use hq_application::{
     ResourceInspectionRequest, ResourceInspectionResult, ResourceReleaseState,
 };
 use hq_domain::{
-    AccountId, CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode, FactId,
-    InstallationId, OperationId, ProjectId, Timestamp,
+    AccountId, BoundedSet, CausalReferences, CommandDigest, CommandId, DomainError,
+    EncryptionPublicKey, ErrorCategory, ErrorCode, FactId, FactScope, InstallationId,
+    MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MailboxId, OperationId, ProjectId, SemanticPayload,
+    SigningPublicKey, Timestamp,
 };
 use hq_node::{
     CancellationToken, ComponentDrain, NodeComponent, ProjectNodeComponent, ProjectNodeConfig,
@@ -28,6 +31,9 @@ use hq_projects::{
     AutomaticProjectCommandPlan, PlanAutomaticProjectCommands, ProjectInputReconciliation,
     ProjectWorkerPort, ReconcileProjectInputs,
 };
+use hq_protocol::{Bip340Signer, CanonicalEventPlan};
+use hq_reducer::AuthorityPolicy;
+use hq_store::Store;
 
 #[derive(Clone, Default)]
 struct FakeWorker {
@@ -120,6 +126,7 @@ struct BlockingInputState {
     blocked: bool,
     calls: usize,
     fail: bool,
+    planned: Vec<ProjectCommandRequest>,
 }
 
 impl BlockingInputs {
@@ -135,6 +142,15 @@ impl BlockingInputs {
 
     fn fail(&self, fail: bool) {
         self.state.0.lock().expect("blocking inputs").fail = fail;
+    }
+
+    fn plan(&self, request: ProjectCommandRequest) {
+        self.state
+            .0
+            .lock()
+            .expect("blocking inputs")
+            .planned
+            .push(request);
     }
 
     fn wait_for_calls(&self, expected: usize) {
@@ -187,8 +203,9 @@ impl PlanAutomaticProjectCommands for BlockingInputs {
         &self,
         _limit: usize,
     ) -> Result<AutomaticProjectCommandPlan, ApplicationError> {
+        let requests = std::mem::take(&mut self.state.0.lock().expect("blocking inputs").planned);
         Ok(AutomaticProjectCommandPlan {
-            requests: Vec::new(),
+            requests,
             truncated: false,
         })
     }
@@ -230,6 +247,47 @@ fn dispatch_request() -> ProjectCommandRequest {
     request.request_digest = CommandDigest::from_bytes([13; 32]);
     request.action = ProjectCommandAction::DispatchPending;
     request
+}
+
+fn root_fact() -> hq_protocol::VerifiedSemanticFact {
+    let mut secret = [0_u8; 32];
+    secret[31] = 1;
+    let signer = Bip340Signer::from_secret_bytes(secret).expect("secret validates");
+    let installation = InstallationId::from_bytes([0x31; 32]);
+    CanonicalEventPlan::new(
+        installation,
+        Timestamp::from_unix_millis(1),
+        FactScope::InstallationPrivate(installation),
+        CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+            BoundedSet::new([]).expect("empty parents validate"),
+            [],
+        )
+        .expect("empty authorities validate"),
+        SemanticPayload::InstallationDeclared {
+            installation_id: installation,
+            signing_key: SigningPublicKey::from_bytes(signer.public_key()),
+            encryption_key: EncryptionPublicKey::from_bytes(signer.public_key()),
+            label: None,
+        },
+    )
+    .sign(&signer, [0x41; 32])
+    .expect("root fact signs")
+}
+
+fn test_store() -> (std::path::PathBuf, Store) {
+    static NEXT: AtomicUsize = AtomicUsize::new(1);
+    let root = std::env::temp_dir().join(format!(
+        "hq-project-revision-wake-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).expect("test root creates");
+    let store = Store::open(
+        root.join("state").join("hq.sqlite3"),
+        NonZeroUsize::new(4).expect("capacity is nonzero"),
+    )
+    .expect("store opens");
+    (root, store)
 }
 
 #[test]
@@ -393,14 +451,57 @@ fn project_commands_return_before_blocked_reconciliation_and_wakes_coalesce() {
         inputs.wait_for_calls(5);
     });
 
-    std::thread::sleep(Duration::from_millis(25));
-    assert_eq!(
-        inputs.calls(),
-        5,
-        "replaceable wakes produce one follow-up cycle"
-    );
+    assert_eq!(inputs.calls(), 5);
     component.stop_intake().expect("intake closes");
     assert_eq!(component.drain(), Ok(ComponentDrain::Complete));
+    assert_eq!(
+        inputs.calls(),
+        7,
+        "replaceable wakes produce one follow-up cycle before the final drain"
+    );
+}
+
+#[test]
+fn committed_store_revision_wakes_idle_project_reconciliation() {
+    let (root, store) = test_store();
+    let inputs = BlockingInputs::default();
+    let worker = FakeWorker::default();
+    let submitted = Arc::clone(&worker.requests);
+    let mut component = ProjectNodeComponent::new_with_invalidations(
+        ProjectNodeConfig {
+            recovery_limit: NonZeroUsize::new(16).expect("nonzero"),
+            recovery_time: Timestamp::from_unix_millis(10),
+        },
+        worker,
+        FakeResources,
+        inputs.clone(),
+        store.subscribe_invalidations(),
+    );
+    component
+        .start(CancellationToken::new())
+        .expect("startup repair succeeds");
+    assert_eq!(inputs.calls(), 1);
+    inputs.plan(dispatch_request());
+
+    let installation = InstallationId::from_bytes([0x31; 32]);
+    store
+        .ingest_verified(
+            root_fact(),
+            AuthorityPolicy::new(installation, MailboxId::from_bytes([0x32; 32])),
+        )
+        .expect("committed revision publishes");
+    inputs.wait_for_calls(3);
+    assert_eq!(
+        submitted.lock().expect("submitted commands").as_slice(),
+        [dispatch_request()],
+        "the revision wake owns automatic dispatch as well as input reconciliation"
+    );
+
+    component.stop_intake().expect("intake closes");
+    assert_eq!(component.drain(), Ok(ComponentDrain::Complete));
+    assert_eq!(inputs.calls(), 5);
+    store.close().expect("store closes");
+    fs::remove_dir_all(root).expect("test root removes");
 }
 
 #[test]

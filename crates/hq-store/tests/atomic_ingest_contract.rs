@@ -23,6 +23,7 @@ fn ingest_materializes_every_package_and_duplicate_replay_is_an_exact_noop() {
         NonZeroUsize::new(4).expect("capacity is nonzero"),
     )
     .expect("store opens");
+    let mut project_invalidations = store.subscribe_invalidations();
     let root = verified_fact();
     let root_id = root.verified_event().event_id();
     assert_eq!(
@@ -36,6 +37,12 @@ fn ingest_materializes_every_package_and_duplicate_replay_is_an_exact_noop() {
 
     assert_eq!(invalidations.try_revision(), Some(Revision::new(2)));
     assert_eq!(invalidations.try_revision(), None);
+    assert_eq!(
+        project_invalidations.try_revision(),
+        Some(Revision::new(2)),
+        "an independent idle subscriber observes the same coalesced burst"
+    );
+    assert_eq!(project_invalidations.try_revision(), None);
     let complete = store
         .complete_snapshot(authority_policy())
         .expect("complete oracle succeeds");
@@ -76,6 +83,7 @@ fn ingest_materializes_every_package_and_duplicate_replay_is_an_exact_noop() {
     );
     assert_eq!(store.current_revision(), Ok(Revision::new(2)));
     assert_eq!(invalidations.try_revision(), None);
+    assert_eq!(project_invalidations.try_revision(), None);
     store.close().expect("store closes");
 
     let reopened = open_store(&database);

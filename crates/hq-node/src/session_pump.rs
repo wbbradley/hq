@@ -148,7 +148,7 @@ impl LocalSessionPump {
             .take_local_listener()
             .map_err(|error| LocalSessionPumpStartError::Listener(error.class()))?;
         let store_invalidations = foundation
-            .take_store_invalidations()
+            .subscribe_store_invalidations()
             .ok_or(LocalSessionPumpStartError::StoreInvalidationsUnavailable)?;
         let listener =
             AsyncFd::new(listener).map_err(|_| LocalSessionPumpStartError::RuntimeUnavailable)?;

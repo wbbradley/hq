@@ -1,11 +1,6 @@
 //! RAII ownership of the state lock, identity, runtime namespace, and bounded store.
 
-use std::{
-    error::Error,
-    fmt,
-    num::NonZeroUsize,
-    sync::{Arc, Mutex},
-};
+use std::{error::Error, fmt, num::NonZeroUsize, sync::Arc};
 
 use hq_application::{
     CommitFacts, FactMutation, FactPlan, MutationAttempt, MutationDecision, MutationOutcome,
@@ -129,7 +124,6 @@ impl Error for NodeReadinessError {}
 pub struct NodeFoundation {
     lifecycle: NodeLifecycle,
     store: Option<Store>,
-    store_invalidations: Mutex<Option<RevisionInvalidations>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     local_transport: LocalTransportOwner,
     runtime: RuntimeDirectoryOwner,
@@ -171,14 +165,12 @@ impl NodeFoundation {
             .map_err(|error| diagnostic(StartupComponent::Runtime, runtime_cause(error.class())))?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let local_transport = LocalTransportOwner::new(runtime.paths().clone());
-        let (store, store_invalidations) =
-            Store::open_with_invalidations(state.paths().database_file(), config.store_capacity)
-                .map_err(|error| diagnostic(StartupComponent::Store, store_cause(error.class())))?;
+        let store = Store::open(state.paths().database_file(), config.store_capacity)
+            .map_err(|error| diagnostic(StartupComponent::Store, store_cause(error.class())))?;
 
         Ok(Self {
             lifecycle: NodeLifecycle::new(),
             store: Some(store),
-            store_invalidations: Mutex::new(Some(store_invalidations)),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             local_transport,
             runtime,
@@ -245,7 +237,6 @@ impl NodeFoundation {
             envelope,
             self.identity.public_identity().installation_id,
             authority_policy,
-            self.signer_handle(),
             connector,
         ))
     }
@@ -333,12 +324,9 @@ impl NodeFoundation {
         self.local_transport.take_listener()
     }
 
-    /// Transfers the sole coalesced post-commit observer into runtime ownership.
-    pub(crate) fn take_store_invalidations(&mut self) -> Option<RevisionInvalidations> {
-        self.store_invalidations
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+    /// Creates an independent coalesced post-commit observer for runtime ownership.
+    pub(crate) fn subscribe_store_invalidations(&self) -> Option<RevisionInvalidations> {
+        self.store.as_ref().map(Store::subscribe_invalidations)
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

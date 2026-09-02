@@ -73,6 +73,12 @@ impl RevisionInvalidations {
         self.revisions.changed().await.ok()?;
         Some(Revision::new(*self.revisions.borrow_and_update()))
     }
+
+    fn subscribe(&self) -> Self {
+        let mut revisions = self.revisions.clone();
+        revisions.borrow_and_update();
+        Self { revisions }
+    }
 }
 
 struct InvalidationEmitter {
@@ -393,6 +399,7 @@ enum ProjectSagaRequest {
 /// preserving one explicit worker owner and one shutdown point.
 pub struct Store {
     requests: SyncSender<Request>,
+    invalidations: RevisionInvalidations,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -943,6 +950,7 @@ impl Store {
         let (requests, receiver) = mpsc::sync_channel(capacity.get());
         let (started, startup) = mpsc::sync_channel(1);
         let (emitter, invalidations) = revision_channel();
+        let subscription_factory = invalidations.subscribe();
         let worker = thread::Builder::new()
             .name("hq-store".to_owned())
             .spawn(move || run(&path, &receiver, &started, &emitter))
@@ -951,6 +959,7 @@ impl Store {
             Ok(Ok(())) => Ok((
                 Self {
                     requests,
+                    invalidations: subscription_factory,
                     worker: Some(worker),
                 },
                 invalidations,
@@ -964,6 +973,14 @@ impl Store {
                 Err(StoreError::new(StoreErrorClass::WorkerStopped))
             }
         }
+    }
+
+    /// Creates an independent latest-value observer for later committed revisions.
+    ///
+    /// The current revision is the observer's baseline. Callers must reread authoritative state
+    /// before acknowledging startup, then treat later revisions only as body-free wake hints.
+    pub fn subscribe_invalidations(&self) -> RevisionInvalidations {
+        self.invalidations.subscribe()
     }
 
     /// Creates a relay-only request capability for owned synchronization tasks.
@@ -1756,8 +1773,10 @@ mod tests {
         let (requests, receiver) = sync_channel(1);
         drop(receiver);
         let worker = thread::spawn(|| {});
+        let (_, invalidations) = revision_channel();
         let mut store = Store {
             requests,
+            invalidations,
             worker: Some(worker),
         };
 
