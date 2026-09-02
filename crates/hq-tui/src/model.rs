@@ -3600,6 +3600,34 @@ impl UiModel {
         changed
     }
 
+    fn follow_conversation_tail(&mut self) -> bool {
+        let tail = self
+            .conversation
+            .as_ref()
+            .and_then(|conversation| conversation.entries.last())
+            .map(|entry| entry.id.clone());
+        let position = tail.as_ref().and_then(|_| {
+            self.conversation_viewport_geometry
+                .as_ref()
+                .and_then(|geometry| geometry.position_at(geometry.maximum_top()))
+        });
+        let mode = if tail.is_some() {
+            ConversationScrollMode::FollowTail
+        } else {
+            ConversationScrollMode::Anchored
+        };
+        let changed = self.conversation_anchor != tail
+            || self.conversation_scroll_mode != mode
+            || self.conversation_viewport_position != position
+            || self.technical_visible
+            || self.technical_scroll != 0;
+        self.conversation_anchor = tail;
+        self.conversation_scroll_mode = mode;
+        self.conversation_viewport_position = position;
+        self.close_technical_details();
+        changed
+    }
+
     fn toggle_technical_details(&mut self) -> bool {
         if self.focus != UiFocus::Conversation || self.conversation_anchor.is_none() {
             return false;
@@ -4519,6 +4547,7 @@ fn apply_input(
             }
             UiFocus::Content if model.conversation.is_some() => {
                 model.focus = UiFocus::Conversation;
+                model.follow_conversation_tail();
                 true
             }
             UiFocus::Content | UiFocus::Conversation | UiFocus::Draft => false,
@@ -5241,6 +5270,7 @@ fn apply_interaction_modal_input(
             interaction,
             response,
         });
+        model.follow_conversation_tail();
     } else {
         model.interaction_modal = Some(UiInteractionModal::Prompt {
             interaction,
@@ -6077,6 +6107,7 @@ fn apply_draft_input(
 fn finish_draft_close(model: &mut UiModel) {
     model.mailbox_draft = None;
     model.focus = UiFocus::Conversation;
+    model.follow_conversation_tail();
     let Some(UiGuidedPending::Instruction(submission)) = model.guided_pending.take() else {
         return;
     };
@@ -8605,6 +8636,7 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
         .is_some_and(|conversation| conversation.row_id == row_id)
     {
         model.focus = UiFocus::Conversation;
+        model.follow_conversation_tail();
     } else {
         model.desired_conversation = Some(row_id);
         model.request_inbox_preview(effects);

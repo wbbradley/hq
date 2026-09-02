@@ -4,7 +4,6 @@
 
 ### Smaller hand-added todos (each need some in-depth analysis)
 
-* Whenever the conversation view opens, place its selection at the tail and enable follow-tail so current and subsequent agent activity auto-scrolls. Restore the same state after approval or denial is submitted through the Codex permission dialog.
 * <esc> should "pop" the UI back to whatever the containing contextual stack is. So, in the compose note, it should close the compose note and bring you back to the conversation. From there, it should bring focus back to the inbox. From the inbox it should bring you back to the main menu. This <esc> to pop UI affordance should work everywhere.
 * The compose area should support both <c-j> and <s-enter> as newline append operators.
 * The "Command approval needed" dialog does not properly handle vim navigation (k/j for up/down).

@@ -1,5 +1,20 @@
 # Completed
 
+## 2026-09-02 — Conversation entry restores follow-tail
+
+Entering an already materialized conversation by either directional navigation or activation now
+selects its latest entry, resolves the current tail viewport position, enables follow-tail, and
+closes entry-specific technical detail. Returning from the composer and submitting a provider
+interaction response use the same model-owned transition. Manual upward navigation still disables
+follow-tail while history is being read. Reducer coverage, strict workspace Clippy, and the complete
+all-feature workspace suite pass.
+
+### Original plan entry
+
+* Whenever the conversation view opens, place its selection at the tail and enable follow-tail so current and subsequent agent activity auto-scrolls. Restore the same state after approval or denial is submitted through the Codex permission dialog.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-02 — Event-driven interaction pipeline audit
 
 The architecture and subsystem specifications now document the direct notification graph from

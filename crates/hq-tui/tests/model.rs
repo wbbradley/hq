@@ -11,16 +11,16 @@ use hq_tui::{
     UiConversationAuthor, UiConversationEntry, UiConversationEntryGeometry,
     UiConversationEntryPresentation, UiConversationPage, UiConversationTarget,
     UiConversationViewportObservation, UiConversationViewportPosition, UiDirectTarget, UiEffect,
-    UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput, UiMailboxAction,
-    UiMailboxDraft, UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
-    UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiMessageTarget, UiModel,
-    UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject, UiProjectAction,
-    UiProjectAssignment, UiProjectCreationChoice, UiProjectFolderAction, UiProjectFormField,
-    UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome, UiProjectResource,
-    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus,
-    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
-    UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput, UiInteraction,
+    UiInteractionChoice, UiInteractionKind, UiMailboxAction, UiMailboxDraft, UiMailboxDraftPane,
+    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
+    UiManagedSessionResult, UiMaterializedConversationView, UiMessageDelivery, UiMessageState,
+    UiMessageTarget, UiModel, UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject,
+    UiProjectAction, UiProjectAssignment, UiProjectCreationChoice, UiProjectFolderAction,
+    UiProjectFormField, UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind,
+    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -1563,6 +1563,79 @@ fn conversation_viewport_scrolls_visual_rows_independently_from_entry_navigation
             row: 1,
         })
     );
+}
+
+#[test]
+fn entering_a_conversation_and_submitting_an_interaction_restore_follow_tail() {
+    let model = opened_conversation(vec![
+        entry("message-1", false),
+        entry("message-2", false),
+        entry("activity-3", true),
+    ]);
+    let observed = observe_conversation_viewport(
+        model,
+        &[("message-1", 3), ("message-2", 4), ("activity-3", 3)],
+        4,
+    );
+    let scrolled = update(observed.model, UiEvent::Input(UiInput::PreviousItem))
+        .expect("manual upward scroll");
+    assert!(!scrolled.model.conversation_follows_tail());
+
+    let content = update(scrolled.model, UiEvent::Input(UiInput::MoveCursorLeft))
+        .expect("leave conversation focus");
+    let reopened = update(content.model, UiEvent::Input(UiInput::MoveCursorRight))
+        .expect("reenter conversation");
+    assert_eq!(reopened.model.conversation_anchor(), Some("activity-3"));
+    assert!(reopened.model.conversation_follows_tail());
+    assert_eq!(
+        reopened.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-2".to_owned(),
+            row: 3,
+        })
+    );
+
+    let scrolled_again = update(reopened.model, UiEvent::Input(UiInput::PreviousItem))
+        .expect("manual upward scroll remains available");
+    let prompted = update(
+        scrolled_again.model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![UiInteraction {
+                agent_id: [6; 32],
+                agent_name: "alice".to_owned(),
+                project_id: None,
+                project_name: None,
+                provider: "codex".to_owned(),
+                session: "conversation-1".to_owned(),
+                request_id: [7; 32],
+                operation_id: [8; 32],
+                kind: UiInteractionKind::CommandApproval,
+                prompt: "Run command?".to_owned(),
+                choices: vec![UiInteractionChoice {
+                    value: "deny".to_owned(),
+                    label: "Deny".to_owned(),
+                }],
+                allow_text: false,
+            }],
+        },
+    )
+    .expect("interaction opens");
+    let submitted =
+        update(prompted.model, UiEvent::Input(UiInput::Activate)).expect("denial submitted");
+    assert_eq!(submitted.model.conversation_anchor(), Some("activity-3"));
+    assert!(submitted.model.conversation_follows_tail());
+
+    let scrolled_again = update(submitted.model, UiEvent::Input(UiInput::PreviousItem))
+        .expect("manual scroll after interaction");
+    let content = update(
+        scrolled_again.model,
+        UiEvent::Input(UiInput::MoveCursorLeft),
+    )
+    .expect("return to inbox selection");
+    let activated = update(content.model, UiEvent::Input(UiInput::Activate))
+        .expect("activate selected conversation");
+    assert_eq!(activated.model.conversation_anchor(), Some("activity-3"));
+    assert!(activated.model.conversation_follows_tail());
 }
 
 #[test]
