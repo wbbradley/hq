@@ -2,6 +2,8 @@
 
 use std::{
     collections::BTreeMap,
+    io::{Read, Write},
+    os::{fd::AsFd, unix::net::UnixStream},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -1486,14 +1488,82 @@ pub struct TuiEffectExecutor<C: TuiClock> {
     clock: C,
     commands: SyncSender<WorkerCommand>,
     events: Receiver<UiEvent>,
+    event_wake: TuiEventWake,
     workers: Option<TuiWorkers>,
     cancellation: Arc<AtomicBool>,
+    worker_stopped: Arc<AtomicBool>,
     observation_interrupt: Arc<dyn TuiObservationInterrupt>,
     observation_control: Arc<dyn TuiObservationControl>,
     timers: Vec<ScheduledTimer>,
     outstanding_snapshots: Vec<EffectId>,
     redraw_pending: bool,
     exit_requested: bool,
+}
+
+/// Readable OS wake source paired with the executor's worker-event queue.
+pub struct TuiEventWake {
+    reader: UnixStream,
+}
+
+#[derive(Clone)]
+struct TuiEventNotifier {
+    writer: Arc<UnixStream>,
+}
+
+impl TuiEventWake {
+    fn pair() -> Result<(Self, TuiEventNotifier), TuiExecutorError> {
+        let (reader, writer) = UnixStream::pair().map_err(|_| TuiExecutorError::WorkerSpawn)?;
+        reader
+            .set_nonblocking(true)
+            .map_err(|_| TuiExecutorError::WorkerSpawn)?;
+        writer
+            .set_nonblocking(true)
+            .map_err(|_| TuiExecutorError::WorkerSpawn)?;
+        Ok((
+            Self { reader },
+            TuiEventNotifier {
+                writer: Arc::new(writer),
+            },
+        ))
+    }
+
+    /// Borrows the readable descriptor for an outer event-loop wait.
+    pub fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.reader.as_fd()
+    }
+
+    fn drain(&mut self) {
+        let mut bytes = [0_u8; 64];
+        loop {
+            match self.reader.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+impl TuiEventNotifier {
+    fn notify(&self) {
+        let _ = (&*self.writer).write(&[1]);
+    }
+}
+
+struct TuiWorkerExitWake {
+    notifier: TuiEventNotifier,
+    stopped: Arc<AtomicBool>,
+    cancellation: Arc<AtomicBool>,
+}
+
+impl Drop for TuiWorkerExitWake {
+    fn drop(&mut self) {
+        if !self.cancellation.load(Ordering::SeqCst) {
+            self.stopped.store(true, Ordering::SeqCst);
+            self.notifier.notify();
+        }
+    }
 }
 
 struct TuiWorkers {
@@ -1518,27 +1588,49 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
     ) -> Result<Self, TuiExecutorError> {
         let (commands, command_receiver) = mpsc::sync_channel(CLIENT_COMMAND_CAPACITY);
         let (event_sender, events) = mpsc::sync_channel(CLIENT_EVENT_CAPACITY);
+        let (event_wake, event_notifier) = TuiEventWake::pair()?;
         let cancellation = Arc::new(AtomicBool::new(false));
+        let worker_stopped = Arc::new(AtomicBool::new(false));
         let command_cancellation = Arc::clone(&cancellation);
         let command_events = event_sender.clone();
+        let command_notifier = event_notifier.clone();
+        let command_stopped = Arc::clone(&worker_stopped);
         let command_worker = thread::Builder::new()
             .name("hq-tui-commands".to_owned())
             .spawn(move || {
+                let _exit_wake = TuiWorkerExitWake {
+                    notifier: command_notifier.clone(),
+                    stopped: command_stopped,
+                    cancellation: Arc::clone(&command_cancellation),
+                };
                 client_worker(
                     client,
                     &command_receiver,
                     &command_events,
                     &command_cancellation,
+                    &command_notifier,
                 );
             })
             .map_err(|_| TuiExecutorError::WorkerSpawn)?;
         let observation_interrupt = observer.interrupt_handle();
         let observation_control = observer.control_handle();
         let observation_cancellation = Arc::clone(&cancellation);
+        let observation_notifier = event_notifier;
+        let observation_stopped = Arc::clone(&worker_stopped);
         let Ok(observation_worker) = thread::Builder::new()
             .name("hq-tui-observations".to_owned())
             .spawn(move || {
-                observation_worker(observer, &event_sender, &observation_cancellation);
+                let _exit_wake = TuiWorkerExitWake {
+                    notifier: observation_notifier.clone(),
+                    stopped: observation_stopped,
+                    cancellation: Arc::clone(&observation_cancellation),
+                };
+                observation_worker(
+                    observer,
+                    &event_sender,
+                    &observation_cancellation,
+                    &observation_notifier,
+                );
             })
         else {
             drop(commands);
@@ -1549,11 +1641,13 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             clock,
             commands,
             events,
+            event_wake,
             workers: Some(TuiWorkers {
                 commands: command_worker,
                 observations: observation_worker,
             }),
             cancellation,
+            worker_stopped,
             observation_interrupt,
             observation_control,
             timers: Vec::new(),
@@ -1670,6 +1764,7 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
 
     /// Returns one ready worker or timer event without blocking.
     pub fn poll_event(&mut self) -> Option<UiEvent> {
+        self.event_wake.drain();
         match self.events.try_recv() {
             Ok(event) => {
                 self.complete_snapshot_identity(&event);
@@ -1702,11 +1797,21 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
         self.exit_requested
     }
 
-    /// Bounds a shell wait by the next scheduled timer.
-    pub fn time_until_event(&self, maximum: Duration) -> Duration {
-        self.timers.first().map_or(maximum, |timer| {
-            timer.deadline.saturating_sub(self.clock.now()).min(maximum)
-        })
+    /// Borrows the worker-event wake source used by the outer event loop.
+    pub const fn event_wake(&self) -> &TuiEventWake {
+        &self.event_wake
+    }
+
+    /// Reports an unexpected worker exit before executor cancellation.
+    pub fn worker_stopped(&self) -> bool {
+        self.worker_stopped.load(Ordering::SeqCst)
+    }
+
+    /// Returns the exact delay until the next scheduled timer, if any.
+    pub fn time_until_event(&self) -> Option<Duration> {
+        self.timers
+            .first()
+            .map(|timer| timer.deadline.saturating_sub(self.clock.now()))
     }
 
     /// Stops and joins the worker, draining bounded results while it exits.
@@ -1849,6 +1954,7 @@ fn client_worker<P: TuiClientPort>(
     commands: &Receiver<WorkerCommand>,
     events: &SyncSender<UiEvent>,
     cancellation: &AtomicBool,
+    notifier: &TuiEventNotifier,
 ) {
     loop {
         if cancellation.load(Ordering::SeqCst) {
@@ -1867,7 +1973,7 @@ fn client_worker<P: TuiClientPort>(
                         failure,
                     },
                 };
-                if events.send(event).is_err() {
+                if !send_tui_event(events, notifier, event) {
                     break;
                 }
             }
@@ -1882,7 +1988,7 @@ fn client_worker<P: TuiClientPort>(
                         failure,
                     },
                 };
-                if events.send(event).is_err() {
+                if !send_tui_event(events, notifier, event) {
                     break;
                 }
             }
@@ -1901,7 +2007,7 @@ fn client_worker<P: TuiClientPort>(
                         failure,
                     },
                 };
-                if events.send(event).is_err() {
+                if !send_tui_event(events, notifier, event) {
                     break;
                 }
             }
@@ -1917,7 +2023,7 @@ fn client_worker<P: TuiClientPort>(
                         current: error.current.map(|draft| *draft),
                     },
                 };
-                if events.send(event).is_err() {
+                if !send_tui_event(events, notifier, event) {
                     break;
                 }
             }
@@ -1933,7 +2039,7 @@ fn client_worker<P: TuiClientPort>(
                         current: error.current.map(|draft| *draft),
                     },
                 };
-                if events.send(event).is_err() {
+                if !send_tui_event(events, notifier, event) {
                     break;
                 }
             }
@@ -1949,7 +2055,7 @@ fn client_worker<P: TuiClientPort>(
                         failure,
                     },
                 };
-                if events.send(event).is_err() {
+                if !send_tui_event(events, notifier, event) {
                     break;
                 }
             }
@@ -1964,7 +2070,7 @@ fn client_worker<P: TuiClientPort>(
                         failure,
                     },
                 };
-                if events.send(event).is_err() {
+                if !send_tui_event(events, notifier, event) {
                     break;
                 }
             }
@@ -1979,7 +2085,7 @@ fn client_worker<P: TuiClientPort>(
                         failure,
                     },
                 };
-                if events.send(event).is_err() {
+                if !send_tui_event(events, notifier, event) {
                     break;
                 }
             }
@@ -1994,7 +2100,7 @@ fn client_worker<P: TuiClientPort>(
                         failure,
                     },
                 };
-                if events.send(event).is_err() {
+                if !send_tui_event(events, notifier, event) {
                     break;
                 }
             }
@@ -2007,6 +2113,7 @@ fn observation_worker<O: TuiObservationPort>(
     mut observer: O,
     events: &SyncSender<UiEvent>,
     cancellation: &AtomicBool,
+    notifier: &TuiEventNotifier,
 ) {
     while !cancellation.load(Ordering::SeqCst) {
         let observations = observer.next_observations();
@@ -2033,11 +2140,23 @@ fn observation_worker<O: TuiObservationPort>(
                     failure,
                 },
             };
-            if events.send(event).is_err() {
+            if !send_tui_event(events, notifier, event) {
                 return;
             }
         }
     }
+}
+
+fn send_tui_event(
+    events: &SyncSender<UiEvent>,
+    notifier: &TuiEventNotifier,
+    event: UiEvent,
+) -> bool {
+    if events.send(event).is_err() {
+        return false;
+    }
+    notifier.notify();
+    true
 }
 
 /// Maps one authoritative local API snapshot into one complete passive presentation snapshot.
@@ -3516,10 +3635,9 @@ fn project_failure(error: &crate::cli::CliError) -> UiFailure {
 
 const fn timer_kind_order(kind: UiTimerKind) -> u8 {
     match kind {
-        UiTimerKind::PeriodicRefresh => 0,
-        UiTimerKind::RetrySnapshot => 1,
-        UiTimerKind::AutosaveDraft => 2,
-        UiTimerKind::DismissCompletion => 3,
+        UiTimerKind::RetrySnapshot => 0,
+        UiTimerKind::AutosaveDraft => 1,
+        UiTimerKind::DismissCompletion => 2,
     }
 }
 

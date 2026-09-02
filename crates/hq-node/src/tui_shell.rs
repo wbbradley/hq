@@ -1,6 +1,11 @@
 //! Crossterm terminal ownership around the pure TUI reducer and effect executor.
 
-use std::{fmt, io::Stdout, time::Duration};
+use std::{
+    fmt,
+    io::Stdout,
+    os::fd::{AsFd, BorrowedFd},
+    time::Duration,
+};
 
 use crossterm::{
     cursor::{Hide, Show},
@@ -16,7 +21,10 @@ use hq_tui::{
     UiConversationViewportObservation, UiEvent, UiInput, UiModel, UiRenderCache, UiSize, UiTheme,
     update,
 };
-use nix::unistd::{Uid, User};
+use nix::{
+    poll::{PollFd, PollFlags, PollTimeout, poll},
+    unistd::{Uid, User},
+};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
@@ -25,8 +33,6 @@ use crate::{
     TuiThemeEnvironment, TuiThemeError, local_client::installed_local_client_config,
     resolve_tui_theme, tui_client::compose_tui_clients,
 };
-
-const MAX_TERMINAL_WAIT: Duration = Duration::from_millis(50);
 
 /// Passive terminal observation after backend-specific normalization.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -153,8 +159,12 @@ pub trait TuiTerminalPort {
     fn activate(&mut self) -> Result<(), TuiTerminalError>;
     /// Returns complete current dimensions.
     fn size(&mut self) -> Result<UiSize, TuiTerminalError>;
-    /// Polls one normalized terminal event for a bounded interval.
-    fn poll(&mut self, wait: Duration) -> Result<Option<TuiTerminalEvent>, TuiTerminalError>;
+    /// Waits for terminal input, executor readiness, or an optional exact deadline.
+    fn poll(
+        &mut self,
+        executor_wake: BorrowedFd<'_>,
+        wait: Option<Duration>,
+    ) -> Result<Option<TuiTerminalEvent>, TuiTerminalError>;
     /// Draws the latest complete model by immutable borrow.
     fn draw(
         &mut self,
@@ -222,8 +232,35 @@ impl TuiTerminalPort for CrosstermTerminal {
         })
     }
 
-    fn poll(&mut self, wait: Duration) -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
-        if !event::poll(wait).map_err(|_| TuiTerminalError::Poll)? {
+    fn poll(
+        &mut self,
+        executor_wake: BorrowedFd<'_>,
+        wait: Option<Duration>,
+    ) -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
+        if event::poll(Duration::ZERO).map_err(|_| TuiTerminalError::Poll)? {
+            return event::read()
+                .map(|observation| normalize_crossterm_event(&observation))
+                .map_err(|_| TuiTerminalError::Poll);
+        }
+        let stdin = std::io::stdin();
+        let interest = PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR;
+        let mut descriptors = [
+            PollFd::new(stdin.as_fd(), interest),
+            PollFd::new(executor_wake, interest),
+        ];
+        let timeout = wait
+            .map_or(Ok(PollTimeout::NONE), PollTimeout::try_from)
+            .map_err(|_| TuiTerminalError::Poll)?;
+        if poll(&mut descriptors, timeout).map_err(|_| TuiTerminalError::Poll)? == 0 {
+            return Ok(None);
+        }
+        if !descriptors[0]
+            .revents()
+            .is_some_and(|ready| ready.intersects(interest))
+        {
+            return Ok(None);
+        }
+        if !event::poll(Duration::ZERO).map_err(|_| TuiTerminalError::Poll)? {
             return Ok(None);
         }
         event::read()
@@ -374,8 +411,11 @@ where
         if executor.exit_requested() {
             break;
         }
-        let wait = executor.time_until_event(MAX_TERMINAL_WAIT);
-        if let Some(event) = terminal.poll(wait)? {
+        if executor.worker_stopped() {
+            return Err(TuiShellError::Executor);
+        }
+        let wait = executor.time_until_event();
+        if let Some(event) = terminal.poll(executor.event_wake().as_fd(), wait)? {
             let event = match event {
                 TuiTerminalEvent::Input(input) => UiEvent::Input(input),
                 TuiTerminalEvent::Resized(size) => UiEvent::Resized(size),
@@ -456,8 +496,12 @@ impl<T: TuiTerminalPort> TerminalGuard<T> {
         self.terminal.size()
     }
 
-    fn poll(&mut self, wait: Duration) -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
-        self.terminal.poll(wait)
+    fn poll(
+        &mut self,
+        executor_wake: BorrowedFd<'_>,
+        wait: Option<Duration>,
+    ) -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
+        self.terminal.poll(executor_wake, wait)
     }
 
     fn draw(

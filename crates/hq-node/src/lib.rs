@@ -146,9 +146,9 @@ pub use session_registry::{
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use tui_client::{
     LocalTuiClient, LocalTuiObserver, MonotonicTuiClock, TuiClientObservation, TuiClientPort,
-    TuiClock, TuiDraftError, TuiEffectExecutor, TuiExecutorError, TuiObservationControl,
-    TuiObservationInterrupt, TuiObservationPort, tui_conversation_page, tui_snapshot,
-    tui_snapshot_with_provider_catalog,
+    TuiClock, TuiDraftError, TuiEffectExecutor, TuiEventWake, TuiExecutorError,
+    TuiObservationControl, TuiObservationInterrupt, TuiObservationPort, tui_conversation_page,
+    tui_snapshot, tui_snapshot_with_provider_catalog,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use tui_shell::{

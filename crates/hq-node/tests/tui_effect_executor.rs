@@ -37,6 +37,7 @@ use hq_tui::{
     UiProjectResult, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot, UiTechnicalSection,
     UiTimerKind, update,
 };
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
@@ -307,21 +308,16 @@ fn executor_coalesces_redraw_and_releases_each_timer_once() {
         .effects
         .iter()
         .find_map(|effect| match effect {
-            UiEffect::ScheduleTimer {
-                id,
-                kind: UiTimerKind::PeriodicRefresh,
-                ..
-            } => Some(*id),
+            UiEffect::LoadSnapshot { id } => Some(*id),
             _ => None,
         })
-        .expect("timer effect");
+        .expect("allocated effect identity");
     executor
-        .execute(
-            started
-                .effects
-                .into_iter()
-                .filter(|effect| !matches!(effect, UiEffect::LoadSnapshot { .. })),
-        )
+        .execute([UiEffect::ScheduleTimer {
+            id: timer_id,
+            kind: UiTimerKind::DismissCompletion,
+            after: Duration::from_secs(300),
+        }])
         .expect("execute non-client effects");
     executor
         .execute([UiEffect::RequestRedraw, UiEffect::RequestRedraw])
@@ -2705,11 +2701,25 @@ fn unsupported_draft() -> TuiDraftError {
 }
 
 fn receive_event<C: TuiClock>(executor: &mut TuiEffectExecutor<C>) -> UiEvent {
-    for _ in 0..200 {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
         if let Some(event) = executor.poll_event() {
             return event;
         }
-        thread::sleep(Duration::from_millis(1));
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("executor event did not arrive");
+        let ready = {
+            let mut descriptors = [PollFd::new(
+                executor.event_wake().as_fd(),
+                PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+            )];
+            poll(
+                &mut descriptors,
+                PollTimeout::try_from(remaining).expect("bounded test timeout"),
+            )
+            .expect("poll executor wake")
+        };
+        assert_ne!(ready, 0, "executor event did not wake its consumer");
     }
-    panic!("executor event did not arrive");
 }

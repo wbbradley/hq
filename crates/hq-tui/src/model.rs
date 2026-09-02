@@ -7,7 +7,6 @@ use std::{
     time::Duration,
 };
 
-const PERIODIC_REFRESH: Duration = Duration::from_secs(300);
 const RETRY_DELAY: Duration = Duration::from_millis(250);
 const DRAFT_AUTOSAVE_DELAY: Duration = Duration::from_millis(250);
 const COMPLETION_NOTICE_DELAY: Duration = Duration::from_secs(4);
@@ -1968,8 +1967,6 @@ enum UiGuidedPending {
 /// Closed timer purpose owned by the shell effect executor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiTimerKind {
-    /// Periodic full-snapshot repair.
-    PeriodicRefresh,
     /// Bounded retry after a failed snapshot request.
     RetrySnapshot,
     /// Debounced local draft autosave.
@@ -2456,7 +2453,6 @@ pub struct UiModel {
     pending_project: Option<PendingProject>,
     pending_project_conversation: Option<([u8; 32], [u8; 32])>,
     section_workspaces: [Option<UiSectionWorkspace>; 5],
-    periodic_timer: Option<EffectId>,
     retry_timer: Option<EffectId>,
     autosave_timer: Option<EffectId>,
     completion_timer: Option<EffectId>,
@@ -2529,7 +2525,6 @@ impl UiModel {
             pending_project: None,
             pending_project_conversation: None,
             section_workspaces: [None, None, None, None, None],
-            periodic_timer: None,
             retry_timer: None,
             autosave_timer: None,
             completion_timer: None,
@@ -3380,7 +3375,6 @@ impl UiModel {
     ) -> Result<(), UiError> {
         let id = self.allocate_effect()?;
         match kind {
-            UiTimerKind::PeriodicRefresh => self.periodic_timer = Some(id),
             UiTimerKind::RetrySnapshot => self.retry_timer = Some(id),
             UiTimerKind::AutosaveDraft => self.autosave_timer = Some(id),
             UiTimerKind::DismissCompletion => self.completion_timer = Some(id),
@@ -4185,7 +4179,6 @@ fn start(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<(), UiError
     if model.snapshot.is_none() {
         model.request_snapshot(effects)?;
     }
-    model.schedule_timer(UiTimerKind::PeriodicRefresh, PERIODIC_REFRESH, effects)?;
     effects.push(UiEffect::RequestRedraw);
     Ok(())
 }
@@ -8644,12 +8637,7 @@ fn timer_elapsed(
     effect_id: EffectId,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
-    if model.periodic_timer == Some(effect_id) {
-        model.periodic_timer = None;
-        model.schedule_timer(UiTimerKind::PeriodicRefresh, PERIODIC_REFRESH, effects)?;
-        model.request_snapshot(effects)?;
-        effects.push(UiEffect::RequestRedraw);
-    } else if model.retry_timer == Some(effect_id) {
+    if model.retry_timer == Some(effect_id) {
         model.retry_timer = None;
         model.connection = UiConnectionState::Connecting;
         model.request_snapshot(effects)?;
@@ -10144,8 +10132,6 @@ fn client_failed(
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::num::NonZeroU64;
-
     use super::{
         TextEdit, UiAgent, UiAgentLifecycle, UiAgentStatus, UiEffect, UiError, UiEvent,
         UiFormField, UiFormKind, UiFormState, UiGuidedPending, UiGuidedSubmission, UiHumanState,
@@ -10163,8 +10149,8 @@ mod tests {
             width: 80,
             height: 24,
         });
-        model.next_effect_id = NonZeroU64::new(u64::MAX);
-        let error = update(model, UiEvent::Started).expect_err("second allocation exhausts");
+        model.next_effect_id = None;
+        let error = update(model, UiEvent::Started).expect_err("allocation exhausts");
         assert_eq!(error, UiError::EffectIdentityExhausted);
     }
 

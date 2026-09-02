@@ -11940,3 +11940,30 @@ Codex-approval-to-wire path, publication/waiter races, coalesced bursts, disconn
 baselines, and shutdown without unrelated I/O.
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-01 — Event-driven TUI wake and redraw
+
+The TUI executor now owns a nonblocking Unix wake pair shared by its command and observation
+workers. Every queued model event and unexpected worker exit wakes the outer shell, while the shell
+waits directly on buffered Crossterm input, stdin readiness, executor readiness, or the next exact
+UI deadline. The former 50 ms terminal sampling bound and five-minute snapshot-repair timer are
+gone; manual refresh, reconnect retry, draft autosave, and completion dismissal remain explicit.
+
+Executor tests now wait on the wake descriptor instead of sleep-polling. A deterministic shell test
+proves an indefinitely idle wait wakes from a provider interaction and draws the command-approval
+dialog in its first subsequent frame. Saturated shutdown and worker-failure coverage remains green,
+as do strict workspace Clippy and the complete workspace test suite.
+
+### Original plan entry
+
+### Wake and redraw the TUI directly from model events
+
+Give the TUI executor an OS/event-loop wake source shared by command and observation producers,
+then wait on terminal input, executor readiness, and the next real UI deadline together. Drain ready
+model events and redraw before sleeping again. Remove the 50 ms terminal sampling bound and
+five-minute periodic snapshot refresh; retain manual refresh and explicit retry/autosave/dismiss
+deadlines. Shutdown must interrupt and join terminal, client, and observer owners without a polling
+deadline. Add deterministic tests from invalidation through pending-interaction refresh to first
+dialog draw.
+
+<!-- End of archived plan entry. -->

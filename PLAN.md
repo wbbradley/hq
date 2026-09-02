@@ -2,16 +2,6 @@
 
 ## Next Up
 
-### Wake and redraw the TUI directly from model events
-
-Give the TUI executor an OS/event-loop wake source shared by command and observation producers,
-then wait on terminal input, executor readiness, and the next real UI deadline together. Drain ready
-model events and redraw before sleeping again. Remove the 50 ms terminal sampling bound and
-five-minute periodic snapshot refresh; retain manual refresh and explicit retry/autosave/dismiss
-deadlines. Shutdown must interrupt and join terminal, client, and observer owners without a polling
-deadline. Add deterministic tests from invalidation through pending-interaction refresh to first
-dialog draw.
-
 ### Add privacy-safe handoff tracing and an installed latency scenario
 
 Add structured boundary records using stable message/fact, dispatch/operation, provider-request,

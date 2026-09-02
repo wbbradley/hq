@@ -881,7 +881,7 @@ fn guided_project_work_names_a_competing_resource_owner_before_setup() {
 }
 
 #[test]
-fn startup_allocates_explicit_snapshot_tick_and_redraw_effects() {
+fn startup_allocates_explicit_snapshot_and_redraw_effects() {
     let transition = update(
         UiModel::new(UiSize {
             width: 120,
@@ -891,24 +891,13 @@ fn startup_allocates_explicit_snapshot_tick_and_redraw_effects() {
     )
     .expect("startup transition");
     assert_eq!(transition.model.connection(), UiConnectionState::Connecting);
-    assert_eq!(transition.effects.len(), 3);
+    assert_eq!(transition.effects.len(), 2);
     let UiEffect::LoadSnapshot { id: snapshot_id } = &transition.effects[0] else {
         panic!("first effect loads a snapshot");
     };
-    let UiEffect::ScheduleTimer {
-        id,
-        kind: UiTimerKind::PeriodicRefresh,
-        after,
-    } = &transition.effects[1]
-    else {
-        panic!("second effect schedules periodic repair");
-    };
-    assert_eq!(*after, Duration::from_secs(300));
-    let tick_id = *id;
     let snapshot_id = *snapshot_id;
-    assert_ne!(snapshot_id, tick_id);
     assert_eq!(transition.model.pending_snapshot(), Some(snapshot_id));
-    assert_eq!(transition.effects[2], UiEffect::RequestRedraw);
+    assert_eq!(transition.effects[1], UiEffect::RequestRedraw);
 }
 
 #[test]
@@ -1397,26 +1386,37 @@ fn client_failures_are_scoped_to_the_current_connection_generation() {
 #[test]
 fn stale_timer_completions_cannot_repeat_effects() {
     let started = started_model();
-    let periodic_id = timer_effect(&started.effects, UiTimerKind::PeriodicRefresh);
-    let elapsed = update(
+    let snapshot_id = snapshot_effect(&started.effects);
+    let failed = update(
         started.model,
+        UiEvent::SnapshotFailed {
+            effect_id: snapshot_id,
+            failure: UiFailure {
+                code: "connection_lost".to_owned(),
+                action: "retry".to_owned(),
+            },
+        },
+    )
+    .expect("snapshot failure schedules retry");
+    let retry_id = timer_effect(&failed.effects, UiTimerKind::RetrySnapshot);
+    let elapsed = update(
+        failed.model,
         UiEvent::TimerElapsed {
-            effect_id: periodic_id,
+            effect_id: retry_id,
         },
     )
     .expect("current timer applies");
-    assert!(elapsed.effects.iter().any(|effect| matches!(
-        effect,
-        UiEffect::ScheduleTimer {
-            kind: UiTimerKind::PeriodicRefresh,
-            ..
-        }
-    )));
+    assert!(
+        elapsed
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::LoadSnapshot { .. }))
+    );
 
     let stale = update(
         elapsed.model,
         UiEvent::TimerElapsed {
-            effect_id: periodic_id,
+            effect_id: retry_id,
         },
     )
     .expect("stale timer is inert");

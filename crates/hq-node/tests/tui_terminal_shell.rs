@@ -5,8 +5,9 @@
 
 use std::{
     collections::VecDeque,
+    os::fd::BorrowedFd,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{Arc, Mutex, mpsc},
     thread,
     time::Duration,
@@ -21,10 +22,12 @@ use hq_node::{
 use hq_tui::{
     UiConversationAuthor, UiConversationEntry, UiConversationEntryGeometry,
     UiConversationEntryPresentation, UiConversationPage, UiConversationViewportObservation,
-    UiConversationViewportPosition, UiFailure, UiHumanState, UiInput, UiMailboxAction,
-    UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget, UiMaterializedConversationView,
-    UiMessageState, UiModel, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
+    UiConversationViewportPosition, UiFailure, UiHumanState, UiInput, UiInteraction,
+    UiInteractionKind, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft,
+    UiMailboxDraftTarget, UiMaterializedConversationView, UiMessageState, UiModel, UiRow,
+    UiRowKind, UiRowState, UiSize, UiSnapshot,
 };
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 #[test]
 fn crossterm_events_normalize_to_the_closed_ui_vocabulary() {
@@ -185,6 +188,29 @@ fn retained_subscription_view_is_drawn_without_refetching_startup_state() {
 
     assert_eq!(snapshot_loads.load(Ordering::SeqCst), 0);
     assert!(log.lock().expect("terminal log").contains(&"draw"));
+}
+
+#[test]
+fn idle_shell_wakes_and_draws_a_provider_interaction_without_terminal_polling() {
+    let (notify_observer, observer_wake) = mpsc::channel();
+    let dialog_drawn = Arc::new(AtomicBool::new(false));
+    let terminal = WakeDrivenTerminal {
+        notify_observer: notify_observer.clone(),
+        observer_notified: false,
+        dialog_drawn: Arc::clone(&dialog_drawn),
+    };
+    let observer = InteractionObserver {
+        wake: observer_wake,
+        interrupt: IdleInterrupt(notify_observer),
+        published: false,
+    };
+
+    assert_eq!(
+        run_tui_shell(terminal, EmptyClient, observer, FixedClock),
+        Err(hq_node::TuiShellError::Terminal(TuiTerminalError::Poll))
+    );
+
+    assert!(dialog_drawn.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -355,6 +381,64 @@ struct ScriptedTerminal {
     draw_positions: Option<Arc<Mutex<Vec<Option<UiConversationViewportPosition>>>>>,
 }
 
+struct WakeDrivenTerminal {
+    notify_observer: mpsc::Sender<()>,
+    observer_notified: bool,
+    dialog_drawn: Arc<AtomicBool>,
+}
+
+impl TuiTerminalPort for WakeDrivenTerminal {
+    fn activate(&mut self) -> Result<(), TuiTerminalError> {
+        Ok(())
+    }
+
+    fn size(&mut self) -> Result<UiSize, TuiTerminalError> {
+        Ok(UiSize {
+            width: 80,
+            height: 24,
+        })
+    }
+
+    fn poll(
+        &mut self,
+        executor_wake: BorrowedFd<'_>,
+        wait: Option<Duration>,
+    ) -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
+        if self.dialog_drawn.load(Ordering::SeqCst) {
+            return Err(TuiTerminalError::Poll);
+        }
+        if !self.observer_notified {
+            self.observer_notified = true;
+            self.notify_observer.send(()).expect("wake observer");
+        }
+        let mut descriptors = [PollFd::new(
+            executor_wake,
+            PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+        )];
+        let timeout = wait
+            .unwrap_or(Duration::from_secs(2))
+            .min(Duration::from_secs(2));
+        let timeout = PollTimeout::try_from(timeout).expect("valid shell wait");
+        let ready = poll(&mut descriptors, timeout).map_err(|_| TuiTerminalError::Poll)?;
+        assert_ne!(ready, 0, "provider interaction must wake the idle shell");
+        Ok(None)
+    }
+
+    fn draw(
+        &mut self,
+        model: &UiModel,
+    ) -> Result<Option<UiConversationViewportObservation>, TuiTerminalError> {
+        if model.interaction_modal().is_some() {
+            self.dialog_drawn.store(true, Ordering::SeqCst);
+        }
+        Ok(None)
+    }
+
+    fn restore(&mut self) -> Result<(), TuiTerminalError> {
+        Ok(())
+    }
+}
+
 impl ScriptedTerminal {
     fn new(
         log: Arc<Mutex<Vec<&'static str>>>,
@@ -394,7 +478,11 @@ impl TuiTerminalPort for ScriptedTerminal {
         })
     }
 
-    fn poll(&mut self, _wait: Duration) -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
+    fn poll(
+        &mut self,
+        _executor_wake: BorrowedFd<'_>,
+        _wait: Option<Duration>,
+    ) -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
         self.record("poll");
         self.events
             .pop_front()
@@ -552,6 +640,40 @@ impl TuiClientPort for PanickingClient {
 struct IdleObserver {
     wake: mpsc::Receiver<()>,
     interrupt: IdleInterrupt,
+}
+
+struct InteractionObserver {
+    wake: mpsc::Receiver<()>,
+    interrupt: IdleInterrupt,
+    published: bool,
+}
+
+impl TuiObservationPort for InteractionObserver {
+    fn next_observations(&mut self) -> Vec<TuiClientObservation> {
+        let _ = self.wake.recv();
+        if self.published {
+            return Vec::new();
+        }
+        self.published = true;
+        vec![TuiClientObservation::Interactions(vec![UiInteraction {
+            agent_id: [1; 32],
+            agent_name: "alice".to_owned(),
+            project_id: None,
+            project_name: None,
+            provider: "codex".to_owned(),
+            session: "session".to_owned(),
+            request_id: [2; 32],
+            operation_id: [3; 32],
+            kind: UiInteractionKind::CommandApproval,
+            prompt: "List the directory?".to_owned(),
+            choices: Vec::new(),
+            allow_text: false,
+        }])]
+    }
+
+    fn interrupt_handle(&self) -> Arc<dyn TuiObservationInterrupt> {
+        Arc::new(self.interrupt.clone())
+    }
 }
 
 struct InitialObserver {
