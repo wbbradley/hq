@@ -16,9 +16,10 @@ use sha2::{Digest, Sha256};
 use crate::{
     MAX_STATE_QUERY_ITEMS, RelayPagePosition, RelayPolicy, RelayPortError, RelaySession,
     RelaySessionConfig, RelaySessionDependencies, RelayStateQuery, RelayUrl,
+    readiness::{WorkerWaiter, WorkerWake, worker_readiness},
 };
 
-/// Ownership, policy-scan, and session retry bounds for the relay manager.
+/// Ownership, policy paging, and session retry bounds for the relay manager.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelayManagerConfig {
     /// Per-session state-machine bounds.
@@ -27,8 +28,6 @@ pub struct RelayManagerConfig {
     pub policy_page_items: usize,
     /// Maximum enabled session owners admitted at once.
     pub max_sessions: usize,
-    /// Temporary session idle-poll interval, removed by the socket-readiness phase.
-    pub periodic_poll: Duration,
 }
 
 impl Default for RelayManagerConfig {
@@ -37,7 +36,6 @@ impl Default for RelayManagerConfig {
             session: RelaySessionConfig::default(),
             policy_page_items: 64,
             max_sessions: 64,
-            periodic_poll: Duration::from_secs(5),
         }
     }
 }
@@ -47,7 +45,6 @@ impl RelayManagerConfig {
         if self.policy_page_items == 0
             || self.policy_page_items > MAX_STATE_QUERY_ITEMS
             || self.max_sessions == 0
-            || self.periodic_poll.is_zero()
         {
             return Err(RelayPortError::InvalidInput);
         }
@@ -142,7 +139,7 @@ struct Worker {
     policy: RelayPolicy,
     recovers_staging: bool,
     stopping: Arc<AtomicBool>,
-    wakes: SyncSender<()>,
+    wakes: WorkerWake,
     join: JoinHandle<Result<(), RelayPortError>>,
 }
 
@@ -171,7 +168,7 @@ fn supervise(
             break;
         }
         for worker in workers.values() {
-            let _ = worker.wakes.try_send(());
+            let _ = worker.wakes.signal();
         }
         if wake_receiver.recv().is_err() {
             break;
@@ -254,7 +251,7 @@ fn spawn_worker(
     manager_wakes: &SyncSender<()>,
 ) -> Result<Worker, RelayPortError> {
     let stopping = Arc::new(AtomicBool::new(false));
-    let (wakes, wake_receiver) = mpsc::sync_channel(1);
+    let (wakes, wake_waiter) = worker_readiness()?;
     let thread_stopping = Arc::clone(&stopping);
     let thread_policy = policy.clone();
     let mut thread_config = config.clone();
@@ -269,7 +266,7 @@ fn spawn_worker(
                 &thread_config,
                 &thread_dependencies,
                 &thread_stopping,
-                &wake_receiver,
+                wake_waiter,
             );
             let _ = manager_wakes.try_send(());
             outcome
@@ -289,7 +286,7 @@ fn run_worker(
     config: &RelayManagerConfig,
     dependencies: &RelaySessionDependencies,
     stopping: &AtomicBool,
-    wake_receiver: &Receiver<()>,
+    mut wake_waiter: WorkerWaiter,
 ) -> Result<(), RelayPortError> {
     let url = policy.url.clone();
     let mut session = RelaySession::new(policy, config.session.clone(), dependencies.clone())?;
@@ -297,13 +294,19 @@ fn run_worker(
     let mut failures = 0_u32;
     while !stopping.load(Ordering::Acquire) {
         let tick = session.tick();
-        let wait = match tick {
+        match tick {
             Ok(progress) => {
                 failures = 0;
-                if progress.frames == config.session.max_frames_per_tick {
+                if progress.immediate_work || progress.frames == config.session.max_frames_per_tick
+                {
                     continue;
                 }
-                config.periodic_poll
+                let timeout = progress.retry_at_millis.map(|retry_at_millis| {
+                    Duration::from_millis(
+                        retry_at_millis.saturating_sub(dependencies.clock.unix_millis()),
+                    )
+                });
+                wake_waiter.wait(Some(session.readiness()?), timeout)?;
             }
             Err(
                 RelayPortError::Connection
@@ -312,16 +315,13 @@ fn run_worker(
             ) => {
                 let _ = session.close();
                 failures = failures.saturating_add(1);
-                worker_backoff(config, dependencies, &url, identity, failures)
+                let wait = worker_backoff(config, dependencies, &url, identity, failures);
+                wake_waiter.wait(None, Some(wait))?;
             }
             Err(error) => {
                 let _ = session.close();
                 return Err(error);
             }
-        };
-        match wake_receiver.recv_timeout(wait) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
     session.close()
@@ -346,7 +346,7 @@ fn worker_backoff(
 
 fn stop_worker(worker: Worker, config: &RelayManagerConfig, report: &mut RelayManagerReport) {
     worker.stopping.store(true, Ordering::Release);
-    let _ = worker.wakes.try_send(());
+    let _ = worker.wakes.signal();
     match worker.join.join() {
         Ok(Ok(())) => {}
         Ok(Err(error)) => retain_failure(config, report, error),

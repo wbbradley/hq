@@ -4,7 +4,10 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
+    io::{Read, Write},
     num::NonZeroU64,
+    os::fd::{AsFd, BorrowedFd},
+    os::unix::net::UnixStream,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -16,11 +19,11 @@ use hq_application::{RelayAccess, RelayAuthentication};
 use hq_domain::{FactId, InstallationId, Revision};
 use hq_relay::{
     AttemptDisposition, CanonicalIngest, CatchupCursor, DurableEnvelope, FailureClass,
-    LogicalEnvelopeId, OpenedRelayEnvelope, OutboundIntent, OutboxKey, PreparedEnvelopeMetadata,
-    PreparedOutbound, PreparedRelayAuthentication, RejectedRelayEnvelope, RelayAttempt,
-    RelayAttemptFailure, RelayClock, RelayConnection, RelayConnector, RelayEnvelopePort,
-    RelayFrame, RelayJitter, RelayManager, RelayManagerConfig, RelayOpenOutcome, RelayPagePosition,
-    RelayPolicy, RelayPortError, RelayReceive, RelaySession, RelaySessionConfig,
+    LogicalEnvelopeId, OpenedRelayEnvelope, OutboundCursor, OutboundIntent, OutboxKey,
+    PreparedEnvelopeMetadata, PreparedOutbound, PreparedRelayAuthentication, RejectedRelayEnvelope,
+    RelayAttempt, RelayAttemptFailure, RelayClock, RelayConnection, RelayConnector,
+    RelayEnvelopePort, RelayFrame, RelayJitter, RelayManager, RelayManagerConfig, RelayOpenOutcome,
+    RelayPagePosition, RelayPolicy, RelayPortError, RelayReceive, RelaySession, RelaySessionConfig,
     RelaySessionDependencies, RelayStateMutation, RelayStatePage, RelayStatePort, RelayStateQuery,
     RelayStateSnapshot, RelayUrl, ResolvedRoute, RouteResolver, StagedInput,
 };
@@ -40,6 +43,7 @@ fn uncertain_publish_restarts_with_byte_identical_wrapper_and_acceptance_is_abso
     let mut session = fixture.session();
     let first = session.tick().expect("first publish tick succeeds");
     assert_eq!(first.published, 1);
+    assert_eq!(first.retry_at_millis, Some(1_010));
     let first_wire = fixture.connection.published();
     assert_eq!(first_wire.len(), 1);
     drop(session);
@@ -80,6 +84,45 @@ fn uncertain_publish_restarts_with_byte_identical_wrapper_and_acceptance_is_abso
 }
 
 #[test]
+fn bounded_outbound_scan_retains_the_earliest_retry_across_pages() {
+    let fixture = Fixture::new(RelayAccess::Write, RelayAuthentication::Disabled);
+    fixture
+        .state
+        .outbound
+        .lock()
+        .expect("outbound locks")
+        .extend((1..=17).map(outbound));
+    let attempts = (1_u8..=17).map(|identity| {
+        (
+            (fixture.url.as_str().to_owned(), [identity; 32]),
+            RelayAttempt {
+                url: fixture.url.clone(),
+                wrapper_id: [identity; 32],
+                attempts: 1,
+                disposition: AttemptDisposition::Uncertain,
+                failure: None,
+                last_attempt_millis: 900,
+                retry_at_millis: Some(if identity == 1 { 1_005 } else { 2_000 }),
+            },
+        )
+    });
+    fixture
+        .state
+        .attempts
+        .lock()
+        .expect("attempts lock")
+        .extend(attempts);
+
+    let mut session = fixture.session();
+    assert!(session.tick().expect("first page scans").immediate_work);
+    assert!(session.tick().expect("second page scans").immediate_work);
+    let complete = session.tick().expect("final page reaches quiescence");
+    assert!(!complete.immediate_work);
+    assert_eq!(complete.retry_at_millis, Some(1_005));
+    assert_eq!(complete.published, 0);
+}
+
+#[test]
 fn required_auth_precedes_live_then_retained_and_live_edge_drains_after_eose() {
     let fixture = Fixture::new(RelayAccess::Read, RelayAuthentication::Required);
     fixture.connection.extend([
@@ -98,7 +141,7 @@ fn required_auth_precedes_live_then_retained_and_live_edge_drains_after_eose() {
             exact_event: vec![2, 50],
         }),
         RelayReceive::Frame(RelayFrame::EndOfStoredEvents("hq-retained-1".to_owned())),
-        RelayReceive::TimedOut,
+        RelayReceive::Pending,
     ]);
 
     let mut session = fixture.session();
@@ -148,7 +191,7 @@ fn reconnect_refreshes_an_exhausted_cursor_across_arbitrary_downtime() {
             exact_event: vec![2, 50],
         }),
         RelayReceive::Frame(RelayFrame::EndOfStoredEvents("hq-retained-1".to_owned())),
-        RelayReceive::TimedOut,
+        RelayReceive::Pending,
     ]);
     let mut first = fixture.session();
     first.tick().expect("initial retained scan completes");
@@ -171,7 +214,7 @@ fn reconnect_refreshes_an_exhausted_cursor_across_arbitrary_downtime() {
             exact_event: vec![3, 40],
         }),
         RelayReceive::Frame(RelayFrame::EndOfStoredEvents("hq-retained-1".to_owned())),
-        RelayReceive::TimedOut,
+        RelayReceive::Pending,
     ]);
     let mut restarted = fixture.session();
     restarted
@@ -213,7 +256,7 @@ fn transient_input_stages_then_recovers_and_permanent_input_quarantines() {
             exact_event: vec![0xff],
         }),
         RelayReceive::Frame(RelayFrame::EndOfStoredEvents("hq-retained-1".to_owned())),
-        RelayReceive::TimedOut,
+        RelayReceive::Pending,
     ]);
     let mut session = fixture.session();
     let first = session.tick().expect("input classifications persist");
@@ -272,7 +315,8 @@ fn full_equal_time_page_never_claims_exhaustion_and_retries_after_backoff() {
             "hq-retained-1".to_owned(),
         )));
     let mut session = fixture.session();
-    session.tick().expect("full repeated page stays safe");
+    let stalled = session.tick().expect("full repeated page stays safe");
+    assert_eq!(stalled.retry_at_millis, Some(1_010));
     assert!(
         !fixture
             .state
@@ -296,7 +340,8 @@ fn full_equal_time_page_never_claims_exhaustion_and_retries_after_backoff() {
             .count()
     };
     assert_eq!(retained_requests(), 1);
-    session.tick().expect("backoff suppresses immediate repeat");
+    let waiting = session.tick().expect("backoff suppresses immediate repeat");
+    assert_eq!(waiting.retry_at_millis, Some(1_010));
     assert_eq!(retained_requests(), 1);
     fixture.clock.set(1_010);
     session.tick().expect("due boundary retries inclusively");
@@ -438,10 +483,9 @@ fn transient_local_work_failure_does_not_tear_down_a_healthy_connection() {
     dependencies.routes = Arc::new(UnavailableRoutes);
     let mut session = RelaySession::new(fixture.policy.clone(), Fixture::config(), dependencies)
         .expect("session constructs");
-    assert_eq!(
-        session.tick().expect("local outage is tolerated").published,
-        0
-    );
+    let progress = session.tick().expect("local outage is tolerated");
+    assert_eq!(progress.published, 0);
+    assert_eq!(progress.retry_at_millis, Some(1_010));
     assert_eq!(session.tick().expect("healthy socket remains").published, 0);
     assert_eq!(fixture.connection.connects.load(Ordering::Acquire), 1);
     assert_eq!(fixture.connection.closes.load(Ordering::Acquire), 0);
@@ -510,7 +554,6 @@ fn manager_coalesces_wakes_refreshes_only_changed_generation_and_joins_every_own
             session: Fixture::config(),
             policy_page_items: 8,
             max_sessions: 8,
-            periodic_poll: Duration::from_millis(25),
         },
         fixture.dependencies(),
     )
@@ -537,6 +580,107 @@ fn manager_coalesces_wakes_refreshes_only_changed_generation_and_joins_every_own
 }
 
 #[test]
+fn manager_drains_bounded_outbound_pages_from_one_durable_wake() {
+    let fixture = Fixture::new(RelayAccess::Write, RelayAuthentication::Disabled);
+    fixture
+        .state
+        .policies
+        .lock()
+        .expect("policies lock")
+        .push(fixture.policy.clone());
+    let manager = RelayManager::start(
+        RelayManagerConfig {
+            session: Fixture::config(),
+            policy_page_items: 8,
+            max_sessions: 8,
+        },
+        fixture.dependencies(),
+    )
+    .expect("manager starts");
+    wait_for(|| fixture.connection.connects.load(Ordering::Acquire) == 1);
+
+    fixture
+        .state
+        .outbound
+        .lock()
+        .expect("outbound locks")
+        .extend((1..=17).map(outbound));
+    manager.wake().expect("one durable wake succeeds");
+    wait_for(|| fixture.connection.published().len() == 17);
+
+    let report = manager.shutdown().expect("manager joins");
+    assert_eq!(report.sessions_started, 1);
+    assert_eq!(report.sessions_joined, 1);
+    assert!(report.failures.is_empty());
+}
+
+#[test]
+fn inbound_socket_readiness_wakes_an_idle_authenticated_session() {
+    let fixture = Fixture::new(RelayAccess::Write, RelayAuthentication::Required);
+    fixture
+        .state
+        .policies
+        .lock()
+        .expect("policies lock")
+        .push(fixture.policy.clone());
+    let manager = RelayManager::start(
+        RelayManagerConfig {
+            session: Fixture::config(),
+            policy_page_items: 8,
+            max_sessions: 8,
+        },
+        fixture.dependencies(),
+    )
+    .expect("manager starts");
+    wait_for(|| fixture.connection.connects.load(Ordering::Acquire) == 1);
+
+    fixture
+        .connection
+        .push(RelayReceive::Frame(RelayFrame::Auth(
+            "idle-challenge".to_owned(),
+        )));
+    wait_for(|| {
+        fixture
+            .connection
+            .sent
+            .lock()
+            .expect("sent locks")
+            .iter()
+            .any(|frame| matches!(frame, RelayFrame::Auth(value) if value == "idle-challenge"))
+    });
+
+    let report = manager.shutdown().expect("manager joins");
+    assert!(report.failures.is_empty());
+}
+
+#[test]
+fn peer_closure_wakes_idle_session_and_reconnects_on_failure_deadline() {
+    let fixture = Fixture::new(RelayAccess::Write, RelayAuthentication::Disabled);
+    fixture
+        .state
+        .policies
+        .lock()
+        .expect("policies lock")
+        .push(fixture.policy.clone());
+    let manager = RelayManager::start(
+        RelayManagerConfig {
+            session: Fixture::config(),
+            policy_page_items: 8,
+            max_sessions: 8,
+        },
+        fixture.dependencies(),
+    )
+    .expect("manager starts");
+    wait_for(|| fixture.connection.connects.load(Ordering::Acquire) == 1);
+
+    fixture.connection.push(RelayReceive::Closed);
+    wait_for(|| fixture.connection.connects.load(Ordering::Acquire) == 2);
+
+    let report = manager.shutdown().expect("manager joins");
+    assert!(report.failures.is_empty());
+}
+
+#[test]
 fn manager_reconciles_a_terminal_child_without_a_periodic_scan() {
     let fixture = Fixture::new(RelayAccess::Write, RelayAuthentication::Disabled);
     fixture
@@ -551,7 +695,6 @@ fn manager_reconciles_a_terminal_child_without_a_periodic_scan() {
             session: Fixture::config(),
             policy_page_items: 8,
             max_sessions: 8,
-            periodic_poll: Duration::from_hours(1),
         },
         fixture.dependencies(),
     )
@@ -623,7 +766,6 @@ impl Fixture {
             live_buffer_bytes: 1_024,
             max_frames_per_tick: 16,
             recover_staging: true,
-            receive_wait: Duration::from_millis(1),
             retry_initial: Duration::from_millis(10),
             retry_max: Duration::from_millis(40),
         }
@@ -664,10 +806,26 @@ impl RelayStatePort for FakeState {
                 .policies
                 .clone_from(&self.policies.lock().expect("policies lock"));
         }
+        let mut next = None;
         if !matches!(query.outbound, RelayPagePosition::Done) {
-            state
-                .outbound
-                .clone_from(&self.outbound.lock().expect("outbound locks"));
+            let mut outbound = self.outbound.lock().expect("outbound locks").clone();
+            outbound.sort_by_key(|intent| (intent.revision, intent.key));
+            if let RelayPagePosition::After(cursor) = &query.outbound {
+                outbound
+                    .retain(|intent| (intent.revision, intent.key) > (cursor.revision, cursor.key));
+            }
+            let has_more = outbound.len() > query.limit;
+            outbound.truncate(query.limit);
+            if has_more {
+                let last = outbound.last().expect("nonempty page has a last row");
+                let mut continuation = query.clone();
+                continuation.outbound = RelayPagePosition::After(OutboundCursor {
+                    revision: last.revision,
+                    key: last.key,
+                });
+                next = Some(continuation);
+            }
+            state.outbound = outbound;
         }
         if !matches!(query.staged, RelayPagePosition::Done) {
             state.staged = self
@@ -678,7 +836,7 @@ impl RelayStatePort for FakeState {
                 .cloned()
                 .collect();
         }
-        Ok(RelayStatePage { state, next: None })
+        Ok(RelayStatePage { state, next })
     }
 
     fn prepared(&self, key: OutboxKey) -> Result<Option<PreparedOutbound>, RelayPortError> {
@@ -918,13 +1076,34 @@ impl RelayJitter for ZeroJitter {
     }
 }
 
-#[derive(Default)]
 struct ScriptedConnectionState {
     received: Mutex<VecDeque<RelayReceive>>,
     sent: Mutex<Vec<RelayFrame>>,
     send_failures: AtomicUsize,
     closes: AtomicUsize,
     connects: AtomicUsize,
+    readiness_writer: Mutex<UnixStream>,
+    readiness_reader: UnixStream,
+}
+
+impl Default for ScriptedConnectionState {
+    fn default() -> Self {
+        let (readiness_reader, readiness_writer) =
+            UnixStream::pair().expect("readiness pair constructs");
+        readiness_reader
+            .set_nonblocking(true)
+            .and_then(|()| readiness_writer.set_nonblocking(true))
+            .expect("readiness pair becomes nonblocking");
+        Self {
+            received: Mutex::default(),
+            sent: Mutex::default(),
+            send_failures: AtomicUsize::default(),
+            closes: AtomicUsize::default(),
+            connects: AtomicUsize::default(),
+            readiness_writer: Mutex::new(readiness_writer),
+            readiness_reader,
+        }
+    }
 }
 
 impl ScriptedConnectionState {
@@ -933,6 +1112,7 @@ impl ScriptedConnectionState {
             .lock()
             .expect("receive queue locks")
             .push_back(receive);
+        self.signal_readiness();
     }
 
     fn extend(&self, receive: impl IntoIterator<Item = RelayReceive>) {
@@ -940,6 +1120,7 @@ impl ScriptedConnectionState {
             .lock()
             .expect("receive queue locks")
             .extend(receive);
+        self.signal_readiness();
     }
 
     fn published(&self) -> Vec<Vec<u8>> {
@@ -953,6 +1134,14 @@ impl ScriptedConnectionState {
             })
             .collect()
     }
+
+    fn signal_readiness(&self) {
+        let _ = self
+            .readiness_writer
+            .lock()
+            .expect("readiness writer locks")
+            .write(&[1]);
+    }
 }
 
 struct FakeConnector {
@@ -964,15 +1153,25 @@ impl RelayConnector for FakeConnector {
         self.state.connects.fetch_add(1, Ordering::AcqRel);
         Ok(Box::new(ScriptedConnection {
             state: self.state.clone(),
+            readiness: self
+                .state
+                .readiness_reader
+                .try_clone()
+                .map_err(|_| RelayPortError::Unavailable)?,
         }))
     }
 }
 
 struct ScriptedConnection {
     state: Arc<ScriptedConnectionState>,
+    readiness: UnixStream,
 }
 
 impl RelayConnection for ScriptedConnection {
+    fn readiness(&self) -> BorrowedFd<'_> {
+        self.readiness.as_fd()
+    }
+
     fn send(&mut self, frame: RelayFrame) -> Result<(), RelayPortError> {
         if self
             .state
@@ -988,14 +1187,19 @@ impl RelayConnection for ScriptedConnection {
         Ok(())
     }
 
-    fn receive(&mut self, _wait: Duration) -> Result<RelayReceive, RelayPortError> {
-        Ok(self
+    fn receive(&mut self) -> Result<RelayReceive, RelayPortError> {
+        let receive = self
             .state
             .received
             .lock()
             .expect("receive queue locks")
             .pop_front()
-            .unwrap_or(RelayReceive::TimedOut))
+            .unwrap_or(RelayReceive::Pending);
+        if !matches!(receive, RelayReceive::Pending) {
+            let mut byte = [0_u8; 1];
+            let _ = self.readiness.read(&mut byte);
+        }
+        Ok(receive)
     }
 
     fn close(&mut self) -> Result<(), RelayPortError> {

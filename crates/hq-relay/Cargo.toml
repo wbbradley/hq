@@ -20,6 +20,7 @@ hq-application.workspace = true
 hq-domain.workspace = true
 hq-protocol.workspace = true
 k256.workspace = true
+nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

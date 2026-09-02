@@ -5,7 +5,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
+    io::{Read, Write},
     num::NonZeroUsize,
+    os::fd::{AsFd, BorrowedFd},
+    os::unix::net::UnixStream,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -62,14 +65,7 @@ fn committed_store_revision_wakes_an_idle_relay_manager() {
             .expect("foundation fact ingests");
     }
 
-    let mut sender = component_with_poll(
-        &store,
-        A,
-        authority_policy,
-        1,
-        Arc::clone(&hub),
-        Duration::from_hours(1),
-    );
+    let mut sender = component(&store, A, authority_policy, 1, Arc::clone(&hub));
     sender
         .start(CancellationToken::new())
         .expect("sender starts");
@@ -281,26 +277,7 @@ fn component(
     secret: u8,
     hub: Arc<RetainedHub>,
 ) -> RelayNodeComponent {
-    component_with_poll(
-        store,
-        installation,
-        authority_policy,
-        secret,
-        hub,
-        Duration::from_millis(5),
-    )
-}
-
-fn component_with_poll(
-    store: &Store,
-    installation: [u8; 32],
-    authority_policy: AuthorityPolicy,
-    secret: u8,
-    hub: Arc<RetainedHub>,
-    periodic_poll: Duration,
-) -> RelayNodeComponent {
     let session = RelaySessionConfig {
-        receive_wait: Duration::from_millis(2),
         retained_page_items: 4,
         retry_initial: Duration::from_millis(5),
         retry_max: Duration::from_millis(20),
@@ -311,7 +288,6 @@ fn component_with_poll(
             session,
             policy_page_items: 8,
             max_sessions: 4,
-            periodic_poll,
         },
     };
     RelayNodeComponent::new(
@@ -777,6 +753,7 @@ struct HubState {
     next_connection: usize,
     retained: Vec<Vec<u8>>,
     queues: BTreeMap<usize, VecDeque<RelayReceive>>,
+    readiness: BTreeMap<usize, UnixStream>,
     live: BTreeMap<usize, (String, String)>,
     drop_ok: usize,
 }
@@ -788,6 +765,7 @@ impl RetainedHub {
                 next_connection: 0,
                 retained: Vec::new(),
                 queues: BTreeMap::new(),
+                readiness: BTreeMap::new(),
                 live: BTreeMap::new(),
                 drop_ok,
             })),
@@ -805,6 +783,9 @@ impl RetainedHub {
         for queue in state.queues.values_mut() {
             queue.push_back(RelayReceive::Closed);
         }
+        for writer in state.readiness.values_mut() {
+            let _ = writer.write(&[1]);
+        }
         state.live.clear();
     }
 }
@@ -814,11 +795,18 @@ impl RelayConnector for RetainedHub {
         let mut state = self.state.lock().map_err(|_| RelayPortError::Connection)?;
         let identity = state.next_connection;
         state.next_connection = state.next_connection.saturating_add(1);
+        let (readiness, writer) = UnixStream::pair().map_err(|_| RelayPortError::Unavailable)?;
+        readiness
+            .set_nonblocking(true)
+            .and_then(|()| writer.set_nonblocking(true))
+            .map_err(|_| RelayPortError::Unavailable)?;
         state.queues.insert(identity, VecDeque::new());
+        state.readiness.insert(identity, writer);
         Ok(Box::new(HubConnection {
             hub: self.clone(),
             identity,
             closed: false,
+            readiness,
         }))
     }
 }
@@ -827,9 +815,14 @@ struct HubConnection {
     hub: RetainedHub,
     identity: usize,
     closed: bool,
+    readiness: UnixStream,
 }
 
 impl RelayConnection for HubConnection {
+    fn readiness(&self) -> BorrowedFd<'_> {
+        self.readiness.as_fd()
+    }
+
     fn send(&mut self, frame: RelayFrame) -> Result<(), RelayPortError> {
         let mut state = self
             .hub
@@ -844,24 +837,36 @@ impl RelayConnection for HubConnection {
                     let live = state.live.clone();
                     let recipient = event_recipient(&exact)?;
                     for (identity, (subscription, expected_recipient)) in live {
-                        if expected_recipient == recipient
-                            && let Some(queue) = state.queues.get_mut(&identity)
-                        {
-                            queue.push_back(RelayReceive::Frame(RelayFrame::SubscriptionEvent {
-                                subscription,
-                                exact_event: exact.clone(),
-                            }));
+                        let delivered = if expected_recipient == recipient {
+                            state.queues.get_mut(&identity).map(|queue| {
+                                queue.push_back(RelayReceive::Frame(
+                                    RelayFrame::SubscriptionEvent {
+                                        subscription,
+                                        exact_event: exact.clone(),
+                                    },
+                                ));
+                            })
+                        } else {
+                            None
+                        };
+                        if delivered.is_some() {
+                            signal_connection(&mut state, identity);
                         }
                     }
                 }
                 if state.drop_ok > 0 {
                     state.drop_ok -= 1;
-                } else if let Some(queue) = state.queues.get_mut(&self.identity) {
-                    queue.push_back(RelayReceive::Frame(RelayFrame::Ok {
-                        event_id: wrapper_id,
-                        accepted: true,
-                        message: String::new(),
-                    }));
+                } else {
+                    let queued = state.queues.get_mut(&self.identity).map(|queue| {
+                        queue.push_back(RelayReceive::Frame(RelayFrame::Ok {
+                            event_id: wrapper_id,
+                            accepted: true,
+                            message: String::new(),
+                        }));
+                    });
+                    if queued.is_some() {
+                        signal_connection(&mut state, self.identity);
+                    }
                 }
             }
             RelayFrame::Request {
@@ -907,15 +912,21 @@ impl RelayConnection for HubConnection {
         Ok(())
     }
 
-    fn receive(&mut self, _wait: Duration) -> Result<RelayReceive, RelayPortError> {
-        self.hub
+    fn receive(&mut self) -> Result<RelayReceive, RelayPortError> {
+        let receive = self
+            .hub
             .state
             .lock()
             .map_err(|_| RelayPortError::Connection)?
             .queues
             .get_mut(&self.identity)
             .and_then(VecDeque::pop_front)
-            .map_or(Ok(RelayReceive::TimedOut), Ok)
+            .unwrap_or(RelayReceive::Pending);
+        if !matches!(receive, RelayReceive::Pending) {
+            let mut byte = [0_u8; 1];
+            let _ = self.readiness.read(&mut byte);
+        }
+        Ok(receive)
     }
 
     fn close(&mut self) -> Result<(), RelayPortError> {
@@ -926,6 +937,7 @@ impl RelayConnection for HubConnection {
                 .lock()
                 .map_err(|_| RelayPortError::Connection)?;
             state.queues.remove(&self.identity);
+            state.readiness.remove(&self.identity);
             state.live.remove(&self.identity);
             self.closed = true;
         }
@@ -976,20 +988,29 @@ fn enqueue_retained(
     if reverse {
         retained.reverse();
     }
-    let queue = state
-        .queues
-        .get_mut(&identity)
-        .ok_or(RelayPortError::Connection)?;
-    for exact_event in retained {
-        queue.push_back(RelayReceive::Frame(RelayFrame::SubscriptionEvent {
-            subscription: subscription.to_owned(),
-            exact_event,
-        }));
+    {
+        let queue = state
+            .queues
+            .get_mut(&identity)
+            .ok_or(RelayPortError::Connection)?;
+        for exact_event in retained {
+            queue.push_back(RelayReceive::Frame(RelayFrame::SubscriptionEvent {
+                subscription: subscription.to_owned(),
+                exact_event,
+            }));
+        }
+        queue.push_back(RelayReceive::Frame(RelayFrame::EndOfStoredEvents(
+            subscription.to_owned(),
+        )));
     }
-    queue.push_back(RelayReceive::Frame(RelayFrame::EndOfStoredEvents(
-        subscription.to_owned(),
-    )));
+    signal_connection(state, identity);
     Ok(())
+}
+
+fn signal_connection(state: &mut HubState, identity: usize) {
+    if let Some(writer) = state.readiness.get_mut(&identity) {
+        let _ = writer.write(&[1]);
+    }
 }
 
 fn event_id(exact: &[u8]) -> Result<[u8; 32], RelayPortError> {

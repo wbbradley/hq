@@ -10543,6 +10543,34 @@ If upcoming plan items need modifications due to a change during this implementa
 
 <!-- End of archived plan entry. -->
 
+## 2026-09-01 — Event-driven relay session scheduling
+
+Relay sessions now expose nonblocking connection readiness and workers poll that descriptor beside
+a component-owned Unix wake source and an optional exact deadline. Healthy `receive_wait`, manager
+`periodic_poll`, and `recv_timeout` scheduling are gone. Durable work, policy replacement, peer
+input or closure, and shutdown interrupt idle sessions immediately, while capped retry deadlines
+remain only for reconnect and durable failure recovery.
+
+Bounded outbound and staging scans carry immediate-work and earliest-retry evidence across pages,
+including newly staged inputs, retained catch-up, and uncertain publishes. The real Tungstenite
+adapter preserves partial decoder state with nonblocking reads and bounded writes. Deterministic
+contracts cover wake races and coalescing, idle authentication, socket closure/reconnect, exact
+deadlines, one-wake multi-page drain, and retry ordering; strict workspace Clippy and the complete
+all-feature workspace suite pass.
+
+### Original plan entry
+
+### Make relay sessions wait on socket readiness and exact deadlines
+
+Replace each relay session's healthy `receive_wait`/`recv_timeout` scheduling with an interruptible
+event loop over inbound WebSocket readiness, durable-work wakes, policy replacement, shutdown, and
+the exact next reconnect/outbound/staging/retained retry deadline. Remove `periodic_poll` and
+`receive_wait`; retain capped retry deadlines solely as failure recovery. Test inbound idle wakes,
+outbound work, backpressure, disconnect/reconnect baselines, closure, deadline ordering, and orderly
+shutdown without advancing a periodic clock.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-01 — Event-driven relay manager reconciliation
 
 Relay policy reconciliation now blocks on a bounded coalescing wake channel instead of periodically

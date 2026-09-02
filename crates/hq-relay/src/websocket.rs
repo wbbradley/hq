@@ -3,6 +3,7 @@
 use std::{
     io,
     net::{TcpStream, ToSocketAddrs},
+    os::fd::{AsFd, BorrowedFd},
     time::{Duration, Instant},
 };
 
@@ -92,7 +93,8 @@ impl RelayConnector for WebSocketRelayConnector {
             .max_message_size(Some(self.config.max_message_bytes))
             .max_frame_size(Some(self.config.max_message_bytes));
         let socket = connect_bounded(url, socket_config, self.config)?;
-        Ok(Box::new(WebSocketRelayConnection { socket }))
+        let readiness = clone_tcp_stream(socket.get_ref())?;
+        Ok(Box::new(WebSocketRelayConnection { socket, readiness }))
     }
 }
 
@@ -178,10 +180,16 @@ fn connect_addresses(
 
 struct WebSocketRelayConnection {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
+    readiness: TcpStream,
 }
 
 impl RelayConnection for WebSocketRelayConnection {
+    fn readiness(&self) -> BorrowedFd<'_> {
+        self.readiness.as_fd()
+    }
+
     fn send(&mut self, frame: RelayFrame) -> Result<(), RelayPortError> {
+        set_nonblocking(self.socket.get_mut(), false)?;
         let exact = encode_frame(&frame)?;
         if exact.len() > self.socket.get_config().max_message_size.unwrap_or(0) {
             return Err(RelayPortError::InvalidInput);
@@ -191,16 +199,9 @@ impl RelayConnection for WebSocketRelayConnection {
             .map_err(|_| RelayPortError::Connection)
     }
 
-    fn receive(&mut self, wait: Duration) -> Result<RelayReceive, RelayPortError> {
-        let deadline = Instant::now()
-            .checked_add(wait)
-            .ok_or(RelayPortError::InvalidInput)?;
+    fn receive(&mut self) -> Result<RelayReceive, RelayPortError> {
+        set_nonblocking(self.socket.get_mut(), true)?;
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Ok(RelayReceive::TimedOut);
-            }
-            set_read_timeout(self.socket.get_mut(), remaining)?;
             match self.socket.read() {
                 Ok(Message::Text(exact)) => {
                     return decode_frame(exact.as_bytes()).map(RelayReceive::Frame);
@@ -213,7 +214,7 @@ impl RelayConnection for WebSocketRelayConnection {
                     return Err(RelayPortError::Connection);
                 }
                 Err(WebSocketError::Io(error)) if timed_out(&error) => {
-                    return Ok(RelayReceive::TimedOut);
+                    return Ok(RelayReceive::Pending);
                 }
                 Err(_) => return Err(RelayPortError::Connection),
             }
@@ -221,6 +222,7 @@ impl RelayConnection for WebSocketRelayConnection {
     }
 
     fn close(&mut self) -> Result<(), RelayPortError> {
+        set_nonblocking(self.socket.get_mut(), false)?;
         match self.socket.close(None) {
             Ok(()) | Err(WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed) => {
                 Ok(())
@@ -230,13 +232,22 @@ impl RelayConnection for WebSocketRelayConnection {
     }
 }
 
-fn set_read_timeout(
+fn clone_tcp_stream(stream: &MaybeTlsStream<TcpStream>) -> Result<TcpStream, RelayPortError> {
+    match stream {
+        MaybeTlsStream::Plain(stream) => stream.try_clone(),
+        MaybeTlsStream::Rustls(stream) => stream.sock.try_clone(),
+        _ => return Err(RelayPortError::Connection),
+    }
+    .map_err(|_| RelayPortError::Connection)
+}
+
+fn set_nonblocking(
     stream: &mut MaybeTlsStream<TcpStream>,
-    wait: Duration,
+    nonblocking: bool,
 ) -> Result<(), RelayPortError> {
     match stream {
-        MaybeTlsStream::Plain(stream) => stream.set_read_timeout(Some(wait)),
-        MaybeTlsStream::Rustls(stream) => stream.sock.set_read_timeout(Some(wait)),
+        MaybeTlsStream::Plain(stream) => stream.set_nonblocking(nonblocking),
+        MaybeTlsStream::Rustls(stream) => stream.sock.set_nonblocking(nonblocking),
         _ => return Err(RelayPortError::Connection),
     }
     .map_err(|_| RelayPortError::Connection)
@@ -399,6 +410,7 @@ mod tests {
 
     use std::{net::TcpListener, thread, time::Instant};
 
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
     use tungstenite::{Message, accept};
 
     use super::*;
@@ -531,17 +543,23 @@ mod tests {
             })
             .expect("request sends");
         assert_eq!(
-            connection
-                .receive(Duration::from_secs(1))
-                .expect("auth receives"),
+            receive_ready(connection.as_mut(), Duration::from_secs(1)),
             RelayReceive::Frame(RelayFrame::Auth("challenge".to_owned()))
         );
         assert_eq!(
-            connection
-                .receive(Duration::from_secs(1))
-                .expect("close receives"),
+            receive_ready(connection.as_mut(), Duration::from_secs(1)),
             RelayReceive::Closed
         );
         server.join().expect("server joins");
+    }
+
+    fn receive_ready(connection: &mut dyn RelayConnection, timeout: Duration) -> RelayReceive {
+        let mut descriptor = [PollFd::new(
+            connection.readiness(),
+            PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+        )];
+        let timeout = PollTimeout::try_from(timeout).expect("timeout fits poll");
+        assert_eq!(poll(&mut descriptor, timeout).expect("readiness waits"), 1);
+        connection.receive().expect("ready frame receives")
     }
 }

@@ -17,6 +17,7 @@ use hq_relay::{
     EnvelopeCodec, RelayConnection, RelayConnector, RelayEnvelopePort, RelayFrame, RelayReceive,
     RelayUrl, SystemRandom, WebSocketRelayConfig, WebSocketRelayConnector,
 };
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 const FIRST_INSTALLATION: [u8; 32] = [0x11; 32];
 
@@ -203,12 +204,22 @@ fn wait_for_frame<T>(
 fn receive_frame(connection: &mut dyn RelayConnection, deadline: Instant) -> RelayFrame {
     let remaining = deadline.saturating_duration_since(Instant::now());
     assert!(!remaining.is_zero(), "controlled relay response timed out");
+    let mut descriptor = [PollFd::new(
+        connection.readiness(),
+        PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+    )];
+    let timeout =
+        PollTimeout::try_from(remaining.min(Duration::from_secs(2))).expect("poll timeout fits");
+    let ready = poll(&mut descriptor, timeout).expect("controlled relay readiness succeeds");
+    if ready == 0 {
+        return receive_frame(connection, deadline);
+    }
     match connection
-        .receive(remaining.min(Duration::from_secs(2)))
+        .receive()
         .expect("controlled relay receive succeeds")
     {
         RelayReceive::Frame(frame) => frame,
-        RelayReceive::TimedOut => {
+        RelayReceive::Pending => {
             assert!(
                 Instant::now() < deadline,
                 "controlled relay response timed out"

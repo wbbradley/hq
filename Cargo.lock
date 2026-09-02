@@ -814,6 +814,7 @@ dependencies = [
  "hq-domain",
  "hq-protocol",
  "k256",
+ "nix",
  "serde",
  "serde_json",
  "sha2",

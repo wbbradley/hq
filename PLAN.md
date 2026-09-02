@@ -2,15 +2,6 @@
 
 ## Next Up
 
-### Make relay sessions wait on socket readiness and exact deadlines
-
-Replace each relay session's healthy `receive_wait`/`recv_timeout` scheduling with an interruptible
-event loop over inbound WebSocket readiness, durable-work wakes, policy replacement, shutdown, and
-the exact next reconnect/outbound/staging/retained retry deadline. Remove `periodic_poll` and
-`receive_wait`; retain capped retry deadlines solely as failure recovery. Test inbound idle wakes,
-outbound work, backpressure, disconnect/reconnect baselines, closure, deadline ordering, and orderly
-shutdown without advancing a periodic clock.
-
 ### Make harness provider events wake the supervisor
 
 Replace `HarnessSession::poll_event` and the component's `event_poll_interval`/`park_timeout` loop

@@ -1,6 +1,6 @@
 //! Consumer-owned relay synchronization ports and passive records.
 
-use std::{error::Error, fmt, num::NonZeroU64, time::Duration};
+use std::{error::Error, fmt, num::NonZeroU64, os::fd::BorrowedFd, time::Duration};
 
 use hq_application::{RelayAccess, RelayAuthentication};
 use hq_domain::{CommandDigest, FactId, InstallationId, OperationId, Revision};
@@ -494,8 +494,8 @@ pub trait RelayEnvelopePort: Send + Sync {
 pub enum RelayReceive {
     /// One complete typed relay frame arrived.
     Frame(RelayFrame),
-    /// No complete frame arrived within the caller's wait bound.
-    TimedOut,
+    /// No complete frame is currently buffered on the ready connection.
+    Pending,
     /// The peer closed the connection cleanly.
     Closed,
 }
@@ -547,10 +547,12 @@ pub enum RelayFrame {
 
 /// One exclusively owned relay connection.
 pub trait RelayConnection: Send {
+    /// Borrows the descriptor whose readable or closed state permits a nonblocking receive.
+    fn readiness(&self) -> BorrowedFd<'_>;
     /// Sends one typed frame.
     fn send(&mut self, frame: RelayFrame) -> Result<(), RelayPortError>;
-    /// Receives one frame without blocking beyond the caller's wait bound.
-    fn receive(&mut self, wait: Duration) -> Result<RelayReceive, RelayPortError>;
+    /// Receives one currently buffered frame without blocking.
+    fn receive(&mut self) -> Result<RelayReceive, RelayPortError>;
     /// Idempotently closes the connection.
     fn close(&mut self) -> Result<(), RelayPortError>;
 }

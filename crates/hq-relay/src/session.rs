@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
+    os::fd::BorrowedFd,
     sync::Arc,
     time::Duration,
 };
@@ -36,8 +37,6 @@ pub struct RelaySessionConfig {
     pub max_frames_per_tick: usize,
     /// Whether this owner performs global staged-input recovery.
     pub recover_staging: bool,
-    /// Maximum time one connection receive may block.
-    pub receive_wait: Duration,
     /// Base outbound and staging retry delay.
     pub retry_initial: Duration,
     /// Inclusive retry-delay cap after deterministic jitter.
@@ -53,7 +52,6 @@ impl Default for RelaySessionConfig {
             live_buffer_bytes: 8 * 1024 * 1024,
             max_frames_per_tick: 64,
             recover_staging: true,
-            receive_wait: Duration::from_millis(100),
             retry_initial: Duration::from_millis(500),
             retry_max: Duration::from_secs(60),
         }
@@ -70,7 +68,6 @@ impl RelaySessionConfig {
             || self.live_buffer_bytes == 0
             || self.live_buffer_bytes > MAX_STAGING_BYTES
             || self.max_frames_per_tick == 0
-            || self.receive_wait.is_zero()
             || self.retry_initial.is_zero()
             || self.retry_initial > self.retry_max
         {
@@ -149,6 +146,18 @@ pub struct RelaySessionProgress {
     pub staged: usize,
     /// Inputs permanently quarantined.
     pub quarantined: usize,
+    /// Whether another bounded tick is required before the session is quiescent.
+    pub immediate_work: bool,
+    /// Earliest known wall-clock retry deadline across durable and retained work.
+    pub retry_at_millis: Option<u64>,
+}
+
+impl RelaySessionProgress {
+    fn retain_retry(&mut self, retry_at_millis: Option<u64>) {
+        if let Some(retry_at_millis) = retry_at_millis {
+            retain_earliest(&mut self.retry_at_millis, retry_at_millis);
+        }
+    }
 }
 
 /// Exclusive state-machine owner for one relay policy generation.
@@ -173,7 +182,9 @@ pub struct RelaySession {
     live_buffer_bytes: usize,
     inflight: BTreeMap<[u8; 32], RelayAttempt>,
     outbound_query: RelayStateQuery,
+    outbound_retry_at: Option<u64>,
     staging_query: RelayStateQuery,
+    staging_retry_at: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -216,7 +227,9 @@ impl RelaySession {
             live_buffer_bytes: 0,
             inflight: BTreeMap::new(),
             outbound_query,
+            outbound_retry_at: None,
             staging_query,
+            staging_retry_at: None,
         })
     }
 
@@ -224,30 +237,46 @@ impl RelaySession {
     pub fn tick(&mut self) -> Result<RelaySessionProgress, RelayPortError> {
         self.ensure_connected()?;
         let mut progress = RelaySessionProgress::default();
+        progress.retain_retry(self.retained_retry_at);
         if self.authenticated {
             self.start_ordinary_work()?;
             self.resume_retained_if_due()?;
             if self.config.recover_staging {
-                tolerate_local_retry(self.recover_staging(&mut progress))?;
+                let retry_at = self.local_retry_at();
+                let staging = self.recover_staging(&mut progress);
+                tolerate_local_retry(staging, &mut progress, retry_at)?;
             }
-            tolerate_local_retry(self.publish_outbound(&mut progress))?;
+            let retry_at = self.local_retry_at();
+            let outbound = self.publish_outbound(&mut progress);
+            tolerate_local_retry(outbound, &mut progress, retry_at)?;
         }
-        let receive_wait = self.config.receive_wait;
         for _ in 0..self.config.max_frames_per_tick {
             let receive = self
                 .connection_mut()?
-                .receive(receive_wait)
+                .receive()
                 .map_err(|_| RelayPortError::Connection)?;
             match receive {
                 RelayReceive::Frame(frame) => {
                     progress.frames += 1;
                     self.handle_frame(frame, &mut progress)?;
                 }
-                RelayReceive::TimedOut => break,
+                RelayReceive::Pending => break,
                 RelayReceive::Closed => return Err(RelayPortError::Connection),
             }
         }
+        if progress.frames > 0 {
+            progress.immediate_work = true;
+        }
+        progress.retain_retry(self.retained_retry_at);
         Ok(progress)
+    }
+
+    /// Borrows the descriptor that becomes readable for inbound frames or peer closure.
+    pub fn readiness(&self) -> Result<BorrowedFd<'_>, RelayPortError> {
+        self.connection
+            .as_ref()
+            .map(|connection| connection.readiness())
+            .ok_or(RelayPortError::Unavailable)
     }
 
     /// Closes named subscriptions and the owned connection idempotently.
@@ -407,16 +436,25 @@ impl RelaySession {
         &mut self,
         progress: &mut RelaySessionProgress,
     ) -> Result<(), RelayPortError> {
+        if matches!(self.staging_query.staged, RelayPagePosition::Start) {
+            self.staging_retry_at = None;
+        }
         let page = self
             .dependencies
             .state
             .load_page(self.staging_query.clone())?;
+        let has_more = page.next.is_some();
+        progress.immediate_work |= has_more;
         self.staging_query = page
             .next
             .unwrap_or_else(|| staging_query(self.config.state_page_items));
         let now = self.dependencies.clock.unix_millis();
         for input in page.state.staged {
-            if input.attempts == u32::MAX || input.retry_at_millis > now {
+            if input.attempts == u32::MAX {
+                continue;
+            }
+            if input.retry_at_millis > now {
+                retain_earliest(&mut self.staging_retry_at, input.retry_at_millis);
                 continue;
             }
             self.process_input(
@@ -425,6 +463,9 @@ impl RelaySession {
                 Some(&input),
                 progress,
             )?;
+        }
+        if !has_more {
+            progress.retain_retry(self.staging_retry_at);
         }
         Ok(())
     }
@@ -436,10 +477,15 @@ impl RelaySession {
         if !writable(self.policy.access) {
             return Ok(());
         }
+        if matches!(self.outbound_query.outbound, RelayPagePosition::Start) {
+            self.outbound_retry_at = None;
+        }
         let page = self
             .dependencies
             .state
             .load_page(self.outbound_query.clone())?;
+        let has_more = page.next.is_some();
+        progress.immediate_work |= has_more;
         self.outbound_query = page
             .next
             .unwrap_or_else(|| outbound_query(self.config.state_page_items));
@@ -454,7 +500,11 @@ impl RelaySession {
                 .dependencies
                 .state
                 .attempt(&self.policy.url, wrapper_id)?;
-            if !attempt_due(prior.as_ref(), self.dependencies.clock.unix_millis()) {
+            let now = self.dependencies.clock.unix_millis();
+            if !attempt_due(prior.as_ref(), now) {
+                if let Some(retry_at_millis) = prior.and_then(|attempt| attempt.retry_at_millis) {
+                    retain_earliest(&mut self.outbound_retry_at, retry_at_millis);
+                }
                 continue;
             }
             let attempts = prior
@@ -467,7 +517,6 @@ impl RelaySession {
             {
                 continue;
             }
-            let now = self.dependencies.clock.unix_millis();
             let retry_at = now.saturating_add(self.retry_delay(wrapper_id, attempts));
             let attempt = RelayAttempt {
                 url: self.policy.url.clone(),
@@ -484,6 +533,10 @@ impl RelaySession {
             self.send(RelayFrame::Event(prepared.envelope.exact_wire.clone()))?;
             self.inflight.insert(wrapper_id, attempt);
             progress.published += 1;
+            retain_earliest(&mut self.outbound_retry_at, retry_at);
+        }
+        if !has_more {
+            progress.retain_retry(self.outbound_retry_at);
         }
         Ok(())
     }
@@ -750,7 +803,7 @@ impl RelaySession {
     }
 
     fn process_input(
-        &self,
+        &mut self,
         exact_outer: Vec<u8>,
         remove_staged: Option<[u8; 32]>,
         staged: Option<&StagedInput>,
@@ -817,7 +870,7 @@ impl RelaySession {
     }
 
     fn stage_new(
-        &self,
+        &mut self,
         exact_outer: Vec<u8>,
         progress: &mut RelaySessionProgress,
     ) -> Result<(), RelayPortError> {
@@ -836,7 +889,7 @@ impl RelaySession {
     }
 
     fn stage_retry(
-        &self,
+        &mut self,
         exact_outer: Vec<u8>,
         digest: [u8; 32],
         prior: Option<&StagedInput>,
@@ -845,6 +898,7 @@ impl RelaySession {
         let now = self.dependencies.clock.unix_millis();
         let attempts = prior.map_or(0, |input| input.attempts.saturating_add(1));
         let first_received_millis = prior.map_or(now, |input| input.first_received_millis);
+        let retry_at_millis = now.saturating_add(self.retry_delay(digest, attempts.max(1)));
         self.dependencies
             .state
             .apply(RelayStateMutation::Stage(StagedInput {
@@ -852,8 +906,10 @@ impl RelaySession {
                 exact_outer,
                 first_received_millis,
                 attempts,
-                retry_at_millis: now.saturating_add(self.retry_delay(digest, attempts.max(1))),
+                retry_at_millis,
             }))?;
+        retain_earliest(&mut progress.retry_at_millis, retry_at_millis);
+        retain_earliest(&mut self.staging_retry_at, retry_at_millis);
         progress.staged += 1;
         Ok(())
     }
@@ -899,6 +955,13 @@ impl RelaySession {
                 .jitter
                 .jitter_millis(&self.policy.url, identity, attempt, jitter_max);
         base.saturating_add(jitter).min(maximum)
+    }
+
+    fn local_retry_at(&self) -> u64 {
+        self.dependencies
+            .clock
+            .unix_millis()
+            .saturating_add(duration_millis(self.config.retry_initial))
     }
 
     fn connection_mut(&mut self) -> Result<&mut (dyn RelayConnection + '_), RelayPortError> {
@@ -959,9 +1022,21 @@ fn attempt_due(attempt: Option<&RelayAttempt>, now: u64) -> bool {
     }
 }
 
-fn tolerate_local_retry(result: Result<(), RelayPortError>) -> Result<(), RelayPortError> {
+fn retain_earliest(target: &mut Option<u64>, candidate: u64) {
+    *target = Some(target.map_or(candidate, |current| current.min(candidate)));
+}
+
+fn tolerate_local_retry(
+    result: Result<(), RelayPortError>,
+    progress: &mut RelaySessionProgress,
+    retry_at_millis: u64,
+) -> Result<(), RelayPortError> {
     match result {
-        Ok(()) | Err(RelayPortError::Unavailable | RelayPortError::Backpressure) => Ok(()),
+        Ok(()) => Ok(()),
+        Err(RelayPortError::Unavailable | RelayPortError::Backpressure) => {
+            progress.retain_retry(Some(retry_at_millis));
+            Ok(())
+        }
         Err(error) => Err(error),
     }
 }

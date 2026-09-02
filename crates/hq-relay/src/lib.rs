@@ -5,6 +5,7 @@ mod envelope_port;
 mod manager;
 mod nip44;
 mod ports;
+mod readiness;
 mod session;
 mod url;
 mod websocket;
