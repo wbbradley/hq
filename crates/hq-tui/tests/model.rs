@@ -2412,6 +2412,80 @@ fn summary_state_shortcuts_explain_that_an_exact_message_must_be_selected() {
 }
 
 #[test]
+fn compose_newline_inserts_at_the_caret_and_plain_enter_still_submits() {
+    let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
+    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let (open_id, target) = open_draft_effect(&opening.effects);
+    let target = target.clone();
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target: UiMailboxDraftTarget::Reply {
+                    message_id: [3; 32],
+                },
+                content: "ab".to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("draft");
+    let moved =
+        update(loaded.model, UiEvent::Input(UiInput::MoveCursorLeft)).expect("move caret before b");
+    let multiline =
+        update(moved.model, UiEvent::Input(UiInput::InsertNewline)).expect("insert newline");
+    assert!(matches!(
+        multiline.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Editing { draft, dirty: true, submitting: false, .. })
+            if draft.content == "a\nb"
+    ));
+    assert!(multiline.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::ScheduleTimer {
+            kind: UiTimerKind::AutosaveDraft,
+            ..
+        }
+    )));
+    assert!(
+        multiline
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitMailboxCommand { .. }))
+    );
+
+    let saving = update(multiline.model, UiEvent::Input(UiInput::Activate))
+        .expect("plain Enter starts submission");
+    let (_, saved) = save_draft_effect(&saving.effects);
+    assert_eq!(saved.content, "a\nb");
+
+    let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
+    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let (open_id, _) = open_draft_effect(&opening.effects);
+    let full = "x".repeat(16 * 1024);
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                draft_id: [5; 32],
+                target,
+                content: full.clone(),
+                version: 1,
+            },
+        },
+    )
+    .expect("full draft");
+    let bounded = update(loaded.model, UiEvent::Input(UiInput::InsertNewline))
+        .expect("newline remains bounded");
+    assert!(matches!(
+        bounded.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.content == full
+    ));
+}
+
+#[test]
 fn dirty_reply_saves_before_submit_and_stale_rejection_preserves_text() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
     let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");

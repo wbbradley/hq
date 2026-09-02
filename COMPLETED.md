@@ -1,5 +1,20 @@
 # Completed
 
+## 2026-09-02 — Multiline compose shortcuts
+
+The terminal shell now normalizes Ctrl+J and Shift+Enter into a dedicated multiline-editor action,
+while plain Enter remains submission. The compose reducer inserts a newline at the Unicode-safe
+caret through the existing byte-bounded editor and autosave path; one-line forms are unaffected.
+Composer hints and TUI documentation advertise both shortcuts. Tests cover terminal normalization,
+mid-string insertion, byte-bound rejection, autosave scheduling, and subsequent submission. Strict
+workspace Clippy and the complete all-feature workspace suite pass.
+
+### Original plan entry
+
+* The compose area should support both <c-j> and <s-enter> as newline append operators.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-02 — Contextual Escape navigation
 
 Escape now pops one visible context at a time. The composer returns to the retained conversation,

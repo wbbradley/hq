@@ -3276,7 +3276,7 @@ fn render_draft_pane(
             );
             let hint_text = model
                 .message_field_error()
-                .unwrap_or("Enter send · Esc save and close");
+                .unwrap_or("Enter send · Ctrl-J/Shift-Enter newline · Esc close");
             frame.render_widget(
                 Paragraph::new(hint_text).style(if model.message_field_error().is_some() {
                     theme.style(UiThemeRole::Error)
@@ -4405,7 +4405,7 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     } else if let Some(hint) = model.transient_help() {
         format!(" Hint · {hint}")
     } else if model.focus() == UiFocus::Draft {
-        " Enter send · Esc save and close · ? help · q quit".to_owned()
+        " Enter send · Ctrl-J/Shift-Enter newline · Esc close · ? help · q quit".to_owned()
     } else if model.focus() == UiFocus::Navigation && model.viewport().width >= WIDE_WIDTH {
         " ↑/↓ or j/k section · Enter content · ? help · q quit".to_owned()
     } else if model.focus() == UiFocus::Navigation {

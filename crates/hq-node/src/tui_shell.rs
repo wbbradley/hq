@@ -329,6 +329,9 @@ fn normalize_key(key: KeyEvent) -> Option<TuiTerminalEvent> {
     {
         return Some(TuiTerminalEvent::Cancelled);
     }
+    if key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('j' | 'J')) {
+        return Some(TuiTerminalEvent::Input(UiInput::InsertNewline));
+    }
     let plain = !key.modifiers.intersects(
         KeyModifiers::CONTROL
             | KeyModifiers::ALT
@@ -343,6 +346,7 @@ fn normalize_key(key: KeyEvent) -> Option<TuiTerminalEvent> {
         KeyCode::Left if plain => UiInput::MoveCursorLeft,
         KeyCode::Down if plain => UiInput::NextItem,
         KeyCode::Up if plain => UiInput::PreviousItem,
+        KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => UiInput::InsertNewline,
         KeyCode::Enter if plain => UiInput::Activate,
         KeyCode::F(1) if plain => UiInput::Help,
         KeyCode::F(5) if plain => UiInput::Refresh,

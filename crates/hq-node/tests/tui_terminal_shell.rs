@@ -68,6 +68,12 @@ fn crossterm_events_normalize_to_the_closed_ui_vocabulary() {
             UiInput::Character('k'),
         ),
         (KeyCode::Enter, KeyModifiers::NONE, UiInput::Activate),
+        (KeyCode::Enter, KeyModifiers::SHIFT, UiInput::InsertNewline),
+        (
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+            UiInput::InsertNewline,
+        ),
         (KeyCode::PageDown, KeyModifiers::NONE, UiInput::LoadMore),
         (KeyCode::Esc, KeyModifiers::NONE, UiInput::Escape),
         (KeyCode::Backspace, KeyModifiers::NONE, UiInput::Backspace),

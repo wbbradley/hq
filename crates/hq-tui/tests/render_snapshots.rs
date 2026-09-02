@@ -1080,7 +1080,7 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
             "{size:?}:\n{rendered}"
         );
         assert!(rendered.contains('│'));
-        assert!(rendered.contains("Enter send · Esc save and close"));
+        assert!(rendered.contains("Ctrl-J/Shift-Enter newline"));
     }
 }
 

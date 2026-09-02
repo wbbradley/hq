@@ -70,7 +70,8 @@ state target. Escape cancels selectors and confirmations without a canonical mut
 
 Draft editing accepts Unicode characters, bounded paste, and Unicode-safe Left, Right, Home, End,
 Backspace, and Delete operations up to the ordinary content bound. A coalesced 250 ms timer
-autosaves optimistic complete replacements. Submit waits for
+autosaves optimistic complete replacements. Ctrl-J and Shift-Enter insert a newline at the current
+caret; plain Enter submits. Submit waits for
 the latest save acknowledgement, then emits one draft-backed command effect. Escape also waits for
 the latest text to be durably saved before closing; an edit made while an earlier save is in flight
 therefore cannot disappear. Save conflicts preserve the local editor text, adopt the current server

@@ -216,6 +216,8 @@ pub enum UiInput {
     PreviousItem,
     /// Activate the selected row.
     Activate,
+    /// Insert one line break in a multiline editor.
+    InsertNewline,
     /// Request the next reducer-ordered conversation page.
     LoadMore,
     /// Dismiss the current transient interaction.
@@ -4626,6 +4628,7 @@ fn apply_input(
             model.reveal_conversation_entry_end()
         }
         UiInput::Paste(_)
+        | UiInput::InsertNewline
         | UiInput::Help
         | UiInput::Refresh
         | UiInput::Backspace
@@ -6050,6 +6053,7 @@ fn apply_draft_input(
         }) => match input {
             UiInput::Character(_)
             | UiInput::Paste(_)
+            | UiInput::InsertNewline
             | UiInput::Backspace
             | UiInput::Delete
             | UiInput::MoveCursorLeft
@@ -6988,6 +6992,7 @@ fn edit_text_input(
     let edit = match input {
         UiInput::Character(value) => TextEdit::Insert(value.encode_utf8(&mut encoded)),
         UiInput::Paste(value) => TextEdit::Insert(value),
+        UiInput::InsertNewline => TextEdit::Insert("\n"),
         UiInput::Backspace => TextEdit::Backspace,
         UiInput::Delete => TextEdit::Delete,
         UiInput::MoveCursorLeft => TextEdit::Left,
