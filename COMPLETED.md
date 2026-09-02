@@ -1,5 +1,20 @@
 # Completed
 
+## 2026-09-02 — Contextual Escape navigation
+
+Escape now pops one visible context at a time. The composer returns to the retained conversation,
+then conversation focus returns to the Inbox list, then list focus returns to top navigation;
+materialized detail is preserved throughout. Technical detail closes before conversation focus,
+help closes before an underlying modal, and a filtered project Inbox no longer swallows the
+conversation-level Escape. Existing typed cancellation and pending-operation rules remain intact.
+Strict workspace Clippy and the complete all-feature workspace suite pass.
+
+### Original plan entry
+
+* <esc> should "pop" the UI back to whatever the containing contextual stack is. So, in the compose note, it should close the compose note and bring you back to the conversation. From there, it should bring focus back to the inbox. From the inbox it should bring you back to the main menu. This <esc> to pop UI affordance should work everywhere.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-02 — Conversation entry restores follow-tail
 
 Entering an already materialized conversation by either directional navigation or activation now

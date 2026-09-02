@@ -4,7 +4,6 @@
 
 ### Smaller hand-added todos (each need some in-depth analysis)
 
-* <esc> should "pop" the UI back to whatever the containing contextual stack is. So, in the compose note, it should close the compose note and bring you back to the conversation. From there, it should bring focus back to the inbox. From the inbox it should bring you back to the main menu. This <esc> to pop UI affordance should work everywhere.
 * The compose area should support both <c-j> and <s-enter> as newline append operators.
 * The "Command approval needed" dialog does not properly handle vim navigation (k/j for up/down).
 * We should have a Config page that is a sibling to the top nav elements (Inbox...Projects) that allows direct editing of all configuration values. Theme updates should take effect in real time. For theme config, it should show all supported themes. If this feature doesn't exist yet (named themes) then let's plan that out after implementing the Config page scaffolding. Things we should be able to configure: default settings for codex (like yolo, and model selection - for now this can be raw text or nothing for default).

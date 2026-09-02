@@ -4478,15 +4478,15 @@ fn apply_input(
         effects.push(UiEffect::RequestRedraw);
         return Ok(());
     }
-    if let Some(changed) = apply_open_modal_input(model, input, effects)? {
-        if changed || dismissed_completion {
+    if model.help_page.is_some() {
+        let changed = apply_help_input(model, input, effects);
+        if changed {
             effects.push(UiEffect::RequestRedraw);
         }
         return Ok(());
     }
-    if model.help_page.is_some() {
-        let changed = apply_help_input(model, input, effects);
-        if changed {
+    if let Some(changed) = apply_open_modal_input(model, input, effects)? {
+        if changed || dismissed_completion {
             effects.push(UiEffect::RequestRedraw);
         }
         return Ok(());
@@ -4649,6 +4649,7 @@ fn apply_project_workspace_input(
 ) -> Result<Option<bool>, UiError> {
     if model.section == UiSection::Inbox
         && model.project_filter.is_some()
+        && model.focus != UiFocus::Conversation
         && matches!(input, UiInput::Escape)
     {
         model.clear_project_filter();
@@ -8663,11 +8664,18 @@ fn escape(model: &mut UiModel) -> bool {
     if model.technical_visible {
         model.close_technical_details();
         true
-    } else if model.conversation.is_some() {
-        model.close_conversation();
-        true
     } else {
-        false
+        match model.focus {
+            UiFocus::Conversation => {
+                model.focus = UiFocus::Content;
+                true
+            }
+            UiFocus::Content => {
+                model.focus = UiFocus::Navigation;
+                true
+            }
+            UiFocus::Navigation | UiFocus::Draft => false,
+        }
     }
 }
 

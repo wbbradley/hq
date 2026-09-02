@@ -1107,7 +1107,12 @@ fn explicit_help_and_refresh_work_without_discarding_an_open_dialog() {
     let helped = update(launcher, UiEvent::Input(UiInput::Help)).expect("F1 help");
     assert_eq!(helped.model.help_page(), Some(UiHelpPage::Context));
     assert_eq!(helped.model.new_modal(), retained.as_ref());
-    let closed = update(helped.model, UiEvent::Input(UiInput::Help)).expect("close F1 help");
+    let escaped = update(helped.model, UiEvent::Input(UiInput::Escape))
+        .expect("Escape closes help before the underlying dialog");
+    assert_eq!(escaped.model.help_page(), None);
+    assert_eq!(escaped.model.new_modal(), retained.as_ref());
+    let reopened = update(escaped.model, UiEvent::Input(UiInput::Help)).expect("reopen F1 help");
+    let closed = update(reopened.model, UiEvent::Input(UiInput::Help)).expect("close F1 help");
     assert_eq!(closed.model.help_page(), None);
     assert_eq!(closed.model.new_modal(), retained.as_ref());
 
@@ -2026,6 +2031,62 @@ fn inbox_back_closes_technical_details_before_leaving_the_conversation() {
     let back = update(closed.model, UiEvent::Input(UiInput::MoveCursorLeft))
         .expect("return to Inbox list");
     assert_eq!(back.model.focus(), UiFocus::Content);
+}
+
+#[test]
+fn escape_pops_composer_conversation_inbox_and_navigation_one_level_at_a_time() {
+    let model = opened_conversation(vec![actionable_entry("question", [4; 32])]);
+    let opening =
+        update(model, UiEvent::Input(UiInput::Character('r'))).expect("open reply composer");
+    let (effect_id, target) = open_draft_effect(&opening.effects);
+    let composing = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id,
+            draft: UiMailboxDraft {
+                draft_id: [5; 32],
+                target: target.clone(),
+                content: String::new(),
+                version: 1,
+            },
+        },
+    )
+    .expect("composer loaded");
+
+    let conversation = update(composing.model, UiEvent::Input(UiInput::Escape))
+        .expect("composer pops to conversation");
+    assert!(conversation.model.mailbox_draft().is_none());
+    assert_eq!(conversation.model.focus(), UiFocus::Conversation);
+    assert!(conversation.model.conversation().is_some());
+
+    let inbox = update(conversation.model, UiEvent::Input(UiInput::Escape))
+        .expect("conversation pops to Inbox");
+    assert_eq!(inbox.model.focus(), UiFocus::Content);
+    assert!(inbox.model.conversation().is_some());
+
+    let navigation = update(inbox.model, UiEvent::Input(UiInput::Escape))
+        .expect("Inbox pops to main navigation");
+    assert_eq!(navigation.model.focus(), UiFocus::Navigation);
+    assert!(navigation.model.conversation().is_some());
+
+    let root = update(navigation.model.clone(), UiEvent::Input(UiInput::Escape))
+        .expect("main navigation is the root");
+    assert_eq!(root.model, navigation.model);
+    assert!(root.effects.is_empty());
+}
+
+#[test]
+fn escape_closes_technical_details_before_popping_conversation_focus() {
+    let model = opened_conversation(vec![entry("message-1", false)]);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("open details");
+    let conversation =
+        update(details.model, UiEvent::Input(UiInput::Escape)).expect("close technical details");
+    assert!(!conversation.model.technical_visible());
+    assert_eq!(conversation.model.focus(), UiFocus::Conversation);
+
+    let inbox = update(conversation.model, UiEvent::Input(UiInput::Escape))
+        .expect("leave conversation on the next escape");
+    assert_eq!(inbox.model.focus(), UiFocus::Content);
 }
 
 #[test]
@@ -4392,7 +4453,7 @@ fn project_primary_action_routes_zero_one_and_many_conversations_without_guessin
     let mut many_snapshot = projects_snapshot(3, vec![project.clone()]);
     many_snapshot.inbox_rows = vec![first.clone(), second.clone()];
     let many = update(
-        loaded_projects_snapshot(many_snapshot),
+        loaded_projects_snapshot(many_snapshot.clone()),
         UiEvent::Input(UiInput::Activate),
     )
     .expect("open filtered conversation list");
@@ -4411,8 +4472,31 @@ fn project_primary_action_routes_zero_one_and_many_conversations_without_guessin
             .all(|effect| !matches!(effect, UiEffect::LoadConversation { .. }))
     );
 
+    let observed = update(
+        many.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: many_snapshot,
+                conversation: Some(UiConversationPage {
+                    title: first.title.clone(),
+                    context: None,
+                    row_id: first.id.clone(),
+                    entries: vec![entry("project-message", false)],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("filtered conversation observed");
+    let conversation = update(observed.model, UiEvent::Input(UiInput::MoveCursorRight))
+        .expect("enter filtered conversation");
+    let inbox = update(conversation.model, UiEvent::Input(UiInput::Escape))
+        .expect("leave conversation before clearing filter");
+    assert_eq!(inbox.model.focus(), UiFocus::Content);
+    assert!(inbox.model.project_filter().is_some());
+
     let cleared =
-        update(many.model, UiEvent::Input(UiInput::Escape)).expect("clear project filter");
+        update(inbox.model, UiEvent::Input(UiInput::Escape)).expect("clear project filter");
     assert!(cleared.model.project_filter().is_none());
 }
 
