@@ -214,6 +214,13 @@ struct StubSession {
 }
 
 impl HarnessSession for StubSession {
+    fn register_event_notifier(
+        &mut self,
+        notifier: hq_harness::HarnessEventNotifier,
+    ) -> Result<(), HarnessError> {
+        notifier.notify()
+    }
+
     fn submit(
         &mut self,
         _submission: HarnessSubmission,
@@ -235,8 +242,8 @@ impl HarnessSession for StubSession {
         Ok(hq_harness::HarnessCancellationOutcome::AlreadyFinished)
     }
 
-    fn poll_event(&mut self, _wait: Duration) -> Result<HarnessEventPoll, HarnessError> {
-        Ok(HarnessEventPoll::TimedOut)
+    fn next_event(&mut self) -> Result<HarnessEventPoll, HarnessError> {
+        Ok(HarnessEventPoll::Pending)
     }
 
     fn answer_interactive(

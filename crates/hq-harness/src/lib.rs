@@ -9,10 +9,10 @@ mod supervisor;
 pub use buffer::{HarnessBufferPush, HarnessBufferedEvent, HarnessEventBuffer, HarnessSnapshotKey};
 pub use contract::{
     HarnessActivity, HarnessCancellationOutcome, HarnessCapabilities, HarnessCapability,
-    HarnessDrainOutcome, HarnessError, HarnessErrorClass, HarnessEvent, HarnessEventPoll,
-    HarnessFactory, HarnessInstance, HarnessInstanceRequest, HarnessInteractiveAnswer,
-    HarnessInteractiveRequest, HarnessInteractiveResponse, HarnessOutput, HarnessOutputKind,
-    HarnessRequestChoice, HarnessRequestId, HarnessRequestKind, HarnessSession,
+    HarnessDrainOutcome, HarnessError, HarnessErrorClass, HarnessEvent, HarnessEventNotifier,
+    HarnessEventPoll, HarnessFactory, HarnessInstance, HarnessInstanceRequest,
+    HarnessInteractiveAnswer, HarnessInteractiveRequest, HarnessInteractiveResponse, HarnessOutput,
+    HarnessOutputKind, HarnessRequestChoice, HarnessRequestId, HarnessRequestKind, HarnessSession,
     HarnessSessionRequest, HarnessSubmission, HarnessSubmissionLookup, HarnessSubmissionOutcome,
     OpenedHarnessSession,
 };

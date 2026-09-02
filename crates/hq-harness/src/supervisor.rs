@@ -18,10 +18,10 @@ use sha2::{Digest, Sha256};
 use crate::{
     HarnessActivity, HarnessBufferPush, HarnessBufferedEvent, HarnessCancellationOutcome,
     HarnessDrainOutcome, HarnessEnvironment, HarnessError, HarnessErrorClass, HarnessEvent,
-    HarnessEventBuffer, HarnessEventPoll, HarnessInstanceRequest, HarnessInteractiveAnswer,
-    HarnessInteractiveRequest, HarnessOutput, HarnessOutputKind, HarnessRegistry, HarnessSession,
-    HarnessSessionRequest, HarnessSnapshotKey, HarnessSubmission, HarnessSubmissionLookup,
-    HarnessSubmissionOutcome,
+    HarnessEventBuffer, HarnessEventNotifier, HarnessEventPoll, HarnessInstanceRequest,
+    HarnessInteractiveAnswer, HarnessInteractiveRequest, HarnessOutput, HarnessOutputKind,
+    HarnessRegistry, HarnessSession, HarnessSessionRequest, HarnessSnapshotKey, HarnessSubmission,
+    HarnessSubmissionLookup, HarnessSubmissionOutcome,
 };
 
 /// Maximum state rows inspected by one supervisor repair pass.
@@ -384,8 +384,6 @@ pub struct HarnessSupervisorConfig {
     pub event_capacity: NonZeroUsize,
     /// Maximum adapter drain wait during ordered shutdown.
     pub drain_wait: Duration,
-    /// Delay between bounded component-owned event polling passes.
-    pub event_poll_interval: Duration,
 }
 
 impl Default for HarnessSupervisorConfig {
@@ -396,7 +394,6 @@ impl Default for HarnessSupervisorConfig {
             lease_duration: Duration::from_secs(30),
             event_capacity: NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN),
             drain_wait: Duration::from_secs(2),
-            event_poll_interval: Duration::from_millis(10),
         }
     }
 }
@@ -414,6 +411,8 @@ pub struct HarnessSupervisorDependencies {
     pub clock: Arc<dyn HarnessClock>,
     /// Injected exact owner-token source.
     pub tokens: Arc<dyn HarnessTokenSource>,
+    /// Coalescing provider-event notification shared with every live adapter session.
+    pub events: HarnessEventNotifier,
 }
 
 /// Memory-only request to start or exactly resume one logical worker.
@@ -541,7 +540,6 @@ impl HarnessSupervisor {
             || config.event_capacity.get() > MAX_HARNESS_SUPERVISOR_STATE_ITEMS
             || config.lease_duration.is_zero()
             || config.drain_wait.is_zero()
-            || config.event_poll_interval.is_zero()
         {
             return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
         }
@@ -764,7 +762,7 @@ impl HarnessSupervisor {
             },
             request.session,
         );
-        let opened = match opened {
+        let mut opened = match opened {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = self
@@ -777,6 +775,9 @@ impl HarnessSupervisor {
                 return Err(error);
             }
         };
+        opened
+            .session
+            .register_event_notifier(self.dependencies.events.clone())?;
         self.dependencies
             .state
             .apply(HarnessStateMutation::SetReadySession {
@@ -801,6 +802,7 @@ impl HarnessSupervisor {
                 requests: VecDeque::with_capacity(self.config.event_capacity.get()),
             },
         );
+        self.dependencies.events.notify()?;
         Ok(ready)
     }
 
@@ -976,6 +978,26 @@ impl HarnessSupervisor {
         Ok(report)
     }
 
+    /// Drains currently ready provider events with bounded work per live source.
+    pub fn drain_ready_events(&self) -> Result<HarnessEventPumpReport, HarnessError> {
+        let mut aggregate = HarnessEventPumpReport::default();
+        let mut exhausted_budget = false;
+        for _ in 0..self.config.event_capacity.get() {
+            let pass = self.poll_events()?;
+            let progressed =
+                pass.events_polled > 0 || pass.workers_closed > 0 || pass.workers_failed > 0;
+            merge_pump_report(&mut aggregate, pass, self.config.max_workers);
+            if aggregate.live_workers == 0 || !progressed {
+                return Ok(aggregate);
+            }
+            exhausted_budget = true;
+        }
+        if exhausted_budget && aggregate.live_workers > 0 {
+            self.dependencies.events.notify()?;
+        }
+        Ok(aggregate)
+    }
+
     /// Activates one exact interactive responder capability idempotently.
     pub fn register_responder(
         &self,
@@ -1014,16 +1036,15 @@ impl HarnessSupervisor {
             .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?;
         let mut aggregate = HarnessEventPumpReport::default();
         loop {
-            let pass = self.poll_events()?;
+            let pass = self.drain_ready_events()?;
             merge_pump_report(&mut aggregate, pass, self.config.max_workers);
             if aggregate.live_workers == 0 || Instant::now() >= deadline {
                 return Ok(aggregate);
             }
-            std::thread::sleep(
-                self.config
-                    .event_poll_interval
-                    .min(deadline.saturating_duration_since(Instant::now())),
-            );
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || !self.dependencies.events.wait(Some(remaining))? {
+                return Ok(aggregate);
+            }
         }
     }
 
@@ -1222,23 +1243,28 @@ fn pump_worker(
             report.failures.push(error.class);
         }
     }
-    match worker.session.poll_event(Duration::ZERO) {
+    match worker.session.next_event() {
         Ok(HarnessEventPoll::Event(event)) => {
-            report.events_polled = 1;
+            report.events_polled = report.events_polled.saturating_add(1);
             match admit_polled_event(config, worker, event, responder_available) {
                 Ok(admission) => account_admission(&mut report, admission),
                 Err(failure) => {
                     account_failed_closed(&mut report, failure.failed_closed);
                     worker.staged = Some(*failure.event);
+                    return report;
                 }
             }
             if let Err(error) = drain_events(dependencies, agent_id, worker) {
                 report.failures.push(error.class);
             }
         }
-        Ok(HarnessEventPoll::TimedOut) => {}
-        Ok(HarnessEventPoll::Closed) => report.terminal = Some(WorkerTerminal::Closed),
-        Err(error) => report.terminal = Some(WorkerTerminal::Failed(error.class)),
+        Ok(HarnessEventPoll::Pending) => {}
+        Ok(HarnessEventPoll::Closed) => {
+            report.terminal = Some(WorkerTerminal::Closed);
+        }
+        Err(error) => {
+            report.terminal = Some(WorkerTerminal::Failed(error.class));
+        }
     }
     report
 }

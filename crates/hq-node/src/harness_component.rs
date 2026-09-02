@@ -18,12 +18,13 @@ use hq_application::{
 };
 use hq_harness::{
     HarnessActivity, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEnvironment,
-    HarnessError, HarnessErrorClass, HarnessInteractiveAnswer, HarnessInteractiveResponse,
-    HarnessLaunchRequest, HarnessOutput, HarnessOwnerToken, HarnessPersistencePort,
-    HarnessProjectDelivery, HarnessRegistry, HarnessRequestKind, HarnessResponderId,
-    HarnessSessionControlOutcome, HarnessSessionOperation, HarnessSessionOperationKind,
-    HarnessSessionOperationState, HarnessSessionRequest, HarnessSubmission, HarnessSupervisor,
-    HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessTokenSource,
+    HarnessError, HarnessErrorClass, HarnessEventNotifier, HarnessInteractiveAnswer,
+    HarnessInteractiveResponse, HarnessLaunchRequest, HarnessOutput, HarnessOwnerToken,
+    HarnessPersistencePort, HarnessProjectDelivery, HarnessRegistry, HarnessRequestKind,
+    HarnessResponderId, HarnessSessionControlOutcome, HarnessSessionOperation,
+    HarnessSessionOperationKind, HarnessSessionOperationState, HarnessSessionRequest,
+    HarnessSubmission, HarnessSupervisor, HarnessSupervisorConfig, HarnessSupervisorDependencies,
+    HarnessTokenSource,
 };
 use hq_projects::{ProjectRuntimeDelivery, ProjectRuntimePort, ProjectRuntimeRequest};
 use hq_store::Store;
@@ -46,6 +47,7 @@ struct HarnessNodeInner {
     canonical: Arc<dyn AgentSessionCanonicalPort>,
     supervisor: Mutex<Option<HarnessSupervisor>>,
     event_task: Mutex<Option<JoinHandle<Result<(), HarnessError>>>>,
+    event_notifications: HarnessEventNotifier,
     event_stop: AtomicBool,
     accepting: AtomicBool,
     interaction_answers: Mutex<BTreeMap<hq_domain::OperationId, InteractionCommandRecord>>,
@@ -101,6 +103,7 @@ impl HarnessNodeComponent {
         canonical: Arc<dyn AgentSessionCanonicalPort>,
         default_provider: Option<hq_domain::ProviderId>,
     ) -> Self {
+        let event_notifications = HarnessEventNotifier::default();
         Self {
             inner: Arc::new(HarnessNodeInner {
                 config,
@@ -110,11 +113,13 @@ impl HarnessNodeComponent {
                     persistence,
                     clock,
                     tokens,
+                    events: event_notifications.clone(),
                 },
                 default_provider,
                 canonical,
                 supervisor: Mutex::new(None),
                 event_task: Mutex::new(None),
+                event_notifications,
                 event_stop: AtomicBool::new(false),
                 accepting: AtomicBool::new(false),
                 interaction_answers: Mutex::new(BTreeMap::new()),
@@ -311,11 +316,7 @@ impl HarnessNodeComponent {
     }
 
     fn wake_event_task(&self) {
-        if let Ok(task) = self.inner.event_task.lock()
-            && let Some(task) = task.as_ref()
-        {
-            task.thread().unpark();
-        }
+        let _ = self.inner.event_notifications.notify();
     }
 
     fn shutdown_supervisor(&self) -> Result<ComponentDrain, ComponentError> {
@@ -325,11 +326,12 @@ impl HarnessNodeComponent {
             .event_task
             .lock()
             .map_err(|_| ComponentError::unavailable())?
-            .take()
-            .is_some_and(|task| {
-                task.thread().unpark();
-                !matches!(task.join(), Ok(Ok(())))
-            });
+            .take();
+        self.inner
+            .event_notifications
+            .notify()
+            .map_err(|_| ComponentError::unavailable())?;
+        let event_failed = event_failed.is_some_and(|task| !matches!(task.join(), Ok(Ok(()))));
         let supervisor = self
             .inner
             .supervisor
@@ -421,7 +423,7 @@ fn run_harness_events(
             let report = supervisor
                 .as_ref()
                 .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?
-                .poll_events();
+                .drain_ready_events();
             match report {
                 Ok(report)
                     if report.interactive_requests > 0
@@ -438,7 +440,7 @@ fn run_harness_events(
                 }
             }
         }
-        thread::park_timeout(inner.config.event_poll_interval);
+        inner.event_notifications.wait(None)?;
     }
     let supervisor = inner
         .supervisor
@@ -608,15 +610,10 @@ impl NodeComponent for HarnessNodeComponent {
             Ok(())
         };
         self.inner.event_stop.store(true, Ordering::Release);
-        if let Some(task) = self
-            .inner
-            .event_task
-            .lock()
-            .map_err(|_| ComponentError::unavailable())?
-            .as_ref()
-        {
-            task.thread().unpark();
-        }
+        self.inner
+            .event_notifications
+            .notify()
+            .map_err(|_| ComponentError::unavailable())?;
         result
     }
 
@@ -1215,7 +1212,6 @@ mod tests {
         let persistence = Arc::new(CountingPersistence::default());
         let mut component = HarnessNodeComponent::new(
             HarnessSupervisorConfig {
-                event_poll_interval: Duration::from_secs(60),
                 drain_wait: Duration::from_millis(20),
                 ..HarnessSupervisorConfig::default()
             },
@@ -1246,8 +1242,6 @@ mod tests {
                 environment: HarnessEnvironment::default(),
             })
             .expect("worker launches");
-        component.wake_event_task();
-
         let deadline = Instant::now() + Duration::from_secs(1);
         while persistence.outputs.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(1));
@@ -1330,10 +1324,7 @@ mod tests {
             )
             .expect("provider registers");
         let mut component = HarnessNodeComponent::new(
-            HarnessSupervisorConfig {
-                event_poll_interval: Duration::from_millis(1),
-                ..HarnessSupervisorConfig::default()
-            },
+            HarnessSupervisorConfig::default(),
             &store,
             Arc::new(registry),
             Arc::new(CountingPersistence::default()),
@@ -1365,7 +1356,6 @@ mod tests {
                 environment: HarnessEnvironment::default(),
             })
             .expect("worker launches");
-        component.wake_event_task();
         let deadline = Instant::now() + Duration::from_secs(1);
         while component
             .pending_interactions(1)
@@ -1524,6 +1514,13 @@ mod tests {
     }
 
     impl HarnessSession for EventSession {
+        fn register_event_notifier(
+            &mut self,
+            notifier: HarnessEventNotifier,
+        ) -> Result<(), HarnessError> {
+            notifier.notify()
+        }
+
         fn submit(
             &mut self,
             _submission: HarnessSubmission,
@@ -1545,12 +1542,12 @@ mod tests {
             Ok(hq_harness::HarnessCancellationOutcome::AlreadyFinished)
         }
 
-        fn poll_event(&mut self, _wait: Duration) -> Result<HarnessEventPoll, HarnessError> {
+        fn next_event(&mut self) -> Result<HarnessEventPoll, HarnessError> {
             self.events
                 .lock()
                 .expect("events lock")
                 .pop_front()
-                .unwrap_or(Ok(HarnessEventPoll::TimedOut))
+                .unwrap_or(Ok(HarnessEventPoll::Pending))
         }
 
         fn answer_interactive(

@@ -1,6 +1,13 @@
 //! Object-safe provider-neutral lifecycle, submission, and event vocabulary.
 
-use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroU64, time::Duration};
+use std::{
+    collections::BTreeSet,
+    error::Error,
+    fmt,
+    num::NonZeroU64,
+    sync::{Arc, Condvar, Mutex},
+    time::Duration,
+};
 
 use hq_domain::{
     ActivityKind, ActivityStatus, AgentId, BoundedVec, CommandDigest, CompletedItemPresentation,
@@ -333,10 +340,72 @@ pub enum HarnessEvent {
 pub enum HarnessEventPoll {
     /// One indivisible event in provider source order.
     Event(HarnessEvent),
-    /// The bounded wait expired without an event.
-    TimedOut,
+    /// No complete event is currently available.
+    Pending,
     /// The session ended normally after all preceding events.
     Closed,
+}
+
+/// Cloneable coalescing notification shared by provider readers and their supervisor owner.
+#[derive(Clone, Default)]
+pub struct HarnessEventNotifier {
+    state: Arc<HarnessEventNotifierState>,
+}
+
+#[derive(Default)]
+struct HarnessEventNotifierState {
+    pending: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl fmt::Debug for HarnessEventNotifier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HarnessEventNotifier")
+            .finish_non_exhaustive()
+    }
+}
+
+impl HarnessEventNotifier {
+    /// Publishes one body-free wake. Repeated unconsumed wakes coalesce.
+    pub fn notify(&self) -> Result<(), HarnessError> {
+        let mut pending = self
+            .state
+            .pending
+            .lock()
+            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?;
+        *pending = true;
+        self.state.changed.notify_one();
+        Ok(())
+    }
+
+    /// Waits for and consumes one coalesced wake, optionally until one exact deadline duration.
+    pub fn wait(&self, timeout: Option<Duration>) -> Result<bool, HarnessError> {
+        let pending = self
+            .state
+            .pending
+            .lock()
+            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?;
+        let mut pending = match timeout {
+            Some(timeout) => {
+                self.state
+                    .changed
+                    .wait_timeout_while(pending, timeout, |pending| !*pending)
+                    .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?
+                    .0
+            }
+            None => self
+                .state
+                .changed
+                .wait_while(pending, |pending| !*pending)
+                .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?,
+        };
+        if !*pending {
+            return Ok(false);
+        }
+        *pending = false;
+        Ok(true)
+    }
 }
 
 /// Explicit provider drain observation.
@@ -390,6 +459,12 @@ impl fmt::Debug for OpenedHarnessSession {
 
 /// Sole mutable owner of one ready provider session.
 pub trait HarnessSession: Send {
+    /// Registers the supervisor's event notifier and immediately wakes it for already-ready input.
+    fn register_event_notifier(
+        &mut self,
+        notifier: HarnessEventNotifier,
+    ) -> Result<(), HarnessError>;
+
     /// Submits or safely repeats one stable exact input.
     fn submit(
         &mut self,
@@ -408,8 +483,8 @@ pub trait HarnessSession: Send {
         operation_id: OperationId,
     ) -> Result<HarnessCancellationOutcome, HarnessError>;
 
-    /// Polls at most `wait` for one source-ordered neutral event.
-    fn poll_event(&mut self, wait: Duration) -> Result<HarnessEventPoll, HarnessError>;
+    /// Returns one currently ready source-ordered neutral event without blocking.
+    fn next_event(&mut self) -> Result<HarnessEventPoll, HarnessError>;
 
     /// Answers one structured request exactly once.
     fn answer_interactive(&mut self, answer: HarnessInteractiveAnswer) -> Result<(), HarnessError>;
@@ -422,4 +497,34 @@ pub trait HarnessSession: Send {
 
     /// Idempotently terminates remaining adapter I/O or runtime ownership.
     fn force_stop(&mut self) -> Result<(), HarnessError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{thread, time::Duration};
+
+    use super::HarnessEventNotifier;
+
+    #[test]
+    fn event_notifier_retains_and_coalesces_wakes() -> Result<(), Box<dyn std::error::Error>> {
+        let notifier = HarnessEventNotifier::default();
+        notifier.notify()?;
+        notifier.notify()?;
+
+        assert!(notifier.wait(Some(Duration::ZERO))?);
+        assert!(!notifier.wait(Some(Duration::from_millis(1)))?);
+        Ok(())
+    }
+
+    #[test]
+    fn event_notifier_wakes_a_blocked_owner() -> Result<(), Box<dyn std::error::Error>> {
+        let notifier = HarnessEventNotifier::default();
+        let waiter = notifier.clone();
+        let waiting = thread::spawn(move || waiter.wait(None));
+
+        notifier.notify()?;
+
+        assert!(waiting.join().map_err(|_| "waiter panicked")??);
+        Ok(())
+    }
 }

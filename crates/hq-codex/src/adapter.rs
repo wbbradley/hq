@@ -878,6 +878,13 @@ impl CodexSession {
 }
 
 impl HarnessSession for CodexSession {
+    fn register_event_notifier(
+        &mut self,
+        notifier: hq_harness::HarnessEventNotifier,
+    ) -> Result<(), HarnessError> {
+        self.transport.register_event_notifier(&notifier)
+    }
+
     fn submit(
         &mut self,
         submission: HarnessSubmission,
@@ -997,7 +1004,7 @@ impl HarnessSession for CodexSession {
         }
     }
 
-    fn poll_event(&mut self, wait: Duration) -> Result<HarnessEventPoll, HarnessError> {
+    fn next_event(&mut self) -> Result<HarnessEventPoll, HarnessError> {
         if let Some(error) = self.deferred_error.take() {
             return Err(HarnessError::new(error));
         }
@@ -1007,18 +1014,12 @@ impl HarnessSession for CodexSession {
         if let Some(event) = self.events.pop_front() {
             return Ok(HarnessEventPoll::Event(event));
         }
-        let deadline = Instant::now()
-            .checked_add(wait)
-            .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?;
         loop {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or(Duration::ZERO);
-            match self.transport.receive(remaining) {
+            match self.transport.try_receive() {
                 TransportRead::Message(message) => {
                     self.dispatch(message)?;
                 }
-                TransportRead::TimedOut => return Ok(HarnessEventPoll::TimedOut),
+                TransportRead::TimedOut => return Ok(HarnessEventPoll::Pending),
                 TransportRead::Closed => {
                     return match self.control.wait(Duration::ZERO)? {
                         CodexWaitOutcome::ExitedSuccessfully => Ok(HarnessEventPoll::Closed),
@@ -1042,9 +1043,6 @@ impl HarnessSession for CodexSession {
             }
             if let Some(event) = self.events.pop_front() {
                 return Ok(HarnessEventPoll::Event(event));
-            }
-            if Instant::now() >= deadline {
-                return Ok(HarnessEventPoll::TimedOut);
             }
         }
     }

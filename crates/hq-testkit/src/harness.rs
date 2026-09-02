@@ -6,7 +6,7 @@ use std::{
     fmt,
     num::NonZeroU64,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use hq_domain::{
@@ -15,12 +15,12 @@ use hq_domain::{
 };
 use hq_harness::{
     HarnessActivity, HarnessCancellationOutcome, HarnessCapabilities, HarnessCapability,
-    HarnessDrainOutcome, HarnessError, HarnessErrorClass, HarnessEvent, HarnessEventPoll,
-    HarnessFactory, HarnessInstance, HarnessInstanceRequest, HarnessInteractiveAnswer,
-    HarnessInteractiveRequest, HarnessInteractiveResponse, HarnessOutput, HarnessOutputKind,
-    HarnessRegistry, HarnessRequestChoice, HarnessRequestId, HarnessRequestKind, HarnessSession,
-    HarnessSessionRequest, HarnessSubmission, HarnessSubmissionLookup, HarnessSubmissionOutcome,
-    OpenedHarnessSession,
+    HarnessDrainOutcome, HarnessError, HarnessErrorClass, HarnessEvent, HarnessEventNotifier,
+    HarnessEventPoll, HarnessFactory, HarnessInstance, HarnessInstanceRequest,
+    HarnessInteractiveAnswer, HarnessInteractiveRequest, HarnessInteractiveResponse, HarnessOutput,
+    HarnessOutputKind, HarnessRegistry, HarnessRequestChoice, HarnessRequestId, HarnessRequestKind,
+    HarnessSession, HarnessSessionRequest, HarnessSubmission, HarnessSubmissionLookup,
+    HarnessSubmissionOutcome, OpenedHarnessSession,
 };
 
 const CONFORMANCE_EVENT_WAIT: Duration = Duration::from_secs(1);
@@ -405,9 +405,7 @@ fn active_operation_race(
         matches!(first, HarnessSubmissionOutcome::Uncertain(_)),
         "active-operation race was not uncertain",
     )?;
-    let event = opened
-        .session
-        .poll_event(CONFORMANCE_EVENT_WAIT)
+    let event = next_ready_event(&mut *opened.session)
         .map_err(|_| failure(scenario, "operation-race event failed"))?;
     ensure(
         scenario,
@@ -525,9 +523,7 @@ fn secret_request_rejection(
     scenario: HarnessConformanceScenario,
 ) -> Result<(), HarnessConformanceFailure> {
     let mut opened = open(fixture, HarnessSessionRequest::Start, scenario)?;
-    let error = opened
-        .session
-        .poll_event(CONFORMANCE_EVENT_WAIT)
+    let error = next_ready_event(&mut *opened.session)
         .err()
         .ok_or_else(|| {
             failure(
@@ -557,9 +553,7 @@ fn output_activity_order(
     let mut opened = open(fixture, HarnessSessionRequest::Start, scenario)?;
     let expected = fixture.expected_output_activity.clone();
     for expected_event in expected {
-        let actual = opened
-            .session
-            .poll_event(CONFORMANCE_EVENT_WAIT)
+        let actual = next_ready_event(&mut *opened.session)
             .map_err(|_| failure(scenario, "normalized event poll failed"))?;
         ensure(
             scenario,
@@ -571,9 +565,9 @@ fn output_activity_order(
         scenario,
         opened
             .session
-            .poll_event(Duration::ZERO)
+            .next_event()
             .map_err(|_| failure(scenario, "empty event poll failed"))?
-            == HarnessEventPoll::TimedOut,
+            == HarnessEventPoll::Pending,
         "event stream did not become empty after exact events",
     )
 }
@@ -597,9 +591,7 @@ fn crash_isolation(
             HarnessSessionRequest::Start,
         )
         .map_err(|_| failure(scenario, "second sibling did not open"))?;
-    let first_error = first
-        .session
-        .poll_event(CONFORMANCE_EVENT_WAIT)
+    let first_error = next_ready_event(&mut *first.session)
         .err()
         .ok_or_else(|| failure(scenario, "scripted sibling did not crash"))?;
     ensure(
@@ -660,9 +652,7 @@ fn teardown(
     ensure(
         scenario,
         matches!(
-            opened
-                .session
-                .poll_event(CONFORMANCE_EVENT_WAIT)
+            next_ready_event(&mut *opened.session)
                 .map_err(|_| failure(scenario, "teardown event drain failed"))?,
             HarnessEventPoll::Event(HarnessEvent::Output(_))
         ),
@@ -757,8 +747,7 @@ fn expect_request(
     session: &mut dyn HarnessSession,
     scenario: HarnessConformanceScenario,
 ) -> Result<HarnessInteractiveRequest, HarnessConformanceFailure> {
-    match session
-        .poll_event(CONFORMANCE_EVENT_WAIT)
+    match next_ready_event(session)
         .map_err(|_| failure(scenario, "interactive request poll failed"))?
     {
         HarnessEventPoll::Event(HarnessEvent::InteractiveRequest(request)) => Ok(request),
@@ -766,6 +755,24 @@ fn expect_request(
             scenario,
             "interactive request was not emitted in source order",
         )),
+    }
+}
+
+fn next_ready_event(session: &mut dyn HarnessSession) -> Result<HarnessEventPoll, HarnessError> {
+    let notifier = HarnessEventNotifier::default();
+    session.register_event_notifier(notifier.clone())?;
+    let deadline = Instant::now()
+        .checked_add(CONFORMANCE_EVENT_WAIT)
+        .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || !notifier.wait(Some(remaining))? {
+            return Err(HarnessError::new(HarnessErrorClass::Unavailable));
+        }
+        match session.next_event()? {
+            HarnessEventPoll::Pending => {}
+            ready => return Ok(ready),
+        }
     }
 }
 
@@ -1012,6 +1019,13 @@ struct ScriptedSession {
 }
 
 impl HarnessSession for ScriptedSession {
+    fn register_event_notifier(
+        &mut self,
+        notifier: HarnessEventNotifier,
+    ) -> Result<(), HarnessError> {
+        notifier.notify()
+    }
+
     fn submit(
         &mut self,
         submission: HarnessSubmission,
@@ -1093,7 +1107,7 @@ impl HarnessSession for ScriptedSession {
         Ok(HarnessCancellationOutcome::Cancelled)
     }
 
-    fn poll_event(&mut self, _wait: Duration) -> Result<HarnessEventPoll, HarnessError> {
+    fn next_event(&mut self) -> Result<HarnessEventPoll, HarnessError> {
         if self.scenario == HarnessConformanceScenario::SecretRequestRejection
             && self.flags.insert(ScriptedSessionFlag::SecretRejected)
         {
@@ -1107,7 +1121,7 @@ impl HarnessSession for ScriptedSession {
             return Err(HarnessError::new(HarnessErrorClass::Crashed));
         }
         let Some(event) = self.events.pop_front() else {
-            return Ok(HarnessEventPoll::TimedOut);
+            return Ok(HarnessEventPoll::Pending);
         };
         if let HarnessEvent::InteractiveRequest(request) = &event {
             self.pending_requests.insert(request.request_id);

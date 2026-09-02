@@ -2,16 +2,6 @@
 
 ## Next Up
 
-### Make harness provider events wake the supervisor
-
-Replace `HarnessSession::poll_event` and the component's `event_poll_interval`/`park_timeout` loop
-with a mandatory provider-neutral readiness notifier plus nonblocking source-ordered drain. Codex's
-reader must signal on queue empty-to-nonempty and terminal closure. Dynamic session launch, bounded
-staging/backpressure, responder loss, answer submission, cancellation, and shutdown drain must
-neither lose a wake nor busy-spin. Update the neutral adapter contract, conformance suite, fakes,
-supervisor, and Codex adapter without coupling the harness to one async runtime. Add deterministic
-idle, race, burst, full-queue, provider-closure, and shutdown tests.
-
 ### Wake local API sessions when revision invalidations are published
 
 Give `RevisionHub` a coalescing generation/wake observed directly by

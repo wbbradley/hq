@@ -21,8 +21,8 @@ use hq_harness::{
     HarnessActivity, HarnessBufferedEvent, HarnessCancellationOutcome, HarnessCapabilities,
     HarnessCapability, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState,
     HarnessDrainOutcome, HarnessEnvironment, HarnessError, HarnessErrorClass, HarnessEvent,
-    HarnessEventCheckpoint, HarnessEventPoll, HarnessFactory, HarnessInstance,
-    HarnessInstanceRequest, HarnessInteractiveAnswer, HarnessInteractiveRequest,
+    HarnessEventCheckpoint, HarnessEventNotifier, HarnessEventPoll, HarnessFactory,
+    HarnessInstance, HarnessInstanceRequest, HarnessInteractiveAnswer, HarnessInteractiveRequest,
     HarnessInteractiveResponse, HarnessLaunchRequest, HarnessLeaseOutcome, HarnessOutput,
     HarnessOutputKind, HarnessOwnerToken, HarnessPersistencePort, HarnessProjectDelivery,
     HarnessReadySession, HarnessRegistry, HarnessRequestId, HarnessRequestKind, HarnessResponderId,
@@ -891,7 +891,6 @@ fn supervisor(dependencies: HarnessSupervisorDependencies) -> HarnessSupervisor 
             lease_duration: Duration::from_secs(1),
             event_capacity: NonZeroUsize::new(2).expect("capacity is nonzero"),
             drain_wait: Duration::from_millis(1),
-            event_poll_interval: Duration::from_millis(1),
         },
         dependencies,
     )
@@ -931,6 +930,7 @@ fn dependencies(
         persistence,
         clock,
         tokens,
+        events: HarnessEventNotifier::default(),
     }
 }
 
@@ -1606,12 +1606,16 @@ struct ProviderState {
     drain_pending: AtomicBool,
     force_stops: AtomicUsize,
     events: Mutex<VecDeque<Result<HarnessEventPoll, HarnessError>>>,
+    notifier: Mutex<Option<HarnessEventNotifier>>,
     answers: Mutex<Vec<HarnessInteractiveAnswer>>,
 }
 
 impl ProviderState {
     fn queue(&self, events: impl IntoIterator<Item = Result<HarnessEventPoll, HarnessError>>) {
         self.events.lock().expect("events lock").extend(events);
+        if let Some(notifier) = self.notifier.lock().expect("notifier locks").as_ref() {
+            notifier.notify().expect("event notification publishes");
+        }
     }
 }
 
@@ -1659,6 +1663,17 @@ struct TestSession {
 }
 
 impl HarnessSession for TestSession {
+    fn register_event_notifier(
+        &mut self,
+        notifier: HarnessEventNotifier,
+    ) -> Result<(), HarnessError> {
+        *self.state.notifier.lock().expect("notifier locks") = Some(notifier.clone());
+        if !self.state.events.lock().expect("events lock").is_empty() {
+            notifier.notify()?;
+        }
+        Ok(())
+    }
+
     fn submit(
         &mut self,
         submission: HarnessSubmission,
@@ -1711,13 +1726,13 @@ impl HarnessSession for TestSession {
         Ok(HarnessCancellationOutcome::Cancelled)
     }
 
-    fn poll_event(&mut self, _wait: Duration) -> Result<HarnessEventPoll, HarnessError> {
+    fn next_event(&mut self) -> Result<HarnessEventPoll, HarnessError> {
         self.state
             .events
             .lock()
             .expect("events lock")
             .pop_front()
-            .unwrap_or(Ok(HarnessEventPoll::TimedOut))
+            .unwrap_or(Ok(HarnessEventPoll::Pending))
     }
 
     fn answer_interactive(&mut self, answer: HarnessInteractiveAnswer) -> Result<(), HarnessError> {

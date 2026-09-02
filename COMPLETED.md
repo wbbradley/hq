@@ -11884,3 +11884,30 @@ all-feature workspace suite pass.
 Done when installed behavior and qualification evidence prove the complete oversized-message task.
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-01 — Event-driven harness provider delivery
+
+Harness sessions now register a provider-neutral, coalescing readiness notifier and expose a
+nonblocking source-ordered event drain. The supervisor performs bounded ready drains, schedules an
+immediate continuation at its fairness bound, and waits only on explicit readiness or a real
+shutdown deadline. Dynamic launches, component actions, cancellation, and shutdown all use the
+same retained wake mechanism; the periodic event interval and park loop are gone.
+
+The Codex JSONL reader signals queued input, backpressure release, and terminal closure while
+preserving its bounded channel and RPC deadlines. Neutral conformance now exercises notifier-driven
+delivery. Deterministic notifier, registration-race, full-channel, closure, launch, interaction, and
+shutdown coverage passes alongside strict workspace Clippy and the complete workspace test suite.
+
+### Original plan entry
+
+### Make harness provider events wake the supervisor
+
+Replace `HarnessSession::poll_event` and the component's `event_poll_interval`/`park_timeout` loop
+with a mandatory provider-neutral readiness notifier plus nonblocking source-ordered drain. Codex's
+reader must signal on queue empty-to-nonempty and terminal closure. Dynamic session launch, bounded
+staging/backpressure, responder loss, answer submission, cancellation, and shutdown drain must
+neither lose a wake nor busy-spin. Update the neutral adapter contract, conformance suite, fakes,
+supervisor, and Codex adapter without coupling the harness to one async runtime. Add deterministic
+idle, race, burst, full-queue, provider-closure, and shutdown tests.
+
+<!-- End of archived plan entry. -->

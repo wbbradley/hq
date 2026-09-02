@@ -123,10 +123,10 @@ mod adapter {
     };
     use hq_harness::{
         HarnessActivity, HarnessCancellationOutcome, HarnessCapabilities, HarnessCapability,
-        HarnessDrainOutcome, HarnessError, HarnessErrorClass, HarnessEvent, HarnessEventPoll,
-        HarnessFactory, HarnessInstance, HarnessInstanceRequest, HarnessInteractiveAnswer,
-        HarnessInteractiveResponse, HarnessOutput, HarnessOutputKind, HarnessSession,
-        HarnessSessionRequest, HarnessSubmission, HarnessSubmissionLookup,
+        HarnessDrainOutcome, HarnessError, HarnessErrorClass, HarnessEvent, HarnessEventNotifier,
+        HarnessEventPoll, HarnessFactory, HarnessInstance, HarnessInstanceRequest,
+        HarnessInteractiveAnswer, HarnessInteractiveResponse, HarnessOutput, HarnessOutputKind,
+        HarnessSession, HarnessSessionRequest, HarnessSubmission, HarnessSubmissionLookup,
         HarnessSubmissionOutcome, OpenedHarnessSession,
     };
     use hq_testkit::{
@@ -304,10 +304,10 @@ mod adapter {
         );
 
         assert!(matches!(
-            opened.session.poll_event(Duration::from_secs(1))?,
+            next_ready_event(opened.session.as_mut())?,
             HarnessEventPoll::Event(HarnessEvent::Activity(_))
         ));
-        let output = opened.session.poll_event(Duration::from_secs(1))?;
+        let output = next_ready_event(opened.session.as_mut())?;
         assert!(matches!(
             output,
             HarnessEventPoll::Event(HarnessEvent::Output(ref output))
@@ -316,7 +316,7 @@ mod adapter {
                     && output.body.as_str() == "finished"
         ));
         let HarnessEventPoll::Event(HarnessEvent::InteractiveRequest(request)) =
-            opened.session.poll_event(Duration::from_secs(1))?
+            next_ready_event(opened.session.as_mut())?
         else {
             return Err("expected interactive request".into());
         };
@@ -462,7 +462,7 @@ mod adapter {
             HarnessSubmissionLookup::Accepted
         );
         assert!(matches!(
-            opened.session.poll_event(Duration::from_secs(1))?,
+            next_ready_event(opened.session.as_mut())?,
             HarnessEventPoll::Event(HarnessEvent::Output(ref output))
                 if output.operation_id == submission.operation_id
                     && output.body.as_str() == "recovered output"
@@ -504,7 +504,7 @@ mod adapter {
             (75, HarnessInteractiveResponse::Cancelled),
         ] {
             let HarnessEventPoll::Event(HarnessEvent::InteractiveRequest(request)) =
-                opened.session.poll_event(Duration::from_secs(1))?
+                next_ready_event(opened.session.as_mut())?
             else {
                 return Err(format!("expected interactive request {id}").into());
             };
@@ -565,9 +565,7 @@ mod adapter {
         let mut opened = factory
             .create_instance(instance_request())?
             .open_session(HarnessSessionRequest::Start)?;
-        let error = opened
-            .session
-            .poll_event(Duration::from_secs(1))
+        let error = next_ready_event(opened.session.as_mut())
             .err()
             .ok_or("unknown server request was ignored")?;
         assert_eq!(error.class, HarnessErrorClass::CompatibilityMismatch);
@@ -1150,6 +1148,24 @@ mod adapter {
         }
     }
 
+    fn next_ready_event(
+        session: &mut dyn HarnessSession,
+    ) -> Result<HarnessEventPoll, HarnessError> {
+        let notifier = HarnessEventNotifier::default();
+        session.register_event_notifier(notifier.clone())?;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || !notifier.wait(Some(remaining))? {
+                return Ok(HarnessEventPoll::Pending);
+            }
+            let event = session.next_event()?;
+            if event != HarnessEventPoll::Pending {
+                return Ok(event);
+            }
+        }
+    }
+
     struct TracingSession {
         inner: Box<dyn HarnessSession>,
         state: Arc<Mutex<Vec<HarnessConformanceObservation>>>,
@@ -1158,6 +1174,13 @@ mod adapter {
     }
 
     impl HarnessSession for TracingSession {
+        fn register_event_notifier(
+            &mut self,
+            notifier: hq_harness::HarnessEventNotifier,
+        ) -> Result<(), HarnessError> {
+            self.inner.register_event_notifier(notifier)
+        }
+
         fn submit(
             &mut self,
             submission: HarnessSubmission,
@@ -1197,8 +1220,8 @@ mod adapter {
             self.inner.cancel_operation(operation_id)
         }
 
-        fn poll_event(&mut self, wait: Duration) -> Result<HarnessEventPoll, HarnessError> {
-            match self.inner.poll_event(wait) {
+        fn next_event(&mut self) -> Result<HarnessEventPoll, HarnessError> {
+            match self.inner.next_event() {
                 Err(error)
                     if matches!(
                         error.class,
