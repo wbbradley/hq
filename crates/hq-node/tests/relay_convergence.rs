@@ -36,6 +36,62 @@ use serde_json::Value;
 
 const A: [u8; 32] = [0x11; 32];
 const B: [u8; 32] = [0x22; 32];
+
+#[test]
+fn committed_store_revision_wakes_an_idle_relay_manager() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory);
+    let authority_policy = policy(A);
+    let relay = RelayUrl::new("ws://relay.test".to_owned()).expect("URL validates");
+    let hub = Arc::new(RetainedHub::new(false, false, 0));
+    let root_id = root_fact().fact().id();
+    let peer_root_id = peer_root_fact().fact().id();
+    let account_id = account_fact(root_id).fact().id();
+    let grant_id = grant_fact(account_id).fact().id();
+    for fact in [
+        root_fact(),
+        peer_root_fact(),
+        account_fact(root_id),
+        grant_fact(account_id),
+        acceptance_fact(grant_id),
+        route_fact(root_id, &relay, [], 5, 1),
+        peer_route_fact(peer_root_id, &relay),
+    ] {
+        store
+            .ingest_verified(fact, authority_policy)
+            .expect("foundation fact ingests");
+    }
+
+    let mut sender = component_with_poll(
+        &store,
+        A,
+        authority_policy,
+        1,
+        Arc::clone(&hub),
+        Duration::from_hours(1),
+    );
+    sender
+        .start(CancellationToken::new())
+        .expect("sender starts");
+    configure(&sender, &relay, 1);
+    let initial_outbox = store
+        .load_outbox_intents(64)
+        .expect("initial outbox loads")
+        .len();
+    wait_for(|| hub.retained_count() == initial_outbox);
+
+    store
+        .ingest_verified(
+            project_fact(root_id, account_id, 0x71, 12),
+            authority_policy,
+        )
+        .expect("later durable work commits");
+    wait_for(|| hub.retained_count() == initial_outbox + 1);
+
+    sender.stop_intake().expect("sender intake stops");
+    sender.drain().expect("sender drains");
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn concrete_two_replica_composition_converges_despite_order_outage_restart_and_response_loss() {
@@ -225,6 +281,24 @@ fn component(
     secret: u8,
     hub: Arc<RetainedHub>,
 ) -> RelayNodeComponent {
+    component_with_poll(
+        store,
+        installation,
+        authority_policy,
+        secret,
+        hub,
+        Duration::from_millis(5),
+    )
+}
+
+fn component_with_poll(
+    store: &Store,
+    installation: [u8; 32],
+    authority_policy: AuthorityPolicy,
+    secret: u8,
+    hub: Arc<RetainedHub>,
+    periodic_poll: Duration,
+) -> RelayNodeComponent {
     let session = RelaySessionConfig {
         receive_wait: Duration::from_millis(2),
         retained_page_items: 4,
@@ -237,7 +311,7 @@ fn component(
             session,
             policy_page_items: 8,
             max_sessions: 4,
-            periodic_poll: Duration::from_millis(5),
+            periodic_poll,
         },
     };
     RelayNodeComponent::new(

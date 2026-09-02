@@ -519,8 +519,6 @@ fn manager_coalesces_wakes_refreshes_only_changed_generation_and_joins_every_own
     for _ in 0..32 {
         manager.wake().expect("wake coalesces");
     }
-    std::thread::sleep(Duration::from_millis(10));
-    assert_eq!(fixture.connection.connects.load(Ordering::Acquire), 1);
 
     let mut refreshed = fixture.policy.clone();
     refreshed.generation = NonZeroU64::new(2).expect("generation is positive");
@@ -536,6 +534,34 @@ fn manager_coalesces_wakes_refreshes_only_changed_generation_and_joins_every_own
     assert_eq!(report.sessions_started, 2);
     assert_eq!(report.sessions_joined, 2);
     assert!(report.failures.is_empty());
+}
+
+#[test]
+fn manager_reconciles_a_terminal_child_without_a_periodic_scan() {
+    let fixture = Fixture::new(RelayAccess::Write, RelayAuthentication::Disabled);
+    fixture
+        .state
+        .policies
+        .lock()
+        .expect("policies lock")
+        .push(fixture.policy.clone());
+    fixture.state.worker_failures.store(1, Ordering::Release);
+    let manager = RelayManager::start(
+        RelayManagerConfig {
+            session: Fixture::config(),
+            policy_page_items: 8,
+            max_sessions: 8,
+            periodic_poll: Duration::from_hours(1),
+        },
+        fixture.dependencies(),
+    )
+    .expect("manager starts");
+
+    wait_for(|| fixture.connection.connects.load(Ordering::Acquire) == 2);
+    let report = manager.shutdown().expect("manager joins");
+    assert_eq!(report.sessions_started, 2);
+    assert_eq!(report.sessions_joined, 2);
+    assert_eq!(report.failures, vec![RelayPortError::Corrupt]);
 }
 
 struct Fixture {
@@ -617,10 +643,21 @@ struct FakeState {
     cursors: Mutex<BTreeMap<String, CatchupCursor>>,
     staged: Mutex<BTreeMap<[u8; 32], StagedInput>>,
     quarantine: Mutex<Vec<hq_relay::QuarantineEvidence>>,
+    worker_failures: AtomicUsize,
 }
 
 impl RelayStatePort for FakeState {
     fn load_page(&self, query: RelayStateQuery) -> Result<RelayStatePage, RelayPortError> {
+        if !matches!(query.outbound, RelayPagePosition::Done)
+            && self
+                .worker_failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                    value.checked_sub(1)
+                })
+                .is_ok()
+        {
+            return Err(RelayPortError::Corrupt);
+        }
         let mut state = RelayStateSnapshot::default();
         if !matches!(query.policies, RelayPagePosition::Done) {
             state

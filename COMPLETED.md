@@ -10543,6 +10543,32 @@ If upcoming plan items need modifications due to a change during this implementa
 
 <!-- End of archived plan entry. -->
 
+## 2026-09-01 — Event-driven relay manager reconciliation
+
+Relay policy reconciliation now blocks on a bounded coalescing wake channel instead of periodically
+scanning. Every terminal session worker publishes a wake, allowing the manager to join, report, and
+restart it immediately when policy still desires the session. The node subscribes to store revision
+invalidations during composition and owns an interruptible bridge that wakes the relay manager;
+startup, rollback, store closure, and shutdown retain explicit ownership and join points.
+
+Deterministic contracts prove that an idle manager reacts to committed durable work and terminal
+children without advancing its hour-long session fallback. Relay, node convergence, node component,
+strict workspace Clippy, and the complete all-feature workspace suite pass.
+
+### Original plan entry
+
+### Wake relay policy and durable-work reconciliation from events
+
+Subscribe relay reconciliation to committed store revisions before startup is acknowledged. Make
+the manager block on coalesced durable-work/policy wakes, child-session termination, and shutdown
+instead of using its periodic policy scan. A terminated child must immediately wake reconciliation
+so the desired policy generation is joined, reported, and restarted without waiting for unrelated
+activity. Preserve bounded policy paging and exact worker ownership. Test idle store/policy wakes,
+coalescing, child completion, store closure, and orderly shutdown without advancing a periodic
+clock.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-01 — Event-driven project reconciliation
 
 The store now retains a revision broadcaster and creates independent latest-value subscriptions for

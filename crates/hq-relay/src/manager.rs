@@ -18,7 +18,7 @@ use crate::{
     RelaySessionConfig, RelaySessionDependencies, RelayStateQuery, RelayUrl,
 };
 
-/// Ownership, polling, and policy-scan bounds for the relay manager.
+/// Ownership, policy-scan, and session retry bounds for the relay manager.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelayManagerConfig {
     /// Per-session state-machine bounds.
@@ -27,7 +27,7 @@ pub struct RelayManagerConfig {
     pub policy_page_items: usize,
     /// Maximum enabled session owners admitted at once.
     pub max_sessions: usize,
-    /// Periodic missed-wake repair interval.
+    /// Temporary session idle-poll interval, removed by the socket-readiness phase.
     pub periodic_poll: Duration,
 }
 
@@ -82,10 +82,19 @@ impl RelayManager {
         config.validate()?;
         let stopping = Arc::new(AtomicBool::new(false));
         let (wakes, wake_receiver) = mpsc::sync_channel(1);
+        let supervisor_wakes = wakes.clone();
         let thread_stopping = Arc::clone(&stopping);
         let supervisor = thread::Builder::new()
             .name("hq-relay-manager".to_owned())
-            .spawn(move || supervise(&config, &dependencies, &thread_stopping, &wake_receiver))
+            .spawn(move || {
+                supervise(
+                    &config,
+                    &dependencies,
+                    &thread_stopping,
+                    &supervisor_wakes,
+                    &wake_receiver,
+                )
+            })
             .map_err(|_| RelayPortError::Unavailable)?;
         Ok(Self {
             stopping,
@@ -141,13 +150,21 @@ fn supervise(
     config: &RelayManagerConfig,
     dependencies: &RelaySessionDependencies,
     stopping: &AtomicBool,
+    wake_sender: &SyncSender<()>,
     wake_receiver: &Receiver<()>,
 ) -> RelayManagerReport {
     let mut workers = BTreeMap::<RelayUrl, Worker>::new();
     let mut report = RelayManagerReport::default();
     loop {
         match load_enabled_policies(config, dependencies) {
-            Ok(policies) => reconcile(policies, config, dependencies, &mut workers, &mut report),
+            Ok(policies) => reconcile(
+                policies,
+                config,
+                dependencies,
+                wake_sender,
+                &mut workers,
+                &mut report,
+            ),
             Err(error) => retain_failure(config, &mut report, error),
         }
         if stopping.load(Ordering::Acquire) {
@@ -156,9 +173,8 @@ fn supervise(
         for worker in workers.values() {
             let _ = worker.wakes.try_send(());
         }
-        match wake_receiver.recv_timeout(config.periodic_poll) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        if wake_receiver.recv().is_err() {
+            break;
         }
     }
     for (_, worker) in workers {
@@ -195,6 +211,7 @@ fn reconcile(
     desired: BTreeMap<RelayUrl, RelayPolicy>,
     config: &RelayManagerConfig,
     dependencies: &RelaySessionDependencies,
+    wake_sender: &SyncSender<()>,
     workers: &mut BTreeMap<RelayUrl, Worker>,
     report: &mut RelayManagerReport,
 ) {
@@ -219,7 +236,7 @@ fn reconcile(
             continue;
         }
         let recovers_staging = staging_owner.as_ref() == Some(&url);
-        match spawn_worker(policy, recovers_staging, config, dependencies) {
+        match spawn_worker(policy, recovers_staging, config, dependencies, wake_sender) {
             Ok(worker) => {
                 report.sessions_started = report.sessions_started.saturating_add(1);
                 workers.insert(url, worker);
@@ -234,6 +251,7 @@ fn spawn_worker(
     recovers_staging: bool,
     config: &RelayManagerConfig,
     dependencies: &RelaySessionDependencies,
+    manager_wakes: &SyncSender<()>,
 ) -> Result<Worker, RelayPortError> {
     let stopping = Arc::new(AtomicBool::new(false));
     let (wakes, wake_receiver) = mpsc::sync_channel(1);
@@ -242,16 +260,19 @@ fn spawn_worker(
     let mut thread_config = config.clone();
     thread_config.session.recover_staging = recovers_staging;
     let thread_dependencies = dependencies.clone();
+    let manager_wakes = manager_wakes.clone();
     let join = thread::Builder::new()
         .name("hq-relay-session".to_owned())
         .spawn(move || {
-            run_worker(
+            let outcome = run_worker(
                 thread_policy,
                 &thread_config,
                 &thread_dependencies,
                 &thread_stopping,
                 &wake_receiver,
-            )
+            );
+            let _ = manager_wakes.try_send(());
+            outcome
         })
         .map_err(|_| RelayPortError::Unavailable)?;
     Ok(Worker {

@@ -2,15 +2,14 @@
 
 ## Next Up
 
-### Make relay work and policy reconciliation event-driven
+### Make relay sessions wait on socket readiness and exact deadlines
 
-Have relay durable-work and policy reconciliation subscribe to committed store revisions before
-startup is acknowledged. Replace relay manager/session periodic polling with an interruptible event
-loop that reacts to inbound WebSocket readiness, post-commit durable-state wakes, policy changes,
-child-session termination, shutdown, and exact retry deadlines. Remove `periodic_poll` and healthy
-`recv_timeout` scheduling; retain capped reconnect/retry deadlines as failure recovery. Test idle
-wakes, coalescing, child completion, disconnect/reconnect baselines, closure, and orderly shutdown
-without advancing a periodic clock.
+Replace each relay session's healthy `receive_wait`/`recv_timeout` scheduling with an interruptible
+event loop over inbound WebSocket readiness, durable-work wakes, policy replacement, shutdown, and
+the exact next reconnect/outbound/staging/retained retry deadline. Remove `periodic_poll` and
+`receive_wait`; retain capped retry deadlines solely as failure recovery. Test inbound idle wakes,
+outbound work, backpressure, disconnect/reconnect baselines, closure, deadline ordering, and orderly
+shutdown without advancing a periodic clock.
 
 ### Make harness provider events wake the supervisor
 
@@ -64,8 +63,9 @@ local or relayed human message and every resulting provider interaction reach ea
 owner and the next TUI draw without any periodic poll, repair scan, unrelated I/O, or durable
 mutation.
 
-* After approval or denial is submitted through the Codex permission dialog, move the conversation
-  selection to the tail and restore follow-tail so subsequent agent activity auto-scrolls.
+* Whenever the conversation view opens, place its selection at the tail and enable follow-tail so
+  current and subsequent agent activity auto-scrolls. Restore the same state after approval or
+  denial is submitted through the Codex permission dialog.
 * <esc> should "pop" the UI back to whatever the containing contextual stack is. So, in the compose note, it should close the compose note and bring you back to the conversation. From there, it should bring focus back to the inbox. From the inbox it should bring you back to the main menu. This <esc> to pop UI affordance should work everywhere.
 * The compose area should support both <c-j> and <s-enter> as newline append operators.
 * The "Command approval needed" dialog does not properly handle vim navigation (k/j for up/down).

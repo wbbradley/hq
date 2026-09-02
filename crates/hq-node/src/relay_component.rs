@@ -6,6 +6,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -25,7 +26,8 @@ use hq_relay::{
     RelayStateMutation, RelayStatePort, RelayStateQuery, RelayUrl, ResolvedRoute, RouteResolver,
     StableRelayJitter,
 };
-use hq_store::{ReplicationHandle, Store};
+use hq_store::{ReplicationHandle, RevisionInvalidations, Store};
+use tokio::{runtime::Builder, sync::watch};
 
 use crate::{
     CancellationToken, ComponentDrain, ComponentError, NodeComponent, RelayStoreAdapter,
@@ -50,7 +52,55 @@ struct RelayNodeInner {
     dependencies: hq_relay::RelaySessionDependencies,
     state: Arc<dyn RelayStatePort>,
     manager: Mutex<Option<RelayManager>>,
+    store_invalidations: Mutex<Option<RevisionInvalidations>>,
+    revision_bridge: Mutex<Option<RelayRevisionBridge>>,
     accepting: AtomicBool,
+}
+
+struct RelayRevisionBridge {
+    shutdown: watch::Sender<bool>,
+    join: JoinHandle<Result<(), RelayPortError>>,
+}
+
+impl RelayRevisionBridge {
+    fn start(
+        mut invalidations: RevisionInvalidations,
+        relay: RelayNodeComponent,
+    ) -> Result<Self, RelayPortError> {
+        let runtime = Builder::new_current_thread()
+            .build()
+            .map_err(|_| RelayPortError::Unavailable)?;
+        let (shutdown, mut shutdown_requested) = watch::channel(false);
+        let join = thread::Builder::new()
+            .name("hq-relay-revision-bridge".to_owned())
+            .spawn(move || {
+                runtime.block_on(async move {
+                    loop {
+                        tokio::select! {
+                            biased;
+                            changed = shutdown_requested.changed() => {
+                                if changed.is_err() || *shutdown_requested.borrow_and_update() {
+                                    return Ok(());
+                                }
+                            }
+                            revision = invalidations.next_revision() => {
+                                if revision.is_none() {
+                                    return Ok(());
+                                }
+                                relay.wake()?;
+                            }
+                        }
+                    }
+                })
+            })
+            .map_err(|_| RelayPortError::Unavailable)?;
+        Ok(Self { shutdown, join })
+    }
+
+    fn shutdown(self) -> Result<(), RelayPortError> {
+        self.shutdown.send_replace(true);
+        self.join.join().map_err(|_| RelayPortError::Unavailable)?
+    }
 }
 
 impl RelayNodeComponent {
@@ -87,6 +137,8 @@ impl RelayNodeComponent {
                 dependencies,
                 state,
                 manager: Mutex::new(None),
+                store_invalidations: Mutex::new(Some(store.subscribe_invalidations())),
+                revision_bridge: Mutex::new(None),
                 accepting: AtomicBool::new(false),
             }),
         }
@@ -103,18 +155,23 @@ impl RelayNodeComponent {
     }
 
     fn shutdown_manager(&self) -> Result<(), ComponentError> {
+        let bridge = self
+            .inner
+            .revision_bridge
+            .lock()
+            .map_err(|_| ComponentError::unavailable())?
+            .take()
+            .map_or(Ok(()), RelayRevisionBridge::shutdown);
         let manager = self
             .inner
             .manager
             .lock()
             .map_err(|_| ComponentError::unavailable())?
             .take();
-        manager.map_or(Ok(()), |manager| {
-            manager
-                .shutdown()
-                .map(|_| ())
-                .map_err(|_| ComponentError::unavailable())
-        })
+        let manager = manager.map_or(Ok(()), |manager| manager.shutdown().map(|_| ()));
+        bridge
+            .and(manager)
+            .map_err(|_| ComponentError::unavailable())
     }
 
     fn ensure_accepting(&self) -> Result<(), ApplicationError> {
@@ -140,20 +197,38 @@ impl fmt::Debug for RelayNodeComponent {
 
 impl NodeComponent for RelayNodeComponent {
     fn start(&mut self, _cancellation: CancellationToken) -> Result<(), ComponentError> {
-        let mut manager = self
-            .inner
-            .manager
-            .lock()
+        {
+            let mut manager = self
+                .inner
+                .manager
+                .lock()
+                .map_err(|_| ComponentError::unavailable())?;
+            if manager.is_some() {
+                return Ok(());
+            }
+            let started = RelayManager::start(
+                self.inner.config.manager.clone(),
+                self.inner.dependencies.clone(),
+            )
             .map_err(|_| ComponentError::unavailable())?;
-        if manager.is_some() {
-            return Ok(());
+            *manager = Some(started);
         }
-        let started = RelayManager::start(
-            self.inner.config.manager.clone(),
-            self.inner.dependencies.clone(),
-        )
-        .map_err(|_| ComponentError::unavailable())?;
-        *manager = Some(started);
+        let invalidations = self
+            .inner
+            .store_invalidations
+            .lock()
+            .map_err(|_| ComponentError::unavailable())?
+            .take()
+            .ok_or_else(ComponentError::unavailable)?;
+        let Ok(bridge) = RelayRevisionBridge::start(invalidations, self.clone()) else {
+            let _ = self.shutdown_manager();
+            return Err(ComponentError::unavailable());
+        };
+        *self
+            .inner
+            .revision_bridge
+            .lock()
+            .map_err(|_| ComponentError::unavailable())? = Some(bridge);
         self.inner.accepting.store(true, Ordering::Release);
         Ok(())
     }
