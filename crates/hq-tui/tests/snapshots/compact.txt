@@ -1,7 +1,7 @@
  HQ   Inbox
  this device Connected
 ────────────────────────────────────────────────────────────────────────
-Inbox · Sent · Archived · Agents · Projects
+Inbox · Sent · Archived · Agents · Projects · Config
 ────────────────────────────────────────────────────────────────────────
 Inbox · 3 conversations
 

@@ -232,6 +232,7 @@ fn open_generation(
 
 fn foreground_codex_config(configuration: &LocalConfiguration) -> ForegroundCodexConfig {
     ForegroundCodexConfig {
+        model: configuration.codex.model.clone(),
         permissive: configuration.codex.yolo,
         ..ForegroundCodexConfig::default()
     }
@@ -392,7 +393,10 @@ mod tests {
         assert!(!restricted.permissive);
 
         let configuration = LocalConfiguration {
-            codex: LocalCodexConfiguration { yolo: true },
+            codex: LocalCodexConfiguration {
+                yolo: true,
+                model: None,
+            },
             ..LocalConfiguration::default()
         };
         let permissive = foreground_codex_config(&configuration);

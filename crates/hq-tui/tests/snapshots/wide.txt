@@ -6,7 +6,7 @@
    Archived │Build release                   │
    Agents   │agent-1                         │
    Projects │Deploy production               │
-            │waiting for approval            │
+   Config   │waiting for approval            │
             │Investigate timeout             │
             │relay needs attention           │
             │                                │

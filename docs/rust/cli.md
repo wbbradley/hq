@@ -80,9 +80,10 @@ role schema.
 
 `config set codex.yolo true` makes newly launched managed Codex sessions use approval policy
 `never` and sandbox mode `danger-full-access`; set it to `false` to restore Codex defaults. Because
-configuration changes are offline operations, stop the HQ daemon before changing it. Start or
-restart the daemon after changing it so the foreground generation loads the new value. Only enable
-this setting inside an externally secured environment.
+the foreground generation captures Codex defaults at startup, restart the daemon after changing
+Codex yolo or model settings. The TUI Config page can edit every installation-local setting and
+applies theme changes immediately; non-theme daemon settings apply on its next start. Only enable
+Codex yolo inside an externally secured environment.
 
 `human create [LABEL]` starts or connects to the node, reconciles the reserved human mailbox,
 authors the installation's deterministic but separately namespaced creator-account identity when
@@ -312,7 +313,8 @@ dependency-incomplete history, and the boundary that humans own identity, author
 selection, and retirement administration.
 
 Identity output has only the installation ID, signing public key, and public fingerprint.
-Configuration output has the optional provider and the complete canonical relay list. Both are
+Configuration output has the optional provider, complete canonical relay list, theme, and Codex
+defaults (yolo and optional model). Identity and configuration are
 passive data with public fields. Configuration setters replace one complete typed field, rebuild
 the validated value, and the persistence adapter revalidates public fields again immediately before
 the atomic write. Human, peer, mailbox, relay/health, route-history, capability-history,

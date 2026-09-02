@@ -144,6 +144,7 @@ fn encrypted_backup_round_trip_preserves_authority_and_refuses_overwrite() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() {
     let directory = TestDirectory::new();
     let paths = StatePaths::new(directory.path().join("state")).expect("test path is valid");
@@ -197,7 +198,10 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
         themed.relays.clone(),
         themed.default_provider.clone(),
         themed.theme.clone(),
-        LocalCodexConfiguration { yolo: true },
+        LocalCodexConfiguration {
+            yolo: true,
+            model: None,
+        },
     )
     .expect("Codex configuration is valid");
     owner
@@ -209,6 +213,25 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
             .expect("configuration is UTF-8")
             .ends_with("\"codex\":{\"yolo\":true}}"),
         "Codex YOLO is persisted canonically"
+    );
+
+    let modeled = LocalConfiguration::from_parts(
+        yolo.relays.clone(),
+        yolo.default_provider.clone(),
+        yolo.theme.clone(),
+        LocalCodexConfiguration::new(true, Some("gpt-5.6".to_owned()))
+            .expect("Codex model is valid"),
+    )
+    .expect("modeled Codex configuration is valid");
+    owner
+        .store_configuration(&modeled)
+        .expect("Codex model configuration stores");
+    assert_eq!(paths.load_configuration().expect("read-only load"), modeled);
+    assert!(
+        String::from_utf8(fs::read(paths.configuration_file()).expect("configuration bytes"))
+            .expect("configuration is UTF-8")
+            .ends_with("\"codex\":{\"yolo\":true,\"model\":\"gpt-5.6\"}}"),
+        "Codex model is persisted canonically"
     );
 
     let replacement = LocalConfiguration::new(

@@ -13,6 +13,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use hq_domain::ProviderId;
 use hq_local_api::{
     BlockingClientError, ClientConnectionState, ClientEvent,
     protocol::v1::{
@@ -32,30 +33,32 @@ use hq_tui::{
     EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase,
     UiAgentAttentionReason, UiAgentLifecycle, UiAgentMailbox, UiAgentProjectAssignment,
     UiAgentSession, UiAgentStatus, UiCompletedFileChange, UiCompletedItemPresentation,
-    UiConnectionState, UiConversationActivityKind, UiConversationAuthor, UiConversationEntry,
-    UiConversationEntryPresentation, UiConversationPage, UiConversationTarget, UiDirectTarget,
-    UiEffect, UiEvent, UiFailure, UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus,
-    UiHumanSelectionEvidence, UiHumanState, UiInteraction, UiInteractionAnswerOutcome,
-    UiInteractionChoice, UiInteractionKind, UiInteractionResponse, UiMailboxAction,
-    UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction,
-    UiManagedSessionOutcome, UiManagedSessionResult, UiMaterializedConversationView,
-    UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject, UiProjectAction,
-    UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome, UiProjectResource,
-    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectThread,
-    UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection,
-    UiTimerKind,
+    UiConfiguration, UiConnectionState, UiConversationActivityKind, UiConversationAuthor,
+    UiConversationEntry, UiConversationEntryPresentation, UiConversationPage, UiConversationTarget,
+    UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanIssue, UiHumanMembershipEvidence,
+    UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState, UiInteraction,
+    UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind, UiInteractionResponse,
+    UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
+    UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject,
+    UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot,
+    UiTechnicalSection, UiTheme, UiThemeChoice, UiTimerKind,
 };
 use sha2::{Digest, Sha256};
 
 use crate::{
-    LocalNodeClient, LocalNodeClientError, LocalNodeEventClient, StatePaths, UnixClientInterrupt,
-    UnixClientWake,
+    LocalCodexConfiguration, LocalConfiguration, LocalNodeClient, LocalNodeClientError,
+    LocalNodeEventClient, RelayEndpoint, StateDirectoryOwner, StatePaths, ThemeSelection,
+    TuiThemeEnvironment, UnixClientInterrupt, UnixClientWake, list_tui_themes,
     local_client::{
         LocalManagedSessionCommand, LocalManagedSessionOutcome, LocalNamedAgentCommand,
         LocalProject, LocalProjectCommand, LocalProjectOutcome, execute_managed_session_command,
         execute_named_agent_command, execute_project_command, tui_named_agent_catalog,
         tui_project_catalog,
     },
+    resolve_tui_theme,
 };
 
 const CLIENT_COMMAND_CAPACITY: usize = 8;
@@ -119,6 +122,26 @@ pub enum TuiClientObservation {
 pub trait TuiClientPort: Send {
     /// Loads and maps one complete authoritative snapshot for every semantic section.
     fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure>;
+
+    /// Loads all installation-local settings and discoverable themes.
+    fn load_configuration(&mut self) -> Result<UiConfiguration, UiFailure> {
+        Err(UiFailure {
+            code: "configuration_unavailable".to_owned(),
+            action: "restart HQ and reopen Config".to_owned(),
+        })
+    }
+
+    /// Validates and persists one complete installation-local replacement.
+    fn save_configuration(
+        &mut self,
+        _configuration: UiConfiguration,
+        _apply_theme: bool,
+    ) -> Result<(UiConfiguration, Option<UiTheme>), UiFailure> {
+        Err(UiFailure {
+            code: "configuration_unavailable".to_owned(),
+            action: "restart HQ and reopen Config".to_owned(),
+        })
+    }
 
     /// Loads one bounded reducer-ordered page for an exact snapshot row identity.
     fn load_conversation(
@@ -900,6 +923,58 @@ impl TuiClientPort for LocalTuiClient {
         ))
     }
 
+    fn load_configuration(&mut self) -> Result<UiConfiguration, UiFailure> {
+        let configuration = self
+            .state
+            .load_configuration()
+            .map_err(|_| configuration_failure())?;
+        tui_configuration(&configuration)
+    }
+
+    fn save_configuration(
+        &mut self,
+        configuration: UiConfiguration,
+        apply_theme: bool,
+    ) -> Result<(UiConfiguration, Option<UiTheme>), UiFailure> {
+        let relays = configuration
+            .relays
+            .iter()
+            .cloned()
+            .map(RelayEndpoint::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| configuration_failure())?;
+        let provider = configuration
+            .default_provider
+            .clone()
+            .map(ProviderId::new)
+            .transpose()
+            .map_err(|_| configuration_failure())?;
+        let selection = configuration
+            .theme
+            .clone()
+            .map(ThemeSelection::new)
+            .transpose()
+            .map_err(|_| configuration_failure())?;
+        let codex = LocalCodexConfiguration::new(
+            configuration.codex_yolo,
+            configuration.codex_model.clone(),
+        )
+        .map_err(|_| configuration_failure())?;
+        let persisted = LocalConfiguration::from_parts(relays, provider, selection, codex)
+            .map_err(|_| configuration_failure())?;
+        let environment = TuiThemeEnvironment::from_environment();
+        let theme = apply_theme
+            .then(|| resolve_tui_theme(persisted.theme.as_ref(), &environment))
+            .transpose()
+            .map_err(|_| configuration_failure())?;
+        let owner = StateDirectoryOwner::acquire(self.state.clone())
+            .map_err(|_| configuration_failure())?;
+        owner
+            .store_configuration(&persisted)
+            .map_err(|_| configuration_failure())?;
+        Ok((tui_configuration(&persisted)?, theme))
+    }
+
     fn load_conversation(
         &mut self,
         row_id: &str,
@@ -1292,6 +1367,52 @@ impl TuiClientPort for LocalTuiClient {
     }
 }
 
+fn tui_configuration(configuration: &LocalConfiguration) -> Result<UiConfiguration, UiFailure> {
+    let environment = TuiThemeEnvironment::from_environment();
+    let mut themes = vec![UiThemeChoice {
+        selector: None,
+        name: "Automatic".to_owned(),
+        source: "default".to_owned(),
+        error: None,
+    }];
+    themes.extend(
+        list_tui_themes(configuration.theme.as_ref(), &environment)
+            .map_err(|_| configuration_failure())?
+            .into_iter()
+            .map(|entry| UiThemeChoice {
+                selector: Some(entry.selector),
+                name: entry.name,
+                source: entry.source,
+                error: entry.error,
+            }),
+    );
+    Ok(UiConfiguration {
+        relays: configuration
+            .relays
+            .iter()
+            .map(|relay| relay.as_str().to_owned())
+            .collect(),
+        default_provider: configuration
+            .default_provider
+            .as_ref()
+            .map(|provider| provider.as_str().to_owned()),
+        theme: configuration
+            .theme
+            .as_ref()
+            .map(|theme| theme.as_str().to_owned()),
+        codex_model: configuration.codex.model.clone(),
+        codex_yolo: configuration.codex.yolo,
+        themes,
+    })
+}
+
+fn configuration_failure() -> UiFailure {
+    UiFailure {
+        code: "configuration_invalid".to_owned(),
+        action: "review the edited setting and try again".to_owned(),
+    }
+}
+
 impl TuiObservationPort for LocalTuiObserver {
     fn take_initial_view(&mut self) -> Option<UiMaterializedConversationView> {
         self.initial_view.take()
@@ -1444,6 +1565,14 @@ struct ScheduledTimer {
 enum WorkerCommand {
     LoadSnapshot {
         id: EffectId,
+    },
+    LoadConfiguration {
+        id: EffectId,
+    },
+    SaveConfiguration {
+        id: EffectId,
+        configuration: UiConfiguration,
+        apply_theme: bool,
     },
     LoadConversation {
         id: EffectId,
@@ -1658,6 +1787,7 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
     }
 
     /// Executes ordered pure-model effects without changing the model.
+    #[allow(clippy::too_many_lines)]
     pub fn execute(
         &mut self,
         effects: impl IntoIterator<Item = UiEffect>,
@@ -1676,6 +1806,23 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                             }
                         })?;
                     self.outstanding_snapshots.push(id);
+                }
+                UiEffect::LoadConfiguration { id } => {
+                    self.enqueue_client_effect(id, WorkerCommand::LoadConfiguration { id })?;
+                }
+                UiEffect::SaveConfiguration {
+                    id,
+                    configuration,
+                    apply_theme,
+                } => {
+                    self.enqueue_client_effect(
+                        id,
+                        WorkerCommand::SaveConfiguration {
+                            id,
+                            configuration,
+                            apply_theme,
+                        },
+                    )?;
                 }
                 UiEffect::LoadConversation { id, row_id, cursor } => {
                     if self.effect_is_outstanding(id) {
@@ -1875,6 +2022,9 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
         let completed = match event {
             UiEvent::SnapshotLoaded { effect_id, .. }
             | UiEvent::SnapshotFailed { effect_id, .. }
+            | UiEvent::ConfigurationLoaded { effect_id, .. }
+            | UiEvent::ConfigurationSaved { effect_id, .. }
+            | UiEvent::ConfigurationFailed { effect_id, .. }
             | UiEvent::ConversationLoaded { effect_id, .. }
             | UiEvent::ConversationFailed { effect_id, .. }
             | UiEvent::InteractionAnswered { effect_id, .. }
@@ -1969,6 +2119,41 @@ fn client_worker<P: TuiClientPort>(
                         snapshot,
                     },
                     Err(failure) => UiEvent::SnapshotFailed {
+                        effect_id: id,
+                        failure,
+                    },
+                };
+                if !send_tui_event(events, notifier, event) {
+                    break;
+                }
+            }
+            Ok(WorkerCommand::LoadConfiguration { id }) => {
+                let event = match client.load_configuration() {
+                    Ok(configuration) => UiEvent::ConfigurationLoaded {
+                        effect_id: id,
+                        configuration,
+                    },
+                    Err(failure) => UiEvent::ConfigurationFailed {
+                        effect_id: id,
+                        failure,
+                    },
+                };
+                if !send_tui_event(events, notifier, event) {
+                    break;
+                }
+            }
+            Ok(WorkerCommand::SaveConfiguration {
+                id,
+                configuration,
+                apply_theme,
+            }) => {
+                let event = match client.save_configuration(configuration, apply_theme) {
+                    Ok((configuration, theme)) => UiEvent::ConfigurationSaved {
+                        effect_id: id,
+                        configuration,
+                        theme,
+                    },
+                    Err(failure) => UiEvent::ConfigurationFailed {
                         effect_id: id,
                         failure,
                     },
@@ -2753,7 +2938,7 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
             UiSection::Inbox => *open_messages > 0,
             UiSection::Sent => *sent_messages > 0,
             UiSection::Archived => *archived_messages > 0,
-            UiSection::Agents | UiSection::Projects => false,
+            UiSection::Agents | UiSection::Projects | UiSection::Config => false,
         } =>
         {
             conversation_row(
@@ -2966,7 +3151,7 @@ fn conversation_row(
         UiSection::Inbox => (counts.open, "open messages", UiRowState::Open),
         UiSection::Sent => (counts.sent, "sent messages", UiRowState::Waiting),
         UiSection::Archived => (counts.archived, "archived messages", UiRowState::Archived),
-        UiSection::Agents | UiSection::Projects => return None,
+        UiSection::Agents | UiSection::Projects | UiSection::Config => return None,
     };
     let fallback = format!("{count} {label}");
     Some(UiRow {

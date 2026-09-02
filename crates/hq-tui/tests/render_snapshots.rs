@@ -2244,7 +2244,7 @@ fn contextual_help_model(size: UiSize, section: UiSection, selected: bool) -> Ui
             state: UiRowState::Attention,
             kind: match section {
                 UiSection::Agents => UiRowKind::Agent,
-                UiSection::Projects => UiRowKind::Project,
+                UiSection::Projects | UiSection::Config => UiRowKind::Project,
                 UiSection::Inbox | UiSection::Sent | UiSection::Archived => UiRowKind::Conversation,
             },
             conversation_target: None,
@@ -2279,6 +2279,7 @@ fn contextual_help_model(size: UiSize, section: UiSection, selected: bool) -> Ui
         UiSection::Archived => 2,
         UiSection::Agents => 3,
         UiSection::Projects => 4,
+        UiSection::Config => 5,
     };
     let section_input = if size.width >= 96 {
         UiInput::NextItem
@@ -2303,6 +2304,7 @@ fn empty_section_model(size: UiSize, section: UiSection) -> UiModel {
         UiSection::Archived => 2,
         UiSection::Agents => 3,
         UiSection::Projects => 4,
+        UiSection::Config => 5,
     };
     let section_input = if size.width >= 96 {
         UiInput::NextItem
@@ -2326,6 +2328,7 @@ const fn section_help_phrase(section: UiSection) -> &'static str {
         UiSection::Archived => "Archived contains conversations",
         UiSection::Agents => "Agents are named workers",
         UiSection::Projects => "Projects describe work",
+        UiSection::Config => "Config controls installation-local defaults",
     }
 }
 

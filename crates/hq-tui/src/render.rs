@@ -13,8 +13,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentAttentionReason, UiAgentModal,
-    UiAgentProjectAssignment, UiAgentStatus, UiCompletedItemPresentation, UiConnectionState,
-    UiConversationActivityKind, UiConversationAuthor, UiConversationEntry,
+    UiAgentProjectAssignment, UiAgentStatus, UiCompletedItemPresentation, UiConfigField,
+    UiConnectionState, UiConversationActivityKind, UiConversationAuthor, UiConversationEntry,
     UiConversationEntryGeometry, UiConversationEntryPresentation,
     UiConversationViewportObservation, UiFocus, UiHelpPage, UiHumanIssue,
     UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanState, UiInteractionKind,
@@ -859,6 +859,7 @@ const fn section_help_text(section: UiSection) -> &'static str {
         UiSection::Archived => "Archived contains conversations you have put away.",
         UiSection::Agents => "Agents are named workers you can assign and contact.",
         UiSection::Projects => "Projects describe work and the resources it owns.",
+        UiSection::Config => "Config controls installation-local defaults and appearance.",
     }
 }
 
@@ -906,6 +907,11 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
                     "↑/↓ or j/k — choose action · Tab — choose folder · h/← — manage"
                 }
             }));
+        }
+        UiSection::Config => {
+            actions.push(Line::from(
+                "↑/↓ or j/k — choose · Enter or → — edit/change · Esc — navigation",
+            ));
         }
     }
     actions
@@ -2777,7 +2783,9 @@ fn render_rows(
     area: Rect,
     cache: &mut UiRenderCache,
 ) {
-    if model.section() == UiSection::Projects {
+    if model.section() == UiSection::Config {
+        render_config(frame, model, theme, area);
+    } else if model.section() == UiSection::Projects {
         render_projects_workspace(frame, model, theme, area);
     } else if model.section() == UiSection::Inbox || model.conversation().is_some() {
         if model.viewport().width >= WIDE_WIDTH {
@@ -2807,6 +2815,123 @@ fn render_rows(
     } else {
         render_summary_rows(frame, model, theme, area);
     }
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_config(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
+    let Some(configuration) = model.configuration() else {
+        frame.render_widget(
+            Paragraph::new("Loading configuration…")
+                .style(theme.style(UiThemeRole::TextMuted))
+                .block(Block::bordered().title(" Config ")),
+            area,
+        );
+        return;
+    };
+    let value = |field| match field {
+        UiConfigField::Theme => configuration
+            .theme
+            .clone()
+            .unwrap_or_else(|| "automatic".to_owned()),
+        UiConfigField::DefaultProvider => configuration
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| "default".to_owned()),
+        UiConfigField::CodexModel => configuration
+            .codex_model
+            .clone()
+            .unwrap_or_else(|| "default".to_owned()),
+        UiConfigField::CodexYolo => {
+            if configuration.codex_yolo {
+                "enabled".to_owned()
+            } else {
+                "disabled".to_owned()
+            }
+        }
+        UiConfigField::Relays => {
+            if configuration.relays.is_empty() {
+                "none".to_owned()
+            } else {
+                configuration.relays.join(", ")
+            }
+        }
+    };
+    let label = |field| match field {
+        UiConfigField::Theme => "Theme",
+        UiConfigField::DefaultProvider => "Default provider",
+        UiConfigField::CodexModel => "Codex model",
+        UiConfigField::CodexYolo => "Codex yolo",
+        UiConfigField::Relays => "Relays",
+    };
+    let mut lines = UiConfigField::ALL
+        .into_iter()
+        .map(|field| {
+            let selected = field == model.config_field();
+            let displayed = if selected {
+                model
+                    .config_edit()
+                    .map_or_else(|| value(field), str::to_owned)
+            } else {
+                value(field)
+            };
+            Line::styled(
+                format!(
+                    "{}{}: {displayed}",
+                    if selected { "› " } else { "  " },
+                    label(field)
+                ),
+                if selected {
+                    selected_style(theme, model.focus() == UiFocus::Content)
+                } else {
+                    theme.style(UiThemeRole::Text)
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        "Supported themes",
+        theme.style(UiThemeRole::Heading),
+    ));
+    for choice in &configuration.themes {
+        let active = choice.selector == configuration.theme;
+        let selector = choice.selector.as_deref().unwrap_or("automatic");
+        let suffix = choice.error.as_ref().map_or_else(
+            || format!(" · {}", choice.source),
+            |error| format!(" · {error}"),
+        );
+        lines.push(Line::styled(
+            format!(
+                "{} {selector} — {}{suffix}",
+                if active { "●" } else { "○" },
+                choice.name
+            ),
+            if choice.error.is_some() {
+                theme.style(UiThemeRole::Error)
+            } else if active {
+                theme.style(UiThemeRole::Accent)
+            } else {
+                theme.style(UiThemeRole::TextMuted)
+            },
+        ));
+    }
+    let title = if model.configuration_pending() {
+        " Config · Saving… "
+    } else {
+        " Config "
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(title).border_style(theme.style(
+                if model.focus() == UiFocus::Content {
+                    UiThemeRole::BorderFocused
+                } else {
+                    UiThemeRole::BorderUnfocused
+                },
+            )))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn render_projects_workspace(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
@@ -3525,6 +3650,7 @@ fn empty_section_lines(section: UiSection, theme: &UiTheme) -> Vec<Line<'static>
             Line::from(" A project records work and ownership of its folders and resources."),
             Line::from(" Press n New… to start guided work, or c to create a project."),
         ],
+        UiSection::Config => vec![Line::styled(" Loading configuration…", heading)],
     }
 }
 
@@ -4410,6 +4536,12 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         " ↑/↓ or j/k section · Enter content · ? help · q quit".to_owned()
     } else if model.focus() == UiFocus::Navigation {
         " ←/→ section · Enter content · ? help · q quit".to_owned()
+    } else if model.section() == UiSection::Config {
+        if model.config_edit().is_some() {
+            " Enter save · Esc cancel · F1 help".to_owned()
+        } else {
+            " j/k choose · Enter/→ edit or change · h/← navigation · ? help · q quit".to_owned()
+        }
     } else if model.section() == UiSection::Projects {
         match model.project_workspace_level() {
             UiProjectWorkspaceLevel::List if model.selected_row_data().is_some() => {
@@ -4568,6 +4700,7 @@ const fn section_label(section: UiSection) -> &'static str {
         UiSection::Archived => "Archived",
         UiSection::Agents => "Agents",
         UiSection::Projects => "Projects",
+        UiSection::Config => "Config",
     }
 }
 
@@ -4589,6 +4722,7 @@ const fn section_item_label(section: UiSection, count: usize) -> &'static str {
         (UiSection::Agents, _) => "agents",
         (UiSection::Projects, 1) => "project",
         (UiSection::Projects, _) => "projects",
+        (UiSection::Config, _) => "settings",
     }
 }
 

@@ -7753,7 +7753,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             identity.fingerprint,
         )),
         (CliOutputFormat::Human, CliResult::Configuration(configuration)) => Ok(format!(
-            "default_provider={} relays={} theme={} codex.yolo={}\n",
+            "default_provider={} relays={} theme={} codex.model={} codex.yolo={}\n",
             configuration
                 .default_provider
                 .as_ref()
@@ -7768,6 +7768,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 .theme
                 .as_ref()
                 .map_or("automatic", ThemeSelection::as_str),
+            configuration.codex.model.as_deref().unwrap_or("default"),
             configuration.codex.yolo,
         )),
         (CliOutputFormat::Human, CliResult::ThemeCatalog(entries)) => {
@@ -7804,7 +7805,10 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 "default_provider": configuration.default_provider.as_ref().map(ProviderId::as_str),
                 "relays": configuration.relays.iter().map(RelayEndpoint::as_str).collect::<Vec<_>>(),
                 "theme": configuration.theme.as_ref().map(ThemeSelection::as_str),
-                "codex": { "yolo": configuration.codex.yolo },
+                "codex": {
+                    "model": configuration.codex.model,
+                    "yolo": configuration.codex.yolo,
+                },
             }),
         ),
         (CliOutputFormat::Json, CliResult::ThemeCatalog(entries)) => machine_record(

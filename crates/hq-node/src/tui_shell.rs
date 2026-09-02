@@ -172,6 +172,10 @@ pub trait TuiTerminalPort {
         &mut self,
         model: &UiModel,
     ) -> Result<Option<UiConversationViewportObservation>, TuiTerminalError>;
+    /// Replaces the resolved semantic theme used by subsequent draws.
+    fn set_theme(&mut self, _theme: UiTheme) -> Result<(), TuiTerminalError> {
+        Ok(())
+    }
     /// Restores every mode activated by this capability; repeated calls are safe.
     fn restore(&mut self) -> Result<(), TuiTerminalError>;
 }
@@ -283,6 +287,12 @@ impl TuiTerminalPort for CrosstermTerminal {
             })
             .map_err(|_| TuiTerminalError::Draw)?;
         Ok(observation)
+    }
+
+    fn set_theme(&mut self, theme: UiTheme) -> Result<(), TuiTerminalError> {
+        self.theme = theme;
+        self.render_cache = UiRenderCache::new();
+        Ok(())
     }
 
     fn restore(&mut self) -> Result<(), TuiTerminalError> {
@@ -401,6 +411,15 @@ where
     while !executor.exit_requested() {
         while let Some(event) = executor.poll_event() {
             trace_tui_event(&trace, BoundaryKind::TuiObservationReceived, &event);
+            if let UiEvent::ConfigurationSaved {
+                effect_id,
+                theme: Some(theme),
+                ..
+            } = &event
+                && model.configuration_effect_pending(*effect_id)
+            {
+                terminal.set_theme(theme.clone())?;
+            }
             let transition = update(model, event).map_err(|_| TuiShellError::Model)?;
             model = transition.model;
             trace_current_interaction(&trace, BoundaryKind::TuiModelUpdated, &model);
@@ -491,6 +510,9 @@ fn trace_tui_event(trace: &BoundaryTrace, kind: BoundaryKind, event: &UiEvent) {
         }
         UiEvent::SnapshotLoaded { effect_id, .. }
         | UiEvent::SnapshotFailed { effect_id, .. }
+        | UiEvent::ConfigurationLoaded { effect_id, .. }
+        | UiEvent::ConfigurationSaved { effect_id, .. }
+        | UiEvent::ConfigurationFailed { effect_id, .. }
         | UiEvent::ConversationLoaded { effect_id, .. }
         | UiEvent::ConversationFailed { effect_id, .. }
         | UiEvent::InteractionAnswered { effect_id, .. }
@@ -604,6 +626,10 @@ impl<T: TuiTerminalPort> TerminalGuard<T> {
         model: &UiModel,
     ) -> Result<Option<UiConversationViewportObservation>, TuiTerminalError> {
         self.terminal.draw(model)
+    }
+
+    fn set_theme(&mut self, theme: UiTheme) -> Result<(), TuiTerminalError> {
+        self.terminal.set_theme(theme)
     }
 
     fn finish(mut self) -> Result<(), TuiTerminalError> {

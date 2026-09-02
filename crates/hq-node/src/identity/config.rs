@@ -13,6 +13,7 @@ use super::{IdentityError, IdentityErrorClass};
 
 const MAX_RELAYS: usize = 16;
 const MAX_THEME_SELECTION_BYTES: usize = 1_024;
+const MAX_CODEX_MODEL_BYTES: usize = 256;
 pub(super) const MAX_CONFIGURATION_BYTES: u64 = 65_536;
 
 /// One bounded built-in/user theme name or explicit absolute theme file.
@@ -68,10 +69,26 @@ pub struct LocalConfiguration {
 }
 
 /// Installation-local Codex defaults.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalCodexConfiguration {
     /// Disable Codex approvals and sandboxing for managed sessions.
     pub yolo: bool,
+    /// Optional exact Codex model selector; absence delegates to Codex.
+    pub model: Option<String>,
+}
+
+impl LocalCodexConfiguration {
+    /// Validates and owns Codex-specific defaults.
+    pub fn new(yolo: bool, model: Option<String>) -> Result<Self, IdentityError> {
+        if model.as_ref().is_some_and(|model| {
+            model.is_empty()
+                || model.len() > MAX_CODEX_MODEL_BYTES
+                || model.chars().any(char::is_control)
+        }) {
+            return Err(IdentityError::new(IdentityErrorClass::ConfigurationInvalid));
+        }
+        Ok(Self { yolo, model })
+    }
 }
 
 impl LocalConfiguration {
@@ -116,11 +133,13 @@ impl LocalConfiguration {
 #[serde(deny_unknown_fields)]
 struct CodexConfigurationDto {
     yolo: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 impl CodexConfigurationDto {
     const fn is_default(&self) -> bool {
-        !self.yolo
+        !self.yolo && self.model.is_none()
     }
 }
 
@@ -151,6 +170,7 @@ pub(super) fn encode(value: &LocalConfiguration) -> Result<Vec<u8>, IdentityErro
         theme: value.theme.as_ref().map(|theme| theme.as_str().to_owned()),
         codex: CodexConfigurationDto {
             yolo: value.codex.yolo,
+            model: value.codex.model.clone(),
         },
     };
     serde_json::to_vec(&dto)
@@ -183,9 +203,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LocalConfiguration, IdentityError> 
         relays,
         provider,
         theme,
-        LocalCodexConfiguration {
-            yolo: dto.codex.yolo,
-        },
+        LocalCodexConfiguration::new(dto.codex.yolo, dto.codex.model)?,
     )?;
     if encode(&configuration)?.as_slice() != bytes {
         return Err(IdentityError::new(

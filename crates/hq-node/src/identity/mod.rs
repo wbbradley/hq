@@ -162,7 +162,7 @@ impl StateDirectoryOwner {
             configuration.relays.clone(),
             configuration.default_provider.clone(),
             configuration.theme.clone(),
-            configuration.codex,
+            configuration.codex.clone(),
         )?;
         let bytes = config::encode(&validated)?;
         atomic_write(self.paths.configuration_file(), &bytes, WriteMode::Replace)

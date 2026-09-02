@@ -7,6 +7,8 @@ use std::{
     time::Duration,
 };
 
+use crate::theme::UiTheme;
+
 const RETRY_DELAY: Duration = Duration::from_millis(250);
 const DRAFT_AUTOSAVE_DELAY: Duration = Duration::from_millis(250);
 const COMPLETION_NOTICE_DELAY: Duration = Duration::from_secs(4);
@@ -136,15 +138,18 @@ pub enum UiSection {
     Agents,
     /// Projects and resources.
     Projects,
+    /// Installation-local defaults and appearance.
+    Config,
 }
 
 impl UiSection {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Inbox,
         Self::Sent,
         Self::Archived,
         Self::Agents,
         Self::Projects,
+        Self::Config,
     ];
 
     fn next(self) -> Self {
@@ -607,6 +612,61 @@ pub struct UiProvider {
     pub available: bool,
     /// Whether installation configuration names this provider as the preferred default.
     pub configured_default: bool,
+}
+
+/// One discoverable theme choice shown by the configuration page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiThemeChoice {
+    /// Exact persisted selector, or `None` for automatic selection.
+    pub selector: Option<String>,
+    /// Human-facing theme name.
+    pub name: String,
+    /// Built-in or file source description.
+    pub source: String,
+    /// Validation failure for an unusable discovered file.
+    pub error: Option<String>,
+}
+
+/// Complete editable installation-local configuration.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UiConfiguration {
+    /// Canonical relay endpoint strings.
+    pub relays: Vec<String>,
+    /// Optional preferred provider namespace.
+    pub default_provider: Option<String>,
+    /// Optional exact theme selector; absence means automatic.
+    pub theme: Option<String>,
+    /// Optional exact Codex model; absence delegates to Codex.
+    pub codex_model: Option<String>,
+    /// Whether managed Codex sessions bypass approvals and sandboxing.
+    pub codex_yolo: bool,
+    /// Complete discovered theme catalog, beginning with automatic selection.
+    pub themes: Vec<UiThemeChoice>,
+}
+
+/// Editable field on the configuration page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiConfigField {
+    /// Active terminal theme.
+    Theme,
+    /// Preferred provider for new managed sessions.
+    DefaultProvider,
+    /// Optional exact Codex model.
+    CodexModel,
+    /// Unrestricted Codex execution toggle.
+    CodexYolo,
+    /// Canonical relay endpoint set.
+    Relays,
+}
+
+impl UiConfigField {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Theme,
+        Self::DefaultProvider,
+        Self::CodexModel,
+        Self::CodexYolo,
+        Self::Relays,
+    ];
 }
 
 /// Closed provider-neutral interaction class.
@@ -1856,6 +1916,7 @@ impl UiSnapshot {
             UiSection::Archived => &self.archived_rows,
             UiSection::Agents => &self.agent_rows,
             UiSection::Projects => &self.project_rows,
+            UiSection::Config => &[],
         }
     }
 }
@@ -2018,6 +2079,29 @@ pub enum UiEvent {
         /// Stable actionable failure.
         failure: UiFailure,
     },
+    /// Installation-local configuration and theme inventory loaded.
+    ConfigurationLoaded {
+        /// Identity of the completed load effect.
+        effect_id: EffectId,
+        /// Complete editable configuration.
+        configuration: UiConfiguration,
+    },
+    /// One complete installation-local configuration replacement committed.
+    ConfigurationSaved {
+        /// Identity of the completed save effect.
+        effect_id: EffectId,
+        /// Canonical persisted configuration.
+        configuration: UiConfiguration,
+        /// Newly resolved theme when the selected theme changed.
+        theme: Option<UiTheme>,
+    },
+    /// A configuration load or save failed.
+    ConfigurationFailed {
+        /// Identity of the failed effect.
+        effect_id: EffectId,
+        /// Stable actionable failure.
+        failure: UiFailure,
+    },
     /// One subscribed snapshot and selected first page became current together.
     MaterializedViewObserved {
         /// Coherent passive view from one serialized daemon revision.
@@ -2165,6 +2249,20 @@ pub enum UiEffect {
     LoadSnapshot {
         /// Identity required on the completion event.
         id: EffectId,
+    },
+    /// Load installation-local configuration and discover themes.
+    LoadConfiguration {
+        /// Identity required on the completion event.
+        id: EffectId,
+    },
+    /// Validate and persist one complete configuration replacement.
+    SaveConfiguration {
+        /// Identity required on the completion event.
+        id: EffectId,
+        /// Complete edited configuration.
+        configuration: UiConfiguration,
+        /// Whether the terminal theme must be resolved and replaced.
+        apply_theme: bool,
     },
     /// Request one bounded reducer-ordered conversation page.
     LoadConversation {
@@ -2449,6 +2547,10 @@ pub struct UiModel {
     new_modal: Option<UiNewModal>,
     agent_search: String,
     project_search: String,
+    configuration: Option<UiConfiguration>,
+    config_field: UiConfigField,
+    config_edit: Option<String>,
+    pending_configuration: Option<EffectId>,
     home_directory: Option<String>,
     form: UiFormState,
     help_page: Option<UiHelpPage>,
@@ -2461,7 +2563,7 @@ pub struct UiModel {
     pending_managed_session: Option<EffectId>,
     pending_project: Option<PendingProject>,
     pending_project_conversation: Option<([u8; 32], [u8; 32])>,
-    section_workspaces: [Option<UiSectionWorkspace>; 5],
+    section_workspaces: [Option<UiSectionWorkspace>; 6],
     retry_timer: Option<EffectId>,
     autosave_timer: Option<EffectId>,
     completion_timer: Option<EffectId>,
@@ -2516,6 +2618,10 @@ impl UiModel {
             new_modal: None,
             agent_search: String::new(),
             project_search: String::new(),
+            configuration: None,
+            config_field: UiConfigField::Theme,
+            config_edit: None,
+            pending_configuration: None,
             home_directory: None,
             form: UiFormState {
                 active: None,
@@ -2533,7 +2639,7 @@ impl UiModel {
             pending_managed_session: None,
             pending_project: None,
             pending_project_conversation: None,
-            section_workspaces: [None, None, None, None, None],
+            section_workspaces: [None, None, None, None, None, None],
             retry_timer: None,
             autosave_timer: None,
             completion_timer: None,
@@ -2715,6 +2821,31 @@ impl UiModel {
     /// Borrows the latest complete snapshot.
     pub const fn snapshot(&self) -> Option<&UiSnapshot> {
         self.snapshot.as_ref()
+    }
+
+    /// Borrows the current editable installation-local configuration.
+    pub const fn configuration(&self) -> Option<&UiConfiguration> {
+        self.configuration.as_ref()
+    }
+
+    /// Returns the selected configuration field.
+    pub const fn config_field(&self) -> UiConfigField {
+        self.config_field
+    }
+
+    /// Borrows the active raw-text configuration edit, when present.
+    pub fn config_edit(&self) -> Option<&str> {
+        self.config_edit.as_deref()
+    }
+
+    /// Reports whether a configuration load or save is in flight.
+    pub const fn configuration_pending(&self) -> bool {
+        self.pending_configuration.is_some()
+    }
+
+    /// Reports whether an exact configuration completion is still current.
+    pub fn configuration_effect_pending(&self, effect_id: EffectId) -> bool {
+        self.pending_configuration == Some(effect_id)
     }
 
     /// Borrows the latest rows for the selected semantic section.
@@ -4112,6 +4243,7 @@ fn project_draft_conversation_id(project_id: [u8; 32]) -> String {
 }
 
 /// Applies one event without performing I/O or domain mutation.
+#[allow(clippy::too_many_lines)]
 pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiError> {
     let mut effects = Vec::new();
     match event {
@@ -4138,6 +4270,24 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         } => snapshot_loaded(&mut model, effect_id, snapshot, &mut effects)?,
         UiEvent::SnapshotFailed { effect_id, failure } => {
             snapshot_failed(&mut model, effect_id, failure, &mut effects)?;
+        }
+        UiEvent::ConfigurationLoaded {
+            effect_id,
+            configuration,
+        }
+        | UiEvent::ConfigurationSaved {
+            effect_id,
+            configuration,
+            ..
+        } => {
+            configuration_completed(&mut model, effect_id, configuration, &mut effects);
+        }
+        UiEvent::ConfigurationFailed { effect_id, failure } => {
+            if model.pending_configuration == Some(effect_id) {
+                model.pending_configuration = None;
+                model.last_failure = Some(failure);
+                effects.push(UiEffect::RequestRedraw);
+            }
         }
         UiEvent::MaterializedViewObserved { view } => {
             materialized_view_observed(&mut model, view, &mut effects)?;
@@ -4205,6 +4355,20 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         } => client_failed(&mut model, generation, failure, &mut effects),
     }
     Ok(UiTransition { model, effects })
+}
+
+fn configuration_completed(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    configuration: UiConfiguration,
+    effects: &mut Vec<UiEffect>,
+) {
+    if model.pending_configuration == Some(effect_id) {
+        model.pending_configuration = None;
+        model.configuration = Some(configuration);
+        model.last_failure = None;
+        effects.push(UiEffect::RequestRedraw);
+    }
 }
 
 fn start(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<(), UiError> {
@@ -4493,6 +4657,16 @@ fn apply_input(
         }
         return Ok(());
     }
+    if model.section == UiSection::Config
+        && (model.focus == UiFocus::Content || model.config_edit.is_some())
+    {
+        request_configuration_if_needed(model, effects)?;
+        let changed = apply_config_input(model, input, effects)?;
+        if changed || dismissed_completion {
+            effects.push(UiEffect::RequestRedraw);
+        }
+        return Ok(());
+    }
     if let Some(changed) = apply_project_workspace_input(model, input, effects)? {
         if changed || dismissed_completion {
             effects.push(UiEffect::RequestRedraw);
@@ -4637,10 +4811,26 @@ fn apply_input(
         | UiInput::Delete => false,
     };
     if changed {
+        request_configuration_if_needed(model, effects)?;
         model.request_inbox_preview(effects);
     }
     if changed || dismissed_transient_help || dismissed_completion {
         effects.push(UiEffect::RequestRedraw);
+    }
+    Ok(())
+}
+
+fn request_configuration_if_needed(
+    model: &mut UiModel,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    if model.section == UiSection::Config
+        && model.configuration.is_none()
+        && model.pending_configuration.is_none()
+    {
+        let id = model.allocate_effect()?;
+        model.pending_configuration = Some(id);
+        effects.push(UiEffect::LoadConfiguration { id });
     }
     Ok(())
 }
@@ -5121,6 +5311,163 @@ fn open_selected_project_conversations(
     Ok(true)
 }
 
+#[allow(clippy::too_many_lines)]
+fn apply_config_input(
+    model: &mut UiModel,
+    input: &UiInput,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    if let Some(mut edit) = model.config_edit.take() {
+        match input {
+            UiInput::Escape => return Ok(true),
+            UiInput::Activate => {
+                let Some(mut configuration) = model.configuration.clone() else {
+                    model.config_edit = Some(edit);
+                    return Ok(false);
+                };
+                match model.config_field {
+                    UiConfigField::CodexModel => {
+                        let value = edit.trim();
+                        configuration.codex_model = (!value.is_empty()).then(|| value.to_owned());
+                    }
+                    UiConfigField::Relays => {
+                        configuration.relays = edit
+                            .lines()
+                            .flat_map(|line| line.split(','))
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned)
+                            .collect();
+                    }
+                    _ => {}
+                }
+                return save_configuration(model, configuration, false, effects);
+            }
+            UiInput::Character(character) if !character.is_control() && edit.len() < 16 * 1024 => {
+                edit.push(*character);
+            }
+            UiInput::Paste(value) => {
+                let value = value
+                    .chars()
+                    .filter(|character| !character.is_control() || *character == '\n')
+                    .take(16 * 1024_usize.saturating_sub(edit.len()))
+                    .collect::<String>();
+                edit.push_str(&value);
+            }
+            UiInput::InsertNewline if model.config_field == UiConfigField::Relays => {
+                edit.push('\n');
+            }
+            UiInput::Backspace => {
+                edit.pop();
+            }
+            _ => {}
+        }
+        model.config_edit = Some(edit);
+        return Ok(true);
+    }
+    if model.pending_configuration.is_some() {
+        return Ok(false);
+    }
+    match input {
+        UiInput::Quit => {
+            model.should_exit = true;
+            effects.push(UiEffect::Exit);
+            Ok(false)
+        }
+        UiInput::Escape | UiInput::MoveCursorLeft => {
+            model.focus = UiFocus::Navigation;
+            Ok(true)
+        }
+        UiInput::NextItem | UiInput::PreviousItem => {
+            let current = UiConfigField::ALL
+                .iter()
+                .position(|field| *field == model.config_field)
+                .unwrap_or(0);
+            let next = if matches!(input, UiInput::NextItem) {
+                (current + 1).min(UiConfigField::ALL.len() - 1)
+            } else {
+                current.saturating_sub(1)
+            };
+            model.config_field = UiConfigField::ALL[next];
+            Ok(next != current)
+        }
+        UiInput::MoveCursorRight | UiInput::Activate => {
+            let Some(mut configuration) = model.configuration.clone() else {
+                return Ok(false);
+            };
+            match model.config_field {
+                UiConfigField::Theme => {
+                    let mut choices = vec![None];
+                    choices.extend(
+                        configuration
+                            .themes
+                            .iter()
+                            .filter(|theme| theme.selector.is_some() && theme.error.is_none())
+                            .map(|theme| theme.selector.clone()),
+                    );
+                    let current = choices
+                        .iter()
+                        .position(|choice| *choice == configuration.theme)
+                        .unwrap_or(0);
+                    configuration
+                        .theme
+                        .clone_from(&choices[(current + 1) % choices.len()]);
+                    save_configuration(model, configuration, true, effects)
+                }
+                UiConfigField::DefaultProvider => {
+                    let mut choices = vec![None];
+                    if let Some(snapshot) = &model.snapshot {
+                        choices.extend(
+                            snapshot
+                                .providers
+                                .iter()
+                                .map(|provider| Some(provider.provider.clone())),
+                        );
+                    }
+                    let current = choices
+                        .iter()
+                        .position(|choice| *choice == configuration.default_provider)
+                        .unwrap_or(0);
+                    configuration
+                        .default_provider
+                        .clone_from(&choices[(current + 1) % choices.len()]);
+                    save_configuration(model, configuration, false, effects)
+                }
+                UiConfigField::CodexYolo => {
+                    configuration.codex_yolo = !configuration.codex_yolo;
+                    save_configuration(model, configuration, false, effects)
+                }
+                UiConfigField::CodexModel => {
+                    model.config_edit = Some(configuration.codex_model.unwrap_or_default());
+                    Ok(true)
+                }
+                UiConfigField::Relays => {
+                    model.config_edit = Some(configuration.relays.join("\n"));
+                    Ok(true)
+                }
+            }
+        }
+        _ => Ok(false),
+    }
+}
+
+fn save_configuration(
+    model: &mut UiModel,
+    configuration: UiConfiguration,
+    apply_theme: bool,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    let id = model.allocate_effect()?;
+    model.configuration = Some(configuration.clone());
+    model.pending_configuration = Some(id);
+    effects.push(UiEffect::SaveConfiguration {
+        id,
+        configuration,
+        apply_theme,
+    });
+    Ok(true)
+}
+
 fn normalize_vim_navigation(model: &UiModel, input: &UiInput) -> UiInput {
     if text_input_is_active(model) {
         return input.clone();
@@ -5138,6 +5485,9 @@ fn normalize_vim_navigation(model: &UiModel, input: &UiInput) -> UiInput {
 }
 
 fn text_input_is_active(model: &UiModel) -> bool {
+    if model.section == UiSection::Config && model.config_edit.is_some() {
+        return true;
+    }
     if matches!(
         model.interaction_modal,
         Some(UiInteractionModal::Prompt {
@@ -10189,14 +10539,14 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        TextEdit, UiAgent, UiAgentLifecycle, UiAgentStatus, UiEffect, UiError, UiEvent,
-        UiFormField, UiFormKind, UiFormState, UiGuidedPending, UiGuidedSubmission, UiHumanState,
-        UiInput, UiInteraction, UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind,
-        UiInteractionModal, UiInteractionResponse, UiMailboxDraftPane, UiMailboxDraftTarget,
-        UiModel, UiProject, UiProjectAction, UiProjectAssignment, UiProjectInteraction,
-        UiProjectResourceCheck, UiProjectThread, UiSize, UiSnapshot,
-        apply_project_interaction_input, edit_text, normalize_path_input,
-        refresh_project_interaction, update,
+        TextEdit, UiAgent, UiAgentLifecycle, UiAgentStatus, UiConfigField, UiConfiguration,
+        UiEffect, UiError, UiEvent, UiFocus, UiFormField, UiFormKind, UiFormState, UiGuidedPending,
+        UiGuidedSubmission, UiHumanState, UiInput, UiInteraction, UiInteractionAnswerOutcome,
+        UiInteractionChoice, UiInteractionKind, UiInteractionModal, UiInteractionResponse,
+        UiMailboxDraftPane, UiMailboxDraftTarget, UiModel, UiProject, UiProjectAction,
+        UiProjectAssignment, UiProjectInteraction, UiProjectResourceCheck, UiProjectThread,
+        UiSection, UiSize, UiSnapshot, UiThemeChoice, apply_project_interaction_input, edit_text,
+        normalize_path_input, refresh_project_interaction, update,
     };
 
     #[test]
@@ -10225,6 +10575,71 @@ mod tests {
             update(started.model, UiEvent::Started),
             Err(UiError::AlreadyStarted)
         );
+    }
+
+    #[test]
+    fn config_theme_selection_emits_typed_save_with_live_theme_application() {
+        let mut model = model();
+        model.change_section(UiSection::Config);
+        model.focus = UiFocus::Content;
+        model.configuration = Some(configuration());
+
+        let changed = update(model, UiEvent::Input(UiInput::Activate)).expect("theme changed");
+
+        assert!(matches!(
+            changed.effects.first(),
+            Some(UiEffect::SaveConfiguration {
+                configuration: UiConfiguration { theme: Some(theme), .. },
+                apply_theme: true,
+                ..
+            }) if theme == "terminal"
+        ));
+        assert!(changed.model.configuration_pending());
+    }
+
+    #[test]
+    fn entering_config_loads_configuration_once() {
+        let mut model = model();
+        model.viewport.width = 120;
+        model.change_section(UiSection::Projects);
+        model.focus = UiFocus::Navigation;
+
+        let entered = update(model, UiEvent::Input(UiInput::NextItem)).expect("enter Config");
+
+        assert_eq!(entered.model.section(), UiSection::Config);
+        assert_eq!(
+            entered
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, UiEffect::LoadConfiguration { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn config_optional_model_editor_preserves_text_until_submit() {
+        let mut model = model();
+        model.change_section(UiSection::Config);
+        model.focus = UiFocus::Content;
+        model.config_field = UiConfigField::CodexModel;
+        model.configuration = Some(configuration());
+        let editing = update(model, UiEvent::Input(UiInput::Activate)).expect("editor opens");
+        let typed = update(
+            editing.model,
+            UiEvent::Input(UiInput::Paste("gpt-5.6".to_owned())),
+        )
+        .expect("model entered");
+        let saved = update(typed.model, UiEvent::Input(UiInput::Activate)).expect("model saved");
+
+        assert!(matches!(
+            saved.effects.first(),
+            Some(UiEffect::SaveConfiguration {
+                configuration: UiConfiguration { codex_model: Some(model), .. },
+                apply_theme: false,
+                ..
+            }) if model == "gpt-5.6"
+        ));
     }
 
     #[test]
@@ -10600,6 +11015,26 @@ mod tests {
             width: 80,
             height: 24,
         })
+    }
+
+    fn configuration() -> UiConfiguration {
+        UiConfiguration {
+            themes: vec![
+                UiThemeChoice {
+                    selector: None,
+                    name: "Automatic".to_owned(),
+                    source: "default".to_owned(),
+                    error: None,
+                },
+                UiThemeChoice {
+                    selector: Some("terminal".to_owned()),
+                    name: "Terminal".to_owned(),
+                    source: "built-in".to_owned(),
+                    error: None,
+                },
+            ],
+            ..UiConfiguration::default()
+        }
     }
 
     fn interaction(identity: u8, allow_text: bool, choices: &[(&str, &str)]) -> UiInteraction {

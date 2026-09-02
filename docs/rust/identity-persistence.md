@@ -88,9 +88,10 @@ or absolute theme-file path. It is omitted when unset so canonical files written
 support remain byte-for-byte accepted; an explicit `null` is noncanonical. Relays are a sorted, duplicate-free list of at
 most 16 nonempty ASCII `ws://` or `wss://` endpoints, each at most 2048 bytes. The optional provider
 uses the domain's nonempty 64-byte `ProviderId` bound. Configuration has no conversion into a
-semantic payload and is replaced independently from identity and canonical history.
+semantic payload and is replaced independently from identity and canonical history. Codex defaults
+contain a boolean yolo policy and an optional bounded single-line model selector.
 
-`LocalConfiguration` is passive DTO data, so its relay, provider, and theme fields are public. Construction
+`LocalConfiguration` is passive DTO data, so its relay, provider, theme, and Codex-default fields are public. Construction
 canonicalizes and validates the value, and persistence reconstructs it through the same validator;
 direct caller mutation therefore cannot persist duplicates, excess entries, or noncanonical order.
 

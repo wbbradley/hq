@@ -1,5 +1,32 @@
 # Completed
 
+## 2026-09-02 — Editable TUI Config page
+
+Config is now a top-level wide-navigation and compact-tab section backed by pure model state and
+explicit background load/save effects. It directly edits the complete installation-local schema:
+relays, default provider, theme, Codex model, and Codex yolo. The theme catalog includes automatic,
+bundled, user-defined, and invalid discovered entries; a successful theme change replaces the
+terminal-owned semantic theme and redraws immediately. The new optional Codex model is validated,
+persisted canonically, shown in CLI output, and supplied to the foreground Codex launch resolver.
+
+Configuration is loaded only when the section is entered, keeping unrelated startup work ordered
+independently. Failed saves retain the edited model and surface the existing actionable failure
+footer. Model transitions, persistence, navigation snapshots, strict workspace Clippy, and the
+workspace suite pass; one unrelated timing-sensitive Unix CLI test failed once, then passed both
+its exact rerun and the complete test-binary rerun.
+
+### Original plan entry
+
+* We should have a Config page that is a sibling to the top nav elements (Inbox...Projects) that allows direct editing of all configuration values. Theme updates should take effect in real time. For theme config, it should show all supported themes. If this feature doesn't exist yet (named themes) then let's plan that out after implementing the Config page scaffolding. Things we should be able to configure: default settings for codex (like yolo, and model selection - for now this can be raw text or nothing for default).
+  * Treat the complete versioned installation-local configuration as the page boundary: relay defaults, default provider, theme, Codex model, and Codex yolo. Add the missing optional Codex model field to the typed persisted schema and CLI output while retaining strict validation.
+  * Add `Config` as a true top-level section in both wide navigation and compact tabs. Give it model-owned field selection/editing state rather than deriving interaction from terminal coordinates.
+  * Load and save typed UI configuration through explicit client effects. Keep filesystem access and theme discovery/resolution in `hq-node`; keep `hq-tui` pure and provider-neutral.
+  * Present every discovered valid or invalid named theme, including the automatic default, and allow keyboard selection. A successful theme save must also replace the terminal-owned theme and redraw immediately without restarting the TUI.
+  * Support direct editing of relay defaults and optional Codex model text, cycling the provider default (including none), and toggling Codex yolo. Surface validation/persistence failures without discarding edits.
+  * Test model navigation/edit/save transitions first, then adapter persistence/theme resolution, shell live-theme application, and representative wide/compact rendering. Run formatting, strict workspace Clippy, and the full workspace test suite before committing.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-02 — Vim navigation in command approvals
 
 Vim key normalization now gives the visible choice dialog ownership of `j` and `k`, even when the
