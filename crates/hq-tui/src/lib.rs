@@ -7,6 +7,7 @@
 mod message_markdown;
 mod model;
 mod render;
+mod shell_highlight;
 mod theme;
 
 pub use model::{

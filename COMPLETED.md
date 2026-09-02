@@ -1,5 +1,30 @@
 # Completed
 
+## 2026-09-02 — Theme-aware shell command highlighting
+
+Completed agent command source is now parsed with Tree-sitter's Bash grammar and highlighted in
+both compact conversation previews and expanded technical detail. Grammar capture names map onto
+HQ's resolved semantic theme roles, so live theme changes automatically affect command colors;
+literal command output retains its activity/detail styling.
+
+The renderer owns a reusable parser and a 64-entry theme-neutral semantic cache alongside its
+Markdown cache. Prefixes, multiline layout, terminal-cell clipping, truncation cues, and status
+styles remain intact. Parser/query/event failures fall back to the exact unstyled source. Tests
+cover semantic segmentation, multiline and plain fallback behavior, cache bounds, theme mapping,
+preview styling, and expanded detail. Strict workspace Clippy and the complete all-feature
+workspace suite pass.
+
+### Original plan entry
+
+* Let's apply syntax highlighting to the agentic command display. Like, when an agent shows us what shell command it is running conversation view, let's find a good rust library for shell syntax highlighting, and apply that to the presentation of that display element. Ideally we find one that can apply our theme/style color choices. We may have to make a mapping from our color scheme to the various semantic layers of whatever library we choose.
+  * Use `tree-sitter-highlight` with `tree-sitter-bash`: its grammar-owned query produces semantic capture names without importing a separate color theme, and HQ can map those names onto resolved `UiThemeRole` styles.
+  * Keep parsing as renderer-owned presentation work. Add a bounded command-highlight cache beside the Markdown cache; neither the pure model nor persisted/provider DTOs should gain styling data.
+  * Highlight command source in both compact activity previews and expanded technical detail, while leaving output literal. Preserve prompt/indent prefixes, clipping, multiline layout, truncation cues, and activity status presentation.
+  * Treat parser/query failures as an unstyled-command fallback, never as a lost command or failed frame. Clear cached styled artifacts when the live theme changes.
+  * Add semantic segmentation, multiline/fallback, theme-mapping, preview, detail, and cache-bound tests. Run formatting, strict workspace Clippy, and the full workspace suite before committing.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-02 — Editable TUI Config page
 
 Config is now a top-level wide-navigation and compact-tab section backed by pure model state and

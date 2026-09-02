@@ -25,7 +25,9 @@ use crate::{
     UiProjectInteraction, UiProjectLifecycle, UiProjectManagementAction, UiProjectOutcome,
     UiProjectRecoverySummary, UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel,
     UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, UiTheme, UiThemeRole,
-    message_markdown::MessageRenderCache, model::WIDE_WIDTH,
+    message_markdown::MessageRenderCache,
+    model::WIDE_WIDTH,
+    shell_highlight::{ShellHighlightCache, ShellSegment, ShellTokenKind},
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -67,6 +69,7 @@ fn inbox_list_width(available: u16) -> u16 {
 #[derive(Default)]
 pub struct UiRenderCache {
     messages: MessageRenderCache,
+    commands: ShellHighlightCache,
     conversation_viewport: Option<UiConversationViewportObservation>,
 }
 
@@ -3300,7 +3303,7 @@ fn render_inbox_detail(
         let [conversation, draft] =
             Layout::vertical([Constraint::Min(2), Constraint::Length(draft_height)]).areas(area);
         if model.technical_visible() {
-            render_technical_inspector(frame, model, theme, conversation, outer_border);
+            render_technical_inspector(frame, model, theme, conversation, outer_border, cache);
         } else {
             render_conversation(frame, model, theme, conversation, outer_border, cache);
         }
@@ -3313,9 +3316,16 @@ fn render_inbox_detail(
         ])
         .areas(area);
         render_conversation(frame, model, theme, conversation, outer_border, cache);
-        render_technical_inspector(frame, model, theme, inspector, Borders::TOP | outer_border);
+        render_technical_inspector(
+            frame,
+            model,
+            theme,
+            inspector,
+            Borders::TOP | outer_border,
+            cache,
+        );
     } else if model.technical_visible() {
-        render_technical_inspector(frame, model, theme, area, outer_border);
+        render_technical_inspector(frame, model, theme, area, outer_border, cache);
     } else {
         render_conversation(frame, model, theme, area, outer_border, cache);
     }
@@ -3755,6 +3765,7 @@ fn render_technical_inspector(
     theme: &UiTheme,
     area: Rect,
     borders: Borders,
+    cache: &mut UiRenderCache,
 ) {
     let block =
         Block::new()
@@ -3790,11 +3801,13 @@ fn render_technical_inspector(
     {
         lines.push(Line::from(detail.clone()));
         if let Some(completed) = completed {
-            lines.extend(
-                completed_item_detail_lines(completed)
-                    .into_iter()
-                    .map(Line::from),
-            );
+            lines.extend(completed_item_detail_styled(
+                &entry.id,
+                completed,
+                inner.width,
+                theme,
+                cache,
+            ));
         }
     }
     for section in &entry.technical {
@@ -4134,20 +4147,7 @@ fn conversation_entry_layout(
                 UiActivityStatus::Failed { .. } => UiThemeRole::ConversationActivityError,
                 UiActivityStatus::Interrupted => UiThemeRole::ConversationActivityWarning,
             };
-            let mut rows = activity_preview(entry, width)
-                .into_iter()
-                .enumerate()
-                .map(|(index, line)| {
-                    Line::styled(
-                        if index == 0 {
-                            format!("{symbol} {line}")
-                        } else {
-                            line
-                        },
-                        theme.style(role),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let mut rows = activity_preview_lines(entry, width, symbol, role, theme, cache);
             rows.push(Line::default());
             ConversationEntryLayout {
                 height: u16::try_from(rows.len()).unwrap_or(u16::MAX),
@@ -4155,6 +4155,96 @@ fn conversation_entry_layout(
             }
         }
     }
+}
+
+fn activity_preview_lines(
+    entry: &UiConversationEntry,
+    width: u16,
+    symbol: &str,
+    role: UiThemeRole,
+    theme: &UiTheme,
+    cache: &mut UiRenderCache,
+) -> Vec<Line<'static>> {
+    const PREVIEW_LINES: usize = 3;
+    let mut rows = activity_preview(entry, width)
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            Line::styled(
+                if index == 0 {
+                    format!("{symbol} {line}")
+                } else {
+                    line
+                },
+                theme.style(role),
+            )
+        })
+        .collect::<Vec<_>>();
+    let UiConversationEntryPresentation::Activity {
+        completed: Some(UiCompletedItemPresentation::Command { command, .. }),
+        ..
+    } = &entry.presentation
+    else {
+        return rows;
+    };
+    let highlighted = cache.commands.highlight(&entry.id, command);
+    for (index, segments) in highlighted.iter().take(PREVIEW_LINES).enumerate() {
+        let prefix = if index == 0 { "$ " } else { "  " };
+        if let Some(row) = rows.get_mut(index + 1) {
+            *row = styled_shell_line(prefix, segments, usize::from(width), role, theme);
+        }
+    }
+    rows
+}
+
+fn styled_shell_line(
+    prefix: &str,
+    segments: &[ShellSegment],
+    width: usize,
+    base_role: UiThemeRole,
+    theme: &UiTheme,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(prefix.to_owned(), theme.style(base_role))];
+    let mut remaining = width.saturating_sub(UnicodeWidthStr::width(prefix));
+    let total_width = segments
+        .iter()
+        .map(|segment| UnicodeWidthStr::width(segment.text.as_str()))
+        .sum::<usize>();
+    let clipped = total_width > remaining;
+    if clipped {
+        remaining = remaining.saturating_sub(1);
+    }
+    for segment in segments {
+        if remaining == 0 {
+            break;
+        }
+        let text = display_prefix(&segment.text, remaining);
+        remaining = remaining.saturating_sub(UnicodeWidthStr::width(text));
+        if !text.is_empty() {
+            spans.push(Span::styled(
+                text.to_owned(),
+                shell_token_style(segment.kind, base_role, theme),
+            ));
+        }
+    }
+    if clipped && width > UnicodeWidthStr::width(prefix) {
+        spans.push(Span::styled("…", theme.style(base_role)));
+    }
+    Line::from(spans)
+}
+
+fn shell_token_style(kind: ShellTokenKind, base_role: UiThemeRole, theme: &UiTheme) -> Style {
+    let syntax_role = match kind {
+        ShellTokenKind::Plain => return theme.style(base_role),
+        ShellTokenKind::Comment => UiThemeRole::TextMuted,
+        ShellTokenKind::Constant | ShellTokenKind::Number => UiThemeRole::Attention,
+        ShellTokenKind::Function => UiThemeRole::Accent,
+        ShellTokenKind::Keyword => UiThemeRole::Heading,
+        ShellTokenKind::Operator | ShellTokenKind::Punctuation => UiThemeRole::Warning,
+        ShellTokenKind::String => UiThemeRole::Success,
+        ShellTokenKind::Variable => UiThemeRole::ConversationProjectContext,
+    };
+    theme.style(base_role).patch(theme.style(syntax_role))
 }
 
 fn activity_preview(entry: &UiConversationEntry, width: u16) -> Vec<String> {
@@ -4300,6 +4390,36 @@ fn completed_item_detail_lines(completed: &UiCompletedItemPresentation) -> Vec<S
         || "Exit code: unavailable".to_owned(),
         |code| format!("Exit code: {code}"),
     ));
+    lines
+}
+
+fn completed_item_detail_styled(
+    cache_key: &str,
+    completed: &UiCompletedItemPresentation,
+    width: u16,
+    theme: &UiTheme,
+    cache: &mut UiRenderCache,
+) -> Vec<Line<'static>> {
+    let mut lines = completed_item_detail_lines(completed)
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let UiCompletedItemPresentation::Command { command, .. } = completed else {
+        return lines;
+    };
+    let highlighted = cache.commands.highlight(cache_key, command);
+    for (index, segments) in highlighted.iter().enumerate() {
+        let prefix = if index == 0 { "$ " } else { "  " };
+        if let Some(line) = lines.get_mut(index + 1) {
+            *line = styled_shell_line(
+                prefix,
+                segments,
+                usize::from(width),
+                UiThemeRole::Text,
+                theme,
+            );
+        }
+    }
     lines
 }
 
@@ -4738,9 +4858,9 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
 #[cfg(test)]
 mod tests {
     use super::{
-        activity_preview, completed_item_detail_lines, conversation_entry_layout,
-        conversation_viewport_slices, conversation_viewport_tail_origin, display_prefix,
-        display_suffix, draft_context_label, inbox_list_width, inert_draft_source,
+        activity_preview, completed_item_detail_lines, completed_item_detail_styled,
+        conversation_entry_layout, conversation_viewport_slices, conversation_viewport_tail_origin,
+        display_prefix, display_suffix, draft_context_label, inbox_list_width, inert_draft_source,
         interaction_supersedes_live_tail, navigation_width, render_conversation_entries,
         render_conversation_entry, text_field_line,
     };
@@ -4748,7 +4868,7 @@ mod tests {
         UiActivityStatus, UiCompletedItemPresentation, UiConversationActivityKind,
         UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation,
         UiConversationViewportObservation, UiInteraction, UiInteractionKind, UiMessageState,
-        UiModel, UiSize, UiTechnicalSection, UiTheme,
+        UiModel, UiSize, UiTechnicalSection, UiTheme, UiThemeRole,
     };
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use unicode_width::UnicodeWidthStr;
@@ -4934,12 +5054,27 @@ mod tests {
         );
 
         let mut cache = super::UiRenderCache::new();
+        let theme = UiTheme::terminal();
+        let layout = conversation_entry_layout(&entry, 80, &theme, &mut cache);
         assert_eq!(
-            conversation_entry_layout(&entry, 80, &UiTheme::terminal(), &mut cache).height,
+            layout.height,
             u16::try_from(preview.len())
                 .unwrap_or(u16::MAX)
                 .saturating_add(1)
         );
+        let command = layout
+            .rows
+            .iter()
+            .find(|line| line.to_string().contains("printf one"));
+        assert!(command.is_some(), "highlighted command line missing");
+        if let Some(command) = command {
+            assert!(command.spans.iter().any(|span| {
+                span.style
+                    == theme
+                        .style(UiThemeRole::ConversationActivityError)
+                        .patch(theme.style(UiThemeRole::Accent))
+            }));
+        }
     }
 
     #[test]
@@ -4966,6 +5101,12 @@ mod tests {
                 "Exit code: 17",
             ]
         );
+        let theme = UiTheme::terminal();
+        let mut cache = super::UiRenderCache::new();
+        let styled =
+            completed_item_detail_styled("command-detail", &completed, 80, &theme, &mut cache);
+        assert!(styled[1].spans.len() > 1);
+        assert_eq!(styled[4].to_string(), "│ one");
     }
 
     #[test]
