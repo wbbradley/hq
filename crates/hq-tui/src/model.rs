@@ -5126,7 +5126,11 @@ fn normalize_vim_navigation(model: &UiModel, input: &UiInput) -> UiInput {
         return input.clone();
     }
     match input {
-        UiInput::Character('j' | 'k') if model.focus == UiFocus::Conversation => input.clone(),
+        UiInput::Character('j' | 'k')
+            if model.focus == UiFocus::Conversation && model.interaction_modal.is_none() =>
+        {
+            input.clone()
+        }
         UiInput::Character('j') => UiInput::NextItem,
         UiInput::Character('k') => UiInput::PreviousItem,
         _ => input.clone(),

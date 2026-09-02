@@ -12,15 +12,16 @@ use hq_tui::{
     UiConversationEntryPresentation, UiConversationPage, UiConversationTarget,
     UiConversationViewportObservation, UiConversationViewportPosition, UiDirectTarget, UiEffect,
     UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput, UiInteraction,
-    UiInteractionChoice, UiInteractionKind, UiMailboxAction, UiMailboxDraft, UiMailboxDraftPane,
-    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiManagedSessionResult, UiMaterializedConversationView, UiMessageDelivery, UiMessageState,
-    UiMessageTarget, UiModel, UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectCreationChoice, UiProjectFolderAction,
-    UiProjectFormField, UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind,
-    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiInteractionChoice, UiInteractionKind, UiInteractionModal, UiInteractionResponse,
+    UiMailboxAction, UiMailboxDraft, UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
+    UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiMessageTarget, UiModel,
+    UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject, UiProjectAction,
+    UiProjectAssignment, UiProjectCreationChoice, UiProjectFolderAction, UiProjectFormField,
+    UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome, UiProjectResource,
+    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus,
+    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
+    UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -1641,6 +1642,69 @@ fn entering_a_conversation_and_submitting_an_interaction_restore_follow_tail() {
         .expect("activate selected conversation");
     assert_eq!(activated.model.conversation_anchor(), Some("activity-3"));
     assert!(activated.model.conversation_follows_tail());
+}
+
+#[test]
+fn command_approval_owns_vim_navigation_over_conversation_focus() {
+    let model = opened_conversation(vec![entry("activity", true)]);
+    assert_eq!(model.focus(), UiFocus::Conversation);
+    let prompted = update(
+        model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![UiInteraction {
+                agent_id: [6; 32],
+                agent_name: "alice".to_owned(),
+                project_id: None,
+                project_name: None,
+                provider: "codex".to_owned(),
+                session: "conversation-1".to_owned(),
+                request_id: [7; 32],
+                operation_id: [8; 32],
+                kind: UiInteractionKind::CommandApproval,
+                prompt: "Command approval".to_owned(),
+                choices: vec![
+                    UiInteractionChoice {
+                        value: "accept".to_owned(),
+                        label: "accept".to_owned(),
+                    },
+                    UiInteractionChoice {
+                        value: "acceptForSession".to_owned(),
+                        label: "acceptForSession".to_owned(),
+                    },
+                    UiInteractionChoice {
+                        value: "decline".to_owned(),
+                        label: "decline".to_owned(),
+                    },
+                ],
+                allow_text: false,
+            }],
+        },
+    )
+    .expect("approval opens");
+
+    let next = update(prompted.model, UiEvent::Input(UiInput::Character('j')))
+        .expect("j selects next approval choice");
+    assert!(matches!(
+        next.model.interaction_modal(),
+        Some(UiInteractionModal::Prompt { selected: 1, .. })
+    ));
+    let previous = update(next.model, UiEvent::Input(UiInput::Character('k')))
+        .expect("k selects previous approval choice");
+    assert!(matches!(
+        previous.model.interaction_modal(),
+        Some(UiInteractionModal::Prompt { selected: 0, .. })
+    ));
+    let next = update(previous.model, UiEvent::Input(UiInput::Character('j')))
+        .expect("select session approval");
+    let submitted =
+        update(next.model, UiEvent::Input(UiInput::Activate)).expect("submit selected choice");
+    assert!(submitted.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::AnswerInteraction {
+            response: UiInteractionResponse::Choice(value),
+            ..
+        } if value == "acceptForSession"
+    )));
 }
 
 #[test]

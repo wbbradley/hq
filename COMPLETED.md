@@ -1,5 +1,19 @@
 # Completed
 
+## 2026-09-02 — Vim navigation in command approvals
+
+Vim key normalization now gives the visible choice dialog ownership of `j` and `k`, even when the
+retained background focus is a conversation. Literal text input and ordinary conversation entry
+navigation keep their prior behavior. A command-approval reducer test covers real Codex-style
+choices, both directions, and submission of the exact selected stable response. Strict workspace
+Clippy and the complete all-feature workspace suite pass.
+
+### Original plan entry
+
+* The "Command approval needed" dialog does not properly handle vim navigation (k/j for up/down).
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-02 — Multiline compose shortcuts
 
 The terminal shell now normalizes Ctrl+J and Shift+Enter into a dedicated multiline-editor action,
