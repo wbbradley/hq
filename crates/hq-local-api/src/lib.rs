@@ -23,6 +23,7 @@ pub use conversion::{
 };
 pub use hub::{
     DEFAULT_MAX_SUBSCRIPTIONS, FanoutDisposition, HubConfigError, RevisionHub, RevisionNotice,
+    RevisionWakeListener, RevisionWakeListenerUnavailable,
 };
 pub use server::{
     LifecycleControl, OutboundMessage, ServerSession, ServerSessionError, ServerWriteDisposition,

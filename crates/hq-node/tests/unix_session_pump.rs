@@ -11,7 +11,10 @@ use hq_application::{ObserveRevisions, SubscriptionRequest, SubscriptionTopic};
 use hq_domain::{InstallationId, MailboxId, OperationId, Revision};
 use hq_local_api::{
     RevisionHub,
-    protocol::v1::{BuildMetadata, ClientHello, Id32, V1, VersionRange, WireMessage},
+    protocol::v1::{
+        BuildMetadata, ClientHello, Id32, InvalidationTopic, Request, RequestEnvelope, RequestId,
+        Response, SubscriptionRequestDto, V1, VersionRange, WireMessage,
+    },
 };
 use hq_node::{
     LocalSessionAdmissionError, LocalSessionDispatch, LocalSessionPump, LocalSessionPumpConfig,
@@ -22,7 +25,7 @@ use hq_protocol::{Bip340Signer, DispatchOutcome, VerifiedSemanticFact};
 use hq_reducer::AuthorityPolicy;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use support::{TestDirectory, UnavailableLifecycle, unavailable_application};
+use support::{TestDirectory, UnavailableLifecycle, snapshot_application, unavailable_application};
 
 fn foundation(directory: &TestDirectory) -> (NodeFoundation, RuntimePaths) {
     let state = StatePaths::new(directory.path().join("state")).expect("state paths");
@@ -127,6 +130,107 @@ async fn committed_revision_wins_one_dispatch_then_listener_pressure_progresses(
     assert!(matches!(
         pump.drive_next(&application, &UnavailableLifecycle).await,
         LocalSessionPumpEvent::Accepted { .. }
+    ));
+
+    drop(client);
+    let report = pump.shutdown().await;
+    assert_eq!(report.sessions.closed_sessions, 1);
+    assert_eq!(report.sessions.joined_tasks, 1);
+    let _replacement = hub
+        .take_wake_listener()
+        .expect("shutdown releases wake ownership");
+    foundation.shutdown().expect("foundation cleanup");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn direct_revision_publication_wakes_an_idle_subscribed_session() {
+    let directory = TestDirectory::new();
+    let (mut foundation, runtime) = foundation(&directory);
+    let hub = RevisionHub::new(1).expect("hub capacity");
+    let application = snapshot_application(hub.clone());
+    let mut pump = LocalSessionPump::start(&mut foundation, config(1), hub.clone(), build())
+        .expect("session pump starts");
+    let client = connect(&runtime);
+    let session_id = match pump.drive_next(&application, &UnavailableLifecycle).await {
+        LocalSessionPumpEvent::Accepted { session_id } => session_id,
+        other => panic!("unexpected admission: {other:?}"),
+    };
+    let mut client = tokio::net::UnixStream::from_std(client).expect("Tokio client");
+    client
+        .write_all(&hello().encode_frame().expect("hello frame"))
+        .await
+        .expect("hello writes");
+    assert!(matches!(
+        pump.drive_next(&application, &UnavailableLifecycle).await,
+        LocalSessionPumpEvent::Session {
+            dispatch: LocalSessionDispatch::MessageHandled { session_id: observed },
+            ..
+        } if observed == session_id
+    ));
+    assert!(matches!(
+        read_message(&mut client).await,
+        WireMessage::ServerHello(_)
+    ));
+    assert!(matches!(
+        pump.drive_next(&application, &UnavailableLifecycle).await,
+        LocalSessionPumpEvent::Session {
+            dispatch: LocalSessionDispatch::WriteConfirmed { session_id: observed },
+            ..
+        } if observed == session_id
+    ));
+
+    let subscribe = WireMessage::Request(RequestEnvelope::new(
+        RequestId::new(1).expect("request id"),
+        Request::Subscribe(
+            SubscriptionRequestDto::new(
+                Id32::new([92; 32]),
+                vec![InvalidationTopic::Operations],
+                None,
+            )
+            .expect("subscription"),
+        ),
+    ));
+    client
+        .write_all(&subscribe.encode_frame().expect("subscribe frame"))
+        .await
+        .expect("subscription writes");
+    assert!(matches!(
+        pump.drive_next(&application, &UnavailableLifecycle).await,
+        LocalSessionPumpEvent::Session {
+            dispatch: LocalSessionDispatch::MessageHandled { session_id: observed },
+            ..
+        } if observed == session_id
+    ));
+    assert!(matches!(
+        read_message(&mut client).await,
+        WireMessage::Response(response) if matches!(response.response, Response::Success(_))
+    ));
+    assert!(matches!(
+        pump.drive_next(&application, &UnavailableLifecycle).await,
+        LocalSessionPumpEvent::Session {
+            dispatch: LocalSessionDispatch::WriteConfirmed { session_id: observed },
+            ..
+        } if observed == session_id
+    ));
+
+    let drive = pump.drive_next(&application, &UnavailableLifecycle);
+    let publish = async {
+        tokio::task::yield_now().await;
+        hub.publish(Revision::new(8), [SubscriptionTopic::Operations], false)
+    };
+    let (event, disposition) = tokio::join!(drive, publish);
+    assert_eq!(
+        disposition,
+        hq_local_api::FanoutDisposition::Scheduled { subscribers: 1 }
+    );
+    assert!(matches!(
+        event,
+        LocalSessionPumpEvent::SubscriptionsInvalidated { invalidations }
+            if invalidations.delivered == 1 && invalidations.failures.is_empty()
+    ));
+    assert!(matches!(
+        read_message(&mut client).await,
+        WireMessage::Invalidation(invalidation) if invalidation.revision == 8
     ));
 
     drop(client);
@@ -342,10 +446,22 @@ async fn listener_transfer_is_once_only_and_invalid_nonce_does_not_consume_it() 
         Err(LocalSessionPumpStartError::InvalidBootNonce)
     ));
 
+    let reserved_wake = hub.take_wake_listener().expect("wake listener reserves");
+    assert!(matches!(
+        LocalSessionPump::start(&mut foundation, config(1), hub.clone(), build()),
+        Err(LocalSessionPumpStartError::RevisionWakeUnavailable)
+    ));
+    drop(reserved_wake);
+
     let pump = LocalSessionPump::start(&mut foundation, config(1), hub.clone(), build())
         .expect("valid transfer succeeds");
     assert!(matches!(
-        LocalSessionPump::start(&mut foundation, config(1), hub, build()),
+        LocalSessionPump::start(
+            &mut foundation,
+            config(1),
+            RevisionHub::new(1).expect("second hub"),
+            build()
+        ),
         Err(LocalSessionPumpStartError::Listener(
             RuntimeArtifactErrorClass::NotBound
         ))

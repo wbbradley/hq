@@ -2,16 +2,6 @@
 
 ## Next Up
 
-### Wake local API sessions when revision invalidations are published
-
-Give `RevisionHub` a coalescing generation/wake observed directly by
-`LocalSessionPump::drive_next`. A publication that first makes any active subscriber pending must
-wake the pump, and publication racing waiter registration must still be observed. Select this
-alongside listener, session, and store readiness, preserve fairness and one pending body-free notice
-per subscriber, and never block publishers or let a slow client block commits. Test an idle
-Codex-approval-to-wire path, publication/waiter races, coalesced bursts, disconnect/reconnect
-baselines, and shutdown without unrelated I/O.
-
 ### Wake and redraw the TUI directly from model events
 
 Give the TUI executor an OS/event-loop wake source shared by command and observation producers,
@@ -44,9 +34,9 @@ local or relayed human message and every resulting provider interaction reach ea
 owner and the next TUI draw without any periodic poll, repair scan, unrelated I/O, or durable
 mutation.
 
-* Whenever the conversation view opens, place its selection at the tail and enable follow-tail so
-  current and subsequent agent activity auto-scrolls. Restore the same state after approval or
-  denial is submitted through the Codex permission dialog.
+### Smaller hand-added todos (each need some in-depth analysis)
+
+* Whenever the conversation view opens, place its selection at the tail and enable follow-tail so current and subsequent agent activity auto-scrolls. Restore the same state after approval or denial is submitted through the Codex permission dialog.
 * <esc> should "pop" the UI back to whatever the containing contextual stack is. So, in the compose note, it should close the compose note and bring you back to the conversation. From there, it should bring focus back to the inbox. From the inbox it should bring you back to the main menu. This <esc> to pop UI affordance should work everywhere.
 * The compose area should support both <c-j> and <s-enter> as newline append operators.
 * The "Command approval needed" dialog does not properly handle vim navigation (k/j for up/down).

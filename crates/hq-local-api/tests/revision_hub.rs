@@ -2,7 +2,17 @@
 
 #![allow(clippy::expect_used)]
 
-use std::{collections::BTreeSet, sync::Arc, thread};
+use std::{
+    collections::BTreeSet,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::{Context, Poll, Wake, Waker},
+    thread,
+};
 
 use hq_application::{ObserveRevisions, SubscriptionRequest, SubscriptionTopic};
 use hq_domain::{OperationId, Revision};
@@ -133,4 +143,82 @@ fn concurrent_publish_cancel_and_poll_remain_bounded_and_deadlock_free() {
     canceller.join().expect("canceller exits");
     assert_eq!(hub.len(), 4);
     assert!(hub.len() <= hub.capacity());
+}
+
+#[test]
+fn wake_listener_retains_pre_wait_publication_and_coalesces_bursts() {
+    let hub = RevisionHub::new(1).expect("positive capacity");
+    let mut listener = hub.take_wake_listener().expect("listener transfers");
+    hub.register_subscription(&request(1, [SubscriptionTopic::Conversation]))
+        .expect("register");
+    hub.activate_subscription(id(1)).expect("activate");
+
+    let _ = hub.publish(Revision::new(1), [SubscriptionTopic::Conversation], false);
+    let _ = hub.publish(Revision::new(2), [SubscriptionTopic::Conversation], false);
+
+    assert!(listener.has_changed());
+    assert!(!listener.has_changed());
+    assert_eq!(
+        hub.take(id(1)).expect("known").expect("notice").revision(),
+        Revision::new(2)
+    );
+    let _ = hub.publish(Revision::new(3), [SubscriptionTopic::Conversation], false);
+    assert!(listener.has_changed());
+}
+
+#[test]
+fn activation_wakes_a_notice_published_while_registration_was_pending() {
+    let hub = RevisionHub::new(1).expect("positive capacity");
+    let mut listener = hub.take_wake_listener().expect("listener transfers");
+    hub.register_subscription(&request(1, [SubscriptionTopic::Conversation]))
+        .expect("register pending");
+
+    let _ = hub.publish(Revision::new(1), [SubscriptionTopic::Conversation], false);
+    assert!(!listener.has_changed());
+    hub.activate_subscription(id(1)).expect("activate");
+    assert!(listener.has_changed());
+}
+
+#[test]
+fn wake_listener_ownership_is_exclusive_and_released_on_drop() {
+    let hub = RevisionHub::new(1).expect("positive capacity");
+    let listener = hub.take_wake_listener().expect("first listener transfers");
+    assert!(hub.take_wake_listener().is_err());
+    drop(listener);
+    let _replacement = hub
+        .take_wake_listener()
+        .expect("listener ownership releases");
+}
+
+#[test]
+fn publication_racing_waiter_registration_is_observed() {
+    let hub = RevisionHub::new(1).expect("positive capacity");
+    let mut listener = hub.take_wake_listener().expect("listener transfers");
+    hub.register_subscription(&request(1, [SubscriptionTopic::All]))
+        .expect("register");
+    hub.activate_subscription(id(1)).expect("activate");
+    let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+    let waker = Waker::from(Arc::clone(&flag));
+    let mut context = Context::from_waker(&waker);
+    let mut changed = Box::pin(listener.changed());
+
+    assert_eq!(
+        Future::poll(Pin::as_mut(&mut changed), &mut context),
+        Poll::Pending
+    );
+    let _ = hub.publish(Revision::new(1), [SubscriptionTopic::All], true);
+
+    assert!(flag.0.load(Ordering::Acquire));
+    assert_eq!(
+        Future::poll(Pin::as_mut(&mut changed), &mut context),
+        Poll::Ready(())
+    );
+}
+
+struct WakeFlag(AtomicBool);
+
+impl Wake for WakeFlag {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, Ordering::Release);
+    }
 }

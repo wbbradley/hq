@@ -11911,3 +11911,32 @@ supervisor, and Codex adapter without coupling the harness to one async runtime.
 idle, race, burst, full-queue, provider-closure, and shutdown tests.
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-01 — Push-driven local revision invalidations
+
+`RevisionHub` now owns a runtime-neutral coalescing generation and a sole wake listener. A
+publication wakes the listener only when an active subscription first becomes actionable, while
+activation wakes notices retained before acknowledgment. Wait registration and generation checks
+share the hub lock, preventing publication races, and publishers release that lock before invoking
+the task waker.
+
+`LocalSessionPump` selects direct revision readiness alongside store, listener, and session work,
+then performs one bounded invalidation pass. Store and session progress acknowledge the same
+generation before flushing, so one subscription notice cannot produce duplicate wire delivery.
+Tests cover pre-wait publication, waiter and activation races, bursts, exclusive ownership,
+shutdown release, and an idle Operations subscription receiving its wire invalidation without
+unrelated I/O. Strict workspace Clippy and the complete workspace suite pass.
+
+### Original plan entry
+
+### Wake local API sessions when revision invalidations are published
+
+Give `RevisionHub` a coalescing generation/wake observed directly by
+`LocalSessionPump::drive_next`. A publication that first makes any active subscriber pending must
+wake the pump, and publication racing waiter registration must still be observed. Select this
+alongside listener, session, and store readiness, preserve fairness and one pending body-free notice
+per subscriber, and never block publishers or let a slow client block commits. Test an idle
+Codex-approval-to-wire path, publication/waiter races, coalesced bursts, disconnect/reconnect
+baselines, and shutdown without unrelated I/O.
+
+<!-- End of archived plan entry. -->

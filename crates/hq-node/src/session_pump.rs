@@ -5,7 +5,7 @@ use std::{error::Error, fmt, num::NonZeroU64};
 use hq_application::{Application, ApplicationPorts, SubscriptionTopic};
 use hq_domain::Revision;
 use hq_local_api::{
-    LifecycleControl, RevisionHub,
+    LifecycleControl, RevisionHub, RevisionWakeListener,
     protocol::v1::{BuildMetadata, Id32},
 };
 use hq_store::RevisionInvalidations;
@@ -38,6 +38,8 @@ pub enum LocalSessionPumpStartError {
     InvalidBootNonce,
     /// The foundation's sole post-commit observer was already transferred.
     StoreInvalidationsUnavailable,
+    /// The hub's sole direct-publication wake listener was already transferred.
+    RevisionWakeUnavailable,
 }
 
 impl fmt::Display for LocalSessionPumpStartError {
@@ -96,6 +98,11 @@ pub enum LocalSessionPumpEvent {
         /// Invalidation frames accepted by per-session write queues.
         invalidations: LocalSessionInvalidationReport,
     },
+    /// Direct hub publication made at least one active subscription actionable.
+    SubscriptionsInvalidated {
+        /// Invalidation frames accepted by per-session write queues.
+        invalidations: LocalSessionInvalidationReport,
+    },
     /// One accepted peer failed kernel validation without affecting the listener.
     PeerRejected {
         /// Stable credential failure class.
@@ -127,6 +134,7 @@ pub struct LocalSessionPump {
     listener: Option<AsyncFd<BoundLocalListener>>,
     sessions: LocalSessionRegistry,
     revisions: RevisionHub,
+    revision_wakes: RevisionWakeListener,
     store_invalidations: Option<RevisionInvalidations>,
     boot_nonce: Id32,
     next_connection: Option<NonZeroU64>,
@@ -144,6 +152,9 @@ impl LocalSessionPump {
         if config.boot_nonce == Id32::new([0; 32]) {
             return Err(LocalSessionPumpStartError::InvalidBootNonce);
         }
+        let revision_wakes = hub
+            .take_wake_listener()
+            .map_err(|_| LocalSessionPumpStartError::RevisionWakeUnavailable)?;
         let listener = foundation
             .take_local_listener()
             .map_err(|error| LocalSessionPumpStartError::Listener(error.class()))?;
@@ -157,6 +168,7 @@ impl LocalSessionPump {
             listener: Some(listener),
             sessions,
             revisions: hub,
+            revision_wakes,
             store_invalidations: Some(store_invalidations),
             boot_nonce: config.boot_nonce,
             next_connection: NonZeroU64::new(1),
@@ -178,11 +190,15 @@ impl LocalSessionPump {
             Listener(Result<AcceptedLocalStream, RuntimeArtifactErrorClass>),
             Session(Option<LocalSessionDispatch>),
             StoreInvalidation(Option<Revision>),
+            RevisionWake,
         }
 
         loop {
             if let Some(invalidation) = self.forward_store_invalidation() {
                 return invalidation;
+            }
+            if self.revision_wakes.has_changed() {
+                return self.flush_subscription_invalidations();
             }
             let ready = {
                 let store_ready = async {
@@ -197,11 +213,13 @@ impl LocalSessionPump {
                     (Some(listener), 0) => tokio::select! {
                         biased;
                         revision = &mut store_ready => Ready::StoreInvalidation(revision),
+                        () = self.revision_wakes.changed() => Ready::RevisionWake,
                         accepted = wait_for_peer(listener) => Ready::Listener(accepted),
                     },
                     (None, _) => tokio::select! {
                         biased;
                         revision = &mut store_ready => Ready::StoreInvalidation(revision),
+                        () = self.revision_wakes.changed() => Ready::RevisionWake,
                         dispatch = self.sessions.dispatch_next(application, lifecycle) => {
                             Ready::Session(dispatch)
                         }
@@ -209,6 +227,7 @@ impl LocalSessionPump {
                     (Some(listener), _) if self.prefer_listener => tokio::select! {
                         biased;
                         revision = &mut store_ready => Ready::StoreInvalidation(revision),
+                        () = self.revision_wakes.changed() => Ready::RevisionWake,
                         accepted = wait_for_peer(listener) => Ready::Listener(accepted),
                         dispatch = self.sessions.dispatch_next(application, lifecycle) => {
                             Ready::Session(dispatch)
@@ -217,6 +236,7 @@ impl LocalSessionPump {
                     (Some(listener), _) => tokio::select! {
                         biased;
                         revision = &mut store_ready => Ready::StoreInvalidation(revision),
+                        () = self.revision_wakes.changed() => Ready::RevisionWake,
                         dispatch = self.sessions.dispatch_next(application, lifecycle) => {
                             Ready::Session(dispatch)
                         }
@@ -248,7 +268,7 @@ impl LocalSessionPump {
                     self.prefer_listener = true;
                     return LocalSessionPumpEvent::Session {
                         dispatch,
-                        invalidations: self.sessions.flush_invalidations(),
+                        invalidations: self.flush_ready_invalidations(),
                     };
                 }
                 Ready::Session(None) => return LocalSessionPumpEvent::Idle,
@@ -257,6 +277,9 @@ impl LocalSessionPump {
                 }
                 Ready::StoreInvalidation(None) => {
                     self.store_invalidations = None;
+                }
+                Ready::RevisionWake => {
+                    return self.flush_subscription_invalidations();
                 }
             }
         }
@@ -273,7 +296,18 @@ impl LocalSessionPump {
             .publish(revision, [SubscriptionTopic::All], true);
         LocalSessionPumpEvent::StoreInvalidated {
             revision,
-            invalidations: self.sessions.flush_invalidations(),
+            invalidations: self.flush_ready_invalidations(),
+        }
+    }
+
+    fn flush_ready_invalidations(&mut self) -> LocalSessionInvalidationReport {
+        self.revision_wakes.observe_current();
+        self.sessions.flush_invalidations()
+    }
+
+    fn flush_subscription_invalidations(&mut self) -> LocalSessionPumpEvent {
+        LocalSessionPumpEvent::SubscriptionsInvalidated {
+            invalidations: self.flush_ready_invalidations(),
         }
     }
 
@@ -295,7 +329,7 @@ impl LocalSessionPump {
 
     /// Performs one explicit bounded invalidation pass for an external revision wake.
     pub fn flush_invalidations(&mut self) -> LocalSessionInvalidationReport {
-        self.sessions.flush_invalidations()
+        self.flush_ready_invalidations()
     }
 
     /// Closes intake and every session, then joins all admitted byte tasks.
