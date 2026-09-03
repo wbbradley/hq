@@ -1042,6 +1042,9 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
         )
         .expect("draft loaded")
         .model;
+        let model = update(model, UiEvent::Input(UiInput::MoveCursorLeft))
+            .expect("move caret onto final character")
+            .model;
         let before = model.clone();
         let backend = TestBackend::new(size.width, size.height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1056,8 +1059,27 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
             rendered.contains("bounded **draft** text"),
             "{size:?}:\n{rendered}"
         );
-        assert!(rendered.contains('│'));
         assert!(rendered.contains("Ctrl-J/Shift-Enter newline"));
+        let draft_start = find_text_starts(terminal.backend().buffer(), "bounded **draft** text")
+            .into_iter()
+            .next()
+            .expect("draft text");
+        let caret = terminal
+            .backend()
+            .buffer()
+            .cell((draft_start.0 + 21, draft_start.1))
+            .expect("character under compose caret");
+        assert_eq!(caret.symbol(), "t");
+        assert!(caret.modifier.contains(Modifier::REVERSED));
+
+        let help = update(model, UiEvent::Input(UiInput::Help))
+            .expect("open compose help")
+            .model;
+        let help = render_text(&help);
+        assert!(help.contains("Ctrl-A/Home line start"), "{help}");
+        assert!(help.contains("Delete/Ctrl-D delete right"), "{help}");
+        assert!(help.contains("Ctrl-U delete to line end"), "{help}");
+        assert!(help.contains("Ctrl-K delete to line start"), "{help}");
     }
 }
 

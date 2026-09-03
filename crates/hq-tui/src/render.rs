@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::Style,
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -583,6 +583,31 @@ fn contextual_help_lines(model: &UiModel, theme: &UiTheme) -> Vec<Line<'static>>
 }
 
 fn dialog_help_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'static>>> {
+    if model.new_modal().is_none()
+        && model.project_interaction().is_none()
+        && model.agent_modal().is_none()
+        && model.mailbox_modal().is_none()
+        && model.mailbox_draft().is_some()
+    {
+        return Some(vec![
+            Line::styled(
+                "Help for writing a message",
+                theme.style(UiThemeRole::Heading),
+            ),
+            Line::from(
+                "HQ saves this draft as you type and retains it if sending needs attention.",
+            ),
+            Line::default(),
+            Line::styled("Editing keys", theme.style(UiThemeRole::Heading)),
+            Line::from("←/→ move one character · ↑/↓ move one line"),
+            Line::from("Ctrl-A/Home line start · Ctrl-E/End line end"),
+            Line::from("Backspace delete left · Delete/Ctrl-D delete right"),
+            Line::from("Ctrl-U delete to line end · Ctrl-K delete to line start"),
+            Line::from("Ctrl-J/Shift-Enter newline · Enter send · Esc close"),
+            Line::default(),
+            Line::from("t — technical details · F1 / Esc — close help"),
+        ]);
+    }
     let (title, purpose) = if let Some(dialog) = model.new_modal() {
         match dialog {
             UiNewModal::Launcher { .. } => (
@@ -632,11 +657,6 @@ fn dialog_help_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'stati
         (
             "Help for this message dialog",
             "Choose a recipient or write the message. Draft text is retained if delivery needs attention.",
-        )
-    } else if model.mailbox_draft().is_some() {
-        (
-            "Help for writing a message",
-            "This draft belongs to the Inbox workspace. HQ saves it as you type and keeps it here if sending needs attention.",
         )
     } else {
         return None;
@@ -3297,15 +3317,14 @@ fn render_draft_pane(
             let [text_area, hint] =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
             let cursor = model.message_field_cursor(&draft.content);
-            let mut content = draft.content.clone();
-            if model.focus() == UiFocus::Draft {
-                content.insert(cursor, '│');
-            }
-            let content = inert_draft_source(&content);
+            let content = draft_source_text(
+                theme,
+                &draft.content,
+                cursor,
+                model.focus() == UiFocus::Draft,
+            );
             frame.render_widget(
-                Paragraph::new(content)
-                    .style(theme.style(UiThemeRole::Input))
-                    .wrap(Wrap { trim: false }),
+                Paragraph::new(content).wrap(Wrap { trim: false }),
                 text_area,
             );
             let hint_text = model
@@ -3351,6 +3370,7 @@ fn draft_context_label(recipient: Option<&str>, project: Option<&str>) -> Option
     }
 }
 
+#[cfg(test)]
 fn inert_draft_source(source: &str) -> String {
     let mut safe = String::with_capacity(source.len());
     for character in source.chars() {
@@ -3362,6 +3382,40 @@ fn inert_draft_source(source: &str) -> String {
         }
     }
     safe
+}
+
+fn draft_source_text(theme: &UiTheme, source: &str, cursor: usize, focused: bool) -> Text<'static> {
+    let input_style = theme.style(UiThemeRole::Input);
+    let cursor_style = input_style.patch(theme.style(UiThemeRole::Cursor));
+    let mut lines = Vec::new();
+    let mut spans = Vec::new();
+    for (offset, character) in source.char_indices() {
+        if character == '\n' {
+            if focused && offset == cursor {
+                spans.push(Span::styled(" ", cursor_style));
+            }
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            continue;
+        }
+        let rendered = match character {
+            '\t' => "    ".to_owned(),
+            character if character.is_control() => " ".to_owned(),
+            character => character.to_string(),
+        };
+        spans.push(Span::styled(
+            rendered,
+            if focused && offset == cursor {
+                cursor_style
+            } else {
+                input_style
+            },
+        ));
+    }
+    if focused && cursor == source.len() {
+        spans.push(Span::styled(" ", cursor_style));
+    }
+    lines.push(Line::from(spans));
+    Text::from(lines)
 }
 
 fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {

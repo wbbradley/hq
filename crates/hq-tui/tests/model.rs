@@ -2767,6 +2767,101 @@ fn compose_newline_inserts_at_the_caret_and_plain_enter_still_submits() {
 }
 
 #[test]
+fn compose_supports_line_navigation_and_directional_line_deletion() {
+    fn composer(content: &str) -> UiModel {
+        let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
+        let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+        let (open_id, _) = open_draft_effect(&opening.effects);
+        update(
+            opening.model,
+            UiEvent::DraftLoaded {
+                effect_id: open_id,
+                draft: UiMailboxDraft {
+                    draft_id: [4; 32],
+                    target: UiMailboxDraftTarget::Reply {
+                        message_id: [3; 32],
+                    },
+                    content: content.to_owned(),
+                    version: 1,
+                },
+            },
+        )
+        .expect("draft")
+        .model
+    }
+
+    fn edited_content(mut model: UiModel, inputs: &[UiInput]) -> String {
+        for input in inputs {
+            model = update(model, UiEvent::Input(input.clone()))
+                .expect("compose edit")
+                .model;
+        }
+        match model.mailbox_draft().expect("open draft") {
+            UiMailboxDraftPane::Editing { draft, .. } => draft.content.clone(),
+            UiMailboxDraftPane::Loading { .. } => panic!("draft still loading"),
+        }
+    }
+
+    assert_eq!(
+        edited_content(
+            composer("abc\ndef\nghi"),
+            &[UiInput::PreviousItem, UiInput::Character('^')],
+        ),
+        "abc\ndef^\nghi"
+    );
+    assert_eq!(
+        edited_content(
+            composer("abc\ndef\nghi"),
+            &[
+                UiInput::MoveCursorHome,
+                UiInput::PreviousItem,
+                UiInput::MoveCursorRight,
+                UiInput::NextItem,
+                UiInput::Character('^'),
+            ],
+        ),
+        "abc\ndef\ng^hi"
+    );
+    assert_eq!(
+        edited_content(
+            composer("abc\ndef\nghi"),
+            &[
+                UiInput::MoveCursorHome,
+                UiInput::Character('>'),
+                UiInput::MoveCursorEnd,
+                UiInput::Character('<'),
+            ],
+        ),
+        "abc\ndef\n>ghi<"
+    );
+    assert_eq!(
+        edited_content(
+            composer("abc\ndef\nghi"),
+            &[UiInput::MoveCursorHome, UiInput::DeleteToLineEnd],
+        ),
+        "abc\ndef\n"
+    );
+    assert_eq!(
+        edited_content(
+            composer("abc\ndef\nghi"),
+            &[
+                UiInput::MoveCursorHome,
+                UiInput::MoveCursorRight,
+                UiInput::DeleteToLineStart,
+            ],
+        ),
+        "abc\ndef\nhi"
+    );
+    assert_eq!(
+        edited_content(
+            composer("a界b"),
+            &[UiInput::MoveCursorHome, UiInput::Delete]
+        ),
+        "界b"
+    );
+}
+
+#[test]
 fn dirty_reply_saves_before_submit_and_stale_rejection_preserves_text() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
     let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");

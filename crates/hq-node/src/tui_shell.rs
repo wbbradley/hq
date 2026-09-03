@@ -518,6 +518,17 @@ fn normalize_key(key: KeyEvent) -> Option<TuiTerminalEvent> {
     if key.modifiers == KeyModifiers::CONTROL && matches!(key.code, KeyCode::Char('j' | 'J')) {
         return Some(TuiTerminalEvent::Input(UiInput::InsertNewline));
     }
+    if key.modifiers == KeyModifiers::CONTROL {
+        let input = match key.code {
+            KeyCode::Char('a' | 'A') => UiInput::MoveCursorHome,
+            KeyCode::Char('e' | 'E') => UiInput::MoveCursorEnd,
+            KeyCode::Char('u' | 'U') => UiInput::DeleteToLineEnd,
+            KeyCode::Char('k' | 'K') => UiInput::DeleteToLineStart,
+            KeyCode::Char('d' | 'D') => UiInput::Delete,
+            _ => return None,
+        };
+        return Some(TuiTerminalEvent::Input(input));
+    }
     let plain = !key.modifiers.intersects(
         KeyModifiers::CONTROL
             | KeyModifiers::ALT

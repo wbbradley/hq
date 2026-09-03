@@ -225,12 +225,16 @@ pub enum UiInput {
     MoveCursorLeft,
     /// Move the insertion caret one Unicode scalar right.
     MoveCursorRight,
-    /// Move the insertion caret to the beginning of the field.
+    /// Move the insertion caret to the beginning of the current line.
     MoveCursorHome,
-    /// Move the insertion caret to the end of the field.
+    /// Move the insertion caret to the end of the current line.
     MoveCursorEnd,
     /// Delete the Unicode scalar under the insertion caret.
     Delete,
+    /// Delete from the insertion caret to the end of the current line.
+    DeleteToLineEnd,
+    /// Delete from the beginning of the current line to the insertion caret.
+    DeleteToLineStart,
 }
 
 /// Passive terminal dimensions supplied by the shell.
@@ -1456,6 +1460,10 @@ enum TextEdit<'a> {
     Right,
     Home,
     End,
+    Up,
+    Down,
+    DeleteToLineEnd,
+    DeleteToLineStart,
 }
 
 /// Current project catalog, creation, input, or outcome interaction.
@@ -4786,7 +4794,9 @@ fn apply_input(
         | UiInput::Backspace
         | UiInput::MoveCursorHome
         | UiInput::MoveCursorEnd
-        | UiInput::Delete => false,
+        | UiInput::Delete
+        | UiInput::DeleteToLineEnd
+        | UiInput::DeleteToLineStart => false,
     };
     if changed {
         request_configuration_if_needed(model, effects)?;
@@ -6370,7 +6380,7 @@ fn apply_draft_input(
     match model.mailbox_draft.clone() {
         Some(UiMailboxDraftPane::Loading { .. }) | None => Ok(false),
         Some(UiMailboxDraftPane::Editing {
-            mut draft,
+            draft,
             dirty,
             submitting,
             closing,
@@ -6384,19 +6394,13 @@ fn apply_draft_input(
             | UiInput::MoveCursorRight
             | UiInput::MoveCursorHome
             | UiInput::MoveCursorEnd
+            | UiInput::NextItem
+            | UiInput::PreviousItem
+            | UiInput::DeleteToLineEnd
+            | UiInput::DeleteToLineStart
                 if !submitting && !closing =>
             {
-                if !edit_text_input(
-                    &mut model.form,
-                    UiFormField::Message,
-                    &mut draft.content,
-                    &input,
-                    MAX_DRAFT_BYTES,
-                ) {
-                    return Ok(false);
-                }
-                update_composer(model, draft, true, false, effects)?;
-                Ok(true)
+                apply_draft_text_input(model, &input, draft, dirty, effects)
             }
             UiInput::Activate if !submitting && !closing => {
                 if draft.content.is_empty() {
@@ -6431,6 +6435,37 @@ fn apply_draft_input(
             _ => Ok(false),
         },
     }
+}
+
+fn apply_draft_text_input(
+    model: &mut UiModel,
+    input: &UiInput,
+    mut draft: UiMailboxDraft,
+    dirty: bool,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    let previous_content_len = draft.content.len();
+    if !edit_text_input(
+        &mut model.form,
+        UiFormField::Message,
+        &mut draft.content,
+        input,
+        MAX_DRAFT_BYTES,
+    ) {
+        return Ok(false);
+    }
+    if draft.content.len() == previous_content_len {
+        model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
+            draft,
+            dirty,
+            submitting: false,
+            closing: false,
+        });
+        model.last_failure = None;
+    } else {
+        update_composer(model, draft, true, false, effects)?;
+    }
+    Ok(true)
 }
 
 fn finish_draft_close(model: &mut UiModel) {
@@ -7275,12 +7310,26 @@ fn edit_text(
             cursor = next_char_boundary(target, cursor);
             true
         }
-        TextEdit::Home if cursor != 0 => {
-            cursor = 0;
+        TextEdit::Home if cursor != line_start(target, cursor) => {
+            cursor = line_start(target, cursor);
             true
         }
-        TextEdit::End if cursor != target.len() => {
-            cursor = target.len();
+        TextEdit::End if cursor != line_end(target, cursor) => {
+            cursor = line_end(target, cursor);
+            true
+        }
+        TextEdit::Up => move_cursor_vertically(target, &mut cursor, false),
+        TextEdit::Down => move_cursor_vertically(target, &mut cursor, true),
+        TextEdit::DeleteToLineEnd if cursor < line_end(target, cursor) => {
+            target.replace_range(cursor..line_end(target, cursor), "");
+            form.errors.remove(&field);
+            true
+        }
+        TextEdit::DeleteToLineStart if cursor > line_start(target, cursor) => {
+            let start = line_start(target, cursor);
+            target.replace_range(start..cursor, "");
+            cursor = start;
+            form.errors.remove(&field);
             true
         }
         TextEdit::Backspace
@@ -7288,7 +7337,9 @@ fn edit_text(
         | TextEdit::Left
         | TextEdit::Right
         | TextEdit::Home
-        | TextEdit::End => false,
+        | TextEdit::End
+        | TextEdit::DeleteToLineEnd
+        | TextEdit::DeleteToLineStart => false,
     };
     form.cursors.insert(field, cursor);
     handled
@@ -7312,9 +7363,54 @@ fn edit_text_input(
         UiInput::MoveCursorRight => TextEdit::Right,
         UiInput::MoveCursorHome => TextEdit::Home,
         UiInput::MoveCursorEnd => TextEdit::End,
+        UiInput::NextItem => TextEdit::Down,
+        UiInput::PreviousItem => TextEdit::Up,
+        UiInput::DeleteToLineEnd => TextEdit::DeleteToLineEnd,
+        UiInput::DeleteToLineStart => TextEdit::DeleteToLineStart,
         _ => return false,
     };
     edit_text(form, field, target, edit, max_bytes)
+}
+
+fn line_start(value: &str, cursor: usize) -> usize {
+    value[..cursor]
+        .rfind('\n')
+        .map_or(0, |newline| newline.saturating_add(1))
+}
+
+fn line_end(value: &str, cursor: usize) -> usize {
+    value[cursor..]
+        .find('\n')
+        .map_or(value.len(), |relative| cursor.saturating_add(relative))
+}
+
+fn move_cursor_vertically(value: &str, cursor: &mut usize, down: bool) -> bool {
+    let current_start = line_start(value, *cursor);
+    let column = value[current_start..*cursor].chars().count();
+    let (target_start, target_end) = if down {
+        let current_end = line_end(value, *cursor);
+        if current_end == value.len() {
+            return false;
+        }
+        let start = current_end.saturating_add(1);
+        (start, line_end(value, start))
+    } else {
+        if current_start == 0 {
+            return false;
+        }
+        let end = current_start.saturating_sub(1);
+        (line_start(value, end), end)
+    };
+    let target = value[target_start..target_end]
+        .char_indices()
+        .nth(column)
+        .map_or(target_end, |(relative, _)| target_start + relative);
+    if target == *cursor {
+        false
+    } else {
+        *cursor = target;
+        true
+    }
 }
 
 fn normalize_path_input(value: &str, home: Option<&str>) -> Result<String, &'static str> {
