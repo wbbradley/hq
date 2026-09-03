@@ -15,7 +15,8 @@ use std::{
 
 use hq_domain::ProviderId;
 use hq_local_api::{
-    BlockingClientError, ClientConnectionState, ClientEvent,
+    BlockingClientError, ClientConnectionState, ClientEvent, ClientReconnectCause,
+    ClientTransportFailureKind,
     protocol::v1::{
         ActivityStatusDto, AuthoritativeConversationViewDto, AuthoritativeSnapshotDto,
         CompletedItemPresentationDto, ConversationActivityDto, ConversationActivityKindDto,
@@ -43,8 +44,9 @@ use hq_tui::{
     UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject,
     UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
     UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot,
-    UiTechnicalSection, UiTheme, UiThemeChoice, UiTimerKind,
+    UiProjectThread, UiProvider, UiReconnectCause, UiReconnectFailureKind, UiReconnectOperation,
+    UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTheme,
+    UiThemeChoice, UiTimerKind,
 };
 use sha2::{Digest, Sha256};
 
@@ -108,6 +110,8 @@ pub enum TuiClientObservation {
         generation: u64,
         /// Presentation-safe connection state.
         state: UiConnectionState,
+        /// Typed cause when the state begins a reconnect.
+        cause: Option<UiReconnectCause>,
     },
     /// A generation-scoped client failure occurred while reconnect remains possible.
     Failure {
@@ -1429,15 +1433,24 @@ impl TuiObservationPort for LocalTuiObserver {
         if self.observed_connection != Some(current) {
             self.observed_connection = Some(current);
             let (generation, state) = connection_observation(current);
-            return vec![TuiClientObservation::Connection { generation, state }];
+            return vec![TuiClientObservation::Connection {
+                generation,
+                state,
+                cause: None,
+            }];
         }
         let result = self.client.next_observation();
         let state = self.client.connection_state();
+        let reconnect_cause = self.client.take_reconnect_cause().map(ui_reconnect_cause);
         let mut observations = Vec::new();
         if self.observed_connection != Some(state) {
             self.observed_connection = Some(state);
             let (generation, state) = connection_observation(state);
-            observations.push(TuiClientObservation::Connection { generation, state });
+            observations.push(TuiClientObservation::Connection {
+                generation,
+                state,
+                cause: reconnect_cause,
+            });
         }
         self.map_observation_result(result, state, &mut observations);
         observations
@@ -1450,6 +1463,20 @@ impl TuiObservationPort for LocalTuiObserver {
     fn control_handle(&self) -> Arc<dyn TuiObservationControl> {
         Arc::new(self.control.clone())
     }
+}
+
+const fn ui_reconnect_cause(cause: ClientReconnectCause) -> UiReconnectCause {
+    let (operation, kind) = match cause {
+        ClientReconnectCause::Connect(kind) => (UiReconnectOperation::Connect, kind),
+        ClientReconnectCause::Read(kind) => (UiReconnectOperation::Read, kind),
+        ClientReconnectCause::Write(kind) => (UiReconnectOperation::Write, kind),
+    };
+    let kind = match kind {
+        ClientTransportFailureKind::Unavailable => UiReconnectFailureKind::Unavailable,
+        ClientTransportFailureKind::Transport => UiReconnectFailureKind::Transport,
+        ClientTransportFailureKind::Protocol => UiReconnectFailureKind::Protocol,
+    };
+    UiReconnectCause { operation, kind }
 }
 
 fn random_identity() -> Result<[u8; 32], UiFailure> {
@@ -2314,9 +2341,15 @@ fn observation_worker<O: TuiObservationPort>(
                     UiEvent::InteractionsObserved { interactions }
                 }
                 TuiClientObservation::Invalidated { revision } => UiEvent::Invalidated { revision },
-                TuiClientObservation::Connection { generation, state } => {
-                    UiEvent::ConnectionObserved { generation, state }
-                }
+                TuiClientObservation::Connection {
+                    generation,
+                    state,
+                    cause,
+                } => UiEvent::ConnectionObserved {
+                    generation,
+                    state,
+                    cause,
+                },
                 TuiClientObservation::Failure {
                     generation,
                     failure,

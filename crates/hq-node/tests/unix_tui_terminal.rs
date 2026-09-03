@@ -244,12 +244,35 @@ fn installed_tui_survives_resize_interruptions_racing_a_model_wake() {
     assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
     let trace = std::fs::read_to_string(&boundary_trace).expect("boundary trace reads");
     assert!(
-        trace.contains("\"kind\":\"tui_observation_received\""),
-        "subscribed observations did not cross the TUI boundary: {trace}"
+        trace.contains("\"kind\":\"tui_connection_observed\""),
+        "subscribed connection did not cross the TUI boundary: {trace}"
     );
     assert!(
         !trace.contains("\"kind\":\"tui_terminal_failed\""),
         "resize interruption became a terminal failure: {trace}"
+    );
+    assert!(
+        !trace.contains("\"tui_connection_state\":\"reconnecting\""),
+        "resize interruption advanced the subscribed connection: {trace}"
+    );
+    assert!(
+        !trace.contains("\"kind\":\"tui_client_failed\""),
+        "resize interruption became a client failure: {trace}"
+    );
+    let connection_records = trace
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("boundary trace records")
+        .into_iter()
+        .filter(|record| record["kind"] == "tui_connection_observed")
+        .collect::<Vec<_>>();
+    assert!(
+        !connection_records.is_empty()
+            && connection_records
+                .iter()
+                .all(|record| record["subscription_generation"] == 1),
+        "healthy subscription generation changed after resize: {trace}"
     );
 }
 

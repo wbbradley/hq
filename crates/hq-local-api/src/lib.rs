@@ -8,9 +8,9 @@ mod server;
 
 pub use client::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientAction,
-    ClientConnectionState, ClientError, ClientEvent, ClientOperation, ClientTransition,
-    ClientTransport, ConnectionGeneration, InitialView, MAX_IN_FLIGHT_RETRYABLE_COMMANDS,
-    ReconnectPolicy, ReconnectingClient,
+    ClientConnectionState, ClientError, ClientEvent, ClientOperation, ClientReconnectCause,
+    ClientTransition, ClientTransport, ClientTransportFailureKind, ConnectionGeneration,
+    InitialView, MAX_IN_FLIGHT_RETRYABLE_COMMANDS, ReconnectPolicy, ReconnectingClient,
 };
 pub use conversion::{
     application_error_to_v1, authoritative_conversation_view_to_v1, canonical_evidence_from_v1,

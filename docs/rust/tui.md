@@ -299,6 +299,14 @@ every interruption; resize signals therefore cannot restart UI timers or turn th
 into periodic polling. Other polling failures retain their typed terminal phase, error kind, and OS
 code and still restore the terminal before exit.
 
+The subscribed Unix client applies the same deadline rule independently around its daemon-socket
+and control-wake poll. It retries only `EINTR`, re-evaluates both descriptors after every
+interruption, and retains its incremental frame decoder and active connection generation. A real
+connect, read, or write failure still enters the reconnecting state machine. Privacy-safe boundary
+records distinguish connection observations from client workflow failures and retain the
+generation, closed connection state, transport operation, and unavailable/transport/protocol cause;
+they never include socket paths, frames, message bodies, prompts, or operating-system prose.
+
 The command worker allocates command/message identities, semantic time, and auxiliary randomness
 once, then the reconnecting runner retains and replays that exact command frame until a durable
 receipt is known. No TUI component resolves human authority, thread roots, recipient validity, or

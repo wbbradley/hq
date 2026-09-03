@@ -44,6 +44,37 @@ pub enum UiConnectionState {
     Incompatible,
 }
 
+/// Closed operation whose transport failure caused a reconnect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiReconnectOperation {
+    /// Opening a local connection.
+    Connect,
+    /// Reading the subscribed local connection.
+    Read,
+    /// Writing to the local connection.
+    Write,
+}
+
+/// Closed privacy-safe transport failure classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiReconnectFailureKind {
+    /// The local endpoint was unavailable.
+    Unavailable,
+    /// The operating-system transport failed.
+    Transport,
+    /// Local framing or protocol decoding failed.
+    Protocol,
+}
+
+/// Typed diagnostic evidence for one reconnect transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiReconnectCause {
+    /// Operation that failed.
+    pub operation: UiReconnectOperation,
+    /// Closed failure classification.
+    pub kind: UiReconnectFailureKind,
+}
+
 /// Current local human-account availability derived by the authoritative client mapper.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiHumanState {
@@ -2225,6 +2256,8 @@ pub enum UiEvent {
         generation: u64,
         /// State observed for that generation.
         state: UiConnectionState,
+        /// Typed cause when this observation begins a reconnect.
+        cause: Option<UiReconnectCause>,
     },
     /// The reconnecting client reported a stable generation-scoped failure.
     ClientFailed {
@@ -4380,7 +4413,9 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
             project_command_failed(&mut model, effect_id, failure, &mut effects);
         }
         UiEvent::Invalidated { revision } => invalidated(&mut model, revision, &mut effects)?,
-        UiEvent::ConnectionObserved { generation, state } => {
+        UiEvent::ConnectionObserved {
+            generation, state, ..
+        } => {
             connection_observed(&mut model, generation, state, &mut effects)?;
         }
         UiEvent::ClientFailed {

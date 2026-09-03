@@ -44,6 +44,12 @@ pub trait ClientTransport {
     /// Adapter-owned redacted transport failure.
     type Error: Error;
 
+    /// Reduces an adapter-specific error to privacy-safe reconnect evidence.
+    fn failure_kind(error: &Self::Error) -> ClientTransportFailureKind {
+        let _ = error;
+        ClientTransportFailureKind::Transport
+    }
+
     /// Opens one local transport connection.
     fn connect(&mut self) -> Result<Self::Connection, Self::Error>;
     /// Writes one complete exact frame.
@@ -74,6 +80,28 @@ pub trait ClientTransport {
     fn close(&mut self, connection: Self::Connection);
     /// Waits for one deterministic reconnect delay.
     fn wait(&mut self, delay: Duration);
+}
+
+/// Closed transport failure evidence retained across a reconnect boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientTransportFailureKind {
+    /// No listener accepted the connection.
+    Unavailable,
+    /// The operating-system transport failed without exposing arbitrary prose.
+    Transport,
+    /// Framing or protocol decoding failed.
+    Protocol,
+}
+
+/// Closed operation and failure evidence for the most recent reconnect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientReconnectCause {
+    /// Opening a new transport failed.
+    Connect(ClientTransportFailureKind),
+    /// Reading from an established transport failed.
+    Read(ClientTransportFailureKind),
+    /// Writing to an established transport failed.
+    Write(ClientTransportFailureKind),
 }
 
 /// Passive bounds for one synchronous local command execution.
@@ -120,6 +148,7 @@ pub struct BlockingClientRunner<T: ClientTransport> {
     events: VecDeque<ClientEvent>,
     connection_attempts: usize,
     response_pending: bool,
+    reconnect_cause: Option<ClientReconnectCause>,
 }
 
 struct QueuedClientAction {
@@ -1644,6 +1673,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
             events: VecDeque::new(),
             connection_attempts: 0,
             response_pending: false,
+            reconnect_cause: None,
         })
     }
 
@@ -2060,6 +2090,11 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
         self.client.connection_state()
     }
 
+    /// Takes the closed cause retained for the most recent reconnect transition.
+    pub fn take_reconnect_cause(&mut self) -> Option<ClientReconnectCause> {
+        self.reconnect_cause.take()
+    }
+
     fn begin_execution(&mut self) {
         self.connection_attempts = 0;
         self.events.clear();
@@ -2130,7 +2165,8 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                 transition
             }
             Ok(None) => ClientTransition::default(),
-            Err(_) => {
+            Err(error) => {
+                self.reconnect_cause = Some(ClientReconnectCause::Read(T::failure_kind(&error)));
                 let (generation, connection) = self
                     .connection
                     .take()
@@ -2172,10 +2208,13 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                             .connected(generation)
                             .map_err(BlockingClientError::Client)?
                     }
-                    Err(_) => self
-                        .client
-                        .connection_failed(generation)
-                        .map_err(BlockingClientError::Client)?,
+                    Err(error) => {
+                        self.reconnect_cause =
+                            Some(ClientReconnectCause::Connect(T::failure_kind(&error)));
+                        self.client
+                            .connection_failed(generation)
+                            .map_err(BlockingClientError::Client)?
+                    }
                 }
             }
             ClientAction::Write { generation, frame } => {
@@ -2186,10 +2225,9 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                     return Err(BlockingClientError::Client(ClientError::ProtocolOrder));
                 }
                 let timeout = remaining(deadline)?;
-                if self.transport.write(connection, &frame, timeout).is_ok() {
-                    self.response_pending = true;
-                    ClientTransition::default()
-                } else {
+                if let Err(error) = self.transport.write(connection, &frame, timeout) {
+                    self.reconnect_cause =
+                        Some(ClientReconnectCause::Write(T::failure_kind(&error)));
                     let (_, connection) = self
                         .connection
                         .take()
@@ -2199,6 +2237,9 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                     self.client
                         .disconnected(generation)
                         .map_err(BlockingClientError::Client)?
+                } else {
+                    self.response_pending = true;
+                    ClientTransition::default()
                 }
             }
             ClientAction::Close { generation } => {

@@ -53,7 +53,8 @@ mod unix_frame;
 pub use agent_guidance::AgentGuidanceTopic;
 pub use boundary_trace::{
     BOUNDARY_TRACE_ENVIRONMENT, BoundaryIds, BoundaryKind, BoundaryProcess, BoundaryTrace,
-    TuiTerminalIoKind, TuiTerminalPhase,
+    TuiClientFailureKind, TuiConnectionDiagnosticState, TuiReconnectFailureKind,
+    TuiReconnectOperation, TuiTerminalIoKind, TuiTerminalPhase,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use cli::{

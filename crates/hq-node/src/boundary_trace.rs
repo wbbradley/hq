@@ -76,6 +76,56 @@ pub enum TuiTerminalIoKind {
     Other,
 }
 
+/// Closed connection state vocabulary used in TUI diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiConnectionDiagnosticState {
+    /// The first local connection is being established.
+    Connecting,
+    /// The subscribed connection is current.
+    Ready,
+    /// A later local connection generation is being established.
+    Reconnecting,
+    /// The local protocol versions are incompatible.
+    Incompatible,
+    /// No local connection is active.
+    Disconnected,
+}
+
+/// Closed transport operation that caused a reconnect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiReconnectOperation {
+    /// Opening a local connection.
+    Connect,
+    /// Reading from the subscribed connection.
+    Read,
+    /// Writing to the local connection.
+    Write,
+}
+
+/// Closed privacy-safe reconnect failure classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiReconnectFailureKind {
+    /// The local endpoint was unavailable.
+    Unavailable,
+    /// The operating-system transport failed.
+    Transport,
+    /// Local framing or protocol decoding failed.
+    Protocol,
+}
+
+/// Closed client failure reported independently of connection-state transitions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiClientFailureKind {
+    /// The local protocol versions are incompatible.
+    Incompatible,
+    /// The local client could not complete its current operation.
+    Unavailable,
+}
+
 /// Closed body-free event vocabulary for the interactive delivery pipeline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +154,10 @@ pub enum BoundaryKind {
     LocalInvalidationWritten,
     /// The TUI observation owner received an invalidation or interaction.
     TuiObservationReceived,
+    /// The TUI observed a generation-scoped local connection transition.
+    TuiConnectionObserved,
+    /// The TUI client reported a generation-scoped workflow failure.
+    TuiClientFailed,
     /// The TUI reducer applied the correlated observation.
     TuiModelUpdated,
     /// The first frame containing the correlated interaction was drawn.
@@ -161,6 +215,14 @@ pub struct BoundaryIds {
     pub terminal_io_kind: Option<TuiTerminalIoKind>,
     /// Platform terminal error number when supplied by the operating system.
     pub terminal_os_code: Option<i32>,
+    /// Closed state for a TUI connection observation.
+    pub tui_connection_state: Option<TuiConnectionDiagnosticState>,
+    /// Closed transport operation that caused a reconnect.
+    pub tui_reconnect_operation: Option<TuiReconnectOperation>,
+    /// Closed transport failure that caused a reconnect.
+    pub tui_reconnect_failure_kind: Option<TuiReconnectFailureKind>,
+    /// Closed client workflow failure.
+    pub tui_client_failure_kind: Option<TuiClientFailureKind>,
 }
 
 /// Cloneable best-effort append sink; absence or failure never affects authority.
@@ -363,6 +425,14 @@ struct EncodedBoundaryRecord {
     terminal_io_kind: Option<TuiTerminalIoKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_os_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tui_connection_state: Option<TuiConnectionDiagnosticState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tui_reconnect_operation: Option<TuiReconnectOperation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tui_reconnect_failure_kind: Option<TuiReconnectFailureKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tui_client_failure_kind: Option<TuiClientFailureKind>,
 }
 
 impl EncodedBoundaryRecord {
@@ -394,6 +464,10 @@ impl EncodedBoundaryRecord {
             terminal_phase: ids.terminal_phase,
             terminal_io_kind: ids.terminal_io_kind,
             terminal_os_code: ids.terminal_os_code,
+            tui_connection_state: ids.tui_connection_state,
+            tui_reconnect_operation: ids.tui_reconnect_operation,
+            tui_reconnect_failure_kind: ids.tui_reconnect_failure_kind,
+            tui_client_failure_kind: ids.tui_client_failure_kind,
         }
     }
 }
@@ -458,6 +532,52 @@ mod tests {
         assert_eq!(value["operation_id"], "ab".repeat(32));
         assert_eq!(value["provider_request_id"], "cd".repeat(32));
         assert!(value.get("message").is_none());
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(directory);
+    }
+
+    #[test]
+    fn tui_connection_diagnostics_distinguish_state_cause_and_client_failure() {
+        let directory = std::env::temp_dir().join(format!(
+            "hq-boundary-connection-{}-{}",
+            std::process::id(),
+            monotonic_nanoseconds().expect("monotonic clock")
+        ));
+        std::fs::create_dir(&directory).expect("trace directory");
+        let path = directory.join("boundaries.jsonl");
+        let trace = BoundaryTrace::open(&path, BoundaryProcess::Tui);
+        trace.record(
+            BoundaryKind::TuiConnectionObserved,
+            BoundaryIds {
+                subscription_generation: Some(2),
+                tui_connection_state: Some(TuiConnectionDiagnosticState::Reconnecting),
+                tui_reconnect_operation: Some(TuiReconnectOperation::Read),
+                tui_reconnect_failure_kind: Some(TuiReconnectFailureKind::Protocol),
+                ..BoundaryIds::default()
+            },
+        );
+        trace.record(
+            BoundaryKind::TuiClientFailed,
+            BoundaryIds {
+                subscription_generation: Some(2),
+                tui_client_failure_kind: Some(TuiClientFailureKind::Unavailable),
+                ..BoundaryIds::default()
+            },
+        );
+
+        let records = std::fs::read_to_string(&path).expect("trace bytes");
+        let values = records
+            .lines()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("connection diagnostics");
+        assert_eq!(values[0]["kind"], "tui_connection_observed");
+        assert_eq!(values[0]["subscription_generation"], 2);
+        assert_eq!(values[0]["tui_connection_state"], "reconnecting");
+        assert_eq!(values[0]["tui_reconnect_operation"], "read");
+        assert_eq!(values[0]["tui_reconnect_failure_kind"], "protocol");
+        assert_eq!(values[1]["kind"], "tui_client_failed");
+        assert_eq!(values[1]["tui_client_failure_kind"], "unavailable");
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(directory);
     }

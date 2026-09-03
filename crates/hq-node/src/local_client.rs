@@ -22,14 +22,18 @@ use hq_domain::{
 };
 use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientConnectionState,
-    ClientEvent, ClientTransport, InitialView, ReconnectPolicy, ReconnectingClient,
+    ClientEvent, ClientReconnectCause, ClientTransport, ClientTransportFailureKind, InitialView,
+    ReconnectPolicy, ReconnectingClient,
     protocol::v1::{
         AgentRetirementRequestDto, AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
         ConversationPageSelectionDto, EffectRequestDto, FrameDecoder, Id32, InvalidationTopic,
         MailboxCommandRequestDto, MutationRequest, ProjectCommandRequestDto, Request,
     },
 };
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::{
+    errno::Errno,
+    poll::{PollFd, PollFlags, PollTimeout, poll},
+};
 
 use crate::{
     LifecycleClient, LifecycleClientConfig, NodeClientCoordinator, NodeCoordinatorConfig,
@@ -1089,6 +1093,11 @@ impl LocalNodeEventClient {
     pub const fn connection_state(&self) -> ClientConnectionState {
         self.runner.connection_state()
     }
+
+    /// Takes the closed cause retained for the most recent reconnect transition.
+    pub fn take_reconnect_cause(&mut self) -> Option<ClientReconnectCause> {
+        self.runner.take_reconnect_cause()
+    }
 }
 
 fn connect_runner<L: NodeLauncher>(
@@ -1275,6 +1284,24 @@ impl UnixClientConnection {
     }
 }
 
+fn poll_until_ready_with<N, P>(wait: Duration, mut now: N, mut poll_ready: P) -> Result<bool, Errno>
+where
+    N: FnMut() -> Instant,
+    P: FnMut(PollTimeout) -> Result<i32, Errno>,
+{
+    let deadline = now().checked_add(wait).ok_or(Errno::EINVAL)?;
+    loop {
+        let timeout = PollTimeout::try_from(deadline.saturating_duration_since(now()))
+            .map_err(|_| Errno::EINVAL)?;
+        match poll_ready(timeout) {
+            Ok(0) => return Ok(false),
+            Ok(_) => return Ok(true),
+            Err(Errno::EINTR) => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 impl UnixClientTransport {
     /// Validates and retains one local Unix transport configuration.
     pub fn new(config: UnixClientTransportConfig) -> Result<Self, UnixClientTransportError> {
@@ -1325,6 +1352,16 @@ impl UnixClientTransport {
 impl ClientTransport for UnixClientTransport {
     type Connection = UnixClientConnection;
     type Error = UnixClientTransportError;
+
+    fn failure_kind(error: &Self::Error) -> ClientTransportFailureKind {
+        match error {
+            UnixClientTransportError::Absent => ClientTransportFailureKind::Unavailable,
+            UnixClientTransportError::Protocol => ClientTransportFailureKind::Protocol,
+            UnixClientTransportError::InvalidTimeout | UnixClientTransportError::Transport => {
+                ClientTransportFailureKind::Transport
+            }
+        }
+    }
 
     fn connect(&mut self) -> Result<Self::Connection, Self::Error> {
         let stream = UnixStream::connect(self.config.runtime.socket_file()).map_err(|error| {
@@ -1387,8 +1424,7 @@ impl ClientTransport for UnixClientTransport {
         if timeout.is_zero() {
             return Ok(None);
         }
-        let timeout = PollTimeout::try_from(timeout.min(self.config.io_timeout))
-            .map_err(|_| UnixClientTransportError::Transport)?;
+        let wait = timeout.min(self.config.io_timeout);
         let mut descriptors = [
             PollFd::new(
                 connection.stream.as_fd(),
@@ -1399,7 +1435,11 @@ impl ClientTransport for UnixClientTransport {
                 PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
             ),
         ];
-        if poll(&mut descriptors, timeout).map_err(|_| UnixClientTransportError::Transport)? == 0 {
+        let ready = poll_until_ready_with(wait, Instant::now, |timeout| {
+            poll(&mut descriptors, timeout)
+        })
+        .map_err(|_| UnixClientTransportError::Transport)?;
+        if !ready {
             return Ok(None);
         }
         if descriptors[1]
@@ -1467,19 +1507,136 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use std::{
+        collections::VecDeque,
         io::{Read as _, Write as _},
         os::unix::net::UnixStream,
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use hq_local_api::{
         ClientTransport,
         protocol::v1::{BuildMetadata, Id32, ServerHello, V1, WireMessage},
     };
+    use nix::{errno::Errno, poll::PollTimeout};
 
-    use super::{UnixClientTransport, UnixClientTransportConfig};
+    use super::{UnixClientTransport, UnixClientTransportConfig, poll_until_ready_with};
     use crate::RuntimePaths;
+
+    #[test]
+    fn unix_poll_retries_interruptions_against_one_deadline() {
+        let started = Instant::now();
+        let mut times = VecDeque::from([
+            started,
+            started,
+            started + Duration::from_millis(40),
+            started + Duration::from_millis(90),
+        ]);
+        let mut results = VecDeque::from([Err(Errno::EINTR), Err(Errno::EINTR), Ok(0)]);
+        let mut timeouts = Vec::new();
+
+        let ready = poll_until_ready_with(
+            Duration::from_millis(100),
+            || times.pop_front().expect("bounded clock observations"),
+            |timeout| {
+                timeouts.push(timeout);
+                results.pop_front().expect("bounded poll attempts")
+            },
+        )
+        .expect("interruptions are transient");
+
+        assert!(!ready);
+        assert_eq!(
+            timeouts,
+            [
+                PollTimeout::try_from(Duration::from_millis(100)).expect("timeout"),
+                PollTimeout::try_from(Duration::from_millis(60)).expect("timeout"),
+                PollTimeout::try_from(Duration::from_millis(10)).expect("timeout"),
+            ]
+        );
+    }
+
+    #[test]
+    fn unix_poll_rechecks_readiness_when_interruption_expires_the_deadline() {
+        let started = Instant::now();
+        let mut times = VecDeque::from([started, started, started + Duration::from_millis(101)]);
+        let mut results = VecDeque::from([Err(Errno::EINTR), Ok(1)]);
+        let mut timeouts = Vec::new();
+
+        let ready = poll_until_ready_with(
+            Duration::from_millis(100),
+            || times.pop_front().expect("bounded clock observations"),
+            |timeout| {
+                timeouts.push(timeout);
+                results.pop_front().expect("bounded poll attempts")
+            },
+        )
+        .expect("expired interruption remains orderly");
+
+        assert!(ready);
+        assert_eq!(
+            timeouts,
+            [
+                PollTimeout::try_from(Duration::from_millis(100)).expect("timeout"),
+                PollTimeout::ZERO,
+            ]
+        );
+    }
+
+    #[test]
+    fn unix_control_wake_racing_an_interruption_is_observed() {
+        let started = Instant::now();
+        let mut results = VecDeque::from([Err(Errno::EINTR), Ok(1)]);
+        let mut timeouts = Vec::new();
+
+        let ready = poll_until_ready_with(
+            Duration::from_millis(100),
+            || started,
+            |timeout| {
+                timeouts.push(timeout);
+                results.pop_front().expect("bounded poll attempts")
+            },
+        )
+        .expect("control readiness survives interruption");
+
+        assert!(ready);
+        assert_eq!(
+            timeouts,
+            [
+                PollTimeout::try_from(Duration::from_millis(100)).expect("timeout"),
+                PollTimeout::try_from(Duration::from_millis(100)).expect("timeout"),
+            ]
+        );
+    }
+
+    #[test]
+    fn unix_poll_preserves_non_interruption_errors() {
+        let started = Instant::now();
+        let error = poll_until_ready_with(
+            Duration::from_millis(100),
+            || started,
+            |_| Err(Errno::EBADF),
+        )
+        .expect_err("real poll failure remains fatal");
+
+        assert_eq!(error, Errno::EBADF);
+    }
+
+    #[test]
+    fn unix_transport_errors_have_closed_reconnect_classifications() {
+        assert_eq!(
+            UnixClientTransport::failure_kind(&super::UnixClientTransportError::Absent),
+            hq_local_api::ClientTransportFailureKind::Unavailable
+        );
+        assert_eq!(
+            UnixClientTransport::failure_kind(&super::UnixClientTransportError::Protocol),
+            hq_local_api::ClientTransportFailureKind::Protocol
+        );
+        assert_eq!(
+            UnixClientTransport::failure_kind(&super::UnixClientTransportError::Transport),
+            hq_local_api::ClientTransportFailureKind::Transport
+        );
+    }
 
     #[test]
     fn unix_poll_preserves_a_partial_frame_across_an_idle_timeout() {

@@ -31,8 +31,9 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
     BoundaryIds, BoundaryKind, BoundaryProcess, BoundaryTrace, IdentityError, IdentityErrorClass,
-    LocalNodeClient, LocalNodeEventClient, MonotonicTuiClock, StatePaths, TuiClientPort, TuiClock,
-    TuiEffectExecutor, TuiObservationPort, TuiTerminalIoKind, TuiTerminalPhase,
+    LocalNodeClient, LocalNodeEventClient, MonotonicTuiClock, StatePaths, TuiClientFailureKind,
+    TuiClientPort, TuiClock, TuiConnectionDiagnosticState, TuiEffectExecutor, TuiObservationPort,
+    TuiReconnectFailureKind, TuiReconnectOperation, TuiTerminalIoKind, TuiTerminalPhase,
     TuiThemeEnvironment, TuiThemeError, local_client::installed_local_client_config,
     resolve_tui_theme, tui_client::compose_tui_clients,
 };
@@ -706,16 +707,15 @@ fn trace_tui_event(trace: &BoundaryTrace, kind: BoundaryKind, event: &UiEvent) {
                 ..BoundaryIds::default()
             },
         ),
-        UiEvent::ConnectionObserved { generation, .. }
-        | UiEvent::ClientFailed { generation, .. } => {
-            trace.record(
-                kind,
-                BoundaryIds {
-                    subscription_generation: Some(*generation),
-                    ..BoundaryIds::default()
-                },
-            );
-        }
+        UiEvent::ConnectionObserved {
+            generation,
+            state,
+            cause,
+        } => trace_connection_observation(trace, *generation, *state, *cause),
+        UiEvent::ClientFailed {
+            generation,
+            failure,
+        } => trace_client_failure(trace, *generation, failure),
         UiEvent::SnapshotLoaded { effect_id, .. }
         | UiEvent::SnapshotFailed { effect_id, .. }
         | UiEvent::ConfigurationLoaded { effect_id, .. }
@@ -744,6 +744,57 @@ fn trace_tui_event(trace: &BoundaryTrace, kind: BoundaryKind, event: &UiEvent) {
         ),
         _ => {}
     }
+}
+
+fn trace_connection_observation(
+    trace: &BoundaryTrace,
+    generation: u64,
+    state: hq_tui::UiConnectionState,
+    cause: Option<hq_tui::UiReconnectCause>,
+) {
+    let connection_state = match state {
+        hq_tui::UiConnectionState::Disconnected => TuiConnectionDiagnosticState::Disconnected,
+        hq_tui::UiConnectionState::Connecting => TuiConnectionDiagnosticState::Connecting,
+        hq_tui::UiConnectionState::Ready => TuiConnectionDiagnosticState::Ready,
+        hq_tui::UiConnectionState::Reconnecting => TuiConnectionDiagnosticState::Reconnecting,
+        hq_tui::UiConnectionState::Incompatible => TuiConnectionDiagnosticState::Incompatible,
+    };
+    let reconnect_operation = cause.map(|cause| match cause.operation {
+        hq_tui::UiReconnectOperation::Connect => TuiReconnectOperation::Connect,
+        hq_tui::UiReconnectOperation::Read => TuiReconnectOperation::Read,
+        hq_tui::UiReconnectOperation::Write => TuiReconnectOperation::Write,
+    });
+    let reconnect_failure_kind = cause.map(|cause| match cause.kind {
+        hq_tui::UiReconnectFailureKind::Unavailable => TuiReconnectFailureKind::Unavailable,
+        hq_tui::UiReconnectFailureKind::Transport => TuiReconnectFailureKind::Transport,
+        hq_tui::UiReconnectFailureKind::Protocol => TuiReconnectFailureKind::Protocol,
+    });
+    trace.record(
+        BoundaryKind::TuiConnectionObserved,
+        BoundaryIds {
+            subscription_generation: Some(generation),
+            tui_connection_state: Some(connection_state),
+            tui_reconnect_operation: reconnect_operation,
+            tui_reconnect_failure_kind: reconnect_failure_kind,
+            ..BoundaryIds::default()
+        },
+    );
+}
+
+fn trace_client_failure(trace: &BoundaryTrace, generation: u64, failure: &hq_tui::UiFailure) {
+    let failure_kind = if failure.code == "local_api_incompatible" {
+        TuiClientFailureKind::Incompatible
+    } else {
+        TuiClientFailureKind::Unavailable
+    };
+    trace.record(
+        BoundaryKind::TuiClientFailed,
+        BoundaryIds {
+            subscription_generation: Some(generation),
+            tui_client_failure_kind: Some(failure_kind),
+            ..BoundaryIds::default()
+        },
+    );
 }
 
 fn trace_current_interaction(trace: &BoundaryTrace, kind: BoundaryKind, model: &UiModel) {

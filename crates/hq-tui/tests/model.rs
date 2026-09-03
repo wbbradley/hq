@@ -1541,6 +1541,7 @@ fn connection_observations_ignore_older_generations() {
         UiEvent::ConnectionObserved {
             generation: 4,
             state: UiConnectionState::Reconnecting,
+            cause: None,
         },
     )
     .expect("new generation applies");
@@ -1554,6 +1555,7 @@ fn connection_observations_ignore_older_generations() {
         UiEvent::ConnectionObserved {
             generation: 3,
             state: UiConnectionState::Ready,
+            cause: None,
         },
     )
     .expect("old generation is inert");
@@ -1565,6 +1567,7 @@ fn connection_observations_ignore_older_generations() {
         UiEvent::ConnectionObserved {
             generation: 4,
             state: UiConnectionState::Ready,
+            cause: None,
         },
     )
     .expect("current generation applies");
@@ -2515,6 +2518,7 @@ fn reconnect_preserves_the_open_conversation_until_authoritative_repair() {
         UiEvent::ConnectionObserved {
             generation: 3,
             state: UiConnectionState::Ready,
+            cause: None,
         },
     )
     .expect("reconnect");
@@ -2582,6 +2586,7 @@ fn self_note_draft_autosaves_and_survives_resize_reconnect_and_reload() {
         UiEvent::ConnectionObserved {
             generation: 3,
             state: UiConnectionState::Reconnecting,
+            cause: None,
         },
     )
     .expect("reconnect state preserves editor");
@@ -4164,6 +4169,7 @@ fn agent_search_and_details_keep_stable_identity_across_reload_reconnect_and_res
         UiEvent::ConnectionObserved {
             generation: 4,
             state: UiConnectionState::Reconnecting,
+            cause: None,
         },
     )
     .expect("reconnect");
@@ -4483,6 +4489,7 @@ fn managed_session_switch_cancel_stale_completion_and_actionable_outcomes_are_ex
         UiEvent::ConnectionObserved {
             generation: 7,
             state: UiConnectionState::Reconnecting,
+            cause: None,
         },
     )
     .expect("reconnect while managed operation is pending");

@@ -646,6 +646,7 @@ fn executor_forwards_subscription_and_connection_observations() {
         TuiClientObservation::Connection {
             generation: 3,
             state: UiConnectionState::Reconnecting,
+            cause: None,
         },
         TuiClientObservation::Invalidated { revision: 12 },
         TuiClientObservation::Failure {
@@ -664,7 +665,8 @@ fn executor_forwards_subscription_and_connection_observations() {
         receive_event(&mut executor),
         UiEvent::ConnectionObserved {
             generation: 3,
-            state: UiConnectionState::Reconnecting
+            state: UiConnectionState::Reconnecting,
+            cause: None,
         }
     ));
     assert_eq!(
