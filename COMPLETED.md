@@ -1,5 +1,52 @@
 # Completed
 
+## 2026-09-02 — Responsive provider activity pipeline
+
+Replaceable provider activity is now coalesced twice before it can amplify work: the Codex JSONL
+reader replaces adjacent progress/output-delta notifications before bounded channel admission, and
+the neutral harness retains only the latest exact activity snapshot before canonical persistence.
+Durable outputs and interactions remain FIFO ordering barriers. Harness calls no longer hold the
+component supervisor catalog lock, persistence has a separate owner, and ready drains have explicit
+work and monotonic-time budgets with retained wakes for remaining work.
+
+Readiness responses are bound to the exact published daemon generation, so a live stale socket or
+PID cannot satisfy a new client's readiness check. Default state diagnostics are private,
+mode-0600, capped at 1 MiB, and body-free; they capture transport and harness coalescing, queue
+high-water marks, drain/persistence/lock latency, stale readiness, exact terminal phase and OS
+classification, and the correlated instant a validated provider interaction enters the Codex
+adapter. Message, prompt, command, output, environment, and secret bodies are excluded by the closed
+record schema.
+
+Deterministic regressions cover a 32-update neutral flood, blocked persistence concurrent with an
+interaction query, generation mismatch and retry, diagnostics bounds/privacy, transport ordering,
+and terminal error evidence. The installed PTY qualification sends 2,000 fake-Codex deltas while
+three fresh clients remain below a one-second response bound, RSS remains below 512 MiB, canonical
+progress remains singular, and shutdown/restart succeeds. The complete all-feature workspace suite,
+the 18-test installed terminal suite, the daemon-descriptor regression, formatting, strict workspace
+Clippy, and qualification-inventory validation pass.
+
+### Original plan entry
+
+### Keep the daemon responsive under long provider activity streams
+
+Prevent replaceable Codex progress and output-delta traffic from turning into an unbounded sequence
+of canonical activity mutations or monopolizing the harness, store, and local API. Provider events
+must be admitted and coalesced before persistence, persistence must not run while holding supervisor
+catalog locks, and every drain pass must have an explicit work/time bound while preserving durable
+FIFO output, interaction ordering, checkpoint recovery, and terminal worker cleanup.
+
+Add deterministic flood and blocked-persistence regressions proving that replaceable updates remain
+bounded, pending-interaction queries and unrelated local API sessions stay responsive, and a ready
+daemon continues answering liveness probes. Readiness must test the advertised generation rather
+than trusting a live PID/socket artifact alone. Add default-on, bounded, mode-0600, privacy-safe
+diagnostics for queue high-water marks, coalescing, drain/store/lock latency, stale readiness, and
+the exact TUI terminal phase plus OS error kind/code; never record message, command, output,
+environment, prompt, or secret bodies. Installed qualification must exercise a long fake-Codex tool
+stream, reconnect a second client during it, and verify bounded facts, memory, latency, and clean
+shutdown/restart.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-02 — Theme-aware shell command highlighting
 
 Completed agent command source is now parsed with Tree-sitter's Bash grammar and highlighted in
