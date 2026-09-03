@@ -3997,6 +3997,14 @@ fn activity_preview_lines(
     cache: &mut UiRenderCache,
 ) -> Vec<Line<'static>> {
     const PREVIEW_LINES: usize = 3;
+    let completed_command_succeeded = matches!(
+        &entry.presentation,
+        UiConversationEntryPresentation::Activity {
+            status: UiActivityStatus::Succeeded,
+            completed: Some(UiCompletedItemPresentation::Command { .. }),
+            ..
+        }
+    );
     let mut rows = activity_preview(entry, width)
         .into_iter()
         .enumerate()
@@ -4007,7 +4015,11 @@ fn activity_preview_lines(
                 } else {
                     line
                 },
-                theme.style(role),
+                theme.style(if completed_command_succeeded && index > 0 {
+                    UiThemeRole::Text
+                } else {
+                    role
+                }),
             )
         })
         .collect::<Vec<_>>();
@@ -4022,7 +4034,17 @@ fn activity_preview_lines(
     for (index, segments) in highlighted.iter().take(PREVIEW_LINES).enumerate() {
         let prefix = if index == 0 { "$ " } else { "  " };
         if let Some(row) = rows.get_mut(index + 1) {
-            *row = styled_shell_line(prefix, segments, usize::from(width), role, theme);
+            *row = styled_shell_line(
+                prefix,
+                segments,
+                usize::from(width),
+                if completed_command_succeeded {
+                    UiThemeRole::Text
+                } else {
+                    role
+                },
+                theme,
+            );
         }
     }
     rows
@@ -4906,6 +4928,51 @@ mod tests {
                         .patch(theme.style(UiThemeRole::Accent))
             }));
         }
+    }
+
+    #[test]
+    fn completed_command_preview_colors_only_the_status_as_success() {
+        let entry = UiConversationEntry {
+            id: "completed-command".to_owned(),
+            presentation: UiConversationEntryPresentation::Activity {
+                kind: UiConversationActivityKind::CompletedItem,
+                status: UiActivityStatus::Succeeded,
+                summary: "Command completed".to_owned(),
+                detail: "complete detail".to_owned(),
+                truncated: false,
+                completed: Some(UiCompletedItemPresentation::Command {
+                    command: "printf '%s\\n' done".to_owned(),
+                    output: Some("done".to_owned()),
+                    exit_code: Some(0),
+                    command_truncated: false,
+                    output_truncated: false,
+                }),
+            },
+            message_state: None,
+            delivery: None,
+            message_target: None,
+            technical: Vec::new(),
+        };
+        let theme = UiTheme::terminal();
+        let mut cache = super::UiRenderCache::new();
+        let layout = conversation_entry_layout(&entry, 80, &theme, &mut cache);
+
+        assert_eq!(
+            layout.rows[0].style,
+            theme.style(UiThemeRole::ConversationActivitySuccess)
+        );
+        assert_eq!(layout.rows[2].to_string(), "│ done");
+        assert_eq!(layout.rows[2].style, theme.style(UiThemeRole::Text));
+        assert!(layout.rows[1].spans.iter().any(|span| {
+            span.style
+                == theme
+                    .style(UiThemeRole::Text)
+                    .patch(theme.style(UiThemeRole::Success))
+        }));
+        assert_eq!(
+            layout.rows[1].spans[0].style,
+            theme.style(UiThemeRole::Text)
+        );
     }
 
     #[test]
