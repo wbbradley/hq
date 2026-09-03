@@ -11,6 +11,8 @@ use crate::{HarnessActivity, HarnessOutput};
 pub struct HarnessSnapshotKey {
     /// Operation whose presentation is being replaced.
     pub operation_id: OperationId,
+    /// Optional provider item whose progress is being replaced.
+    pub item: Option<ShortText>,
     /// Stable neutral logical key within the operation.
     pub logical_key: ShortText,
 }

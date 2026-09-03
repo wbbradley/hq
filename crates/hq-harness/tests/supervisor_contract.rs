@@ -106,6 +106,7 @@ fn snapshot(key: HarnessSnapshotKey, sequence: u64, body: &str) -> HarnessBuffer
 fn snapshot_key(value: &str) -> HarnessSnapshotKey {
     HarnessSnapshotKey {
         operation_id: OperationId::from_bytes([7; 32]),
+        item: None,
         logical_key: ShortText::new(value).expect("key validates"),
     }
 }

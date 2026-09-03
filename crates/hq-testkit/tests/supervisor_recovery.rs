@@ -197,6 +197,49 @@ fn saturation_stages_durable_values_and_coalesces_only_exact_snapshots() {
 }
 
 #[test]
+fn ready_progress_flood_coalesces_before_canonical_persistence() {
+    let agent = AgentId::from_bytes([0x48; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let session_id = ProviderSessionId::new("progress-session").expect("session validates");
+    let provider = Arc::new(ProviderState::default());
+    provider.queue((1..=32).map(|sequence| {
+        Ok(HarnessEventPoll::Event(HarnessEvent::Activity(
+            progress_activity(sequence, "command-1", &format!("progress {sequence}")),
+        )))
+    }));
+    let state = Arc::new(MemoryState::default());
+    let persistence = Arc::new(MemoryPersistence::available());
+    let runtime = HarnessSupervisor::new(
+        HarnessSupervisorConfig {
+            event_capacity: NonZeroUsize::new(64).expect("capacity is nonzero"),
+            ..HarnessSupervisorConfig::default()
+        },
+        dependencies(
+            registry(provider_id.clone(), session_id, provider),
+            state,
+            persistence.clone(),
+            Arc::new(TestClock::new(10)),
+            Arc::new(TestTokens::default()),
+        ),
+    )
+    .expect("supervisor config validates");
+    runtime
+        .launch(launch(agent, provider_id, HarnessSessionRequest::Start))
+        .expect("worker starts");
+
+    let report = runtime.drain_ready_events().expect("ready progress drains");
+
+    assert_eq!(report.events_polled, 32);
+    assert_eq!(report.snapshots_replaced, 31);
+    let activities = persistence.activities.lock().expect("activities lock");
+    assert_eq!(activities.len(), 1);
+    assert_eq!(activities[0].sequence.get(), 32);
+    assert_eq!(activities[0].content.as_str(), "progress 32");
+    drop(activities);
+    runtime.shutdown().expect("worker shuts down");
+}
+
+#[test]
 fn restart_replay_recovers_a_polled_value_after_persistence_outage() {
     let agent = AgentId::from_bytes([43; 32]);
     let provider_id = ProviderId::new("scripted").expect("provider validates");
@@ -1080,6 +1123,15 @@ fn agent_turn(sequence: u64, status: ActivityStatus, content: &str) -> HarnessAc
         kind: ActivityKind::AgentTurn,
         logical_key: ShortText::new("turn").expect("key validates"),
         ..activity(sequence, status, content)
+    }
+}
+
+fn progress_activity(sequence: u64, item: &str, content: &str) -> HarnessActivity {
+    HarnessActivity {
+        item: Some(ShortText::new(item).expect("item validates")),
+        kind: ActivityKind::Progress,
+        logical_key: ShortText::new("progress").expect("key validates"),
+        ..activity(sequence, ActivityStatus::Running, content)
     }
 }
 

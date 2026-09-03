@@ -503,6 +503,23 @@ struct HarnessWorker {
     requests: VecDeque<HarnessInteractiveRequest>,
 }
 
+#[derive(Clone)]
+struct HarnessPersistenceContext {
+    token: HarnessOwnerToken,
+    provider_id: ProviderId,
+    session_id: ProviderSessionId,
+}
+
+impl From<&HarnessWorker> for HarnessPersistenceContext {
+    fn from(worker: &HarnessWorker) -> Self {
+        Self {
+            token: worker.token,
+            provider_id: worker.provider_id.clone(),
+            session_id: worker.session_id.clone(),
+        }
+    }
+}
+
 /// Complete memory-only provider request with its exact live owner context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HarnessPendingInteraction {
@@ -523,6 +540,7 @@ pub struct HarnessSupervisor {
     config: HarnessSupervisorConfig,
     dependencies: HarnessSupervisorDependencies,
     workers: Mutex<BTreeMap<AgentId, HarnessWorker>>,
+    persistence: Mutex<()>,
     responders: Mutex<BTreeSet<HarnessResponderId>>,
     accepting: AtomicBool,
 }
@@ -547,6 +565,7 @@ impl HarnessSupervisor {
             config,
             dependencies,
             workers: Mutex::new(BTreeMap::new()),
+            persistence: Mutex::new(()),
             responders: Mutex::new(BTreeSet::new()),
             accepting: AtomicBool::new(true),
         })
@@ -896,7 +915,8 @@ impl HarnessSupervisor {
             .events
             .push(event)
             .map_err(|_| HarnessError::new(HarnessErrorClass::Backpressure))?;
-        drain_events(&self.dependencies, agent_id, worker)
+        drop(workers);
+        self.drain_buffered_agent_events(agent_id)
     }
 
     /// Retries every already accepted normalized item without admitting new work.
@@ -906,16 +926,29 @@ impl HarnessSupervisor {
             .get_mut(&agent_id)
             .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
         renew_worker(&self.config, &self.dependencies, agent_id, worker)?;
-        drain_events(&self.dependencies, agent_id, worker)
+        drop(workers);
+        self.drain_buffered_agent_events(agent_id)
     }
 
     /// Polls every live worker once without blocking and retains every accepted value.
     pub fn poll_events(&self) -> Result<HarnessEventPumpReport, HarnessError> {
-        let responders = self.lock_responders()?;
-        let responder_available = !responders.is_empty();
+        self.poll_events_with_persistence(true)
+    }
+
+    fn poll_events_with_persistence(
+        &self,
+        persist: bool,
+    ) -> Result<HarnessEventPumpReport, HarnessError> {
+        let persistence_failure = persist
+            .then(|| self.drain_buffered_events().err())
+            .flatten();
+        let responder_available = !self.lock_responders()?.is_empty();
         let mut workers = self.lock_workers()?;
         let agents: Vec<_> = workers.keys().copied().collect();
         let mut report = HarnessEventPumpReport::default();
+        if let Some(error) = persistence_failure {
+            retain_pump_failure(&mut report, error.class, self.config.max_workers);
+        }
         let mut terminal = Vec::new();
         for agent_id in agents {
             let worker = workers
@@ -945,6 +978,7 @@ impl HarnessSupervisor {
                 terminal.push((agent_id, outcome));
             }
         }
+        let mut terminal_workers = Vec::new();
         for (agent_id, outcome) in terminal {
             let Some(worker) = workers.remove(&agent_id) else {
                 continue;
@@ -958,11 +992,23 @@ impl HarnessSupervisor {
                     retain_pump_failure(&mut report, class, self.config.max_workers);
                 }
             }
-            let stopped = stop_worker(&self.config, &self.dependencies, agent_id, worker);
-            for failure in stopped.failures {
-                retain_pump_failure(&mut report, failure, self.config.max_workers);
+            terminal_workers.push((agent_id, worker));
+        }
+        report.live_workers = workers.len();
+        drop(workers);
+        if !terminal_workers.is_empty() {
+            let _persistence = self.lock_persistence()?;
+            for (agent_id, worker) in terminal_workers {
+                let stopped = stop_worker(&self.config, &self.dependencies, agent_id, worker);
+                for failure in stopped.failures {
+                    retain_pump_failure(&mut report, failure, self.config.max_workers);
+                }
             }
         }
+        if persist && let Err(error) = self.drain_buffered_events() {
+            retain_pump_failure(&mut report, error.class, self.config.max_workers);
+        }
+        let workers = self.lock_workers()?;
         report.pending_values = workers
             .values()
             .map(|worker| {
@@ -974,8 +1020,50 @@ impl HarnessSupervisor {
             })
             .sum();
         report.live_workers = workers.len();
-        drop(responders);
         Ok(report)
+    }
+
+    fn drain_buffered_events(&self) -> Result<(), HarnessError> {
+        let agents = self.lock_workers()?.keys().copied().collect::<Vec<_>>();
+        for agent_id in agents {
+            self.drain_buffered_agent_events(agent_id)?;
+        }
+        Ok(())
+    }
+
+    fn drain_buffered_agent_events(&self, agent_id: AgentId) -> Result<(), HarnessError> {
+        let _persistence = self.lock_persistence()?;
+        loop {
+            let next = {
+                let workers = self.lock_workers()?;
+                let worker = workers
+                    .get(&agent_id)
+                    .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
+                worker
+                    .events
+                    .front()
+                    .cloned()
+                    .map(|event| (HarnessPersistenceContext::from(worker), event))
+            };
+            let Some((context, event)) = next else {
+                return Ok(());
+            };
+            persist_one(&self.dependencies, agent_id, &context, &event)?;
+            let mut workers = self.lock_workers()?;
+            let worker = workers
+                .get_mut(&agent_id)
+                .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
+            if worker.events.front() != Some(&event) {
+                return Err(HarnessError::new(HarnessErrorClass::PersistenceCollision));
+            }
+            let _ = worker.events.pop();
+        }
+    }
+
+    fn lock_persistence(&self) -> Result<std::sync::MutexGuard<'_, ()>, HarnessError> {
+        self.persistence
+            .lock()
+            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))
     }
 
     /// Drains currently ready provider events with bounded work per live source.
@@ -983,15 +1071,20 @@ impl HarnessSupervisor {
         let mut aggregate = HarnessEventPumpReport::default();
         let mut exhausted_budget = false;
         for _ in 0..self.config.event_capacity.get() {
-            let pass = self.poll_events()?;
+            let pass = self.poll_events_with_persistence(false)?;
             let progressed =
                 pass.events_polled > 0 || pass.workers_closed > 0 || pass.workers_failed > 0;
             merge_pump_report(&mut aggregate, pass, self.config.max_workers);
-            if aggregate.live_workers == 0 || !progressed {
+            if aggregate.live_workers == 0 {
                 return Ok(aggregate);
+            }
+            if !progressed {
+                break;
             }
             exhausted_budget = true;
         }
+        let persisted = self.poll_events()?;
+        merge_pump_report(&mut aggregate, persisted, self.config.max_workers);
         if exhausted_budget && aggregate.live_workers > 0 {
             self.dependencies.events.notify()?;
         }
@@ -1227,9 +1320,6 @@ fn pump_worker(
         report.terminal = Some(WorkerTerminal::Failed(error.class));
         return report;
     }
-    if let Err(error) = drain_events(dependencies, agent_id, worker) {
-        report.failures.push(error.class);
-    }
     if let Some(staged) = worker.staged.take() {
         match admit_polled_event(config, worker, staged, responder_available) {
             Ok(admission) => account_admission(&mut report, admission),
@@ -1238,9 +1328,6 @@ fn pump_worker(
                 worker.staged = Some(*failure.event);
                 return report;
             }
-        }
-        if let Err(error) = drain_events(dependencies, agent_id, worker) {
-            report.failures.push(error.class);
         }
     }
     match worker.session.next_event() {
@@ -1253,9 +1340,6 @@ fn pump_worker(
                     worker.staged = Some(*failure.event);
                     return report;
                 }
-            }
-            if let Err(error) = drain_events(dependencies, agent_id, worker) {
-                report.failures.push(error.class);
             }
         }
         Ok(HarnessEventPoll::Pending) => {}
@@ -1457,12 +1541,13 @@ fn buffered_activity(activity: HarnessActivity) -> HarnessBufferedEvent {
     digest.update([u8::from(activity.truncated)]);
     update_completed_digest(&mut digest, activity.completed.as_deref());
     let digest = CommandDigest::from_bytes(digest.finalize().into());
-    if activity.status == ActivityStatus::Snapshot {
+    if activity.status == ActivityStatus::Snapshot || activity.kind == ActivityKind::Progress {
         HarnessBufferedEvent::Snapshot {
             event_id,
             digest,
             key: HarnessSnapshotKey {
                 operation_id: activity.operation_id,
+                item: activity.item.clone(),
                 logical_key: activity.logical_key.clone(),
             },
             activity,
@@ -1691,8 +1776,9 @@ fn drain_events(
     agent_id: AgentId,
     worker: &mut HarnessWorker,
 ) -> Result<(), HarnessError> {
+    let context = HarnessPersistenceContext::from(&*worker);
     while let Some(event) = worker.events.front().cloned() {
-        persist_one(dependencies, agent_id, worker, &event)?;
+        persist_one(dependencies, agent_id, &context, &event)?;
         let _ = worker.events.pop();
     }
     Ok(())
@@ -1718,7 +1804,7 @@ fn drain_owned_values(
 fn persist_one(
     dependencies: &HarnessSupervisorDependencies,
     agent_id: AgentId,
-    worker: &HarnessWorker,
+    context: &HarnessPersistenceContext,
     event: &HarnessBufferedEvent,
 ) -> Result<(), HarnessError> {
     let (event_id, digest, output, activity) = match event {
@@ -1755,18 +1841,18 @@ fn persist_one(
         .map(|value| value.operation_id)
         .or_else(|| activity.map(|value| value.operation_id))
         .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?;
-    let delivery = attributed_delivery(dependencies, agent_id, worker, operation_id)?;
+    let delivery = attributed_delivery(dependencies, agent_id, context, operation_id)?;
     if let Some(output) = output {
         dependencies.persistence.persist_output(
             agent_id,
-            &worker.provider_id,
-            &worker.session_id,
+            &context.provider_id,
+            &context.session_id,
             delivery.as_ref(),
             output,
         )?;
         checkpoint_event(
             dependencies,
-            worker.token,
+            context.token,
             HarnessEventCheckpoint {
                 agent_id,
                 event_id,
@@ -1779,14 +1865,14 @@ fn persist_one(
     if let Some(activity) = activity {
         dependencies.persistence.persist_activity(
             agent_id,
-            &worker.provider_id,
-            &worker.session_id,
+            &context.provider_id,
+            &context.session_id,
             delivery.as_ref(),
             activity,
         )?;
         checkpoint_event(
             dependencies,
-            worker.token,
+            context.token,
             HarnessEventCheckpoint {
                 agent_id,
                 event_id,
@@ -1802,7 +1888,7 @@ fn persist_one(
 fn attributed_delivery(
     dependencies: &HarnessSupervisorDependencies,
     agent_id: AgentId,
-    worker: &HarnessWorker,
+    context: &HarnessPersistenceContext,
     operation_id: hq_domain::OperationId,
 ) -> Result<Option<HarnessDeliveryRecord>, HarnessError> {
     let Some(delivery) = dependencies
@@ -1812,8 +1898,8 @@ fn attributed_delivery(
         return Ok(None);
     };
     if delivery.agent_id != agent_id
-        || delivery.provider_id != worker.provider_id
-        || delivery.session_id != worker.session_id
+        || delivery.provider_id != context.provider_id
+        || delivery.session_id != context.session_id
         || delivery.submission.operation_id != operation_id
         || delivery.project.is_none()
     {
