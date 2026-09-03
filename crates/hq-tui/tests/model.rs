@@ -55,7 +55,10 @@ fn new_launcher_keeps_project_direct_and_personal_intents_distinct() {
     let launcher = update(launcher, UiEvent::Input(UiInput::Character('n')))
         .expect("reopen New launcher")
         .model;
-    let note = update(launcher, UiEvent::Input(UiInput::PreviousItem))
+    let note = update(launcher, UiEvent::Input(UiInput::NextItem))
+        .expect("choose direct message")
+        .model;
+    let note = update(note, UiEvent::Input(UiInput::NextItem))
         .expect("choose personal note")
         .model;
     let note = update(note, UiEvent::Input(UiInput::Activate)).expect("prepare note");
@@ -82,6 +85,15 @@ fn vim_vertical_keys_navigate_choices_without_stealing_text_input() {
     model = update(model, UiEvent::Input(UiInput::Character('n')))
         .expect("open launcher")
         .model;
+    model = update(model, UiEvent::Input(UiInput::Character('k')))
+        .expect("k at the first intent is inert")
+        .model;
+    assert!(matches!(
+        model.new_modal(),
+        Some(UiNewModal::Launcher {
+            selected: UiNewChoice::ProjectWork,
+        })
+    ));
     model = update(model, UiEvent::Input(UiInput::Character('j')))
         .expect("j selects the next intent")
         .model;
@@ -116,8 +128,8 @@ fn vim_vertical_keys_navigate_choices_without_stealing_text_input() {
     model = update(model, UiEvent::Input(UiInput::Activate))
         .expect("choose agent")
         .model;
-    model = update(model, UiEvent::Input(UiInput::Character('j')))
-        .expect("j selects the next provider")
+    model = update(model, UiEvent::Input(UiInput::Character('k')))
+        .expect("k selects the previous provider")
         .model;
     assert!(matches!(
         model.new_modal(),
@@ -150,6 +162,37 @@ fn vim_vertical_keys_navigate_choices_without_stealing_text_input() {
         project_model.project_interaction(),
         Some(UiProjectInteraction::CreateExisting { path, .. }) if path == "j"
     ));
+}
+
+#[test]
+fn vim_keys_never_cross_focus_or_activate_the_current_item() {
+    let previewed = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
+            row_id: "thread-a".to_owned(),
+            entries: vec![entry("message-1", false)],
+            next_cursor: None,
+        },
+    );
+
+    let navigation = update(
+        previewed.model.clone(),
+        UiEvent::Input(UiInput::Character('l')),
+    )
+    .expect("l in navigation is inert");
+    assert_eq!(navigation.model.focus(), UiFocus::Navigation);
+    assert_eq!(navigation.model.section(), UiSection::Inbox);
+
+    let content = update(previewed.model, UiEvent::Input(UiInput::NextFocus))
+        .expect("Tab focuses Inbox content");
+    let unchanged = update(content.model, UiEvent::Input(UiInput::Character('h')))
+        .expect("h in content is inert");
+    assert_eq!(unchanged.model.focus(), UiFocus::Content);
+    let unchanged = update(unchanged.model, UiEvent::Input(UiInput::Character('l')))
+        .expect("l in content does not activate the conversation");
+    assert_eq!(unchanged.model.focus(), UiFocus::Content);
 }
 
 #[test]
@@ -1128,7 +1171,7 @@ fn explicit_help_and_refresh_work_without_discarding_an_open_dialog() {
 }
 
 #[test]
-fn wide_sidebar_uses_vertical_keys_and_horizontal_keys_only_change_focus() {
+fn wide_sidebar_uses_arrow_keys_and_clamps_at_section_boundaries() {
     let started = update(
         UiModel::new(UiSize {
             width: 120,
@@ -1149,20 +1192,24 @@ fn wide_sidebar_uses_vertical_keys_and_horizontal_keys_only_change_focus() {
     )
     .expect("load complete snapshot");
 
-    let sent = update(loaded.model, UiEvent::Input(UiInput::NextItem)).expect("down in sidebar");
+    let inbox = update(loaded.model, UiEvent::Input(UiInput::PreviousItem))
+        .expect("up at first section is inert");
+    assert_eq!(inbox.model.section(), UiSection::Inbox);
+
+    let sent = update(inbox.model, UiEvent::Input(UiInput::NextItem)).expect("down in sidebar");
     assert_eq!(sent.model.section(), UiSection::Sent);
     assert_eq!(sent.model.focus(), UiFocus::Navigation);
     assert_eq!(sent.model.selected_row(), Some("sent-a"));
 
-    let archived =
-        update(sent.model, UiEvent::Input(UiInput::Character('j'))).expect("j in sidebar");
-    assert_eq!(archived.model.section(), UiSection::Archived);
-    let sent =
-        update(archived.model, UiEvent::Input(UiInput::Character('k'))).expect("k in sidebar");
-    assert_eq!(sent.model.section(), UiSection::Sent);
+    let unchanged = update(sent.model, UiEvent::Input(UiInput::Character('j')))
+        .expect("j cannot leave the sidebar control");
+    assert_eq!(unchanged.model.section(), UiSection::Sent);
+    let unchanged = update(unchanged.model, UiEvent::Input(UiInput::Character('k')))
+        .expect("k cannot leave the sidebar control");
+    assert_eq!(unchanged.model.section(), UiSection::Sent);
 
-    let content =
-        update(sent.model, UiEvent::Input(UiInput::NextSection)).expect("right focuses content");
+    let content = update(unchanged.model, UiEvent::Input(UiInput::NextSection))
+        .expect("right focuses content");
     assert_eq!(content.model.section(), UiSection::Sent);
     assert_eq!(content.model.focus(), UiFocus::Content);
     let second =
@@ -1172,6 +1219,53 @@ fn wide_sidebar_uses_vertical_keys_and_horizontal_keys_only_change_focus() {
         .expect("left returns to sidebar");
     assert_eq!(navigation.model.section(), UiSection::Sent);
     assert_eq!(navigation.model.focus(), UiFocus::Navigation);
+}
+
+#[test]
+fn narrow_section_navigation_clamps_and_vim_keys_do_not_wrap_config_to_inbox() {
+    let started = update(
+        UiModel::new(UiSize {
+            width: 70,
+            height: 30,
+        }),
+        UiEvent::Started,
+    )
+    .expect("start compact model");
+    let request = snapshot_effect(&started.effects);
+    let mut model = update(
+        started.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: request,
+            snapshot: snapshot(1, &["inbox"]),
+        },
+    )
+    .expect("load compact model")
+    .model;
+
+    model = update(model, UiEvent::Input(UiInput::MoveCursorLeft))
+        .expect("left at Inbox is inert")
+        .model;
+    assert_eq!(model.section(), UiSection::Inbox);
+    for _ in 0..5 {
+        model = update(model, UiEvent::Input(UiInput::NextSection))
+            .expect("visit next section")
+            .model;
+    }
+    assert_eq!(model.section(), UiSection::Config);
+
+    for input in [
+        UiInput::MoveCursorRight,
+        UiInput::Character('h'),
+        UiInput::Character('j'),
+        UiInput::Character('k'),
+        UiInput::Character('l'),
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("boundary input is inert")
+            .model;
+        assert_eq!(model.section(), UiSection::Config);
+        assert_eq!(model.focus(), UiFocus::Navigation);
+    }
 }
 
 #[test]
@@ -2058,7 +2152,7 @@ fn materialized_first_page_retention_is_lru_bounded() {
 }
 
 #[test]
-fn inbox_left_and_right_navigation_moves_one_visible_level_at_a_time() {
+fn inbox_arrow_navigation_moves_one_visible_level_at_a_time() {
     let previewed = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
@@ -2070,13 +2164,13 @@ fn inbox_left_and_right_navigation_moves_one_visible_level_at_a_time() {
         },
     );
     let content = update(previewed.model, UiEvent::Input(UiInput::NextFocus)).expect("list focus");
-    let conversation =
-        update(content.model, UiEvent::Input(UiInput::Character('l'))).expect("enter conversation");
+    let conversation = update(content.model, UiEvent::Input(UiInput::MoveCursorRight))
+        .expect("enter conversation");
     assert_eq!(conversation.model.focus(), UiFocus::Conversation);
     let back_to_list =
-        update(conversation.model, UiEvent::Input(UiInput::Character('h'))).expect("back to list");
+        update(conversation.model, UiEvent::Input(UiInput::MoveCursorLeft)).expect("back to list");
     assert_eq!(back_to_list.model.focus(), UiFocus::Content);
-    let back_to_navigation = update(back_to_list.model, UiEvent::Input(UiInput::Character('h')))
+    let back_to_navigation = update(back_to_list.model, UiEvent::Input(UiInput::MoveCursorLeft))
         .expect("back to navigation");
     assert_eq!(back_to_navigation.model.focus(), UiFocus::Navigation);
 }
@@ -2088,7 +2182,7 @@ fn inbox_back_closes_technical_details_before_leaving_the_conversation() {
     assert!(details.model.technical_visible());
 
     let closed =
-        update(details.model, UiEvent::Input(UiInput::Character('h'))).expect("close details");
+        update(details.model, UiEvent::Input(UiInput::MoveCursorLeft)).expect("close details");
     assert!(!closed.model.technical_visible());
     assert_eq!(closed.model.focus(), UiFocus::Conversation);
 
@@ -4037,8 +4131,8 @@ fn managed_session_provider_choices_select_defaults_and_skip_unavailable_entries
         Some(UiAgentModal::ManagedProvider { selected: Some(provider), .. })
             if provider == "codex"
     ));
-    let choosing = update(choosing.model, UiEvent::Input(UiInput::NextItem))
-        .expect("cycle to the next available provider");
+    let choosing = update(choosing.model, UiEvent::Input(UiInput::PreviousItem))
+        .expect("move to the previous available provider");
     assert!(matches!(
         choosing.model.agent_modal(),
         Some(UiAgentModal::ManagedProvider { selected: Some(provider), .. })
@@ -4651,6 +4745,15 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
             selected: UiProjectCreationChoice::ExistingFolder
         })
     ));
+    model = update(model, UiEvent::Input(UiInput::PreviousItem))
+        .expect("creation chooser clamps at its first item")
+        .model;
+    assert!(matches!(
+        model.project_interaction(),
+        Some(UiProjectInteraction::ChooseCreation {
+            selected: UiProjectCreationChoice::ExistingFolder
+        })
+    ));
     model = update(model, UiEvent::Input(UiInput::Activate))
         .expect("existing folder form")
         .model;
@@ -4770,6 +4873,14 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
         .model;
     assert!(matches!(
         model.project_interaction(),
+        Some(UiProjectInteraction::ChooseCreation {
+            selected: UiProjectCreationChoice::IsolatedWorktree
+        })
+    ));
+    let bounded = update(model.clone(), UiEvent::Input(UiInput::NextItem))
+        .expect("creation chooser clamps at its last item");
+    assert!(matches!(
+        bounded.model.project_interaction(),
         Some(UiProjectInteraction::ChooseCreation {
             selected: UiProjectCreationChoice::IsolatedWorktree
         })
@@ -5165,7 +5276,7 @@ fn activation_target_and_edited_fields_survive_authoritative_reload() {
             .expect("provider field")
             .model;
     }
-    model = update(model, UiEvent::Input(UiInput::NextItem))
+    model = update(model, UiEvent::Input(UiInput::PreviousItem))
         .expect("provider choice")
         .model;
     model = update(model, UiEvent::Input(UiInput::NextFocus))
@@ -5231,7 +5342,7 @@ fn project_new_session_provider_is_a_typed_choice_and_empty_catalog_blocks_submi
     .expect("provider field does not accept text");
     assert_eq!(ignored.model, model);
     assert!(ignored.effects.is_empty());
-    let selected = update(model, UiEvent::Input(UiInput::NextItem))
+    let selected = update(model, UiEvent::Input(UiInput::PreviousItem))
         .expect("choose alpha")
         .model;
     assert!(matches!(
@@ -5645,7 +5756,7 @@ fn loaded_agents_model_with_providers(
     snapshot.providers = providers;
     let mut model = loaded_model(snapshot);
     for _ in 0..3 {
-        model = update(model, UiEvent::Input(UiInput::Character('l')))
+        model = update(model, UiEvent::Input(UiInput::MoveCursorRight))
             .expect("next cached section")
             .model;
     }
@@ -5686,7 +5797,7 @@ fn loaded_projects_model(revision: u64, projects: Vec<UiProject>) -> UiModel {
 fn loaded_projects_snapshot(snapshot: UiSnapshot) -> UiModel {
     let mut model = loaded_model(snapshot);
     for _ in 0..4 {
-        model = update(model, UiEvent::Input(UiInput::Character('l')))
+        model = update(model, UiEvent::Input(UiInput::MoveCursorRight))
             .expect("next cached section")
             .model;
     }
@@ -5719,7 +5830,7 @@ fn loaded_projects_model_with_agents_and_providers(
     snapshot.providers = providers;
     let mut model = loaded_model(snapshot);
     for _ in 0..4 {
-        model = update(model, UiEvent::Input(UiInput::Character('l')))
+        model = update(model, UiEvent::Input(UiInput::MoveCursorRight))
             .expect("next cached section")
             .model;
     }

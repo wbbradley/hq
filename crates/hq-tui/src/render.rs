@@ -897,17 +897,17 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
         UiSection::Projects => {
             actions.push(Line::from(match model.project_workspace_level() {
                 UiProjectWorkspaceLevel::List if model.selected_row_data().is_some() => {
-                    "Enter — collaborate · l/→ — summary · c — create · / — search"
+                    "Enter — collaborate · → — summary · c — create · / — search"
                 }
                 UiProjectWorkspaceLevel::List => "c — create project · / — search",
                 UiProjectWorkspaceLevel::Summary => {
-                    "↑/↓ or j/k — choose · Enter — open · h/← — Projects"
+                    "↑/↓ or j/k — choose · Enter — open · ← — Projects"
                 }
                 UiProjectWorkspaceLevel::Manage => {
-                    "↑/↓ or j/k — choose action · h/← — project summary"
+                    "↑/↓ or j/k — choose action · ← — project summary"
                 }
                 UiProjectWorkspaceLevel::Folders => {
-                    "↑/↓ or j/k — choose action · Tab — choose folder · h/← — manage"
+                    "↑/↓ or j/k — choose action · Tab — choose folder · ← — manage"
                 }
             }));
         }
@@ -2977,7 +2977,7 @@ fn render_project_workspace_detail(
         return;
     };
     let title = if compact {
-        format!("Projects / {} · h/← Projects", summary.name)
+        format!("Projects / {} · ← Projects", summary.name)
     } else {
         format!("Project · {}", summary.name)
     };
@@ -3003,10 +3003,10 @@ fn render_project_workspace_detail(
     if compact {
         lines.push(Line::default());
         lines.push(Line::from(match model.project_workspace_level() {
-            UiProjectWorkspaceLevel::Manage => "h/← Project summary",
-            UiProjectWorkspaceLevel::Folders => "Tab choose folder · h/← Manage project",
+            UiProjectWorkspaceLevel::Manage => "← Project summary",
+            UiProjectWorkspaceLevel::Folders => "Tab choose folder · ← Manage project",
             UiProjectWorkspaceLevel::List => "",
-            UiProjectWorkspaceLevel::Summary => "Enter choose · h/← Projects",
+            UiProjectWorkspaceLevel::Summary => "Enter choose · ← Projects",
         }));
     }
     frame.render_widget(
@@ -3815,7 +3815,7 @@ fn render_technical_inspector(
     }
     lines.push(Line::default());
     lines.push(Line::styled(
-        "j/k scroll · t/h/← close details · ? help",
+        "j/k scroll · t/← close details · ? help",
         theme.style(UiThemeRole::TextMuted),
     ));
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -4660,23 +4660,22 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         if model.config_edit().is_some() {
             " Enter save · Esc cancel · F1 help".to_owned()
         } else {
-            " j/k choose · Enter/→ edit or change · h/← navigation · ? help · q quit".to_owned()
+            " j/k choose · Enter/→ edit or change · ← navigation · ? help · q quit".to_owned()
         }
     } else if model.section() == UiSection::Projects {
         match model.project_workspace_level() {
             UiProjectWorkspaceLevel::List if model.selected_row_data().is_some() => {
-                " Enter collaborate · l/→ summary · c create · / search · ? help · q quit"
-                    .to_owned()
+                " Enter collaborate · → summary · c create · / search · ? help · q quit".to_owned()
             }
             UiProjectWorkspaceLevel::List => " c create · / search · ? help · q quit".to_owned(),
             UiProjectWorkspaceLevel::Summary => {
-                " j/k choose · Enter open · h/← Projects · ? help · q quit".to_owned()
+                " j/k choose · Enter open · ← Projects · ? help · q quit".to_owned()
             }
             UiProjectWorkspaceLevel::Manage => {
-                " j/k choose action · Enter open · h/← summary · ? help · q quit".to_owned()
+                " j/k choose action · Enter open · ← summary · ? help · q quit".to_owned()
             }
             UiProjectWorkspaceLevel::Folders => {
-                " j/k choose action · Tab folder · Enter run · h/← manage · ? help · q quit"
+                " j/k choose action · Tab folder · Enter run · ← manage · ? help · q quit"
                     .to_owned()
             }
         }
@@ -4718,7 +4717,7 @@ fn conversation_footer(model: &UiModel) -> String {
         conversation.entries.iter().find(|entry| entry.id == anchor)
     });
     if model.technical_visible() {
-        return " j/k scroll · t/h/← close details · ? help".to_owned();
+        return " j/k scroll · t/← close details · ? help".to_owned();
     }
     let mut controls = vec![if model.viewport().width >= WIDE_WIDTH {
         "↑/↓ or j/k message"
@@ -4749,7 +4748,7 @@ fn conversation_footer(model: &UiModel) -> String {
     } else {
         "t/Enter info"
     });
-    controls.push("h/← Inbox");
+    controls.push("← Inbox");
     controls.push("? help");
     format!(" {}", controls.join(" · "))
 }

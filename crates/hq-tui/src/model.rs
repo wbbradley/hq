@@ -157,7 +157,7 @@ impl UiSection {
             .iter()
             .position(|candidate| *candidate == self)
             .unwrap_or(0);
-        Self::ALL[(index + 1) % Self::ALL.len()]
+        Self::ALL[(index + 1).min(Self::ALL.len() - 1)]
     }
 
     fn previous(self) -> Self {
@@ -165,7 +165,7 @@ impl UiSection {
             .iter()
             .position(|candidate| *candidate == self)
             .unwrap_or(0);
-        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+        Self::ALL[index.saturating_sub(1)]
     }
 
     fn index(self) -> usize {
@@ -174,6 +174,20 @@ impl UiSection {
             .position(|candidate| *candidate == self)
             .unwrap_or(0)
     }
+}
+
+fn bounded_navigation_index(current: Option<usize>, len: usize, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let Some(current) = current else {
+        return Some(0);
+    };
+    Some(if forward {
+        current.saturating_add(1).min(len - 1)
+    } else {
+        current.saturating_sub(1)
+    })
 }
 
 /// Logical focus independent of terminal coordinates.
@@ -1498,11 +1512,8 @@ impl UiNewChoice {
             .iter()
             .position(|candidate| *candidate == self)
             .unwrap_or(0);
-        let next = if forward {
-            (current + 1) % Self::ALL.len()
-        } else {
-            current.checked_sub(1).unwrap_or(Self::ALL.len() - 1)
-        };
+        let next =
+            bounded_navigation_index(Some(current), Self::ALL.len(), forward).unwrap_or(current);
         Self::ALL[next]
     }
 }
@@ -3507,6 +3518,20 @@ impl UiModel {
         self.refresh_selected_project_summary();
     }
 
+    fn move_section(&mut self, forward: bool) -> bool {
+        let next = if forward {
+            self.section.next()
+        } else {
+            self.section.previous()
+        };
+        if next == self.section {
+            false
+        } else {
+            self.change_section(next);
+            true
+        }
+    }
+
     fn schedule_timer(
         &mut self,
         kind: UiTimerKind,
@@ -4705,21 +4730,21 @@ fn apply_input(
         UiInput::NextSection => {
             if model.viewport.width >= WIDE_WIDTH && model.focus == UiFocus::Navigation {
                 model.focus = UiFocus::Content;
+                true
             } else if model.viewport.width < WIDE_WIDTH {
-                model.change_section(model.section.next());
+                model.move_section(true)
             } else {
                 return Ok(());
             }
-            true
         }
         UiInput::MoveCursorRight => match model.focus {
             UiFocus::Navigation => {
                 if model.viewport.width >= WIDE_WIDTH {
                     model.focus = UiFocus::Content;
+                    true
                 } else {
-                    model.change_section(model.section.next());
+                    model.move_section(true)
                 }
-                true
             }
             UiFocus::Content if model.conversation.is_some() => {
                 model.focus = UiFocus::Conversation;
@@ -4733,12 +4758,12 @@ fn apply_input(
                 && matches!(model.focus, UiFocus::Content | UiFocus::Conversation)
             {
                 model.focus = UiFocus::Navigation;
+                true
             } else if model.viewport.width < WIDE_WIDTH {
-                model.change_section(model.section.previous());
+                model.move_section(false)
             } else {
                 return Ok(());
             }
-            true
         }
         UiInput::MoveCursorLeft => match model.focus {
             UiFocus::Conversation => {
@@ -4755,8 +4780,7 @@ fn apply_input(
             }
             UiFocus::Navigation => {
                 if model.viewport.width < WIDE_WIDTH {
-                    model.change_section(model.section.previous());
-                    true
+                    model.move_section(false)
                 } else {
                     false
                 }
@@ -4768,10 +4792,7 @@ fn apply_input(
                 model.scroll_technical_details(true)
             }
             UiFocus::Conversation => model.scroll_conversation_viewport(true),
-            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
-                model.change_section(model.section.next());
-                true
-            }
+            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => model.move_section(true),
             UiFocus::Navigation | UiFocus::Content => model.move_row_selection(true),
             UiFocus::Draft => false,
         },
@@ -4780,10 +4801,7 @@ fn apply_input(
                 model.scroll_technical_details(false)
             }
             UiFocus::Conversation => model.scroll_conversation_viewport(false),
-            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
-                model.change_section(model.section.previous());
-                true
-            }
+            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => model.move_section(false),
             UiFocus::Navigation | UiFocus::Content => model.move_row_selection(false),
             UiFocus::Draft => false,
         },
@@ -4854,7 +4872,7 @@ fn apply_project_workspace_input(
         return Ok(None);
     }
     match (model.project_workspace_level, input) {
-        (UiProjectWorkspaceLevel::List, UiInput::MoveCursorRight | UiInput::Character('l')) => {
+        (UiProjectWorkspaceLevel::List, UiInput::MoveCursorRight) => {
             if model.project_summary.is_none() {
                 Ok(Some(false))
             } else {
@@ -4868,7 +4886,7 @@ fn apply_project_workspace_input(
             UiProjectWorkspaceLevel::Summary
             | UiProjectWorkspaceLevel::Manage
             | UiProjectWorkspaceLevel::Folders,
-            UiInput::MoveCursorLeft | UiInput::Character('h') | UiInput::Escape,
+            UiInput::MoveCursorLeft | UiInput::Escape,
         ) => {
             model.project_workspace_level = match model.project_workspace_level {
                 UiProjectWorkspaceLevel::Folders => UiProjectWorkspaceLevel::Manage,
@@ -5474,6 +5492,17 @@ fn normalize_vim_navigation(model: &UiModel, input: &UiInput) -> UiInput {
     }
     match input {
         UiInput::Character('j' | 'k')
+            if model.focus == UiFocus::Navigation
+                && model.viewport.width >= WIDE_WIDTH
+                && model.interaction_modal.is_none()
+                && model.new_modal.is_none()
+                && model.mailbox_modal.is_none()
+                && model.project_interaction.is_none()
+                && model.agent_modal.is_none() =>
+        {
+            input.clone()
+        }
+        UiInput::Character('j' | 'k')
             if model.focus == UiFocus::Conversation && model.interaction_modal.is_none() =>
         {
             input.clone()
@@ -5582,11 +5611,13 @@ fn apply_interaction_modal_input(
     let response = match input {
         UiInput::Escape => Some(UiInteractionResponse::Cancelled),
         UiInput::NextItem if !interaction.choices.is_empty() => {
-            selected = (selected + 1) % interaction.choices.len();
+            selected = bounded_navigation_index(Some(selected), interaction.choices.len(), true)
+                .unwrap_or(selected);
             None
         }
         UiInput::PreviousItem if !interaction.choices.is_empty() => {
-            selected = (selected + interaction.choices.len() - 1) % interaction.choices.len();
+            selected = bounded_navigation_index(Some(selected), interaction.choices.len(), false)
+                .unwrap_or(selected);
             None
         }
         UiInput::Activate if interaction.allow_text && !text.trim().is_empty() => {
@@ -5906,11 +5937,7 @@ fn cycle_identity_choice<T>(
             .and_then(|selected| values.iter().position(|value| identity(value) == selected))
             .unwrap_or(0)
     };
-    let next = if forward {
-        (current + 1) % count
-    } else {
-        current.checked_sub(1).unwrap_or(count - 1)
-    };
+    let next = bounded_navigation_index(Some(current), count, forward).unwrap_or(current);
     if next == values.len() {
         (None, true)
     } else {
@@ -6551,13 +6578,14 @@ fn apply_project_interaction_input(
     match model.project_interaction.clone() {
         Some(UiProjectInteraction::ChooseCreation { mut selected }) => match input {
             UiInput::NextItem | UiInput::PreviousItem => {
-                selected = match selected {
-                    UiProjectCreationChoice::ExistingFolder => {
+                selected = match (selected, matches!(input, UiInput::NextItem)) {
+                    (UiProjectCreationChoice::ExistingFolder, true) => {
                         UiProjectCreationChoice::IsolatedWorktree
                     }
-                    UiProjectCreationChoice::IsolatedWorktree => {
+                    (UiProjectCreationChoice::IsolatedWorktree, false) => {
                         UiProjectCreationChoice::ExistingFolder
                     }
+                    (selected, _) => selected,
                 };
                 model.project_interaction = Some(UiProjectInteraction::ChooseCreation { selected });
                 Ok(true)
@@ -6913,11 +6941,7 @@ fn cycle_provider_choice(
             .iter()
             .position(|provider| provider.provider == selected)
     });
-    let next = match (current, forward) {
-        (Some(index), true) => (index + 1) % available.len(),
-        (Some(index), false) => index.checked_sub(1).unwrap_or(available.len() - 1),
-        (None, _) => 0,
-    };
+    let next = bounded_navigation_index(current, available.len(), forward)?;
     Some(available[next].provider.clone())
 }
 
@@ -7071,8 +7095,8 @@ fn adjust_activation_selection(model: &mut UiModel, forward: bool) {
         _ => return,
     };
     match field {
-        UiProjectFormField::Agent => cycle_activation_agent(model),
-        UiProjectFormField::Thread => cycle_activation_thread(model),
+        UiProjectFormField::Agent => cycle_activation_agent(model, forward),
+        UiProjectFormField::Thread => cycle_activation_thread(model, forward),
         UiProjectFormField::SessionMode => toggle_activation_mode(model),
         UiProjectFormField::Provider => cycle_activation_provider(model, forward),
         UiProjectFormField::Confirmation => {
@@ -7118,7 +7142,7 @@ fn cycle_activation_provider(model: &mut UiModel, forward: bool) {
     }
 }
 
-fn cycle_activation_agent(model: &mut UiModel) {
+fn cycle_activation_agent(model: &mut UiModel, forward: bool) {
     let Some(
         UiProjectInteraction::Activate {
             project,
@@ -7147,10 +7171,11 @@ fn cycle_activation_agent(model: &mut UiModel) {
     if agents.is_empty() {
         return;
     }
-    let current = agent_id
-        .and_then(|id| agents.iter().position(|agent| agent.agent_id == id))
-        .unwrap_or(agents.len() - 1);
-    let selected = agents[(current + 1) % agents.len()].agent_id;
+    let current = agent_id.and_then(|id| agents.iter().position(|agent| agent.agent_id == id));
+    let Some(next) = bounded_navigation_index(current, agents.len(), forward) else {
+        return;
+    };
+    let selected = agents[next].agent_id;
     *agent_id = Some(selected);
     *thread = project
         .threads
@@ -7167,7 +7192,7 @@ fn cycle_activation_agent(model: &mut UiModel) {
     model.last_failure = None;
 }
 
-fn cycle_activation_thread(model: &mut UiModel) {
+fn cycle_activation_thread(model: &mut UiModel, forward: bool) {
     let Some(
         UiProjectInteraction::Activate {
             project,
@@ -7197,15 +7222,15 @@ fn cycle_activation_thread(model: &mut UiModel) {
         *thread = None;
         return;
     }
-    let current = thread
-        .as_ref()
-        .and_then(|selected| {
-            candidates
-                .iter()
-                .position(|candidate| **candidate == *selected)
-        })
-        .unwrap_or(candidates.len() - 1);
-    let selected = candidates[(current + 1) % candidates.len()].clone();
+    let current = thread.as_ref().and_then(|selected| {
+        candidates
+            .iter()
+            .position(|candidate| **candidate == *selected)
+    });
+    let Some(next) = bounded_navigation_index(current, candidates.len(), forward) else {
+        return;
+    };
+    let selected = candidates[next].clone();
     provider.clone_from(&selected.provider);
     *thread = Some(selected);
     model.last_failure = None;
@@ -8395,10 +8420,8 @@ fn select_project_search_match(model: &mut UiModel, forward: bool) {
         .selected_row
         .as_ref()
         .and_then(|selected| matches.iter().position(|candidate| candidate == selected));
-    let next = match (current, forward) {
-        (Some(index), true) => (index + 1) % matches.len(),
-        (Some(index), false) => index.checked_sub(1).unwrap_or(matches.len() - 1),
-        (None, _) => 0,
+    let Some(next) = bounded_navigation_index(current, matches.len(), forward) else {
+        return;
     };
     model.selected_row = Some(matches[next].clone());
 }
@@ -8463,10 +8486,8 @@ fn select_agent_search_match(model: &mut UiModel, forward: bool) {
         .selected_row
         .as_ref()
         .and_then(|selected| matches.iter().position(|candidate| candidate == selected));
-    let next = match (current, forward) {
-        (Some(index), true) => (index + 1) % matches.len(),
-        (Some(index), false) => index.checked_sub(1).unwrap_or(matches.len() - 1),
-        (None, _) => 0,
+    let Some(next) = bounded_navigation_index(current, matches.len(), forward) else {
+        return;
     };
     model.selected_row = Some(matches[next].clone());
 }
@@ -8814,56 +8835,22 @@ fn mailbox_shortcut(
             open_worktree_project_form(model);
             Ok(true)
         }
-        'h' => {
-            match model.focus {
-                UiFocus::Conversation if model.technical_visible => {
-                    model.close_technical_details();
-                }
-                UiFocus::Conversation => model.focus = UiFocus::Content,
-                UiFocus::Content => model.focus = UiFocus::Navigation,
-                UiFocus::Navigation if model.viewport.width < WIDE_WIDTH => {
-                    model.change_section(model.section.previous());
-                }
-                UiFocus::Navigation | UiFocus::Draft => return Ok(false),
-            }
-            Ok(true)
-        }
         't' => Ok(model.toggle_technical_details()),
-        'l' => match model.focus {
-            UiFocus::Navigation if model.viewport.width < WIDE_WIDTH => {
-                model.change_section(model.section.next());
-                Ok(true)
-            }
-            UiFocus::Navigation => {
-                model.focus = UiFocus::Content;
-                Ok(true)
-            }
-            UiFocus::Content => activate(model, effects),
-            UiFocus::Conversation | UiFocus::Draft => Ok(false),
-        },
         'j' => Ok(match model.focus {
             UiFocus::Conversation if model.technical_visible => {
                 model.scroll_technical_details(true)
             }
             UiFocus::Conversation => model.move_conversation_anchor(true),
-            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
-                model.change_section(model.section.next());
-                true
-            }
-            UiFocus::Navigation | UiFocus::Content => model.move_row_selection(true),
-            UiFocus::Draft => false,
+            UiFocus::Content => model.move_row_selection(true),
+            UiFocus::Navigation | UiFocus::Draft => false,
         }),
         'k' => Ok(match model.focus {
             UiFocus::Conversation if model.technical_visible => {
                 model.scroll_technical_details(false)
             }
             UiFocus::Conversation => model.move_conversation_anchor(false),
-            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
-                model.change_section(model.section.previous());
-                true
-            }
-            UiFocus::Navigation | UiFocus::Content => model.move_row_selection(false),
-            UiFocus::Draft => false,
+            UiFocus::Content => model.move_row_selection(false),
+            UiFocus::Navigation | UiFocus::Draft => false,
         }),
         _ => Ok(false),
     }

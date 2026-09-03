@@ -259,7 +259,7 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
         "installed inbox",
         "https://example.test/preview",
         "You",
-        "h/← Inbox",
+        "← Inbox",
         "Enter open",
     ] {
         assert!(
@@ -352,7 +352,7 @@ fn installed_markdown_content_is_inert_and_resource_free() {
         "https://192.0.2.1/never-load.png",
         "CODE_MARKER",
         "nested item",
-        "h/← Inbox",
+        "← Inbox",
     ] {
         assert!(
             run.bytes
@@ -1171,10 +1171,14 @@ fn run_in_pty_with_trace(
                 PtyInteraction::NavigateInboxConversation { .. }
                 | PtyInteraction::ScrollOversizedConversation { .. }
                 | PtyInteraction::ReplyToProjectConversation { .. } => Vec::new(),
-                PtyInteraction::CreateAgent(_) => vec![b"l", b"l", b"l", b"c"],
-                PtyInteraction::StartRejectedSession => vec![b"l", b"l", b"l", b"\t"],
+                PtyInteraction::CreateAgent(_) => {
+                    vec![b"\x1b[C", b"\x1b[C", b"\x1b[C", b"c"]
+                }
+                PtyInteraction::StartRejectedSession => {
+                    vec![b"\x1b[C", b"\x1b[C", b"\x1b[C", b"\t"]
+                }
                 PtyInteraction::CreateExistingProject { .. } => {
-                    vec![b"l", b"l", b"l", b"l", b"c", b"\r"]
+                    vec![b"\x1b[C", b"\x1b[C", b"\x1b[C", b"\x1b[C", b"c", b"\r"]
                 }
                 PtyInteraction::CreateGuidedProjectWork { .. } => {
                     vec![b"n", b"\r", b"\r", b"\r"]
@@ -1183,10 +1187,10 @@ fn run_in_pty_with_trace(
                 | PtyInteraction::CloseProject { .. }
                 | PtyInteraction::OpenProject { .. }
                 | PtyInteraction::SetProjectArchived { .. } => {
-                    vec![b"l", b"l", b"l", b"l", b"\t"]
+                    vec![b"\x1b[C", b"\x1b[C", b"\x1b[C", b"\x1b[C", b"\t"]
                 }
                 PtyInteraction::CreateWorktreeProject { .. } => {
-                    vec![b"l", b"l", b"l", b"l", b"w"]
+                    vec![b"\x1b[C", b"\x1b[C", b"\x1b[C", b"\x1b[C", b"w"]
                 }
             };
             for key in keys {
@@ -1311,14 +1315,14 @@ fn run_in_pty_with_trace(
             && !managed_action_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows("h/← Inbox".len())
-                    .any(|window| window == "h/← Inbox".as_bytes())
+                    .windows("← Inbox".len())
+                    .any(|window| window == "← Inbox".as_bytes())
             })
         {
             let keys = if visit_bounds {
                 b"\x1b[H".as_slice()
             } else {
-                b"h"
+                b"\x1b[D"
             };
             master.write_all(keys).expect("Inbox navigation keys write");
             master.flush().expect("Inbox navigation keys flush");
@@ -1414,8 +1418,8 @@ fn run_in_pty_with_trace(
             && completion_offset.is_some_and(|offset| {
                 let rendered = &bytes[offset..];
                 rendered
-                    .windows("h/← Inbox".len())
-                    .any(|window| window == "h/← Inbox".as_bytes())
+                    .windows("← Inbox".len())
+                    .any(|window| window == "← Inbox".as_bytes())
                     && rendered
                         .windows(last.len())
                         .any(|window| window == last.as_bytes())
@@ -1466,7 +1470,7 @@ fn run_in_pty_with_trace(
                     .any(|window| window == last.as_bytes())
             })
         {
-            master.write_all(b"h").expect("Inbox back key writes");
+            master.write_all(b"\x1b[D").expect("Inbox back key writes");
             master.flush().expect("Inbox back key flushes");
             resource_commit_sent = true;
             oversized_phase = 5;
@@ -1501,7 +1505,7 @@ fn run_in_pty_with_trace(
             })
         {
             master
-                .write_all(b"h")
+                .write_all(b"\x1b[D")
                 .expect("second Inbox back key writes");
             master.flush().expect("second Inbox back key flushes");
             oversized_phase = 7;
@@ -1567,8 +1571,8 @@ fn run_in_pty_with_trace(
             && !managed_action_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows("h/← Inbox".len())
-                    .any(|window| window == "h/← Inbox".as_bytes())
+                    .windows("← Inbox".len())
+                    .any(|window| window == "← Inbox".as_bytes())
             })
         {
             master.write_all(b"r").expect("project reply key writes");
@@ -1765,7 +1769,9 @@ fn run_in_pty_with_trace(
                 .windows(name.len())
                 .any(|window| window == name.as_bytes())
         {
-            master.write_all(b"l").expect("project summary key writes");
+            master
+                .write_all(b"\x1b[C")
+                .expect("project summary key writes");
             master.flush().expect("project details key flushes");
             content_sent = true;
             completion_offset = Some(bytes.len());
@@ -1783,7 +1789,9 @@ fn run_in_pty_with_trace(
                 .windows(name.len())
                 .any(|window| window == name.as_bytes())
         {
-            master.write_all(b"l").expect("project summary key writes");
+            master
+                .write_all(b"\x1b[C")
+                .expect("project summary key writes");
             master.flush().expect("project details key flushes");
             content_sent = true;
             completion_offset = Some(bytes.len());

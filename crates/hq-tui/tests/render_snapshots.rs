@@ -88,7 +88,7 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
     assert!(archived.contains("u restore"));
     assert!(!archived.contains("a archive"));
     assert!(
-        archived.contains("u restore · t/Enter info · h/← Inbox · ? help"),
+        archived.contains("u restore · t/Enter info · ← Inbox · ? help"),
         "{archived}"
     );
 
@@ -1024,7 +1024,7 @@ fn technical_details_are_in_pane_and_keep_exact_activity_content() {
         assert!(rendered.contains("Activity details"), "{rendered}");
         assert!(rendered.contains("compiling"), "{rendered}");
         assert!(rendered.contains("sequence: 2"), "{rendered}");
-        assert!(rendered.contains("h/← close details"), "{rendered}");
+        assert!(rendered.contains("← close details"), "{rendered}");
         assert!(!rendered.contains("activity sequence="), "{rendered}");
     }
 }
@@ -1995,7 +1995,7 @@ fn projects_workspace_uses_persistent_wide_summary_and_compact_one_level_detail(
     assert!(compact_detail.contains("Projects / release"));
     assert!(no_color.contains('›'), "no-color project focus: {no_color}");
     assert!(
-        compact_detail.contains("h/← Projects"),
+        compact_detail.contains("← Projects"),
         "compact project detail:\n{compact_detail}"
     );
     assert!(!compact_detail.contains("Project details"));
@@ -2532,7 +2532,7 @@ fn agent_status_rows_model(size: UiSize) -> UiModel {
     let section_input = if size.width >= 96 {
         UiInput::NextItem
     } else {
-        UiInput::Character('l')
+        UiInput::MoveCursorRight
     };
     for _ in 0..3 {
         model = update(model, UiEvent::Input(section_input.clone()))
@@ -2599,7 +2599,7 @@ fn agent_details_model_with_status_and_providers(
     let section_input = if size.width >= 96 {
         UiInput::NextItem
     } else {
-        UiInput::Character('l')
+        UiInput::MoveCursorRight
     };
     for _ in 0..3 {
         model = update(model, UiEvent::Input(section_input.clone()))
@@ -2794,7 +2794,7 @@ fn project_model_with_state(
     let section_input = if size.width >= 96 {
         UiInput::NextItem
     } else {
-        UiInput::Character('l')
+        UiInput::MoveCursorRight
     };
     for _ in 0..4 {
         model = update(model, UiEvent::Input(section_input.clone()))
