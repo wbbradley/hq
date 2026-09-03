@@ -1,5 +1,63 @@
 # Completed
 
+## 2026-09-03 — Interruption-resilient subscribed TUI connections
+
+The subscribed Unix transport now retries only `EINTR` against one monotonic effective deadline,
+re-evaluating daemon and control-wake readiness without losing partial frames or advancing a healthy
+connection generation. The reconnecting runner retains closed connect/read/write and
+unavailable/transport/protocol evidence, and TUI diagnostics now distinguish connection transitions
+from client workflow failures without retaining bodies, paths, or operating-system prose.
+
+Deterministic coverage exercises repeated interruption, deadline recomputation and expiry, a racing
+control wake, partial-frame retention, non-interruption failures, transport classification, and
+runner cause propagation. The installed PTY regression proves repeated SIGWINCH delivery can race
+an authoritative update without displaying `Reconnecting…`, emitting a client failure, changing
+the subscription generation, losing input, or failing terminal restoration. Formatting, strict
+locked workspace Clippy, and the complete locked all-target/all-feature workspace suite, including
+all 20 installed terminal tests, pass.
+
+### Original plan entry
+
+### Keep subscribed TUI connections alive across interrupted Unix polls
+
+The terminal polling boundary already treats `EINTR` as transient, but
+`UnixClientTransport::poll_frame` in `crates/hq-node/src/local_client.rs` still maps an interrupted
+`nix::poll` to `UnixClientTransportError::Transport`. The reconnecting runner consequently closes a
+healthy subscribed socket and advances its generation when tmux focus or resize signaling
+interrupts the observer thread. Existing boundary records retain the generation but conflate
+connection observations and client failures, so a later `Reconnecting…` header cannot be traced to
+its actual transition cause.
+
+- Give the Unix client polling path a testable retry boundary. Retry only `Errno::EINTR`, retain one
+  monotonic deadline for the effective `min(requested timeout, io_timeout)` wait, recompute the
+  remaining timeout after every interruption, and re-evaluate both daemon-socket and control-wake
+  readiness on every attempt. Preserve incremental frame decoding, generation-safe wake/interrupt
+  ownership, and normal timeout behavior.
+- Keep non-`EINTR` poll, socket, framing, EOF, and protocol failures on the existing reconnect path.
+  Preserve enough closed, privacy-safe failure evidence to distinguish those causes without
+  exposing paths, payloads, prompts, or arbitrary operating-system prose.
+- Extend the TUI client and boundary diagnostics so connection observations and client failures
+  produce distinguishable records containing the subscription generation, closed connection
+  state, and closed reconnect/failure cause. A healthy interruption must produce neither a
+  client-failure record nor a reconnect generation.
+- Add deterministic local-client tests for repeated interruption, deadline recomputation and
+  expiry, a control wake racing an interruption, partial-frame preservation, and unchanged
+  non-`EINTR` failure behavior. Extend installed Unix PTY coverage to exercise repeated tmux-like
+  focus/resize signaling while authoritative updates arrive, proving the TUI remains connected,
+  redraws, accepts input and orderly exit, and preserves terminal modes.
+- Update the local-client, TUI shell, and diagnostic contracts in the relevant Rust design
+  documentation.
+
+Dependencies: the existing Unix transport polling seam, reconnecting client, privacy-safe boundary
+trace, and installed PTY harness. This should land before the conversation-setup work so its
+installed journey is not obscured by spurious reconnects.
+
+Completion condition: repeated focus/resize interruptions cannot move a healthy observer out of
+its active connection generation or display `Reconnecting…`, while every genuine reconnect retains
+typed diagnostic evidence that identifies why it occurred.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-02 — Interruption-resilient TUI terminal polling
 
 The Crossterm terminal boundary now retries only Unix `EINTR`, rechecking queued terminal events
