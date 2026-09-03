@@ -230,6 +230,9 @@ impl<P: LifecycleProbe, L: NodeLauncher> NodeClientCoordinator<P, L> {
             }
             Ok(_) => return self.wait_for_ready(None, None, false, true),
             Err(LifecycleClientError::Absent) => {}
+            Err(LifecycleClientError::StaleReadiness) => {
+                return self.wait_for_ready(None, None, false, true);
+            }
             Err(error) => return Err(NodeCoordinatorError::Probe(error)),
         }
         let child = self
@@ -326,7 +329,12 @@ impl<P: LifecycleProbe, L: NodeLauncher> NodeClientCoordinator<P, L> {
                     );
                     child_started = true;
                 }
-                Ok(_) | Err(LifecycleClientError::Absent | LifecycleClientError::ResponseLost) => {}
+                Ok(_)
+                | Err(
+                    LifecycleClientError::Absent
+                    | LifecycleClientError::ResponseLost
+                    | LifecycleClientError::StaleReadiness,
+                ) => {}
                 Err(error) => {
                     if let Some(child) = child.take() {
                         self.launcher
@@ -427,6 +435,7 @@ mod tests {
                 state: LifecycleState::Ready,
                 build: build.clone(),
                 revision: Some(0),
+                generation: Some(Id32::new([nonce; 32])),
                 detail: None,
             },
             readiness: Some(
@@ -467,6 +476,26 @@ mod tests {
         let ready = coordinator.ensure_ready().expect("ready");
         assert!(!ready.child_started);
         assert_eq!(coordinator.launcher.spawns, 0);
+    }
+
+    #[test]
+    fn stale_readiness_is_retried_until_the_live_generation_matches() {
+        let mut coordinator = coordinator(
+            [
+                Err(LifecycleClientError::StaleReadiness),
+                Ok(observation(2)),
+            ],
+            ScriptedLauncher::default(),
+        );
+        let ready = coordinator
+            .ensure_ready()
+            .expect("ready generation converges");
+        assert!(!ready.child_started);
+        assert_eq!(coordinator.launcher.spawns, 0);
+        assert_eq!(
+            ready.observation.status.generation,
+            Some(Id32::new([2; 32]))
+        );
     }
 
     #[test]

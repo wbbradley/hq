@@ -1799,6 +1799,8 @@ pub struct LifecycleStatus {
     pub build: BuildMetadata,
     /// Authoritative revision when durable state is available.
     pub revision: Option<u64>,
+    /// Boot-local generation returned by the live protocol peer.
+    pub generation: Option<Id32>,
     /// Optional bounded inert readiness or failure detail.
     pub detail: Option<String>,
 }
@@ -1818,8 +1820,16 @@ impl LifecycleStatus {
             state,
             build,
             revision,
+            generation: None,
             detail,
         })
+    }
+
+    /// Binds this live response to one boot-local readiness generation.
+    #[must_use]
+    pub const fn with_generation(mut self, generation: Id32) -> Self {
+        self.generation = Some(generation);
+        self
     }
 }
 

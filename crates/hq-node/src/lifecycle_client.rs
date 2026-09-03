@@ -46,6 +46,8 @@ pub enum LifecycleClientError {
     Protocol,
     /// Existing readiness metadata failed strict validation after protocol liveness succeeded.
     Readiness(RuntimeArtifactErrorClass),
+    /// The live peer did not match the boot generation in its readiness artifact.
+    StaleReadiness,
 }
 
 impl fmt::Display for LifecycleClientError {
@@ -120,7 +122,25 @@ impl LifecycleClient {
         let Response::Success(ResponseResult::Lifecycle(status)) = response.response else {
             return Err(LifecycleClientError::Protocol);
         };
+        validate_readiness_generation(&status, readiness.as_ref())?;
         Ok(LifecycleObservation { status, readiness })
+    }
+}
+
+fn validate_readiness_generation(
+    status: &LifecycleStatus,
+    readiness: Option<&ReadinessRecord>,
+) -> Result<(), LifecycleClientError> {
+    if status.state != hq_local_api::protocol::v1::LifecycleState::Ready {
+        return Ok(());
+    }
+    let Some(generation) = status.generation else {
+        return Err(LifecycleClientError::StaleReadiness);
+    };
+    if readiness.is_some_and(|record| record.boot_nonce == generation) {
+        Ok(())
+    } else {
+        Err(LifecycleClientError::StaleReadiness)
     }
 }
 
@@ -173,5 +193,57 @@ fn read_readiness_after_protocol(
         Err(_) => Err(LifecycleClientError::Readiness(
             RuntimeArtifactErrorClass::OperatingSystem,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use hq_local_api::protocol::v1::{BuildMetadata, Id32, LifecycleState, LifecycleStatus};
+
+    use super::{LifecycleClientError, ReadinessRecord, validate_readiness_generation};
+
+    fn build() -> BuildMetadata {
+        BuildMetadata::new("hq", "0.1.0", Some("generation-test")).expect("build validates")
+    }
+
+    fn readiness(generation: u8) -> ReadinessRecord {
+        ReadinessRecord::new(
+            LifecycleState::Ready,
+            1,
+            build(),
+            Id32::new([4; 32]),
+            7,
+            Id32::new([generation; 32]),
+        )
+        .expect("readiness validates")
+    }
+
+    #[test]
+    fn ready_response_requires_the_exact_advertised_generation() {
+        let status = LifecycleStatus::new(LifecycleState::Ready, build(), Some(7), None)
+            .expect("status validates")
+            .with_generation(Id32::new([2; 32]));
+
+        assert_eq!(
+            validate_readiness_generation(&status, Some(&readiness(1))),
+            Err(LifecycleClientError::StaleReadiness)
+        );
+        assert_eq!(
+            validate_readiness_generation(&status, None),
+            Err(LifecycleClientError::StaleReadiness)
+        );
+        assert_eq!(
+            validate_readiness_generation(&status, Some(&readiness(2))),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn nonready_response_does_not_require_published_readiness() {
+        let status = LifecycleStatus::new(LifecycleState::Starting, build(), None, None)
+            .expect("status validates");
+        assert_eq!(validate_readiness_generation(&status, None), Ok(()));
     }
 }

@@ -93,6 +93,7 @@ where
     owner: NodeOwner<L, R, H, P>,
     pump: LocalSessionPump,
     config: LocalNodeRuntimeConfig,
+    generation: hq_local_api::protocol::v1::Id32,
 }
 
 impl<L, R, H, P> LocalNodeRuntime<L, R, H, P>
@@ -121,11 +122,13 @@ where
         let (pump, readiness) = owner
             .open_local_session_pump(config.pump, config.build.clone())
             .map_err(LocalNodeRuntimeStartError::Pump)?;
+        let generation = readiness.boot_nonce;
         Ok((
             Self {
                 owner,
                 pump,
                 config,
+                generation,
             },
             readiness,
         ))
@@ -144,7 +147,8 @@ where
             let status = self
                 .owner
                 .lifecycle_status(self.config.build.clone())
-                .map_err(|_| LocalNodeRuntimeError::OwnerUnavailable)?;
+                .map_err(|_| LocalNodeRuntimeError::OwnerUnavailable)?
+                .with_generation(self.generation);
             let lifecycle = CallLifecycle::new(status);
             let selected = {
                 let ports = self
@@ -203,7 +207,8 @@ where
             let status = self
                 .owner
                 .lifecycle_status(self.config.build.clone())
-                .map_err(|_| LocalNodeRuntimeError::OwnerUnavailable)?;
+                .map_err(|_| LocalNodeRuntimeError::OwnerUnavailable)?
+                .with_generation(self.generation);
             let lifecycle = CallLifecycle::new(status);
             let progressed = {
                 let ports = self
@@ -340,6 +345,7 @@ mod tests {
             state: LifecycleState::Ready,
             build: BuildMetadata::new("hq", "0.1.0", Some("test")).expect("build"),
             revision: Some(7),
+            generation: Some(hq_local_api::protocol::v1::Id32::new([9; 32])),
             detail: None,
         })
     }

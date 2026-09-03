@@ -596,6 +596,7 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
             state,
             build,
             revision: lifecycle.revision(),
+            generation: None,
             detail: None,
         })
     }
