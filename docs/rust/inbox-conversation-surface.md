@@ -296,9 +296,14 @@ is the only box edge. Draft target, persistence state, and validation stay in it
 the transcript does not repeat them. The upper-left border names the exact recipient and appends an
 unlabeled project name for a project-bound draft; persistence and byte state stay right-aligned. A
 guided new project conversation resolves its recipient from the selected agent before the eventual
-assignment exists. It also installs a local typed Inbox row and empty Conversation view immediately;
-the authoritative project-thread row replaces that local context after the first message commits
-and appears in a snapshot.
+assignment exists. Its persisted draft target is an explicit setup containing the stable project,
+agent, provider, and draft identities. The Inbox row is labeled “Conversation not started” and its
+detail explains that assignment begins with the first message; it is not an authoritative
+conversation and does not invent an empty transcript. Esc retains this modeless setup, `r` or Enter
+reopens its exact draft, `c` explicitly replaces its chosen agent without changing the setup or
+draft identity, Tab visibly switches between the list and setup detail, and reopening the same
+project through `n` is idempotent. No project filter is installed for this state. The
+authoritative project-thread row replaces only the matching draft/message identity after commit.
 
 When the selected conversation changes from a running agent turn to a newly terminal turn, Inbox
 opens a follow-up draft for that exact project thread or latest replyable direct message. Loading an

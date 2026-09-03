@@ -1000,13 +1000,15 @@ pub fn mailbox_command_request_to_v1(request: &MailboxCommandRequest) -> Mailbox
 }
 
 /// Converts one wire draft autosave request into the application vocabulary.
-pub fn mailbox_draft_save_from_v1(request: MailboxDraftSaveRequestDto) -> MailboxDraftSaveRequest {
-    MailboxDraftSaveRequest {
+pub fn mailbox_draft_save_from_v1(
+    request: MailboxDraftSaveRequestDto,
+) -> Result<MailboxDraftSaveRequest, ValueError> {
+    Ok(MailboxDraftSaveRequest {
         draft_id: OperationId::from_bytes(request.draft_id.bytes()),
-        target: mailbox_draft_target_from_v1(&request.target),
+        target: mailbox_draft_target_from_v1(&request.target)?,
         content: request.content,
         expected_version: request.expected_version,
-    }
+    })
 }
 
 /// Converts one wire draft deletion request into the application vocabulary.
@@ -1068,14 +1070,25 @@ fn mailbox_draft_to_v1(draft: &MailboxDraft) -> MailboxDraftDto {
                 project_id: id32(project_id.as_bytes()),
                 thread_id: thread_id.map(|id| id32(id.as_bytes())),
             },
+            MailboxDraftTarget::ProjectSetup {
+                project_id,
+                agent_id,
+                ref provider,
+            } => MailboxDraftTargetDto::ProjectSetup {
+                project_id: id32(project_id.as_bytes()),
+                agent_id: id32(agent_id.as_bytes()),
+                provider: provider.as_str().to_owned(),
+            },
         },
         content: draft.content.clone(),
         version: draft.version,
     }
 }
 
-fn mailbox_draft_target_from_v1(target: &MailboxDraftTargetDto) -> MailboxDraftTarget {
-    match target {
+fn mailbox_draft_target_from_v1(
+    target: &MailboxDraftTargetDto,
+) -> Result<MailboxDraftTarget, ValueError> {
+    Ok(match target {
         MailboxDraftTargetDto::Reply { message_id } => MailboxDraftTarget::Reply {
             message_id: hq_domain::MessageId::from_bytes(message_id.bytes()),
         },
@@ -1096,7 +1109,16 @@ fn mailbox_draft_target_from_v1(target: &MailboxDraftTargetDto) -> MailboxDraftT
             project_id: hq_domain::ProjectId::from_bytes(project_id.bytes()),
             thread_id: thread_id.map(|id| hq_domain::ThreadId::from_bytes(id.bytes())),
         },
-    }
+        MailboxDraftTargetDto::ProjectSetup {
+            project_id,
+            agent_id,
+            provider,
+        } => MailboxDraftTarget::ProjectSetup {
+            project_id: ProjectId::from_bytes(project_id.bytes()),
+            agent_id: AgentId::from_bytes(agent_id.bytes()),
+            provider: ProviderId::new(provider.clone()).map_err(|_| ValueError::InvalidText)?,
+        },
+    })
 }
 
 /// Converts a wire subscription into the application observer vocabulary.

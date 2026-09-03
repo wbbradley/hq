@@ -8,11 +8,11 @@ use hq_tui::{
     UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
     UiEffect, UiEvent, UiFailure, UiHumanState, UiInput, UiMailboxDraft, UiMailboxDraftTarget,
     UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiModel, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectFolderAction,
-    UiProjectManagementAction, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
-    UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus, UiProjectThread, UiProvider,
-    UiRenderCache, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection,
-    UiTheme, UiThemeRole, render, render_with_cache, update,
+    UiProjectAction, UiProjectAssignment, UiProjectConversationSetup, UiProjectExternalWarning,
+    UiProjectFolderAction, UiProjectManagementAction, UiProjectOutcome, UiProjectResource,
+    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus,
+    UiProjectThread, UiProvider, UiRenderCache, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
+    UiSnapshot, UiTechnicalSection, UiTheme, UiThemeRole, render, render_with_cache, update,
 };
 use ratatui::{
     Terminal,
@@ -57,6 +57,34 @@ fn passive_inbox_surfaces_never_render_first_page_loading_text() {
     ] {
         assert!(!render_text(&ready_model(size)).contains("Loading messages"));
         assert!(!render_text(&conversation_model(size)).contains("Loading messages"));
+    }
+}
+
+#[test]
+fn project_setup_is_distinct_from_a_conversation_in_wide_and_compact_layouts() {
+    for size in [
+        UiSize {
+            width: 104,
+            height: 18,
+        },
+        UiSize {
+            width: 72,
+            height: 16,
+        },
+    ] {
+        let rendered = render_text(&project_setup_model(size));
+        assert!(rendered.contains("Alice · hq"));
+        assert!(contains_visible_words_in_order(
+            &rendered,
+            "Conversation with Alice about hq has not started"
+        ));
+        assert!(contains_visible_words_in_order(
+            &rendered,
+            "Alice will be assigned when you send the first message"
+        ));
+        assert!(rendered.contains("r/Enter write first message"));
+        assert!(!rendered.contains("No messages yet"));
+        assert!(!rendered.contains("clear filter"));
     }
 }
 
@@ -2270,6 +2298,7 @@ fn contextual_help_model(size: UiSize, section: UiSection, selected: bool) -> Ui
             providers: Vec::new(),
             agents: Vec::new(),
             projects: Vec::new(),
+            project_setups: Vec::new(),
         },
     );
     model = update(
@@ -2348,11 +2377,56 @@ fn ready_snapshot() -> UiSnapshot {
         providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
+        project_setups: Vec::new(),
     }
 }
 
 fn ready_model(size: UiSize) -> UiModel {
     ready_transition(size).model
+}
+
+fn project_setup_model(size: UiSize) -> UiModel {
+    let draft = UiMailboxDraft {
+        draft_id: [4; 32],
+        target: UiMailboxDraftTarget::ProjectSetup {
+            project_id: [1; 32],
+            agent_id: [2; 32],
+            provider: "codex".to_owned(),
+        },
+        content: String::new(),
+        version: 1,
+    };
+    let setup = UiProjectConversationSetup {
+        draft,
+        project_name: "hq".to_owned(),
+        agent_name: "Alice".to_owned(),
+        provider_name: "Codex".to_owned(),
+    };
+    let snapshot = UiSnapshot {
+        revision: 1,
+        human_state: UiHumanState::Ready,
+        inbox_rows: vec![UiRow {
+            id: format!("project-setup:{}", "04".repeat(32)),
+            title: "Alice · hq".to_owned(),
+            detail: "Conversation not started".to_owned(),
+            state: UiRowState::Open,
+            kind: UiRowKind::ConversationSetup,
+            conversation_target: None,
+        }],
+        sent_rows: Vec::new(),
+        archived_rows: Vec::new(),
+        agent_rows: Vec::new(),
+        project_rows: Vec::new(),
+        direct_targets: Vec::new(),
+        providers: Vec::new(),
+        agents: Vec::new(),
+        projects: Vec::new(),
+        project_setups: vec![setup],
+    };
+    let model = loaded_snapshot_model(size, snapshot);
+    update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("focus setup detail")
+        .model
 }
 
 fn loaded_snapshot_model(size: UiSize, snapshot: UiSnapshot) -> UiModel {
@@ -2389,6 +2463,7 @@ fn empty_render_snapshot(revision: u64) -> UiSnapshot {
         providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
+        project_setups: Vec::new(),
     }
 }
 
@@ -2510,6 +2585,7 @@ fn agent_status_rows_model(size: UiSize) -> UiModel {
             providers: Vec::new(),
             agents: Vec::new(),
             projects: Vec::new(),
+            project_setups: Vec::new(),
         },
     );
     update(model, UiEvent::Input(UiInput::Character('4')))
@@ -2567,6 +2643,7 @@ fn agent_details_model_with_status_and_providers(
             providers,
             agents: vec![agent],
             projects: Vec::new(),
+            project_setups: Vec::new(),
         },
     );
     model = update(model, UiEvent::Input(UiInput::Character('4')))
@@ -2752,6 +2829,7 @@ fn project_model_with_state(
             providers: render_providers(),
             agents,
             projects,
+            project_setups: Vec::new(),
         },
     );
     update(model, UiEvent::Input(UiInput::Character('5')))

@@ -343,8 +343,9 @@ impl ServerSession {
             Request::MailboxDrafts => application
                 .mailbox_drafts()
                 .map(|drafts| ResponseResult::MailboxDrafts(mailbox_drafts_to_v1(&drafts))),
-            Request::SaveMailboxDraft(request) => application
-                .save_mailbox_draft(mailbox_draft_save_from_v1(request))
+            Request::SaveMailboxDraft(request) => mailbox_draft_save_from_v1(request)
+                .map_err(|_| invalid_request_error())
+                .and_then(|request| application.save_mailbox_draft(request))
                 .map(|outcome| {
                     ResponseResult::MailboxDraftSave(mailbox_draft_save_to_v1(&outcome))
                 }),

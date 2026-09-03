@@ -7,7 +7,8 @@ use hq_application::{
     MailboxDraftSaveRequest, MailboxDraftTarget,
 };
 use hq_domain::{
-    InstallationId, MailboxAddress, MailboxId, MessageId, OperationId, ProjectId, ThreadId,
+    AgentId, InstallationId, MailboxAddress, MailboxId, MessageId, OperationId, ProjectId,
+    ProviderId, ThreadId,
 };
 
 mod support;
@@ -132,6 +133,11 @@ fn every_explicit_target_round_trips_without_a_canonical_foreign_key() {
             project_id: ProjectId::from_bytes([0x72; 32]),
             thread_id: Some(ThreadId::from_bytes([0x73; 32])),
         },
+        MailboxDraftTarget::ProjectSetup {
+            project_id: ProjectId::from_bytes([0x74; 32]),
+            agent_id: AgentId::from_bytes([0x75; 32]),
+            provider: ProviderId::new("codex").expect("provider"),
+        },
     ];
     for (index, target) in targets.into_iter().enumerate() {
         let mut id = [0; 32];
@@ -146,6 +152,6 @@ fn every_explicit_target_round_trips_without_a_canonical_foreign_key() {
             .expect("draft saves");
     }
     let loaded = drafts.load_mailbox_drafts().expect("drafts load");
-    assert_eq!(loaded.len(), 5);
+    assert_eq!(loaded.len(), 6);
     assert!(loaded.iter().all(|draft| draft.content == "recover me"));
 }

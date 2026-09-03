@@ -3,9 +3,9 @@
 use std::collections::BTreeSet;
 
 use hq_domain::{
-    AuthorityReference, AuthorityRole, CommandDigest, CommandId, ContentText, DomainError,
+    AgentId, AuthorityReference, AuthorityRole, CommandDigest, CommandId, ContentText, DomainError,
     ErrorCategory, ErrorCode, FactScope, InstallationId, MailboxAddress, MailboxKind, MessageId,
-    OperationId, PresentationKind, ProjectId, ThreadId, Timestamp,
+    OperationId, PresentationKind, ProjectId, ProviderId, ThreadId, Timestamp,
 };
 use hq_reducer::{
     AuthorityProjection, AuthorityProjectionKey, ConversationProjection, ConversationProjectionKey,
@@ -36,6 +36,12 @@ pub enum MailboxDraftTarget {
     Project {
         project_id: ProjectId,
         thread_id: Option<ThreadId>,
+    },
+    /// Prepare the first conversation with one exact named agent and provider.
+    ProjectSetup {
+        project_id: ProjectId,
+        agent_id: AgentId,
+        provider: ProviderId,
     },
 }
 
@@ -242,9 +248,17 @@ pub fn plan_mailbox_command(
             thread_id,
             message_id,
         } => {
-            let target = MailboxDraftTarget::Project {
-                project_id: *project_id,
-                thread_id: *thread_id,
+            let target = match draft.map(|draft| &draft.target) {
+                Some(
+                    target @ MailboxDraftTarget::ProjectSetup {
+                        project_id: target_project,
+                        ..
+                    },
+                ) if target_project == project_id && thread_id.is_none() => target.clone(),
+                _ => MailboxDraftTarget::Project {
+                    project_id: *project_id,
+                    thread_id: *thread_id,
+                },
             };
             content(request, draft, &target).and_then(|body| {
                 let (project, authority) =

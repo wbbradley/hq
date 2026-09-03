@@ -326,6 +326,8 @@ pub enum UiRowState {
 pub enum UiRowKind {
     /// A conversation whose entries are available by bounded page query.
     Conversation,
+    /// A persisted first-message setup that has not created a conversation yet.
+    ConversationSetup,
     /// Inert diagnostic state that cannot be used as an action target.
     Diagnostic,
     /// A named-agent summary.
@@ -1549,6 +1551,12 @@ pub enum UiNewModal {
         selected: Option<[u8; 32]>,
         create_new: bool,
     },
+    ChangeSetupAgent {
+        setup: UiProjectConversationSetup,
+        project: UiProject,
+        agents: Vec<UiAgent>,
+        selected: Option<[u8; 32]>,
+    },
     ChooseProvider {
         project: UiProject,
         agent: UiAgent,
@@ -1792,6 +1800,12 @@ pub enum UiMailboxDraftTarget {
         project_id: [u8; 32],
         thread_id: Option<[u8; 32]>,
     },
+    /// Prepare a project's first conversation with one exact agent and provider.
+    ProjectSetup {
+        project_id: [u8; 32],
+        agent_id: [u8; 32],
+        provider: String,
+    },
 }
 
 /// Complete passive local draft returned by the ordinary client boundary.
@@ -1805,6 +1819,19 @@ pub struct UiMailboxDraft {
     pub content: String,
     /// Optimistic local draft version.
     pub version: u64,
+}
+
+/// One persisted, typed first-message setup shown separately from real conversations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiProjectConversationSetup {
+    /// Exact persisted draft and routing evidence.
+    pub draft: UiMailboxDraft,
+    /// Current plain-language project name.
+    pub project_name: String,
+    /// Current plain-language agent name.
+    pub agent_name: String,
+    /// Current plain-language provider name.
+    pub provider_name: String,
 }
 
 /// Definite mailbox-command result retained for exact post-refresh navigation.
@@ -1929,6 +1956,8 @@ pub struct UiSnapshot {
     pub agents: Vec<UiAgent>,
     /// Complete passive project catalog for cached navigation and detail views.
     pub projects: Vec<UiProject>,
+    /// Persisted project conversations that have not sent their first message.
+    pub project_setups: Vec<UiProjectConversationSetup>,
 }
 
 impl UiSnapshot {
@@ -2445,6 +2474,7 @@ struct PendingMailbox {
 struct UiSectionWorkspace {
     selected_row: Option<String>,
     conversation: Option<UiConversation>,
+    conversation_setup: Option<UiProjectConversationSetup>,
     conversation_anchor: Option<String>,
     conversation_scroll_mode: ConversationScrollMode,
     conversation_viewport_position: Option<UiConversationViewportPosition>,
@@ -2578,6 +2608,7 @@ pub struct UiModel {
     snapshot: Option<UiSnapshot>,
     selected_row: Option<String>,
     conversation: Option<UiConversation>,
+    conversation_setup: Option<UiProjectConversationSetup>,
     retained_conversations: BTreeMap<String, RetainedConversationPage>,
     retained_conversation_order: VecDeque<String>,
     desired_conversation: Option<String>,
@@ -2649,6 +2680,7 @@ impl UiModel {
             snapshot: None,
             selected_row: None,
             conversation: None,
+            conversation_setup: None,
             retained_conversations: BTreeMap::new(),
             retained_conversation_order: VecDeque::new(),
             desired_conversation: None,
@@ -2926,6 +2958,11 @@ impl UiModel {
         })
     }
 
+    /// Borrows the selected not-yet-started project conversation setup.
+    pub const fn conversation_setup(&self) -> Option<&UiProjectConversationSetup> {
+        self.conversation_setup.as_ref()
+    }
+
     /// Returns current local human-account availability when a snapshot exists.
     pub fn human_state(&self) -> Option<&UiHumanState> {
         self.snapshot.as_ref().map(|snapshot| &snapshot.human_state)
@@ -3032,6 +3069,16 @@ impl UiModel {
             } => self
                 .project_draft_recipient(*project_id, *thread_id)
                 .or_else(|| self.selected_project_conversation_recipient(*project_id, *thread_id)),
+            UiMailboxDraftTarget::ProjectSetup { agent_id, .. } => self
+                .snapshot
+                .as_ref()?
+                .agents
+                .iter()
+                .find(|agent| agent.agent_id == *agent_id)
+                .and_then(|agent| match agent.names.as_slice() {
+                    [name] => Some(name.as_str()),
+                    _ => None,
+                }),
         }
     }
 
@@ -3105,7 +3152,8 @@ impl UiModel {
 
     fn draft_project_id(&self) -> Option<[u8; 32]> {
         Some(match self.draft_target()? {
-            UiMailboxDraftTarget::Project { project_id, .. } => *project_id,
+            UiMailboxDraftTarget::Project { project_id, .. }
+            | UiMailboxDraftTarget::ProjectSetup { project_id, .. } => *project_id,
             UiMailboxDraftTarget::Reply { .. } => {
                 match self.selected_row_data()?.conversation_target {
                     Some(UiConversationTarget::Project { project_id, .. }) => project_id,
@@ -3121,7 +3169,8 @@ impl UiModel {
             UiMailboxDraftTarget::Project {
                 project_id,
                 thread_id: None,
-            } => Some(*project_id),
+            }
+            | UiMailboxDraftTarget::ProjectSetup { project_id, .. } => Some(*project_id),
             UiMailboxDraftTarget::Reply { .. }
             | UiMailboxDraftTarget::Direct { .. }
             | UiMailboxDraftTarget::SelfNote
@@ -3370,6 +3419,20 @@ impl UiModel {
         let Some(row_id) = row_id else {
             return;
         };
+        let is_conversation = self.rows().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row.id == row_id && row.kind == UiRowKind::Conversation)
+        });
+        if !is_conversation {
+            if self.requested_conversation.take().is_some() {
+                effects.push(UiEffect::ObserveConversation { row_id: None });
+            }
+            self.conversation_setup = self.selected_setup().cloned();
+            let focus = self.focus;
+            self.close_conversation();
+            self.focus = focus;
+            return;
+        }
         if self.requested_conversation.as_ref() != Some(&row_id) {
             self.requested_conversation = Some(row_id.clone());
             effects.push(UiEffect::ObserveConversation {
@@ -3400,20 +3463,6 @@ impl UiModel {
             kind: PendingMailboxKind::OpenDraft,
         });
         self.change_section(UiSection::Inbox);
-        if let UiMailboxDraftTarget::Project {
-            project_id,
-            thread_id: None,
-        } = target
-            && let Some(project) = self.snapshot.as_ref().and_then(|snapshot| {
-                snapshot
-                    .projects
-                    .iter()
-                    .find(|project| project.project_id == project_id)
-                    .cloned()
-            })
-        {
-            self.install_project_draft_conversation(&project);
-        }
         self.focus = UiFocus::Draft;
         self.mailbox_modal = None;
         self.mailbox_draft = Some(UiMailboxDraftPane::Loading {
@@ -3524,6 +3573,7 @@ impl UiModel {
         *self.section_workspaces.get_mut(self.section) = Some(UiSectionWorkspace {
             selected_row: self.selected_row.clone(),
             conversation: self.conversation.clone(),
+            conversation_setup: self.conversation_setup.clone(),
             conversation_anchor: self.conversation_anchor.clone(),
             conversation_scroll_mode: self.conversation_scroll_mode,
             conversation_viewport_position: self.conversation_viewport_position.clone(),
@@ -3539,6 +3589,7 @@ impl UiModel {
         if let Some(workspace) = workspace {
             self.selected_row = workspace.selected_row;
             self.conversation = workspace.conversation;
+            self.conversation_setup = workspace.conversation_setup;
             self.conversation_anchor = workspace.conversation_anchor;
             self.conversation_scroll_mode = workspace.conversation_scroll_mode;
             self.conversation_viewport_position = workspace.conversation_viewport_position;
@@ -3868,6 +3919,15 @@ impl UiModel {
         })
     }
 
+    fn selected_setup(&self) -> Option<&UiProjectConversationSetup> {
+        let selected = self.selected_row.as_deref()?;
+        self.snapshot
+            .as_ref()?
+            .project_setups
+            .iter()
+            .find(|setup| project_setup_row_id(setup.draft.draft_id) == selected)
+    }
+
     fn close_conversation(&mut self) {
         self.conversation = None;
         self.conversation_anchor = None;
@@ -3882,6 +3942,40 @@ impl UiModel {
     }
 
     fn apply_snapshot(&mut self, snapshot: UiSnapshot) {
+        if self.guided_pending.is_none()
+            && let Some((setup, message_id)) = snapshot.project_setups.iter().find_map(|setup| {
+                let UiMailboxDraftTarget::ProjectSetup {
+                    project_id,
+                    agent_id: _,
+                    provider: _,
+                } = setup.draft.target
+                else {
+                    return None;
+                };
+                snapshot
+                    .projects
+                    .iter()
+                    .find(|project| project.project_id == project_id)?
+                    .pending_inputs
+                    .iter()
+                    .find(|input| input.message_id == setup.draft.draft_id)
+                    .map(|input| (setup, input.message_id))
+            })
+            && let UiMailboxDraftTarget::ProjectSetup {
+                project_id,
+                agent_id,
+                ref provider,
+            } = setup.draft.target
+        {
+            self.guided_pending = Some(UiGuidedPending::InputSnapshot {
+                submission: UiGuidedSubmission {
+                    project_id,
+                    agent_id,
+                    provider: provider.clone(),
+                },
+                message_id,
+            });
+        }
         if let Some(UiMailboxModal::SelectDirect { selected, targets }) = &mut self.mailbox_modal {
             let keep = selected.filter(|(installation, mailbox)| {
                 snapshot.direct_targets.iter().any(|target| {
@@ -3922,6 +4016,7 @@ impl UiModel {
             self.pending_project_conversation = None;
         }
         self.reconcile_current_section();
+        self.conversation_setup = self.selected_setup().cloned();
         self.refresh_selected_project_summary();
         select_agent_search_match(self, false);
         select_project_search_match(self, false);
@@ -4021,15 +4116,7 @@ impl UiModel {
                             root_message,
                         )
                 });
-        if targets_local_draft || awaits_authoritative_row {
-            let row = project_draft_conversation_row(project);
-            if let Some(conversation) = &mut self.conversation
-                && conversation.row_id == row.id
-            {
-                conversation.title.clone_from(&project.name);
-            }
-            self.project_filter_rows.insert(0, row);
-        }
+        let _ = (targets_local_draft, awaits_authoritative_row);
         self.project_filter = Some(filter);
     }
 
@@ -4056,25 +4143,6 @@ impl UiModel {
         self.project_filter_rows = self.snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
             project_conversation_rows(snapshot, project.project_id)
         });
-    }
-
-    fn install_project_draft_conversation(&mut self, project: &UiProject) {
-        self.install_project_filter(project);
-        let row = project_draft_conversation_row(project);
-        self.project_filter_rows
-            .retain(|candidate| candidate.id != row.id);
-        self.project_filter_rows.insert(0, row.clone());
-        self.selected_row = Some(row.id.clone());
-        self.conversation = Some(UiConversation {
-            row_id: row.id,
-            title: project.name.clone(),
-            context: Some("New project conversation".to_owned()),
-            entries: Vec::new(),
-            next_cursor: None,
-        });
-        self.conversation_anchor = None;
-        self.conversation_scroll_mode = ConversationScrollMode::Anchored;
-        self.close_technical_details();
     }
 
     fn clear_project_filter(&mut self) {
@@ -4110,6 +4178,7 @@ impl UiModel {
         if !conversation_survives {
             self.close_conversation();
         }
+        self.conversation_setup = self.selected_setup().cloned();
     }
 }
 
@@ -4294,19 +4363,19 @@ fn has_project_conversation_root(
     })
 }
 
-fn project_draft_conversation_row(project: &UiProject) -> UiRow {
+fn project_setup_row(setup: &UiProjectConversationSetup) -> UiRow {
     UiRow {
-        id: project_draft_conversation_id(project.project_id),
-        title: project.name.clone(),
-        detail: "New project conversation".to_owned(),
+        id: project_setup_row_id(setup.draft.draft_id),
+        title: format!("{} · {}", setup.agent_name, setup.project_name),
+        detail: "Conversation not started".to_owned(),
         state: UiRowState::Open,
-        kind: UiRowKind::Conversation,
+        kind: UiRowKind::ConversationSetup,
         conversation_target: None,
     }
 }
 
-fn project_draft_conversation_id(project_id: [u8; 32]) -> String {
-    format!("project-draft:{}", agent_hex(project_id))
+fn project_setup_row_id(draft_id: [u8; 32]) -> String {
+    format!("project-setup:{}", agent_hex(draft_id))
 }
 
 /// Applies one event without performing I/O or domain mutation.
@@ -4767,14 +4836,20 @@ fn apply_input(
         }
         UiInput::NextFocus | UiInput::PreviousFocus => {
             model.focus = match model.focus {
-                UiFocus::Content if model.conversation.is_some() => UiFocus::Conversation,
+                UiFocus::Content
+                    if model.conversation.is_some() || model.conversation_setup.is_some() =>
+                {
+                    UiFocus::Conversation
+                }
                 UiFocus::Conversation | UiFocus::Content => UiFocus::Content,
                 UiFocus::Draft => UiFocus::Draft,
             };
             true
         }
         UiInput::MoveCursorRight => match model.focus {
-            UiFocus::Content if model.conversation.is_some() => {
+            UiFocus::Content
+                if model.conversation.is_some() || model.conversation_setup.is_some() =>
+            {
                 model.focus = UiFocus::Conversation;
                 model.follow_conversation_tail();
                 true
@@ -5674,7 +5749,7 @@ fn apply_new_modal_input(
     };
     if matches!(input, UiInput::Escape) {
         model.new_modal = match interaction {
-            UiNewModal::Launcher { .. } => None,
+            UiNewModal::Launcher { .. } | UiNewModal::ChangeSetupAgent { .. } => None,
             UiNewModal::ChooseProject { .. } => Some(UiNewModal::Launcher {
                 selected: UiNewChoice::ProjectWork,
             }),
@@ -5807,6 +5882,38 @@ fn apply_new_modal_input(
                     return Ok(false);
                 };
                 open_guided_agent(model, project, agent, effects)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        UiNewModal::ChangeSetupAgent {
+            setup,
+            project,
+            agents,
+            selected,
+        } => match input {
+            UiInput::NextItem | UiInput::PreviousItem => {
+                let selected = bounded_navigation_index(
+                    selected.and_then(|selected| {
+                        agents.iter().position(|agent| agent.agent_id == selected)
+                    }),
+                    agents.len(),
+                    matches!(input, UiInput::NextItem),
+                )
+                .and_then(|index| agents.get(index).map(|agent| agent.agent_id));
+                model.new_modal = Some(UiNewModal::ChangeSetupAgent {
+                    setup,
+                    project,
+                    agents,
+                    selected,
+                });
+                Ok(true)
+            }
+            UiInput::Activate => {
+                let Some(agent_id) = selected else {
+                    return Ok(false);
+                };
+                replace_project_setup_agent(model, setup, agent_id, effects)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -5954,6 +6061,26 @@ fn open_guided_project(
     project: UiProject,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
+    if let Some(setup) = model
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| {
+            snapshot.project_setups.iter().find(|setup| {
+                matches!(
+                    setup.draft.target,
+                    UiMailboxDraftTarget::ProjectSetup { project_id, .. }
+                        if project_id == project.project_id
+                )
+            })
+        })
+        .cloned()
+    {
+        model.new_modal = None;
+        model.selected_row = Some(project_setup_row_id(setup.draft.draft_id));
+        model.conversation_setup = Some(setup.clone());
+        model.open_draft(setup.draft.target, effects)?;
+        return Ok(());
+    }
     if !project.claimable
         || project
             .resources
@@ -6160,9 +6287,17 @@ fn open_guided_instruction(
     model.new_modal = None;
     model.project_interaction = None;
     model.open_draft(
-        UiMailboxDraftTarget::Project {
+        UiMailboxDraftTarget::ProjectSetup {
             project_id: project.project_id,
-            thread_id: None,
+            agent_id: agent.agent_id,
+            provider: model
+                .guided_pending
+                .as_ref()
+                .and_then(|pending| match pending {
+                    UiGuidedPending::Instruction(submission) => Some(submission.provider.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
         },
         effects,
     )
@@ -6209,6 +6344,109 @@ fn open_direct_target_picker(model: &mut UiModel) {
         .first()
         .map(|target| (target.installation_id, target.mailbox_id));
     model.mailbox_modal = Some(UiMailboxModal::SelectDirect { targets, selected });
+}
+
+fn open_setup_agent_picker(model: &mut UiModel) -> bool {
+    let Some(setup) = model.selected_setup().cloned() else {
+        return false;
+    };
+    let UiMailboxDraftTarget::ProjectSetup { project_id, .. } = setup.draft.target else {
+        return false;
+    };
+    let Some(snapshot) = model.snapshot.as_ref() else {
+        return false;
+    };
+    let Some(project) = snapshot
+        .projects
+        .iter()
+        .find(|project| project.project_id == project_id)
+        .cloned()
+    else {
+        return false;
+    };
+    model.new_modal = refreshed_setup_agent_picker(snapshot, setup, project, None);
+    true
+}
+
+fn refreshed_setup_agent_picker(
+    snapshot: &UiSnapshot,
+    setup: UiProjectConversationSetup,
+    project: UiProject,
+    selected: Option<[u8; 32]>,
+) -> Option<UiNewModal> {
+    let UiMailboxDraftTarget::ProjectSetup {
+        agent_id: current_agent,
+        ..
+    } = setup.draft.target
+    else {
+        return None;
+    };
+    let mut agents = snapshot
+        .agents
+        .iter()
+        .filter(|agent| {
+            agent.lifecycle == UiAgentLifecycle::Active
+                && agent
+                    .mailboxes
+                    .iter()
+                    .any(|mailbox| mailbox.installation_id == project.home)
+                && (agent.agent_id == current_agent
+                    || matches!(agent.status, UiAgentStatus::Unassigned))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    agents.sort_by_key(|agent| {
+        (
+            agent.agent_id != current_agent,
+            agent.names.first().cloned().unwrap_or_default(),
+            agent.agent_id,
+        )
+    });
+    let selected = selected
+        .filter(|selected| agents.iter().any(|agent| agent.agent_id == *selected))
+        .or_else(|| {
+            agents
+                .iter()
+                .find(|agent| agent.agent_id == current_agent)
+                .map(|agent| agent.agent_id)
+        })
+        .or_else(|| agents.first().map(|agent| agent.agent_id));
+    Some(UiNewModal::ChangeSetupAgent {
+        setup,
+        project,
+        agents,
+        selected,
+    })
+}
+
+fn replace_project_setup_agent(
+    model: &mut UiModel,
+    setup: UiProjectConversationSetup,
+    agent_id: [u8; 32],
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    let mut draft = setup.draft;
+    let UiMailboxDraftTarget::ProjectSetup {
+        agent_id: current, ..
+    } = &mut draft.target
+    else {
+        return Ok(());
+    };
+    if *current == agent_id {
+        model.new_modal = None;
+        return Ok(());
+    }
+    *current = agent_id;
+    model.new_modal = None;
+    install_project_setup(model, &draft);
+    model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
+        draft,
+        dirty: true,
+        submitting: false,
+        closing: true,
+    });
+    model.autosave_timer = None;
+    model.save_draft(effects)
 }
 
 fn submit_guided_project(
@@ -6507,9 +6745,6 @@ fn finish_draft_close(model: &mut UiModel) {
     model.mailbox_draft = None;
     model.focus = UiFocus::Conversation;
     model.follow_conversation_tail();
-    if matches!(model.guided_pending, Some(UiGuidedPending::Instruction(_))) {
-        model.guided_pending = None;
-    }
 }
 
 fn update_composer(
@@ -6519,6 +6754,7 @@ fn update_composer(
     submitting: bool,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
+    install_project_setup(model, &draft);
     model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
         draft,
         dirty,
@@ -8817,6 +9053,10 @@ fn mailbox_shortcut(
             if model.section == UiSection::Agents {
                 return Ok(false);
             }
+            if let Some(setup) = model.selected_setup().cloned() {
+                model.open_draft(setup.draft.target, effects)?;
+                return Ok(true);
+            }
             if let Some(UiConversationTarget::Project {
                 project_id,
                 thread_id,
@@ -8882,6 +9122,9 @@ fn mailbox_shortcut(
             Ok(true)
         }
         'c' if model.section == UiSection::Inbox => {
+            if model.selected_setup().is_some() {
+                return Ok(open_setup_agent_picker(model));
+            }
             let Some(UiConversationTarget::Project { project_id, .. }) =
                 selected_conversation_target(model)
             else {
@@ -9003,6 +9246,10 @@ fn draft_action(target: &UiMailboxDraftTarget) -> UiMailboxAction {
             project_id: *project_id,
             thread_id: *thread_id,
         },
+        UiMailboxDraftTarget::ProjectSetup { project_id, .. } => UiMailboxAction::Project {
+            project_id: *project_id,
+            thread_id: None,
+        },
     }
 }
 
@@ -9033,6 +9280,10 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
     }
     if model.section == UiSection::Projects {
         return open_selected_project_conversations(model, effects);
+    }
+    if let Some(setup) = model.selected_setup().cloned() {
+        model.open_draft(setup.draft.target, effects)?;
+        return Ok(true);
     }
     if !model.selected_row_is_conversation() {
         return Ok(false);
@@ -9412,6 +9663,65 @@ fn conversation_failed(
     effects.push(UiEffect::RequestRedraw);
 }
 
+fn project_setup_from_draft(
+    model: &UiModel,
+    draft: &UiMailboxDraft,
+) -> Option<UiProjectConversationSetup> {
+    let UiMailboxDraftTarget::ProjectSetup {
+        project_id,
+        agent_id,
+        provider,
+    } = &draft.target
+    else {
+        return None;
+    };
+    let snapshot = model.snapshot.as_ref()?;
+    let project_name = snapshot
+        .projects
+        .iter()
+        .find(|project| project.project_id == *project_id)?
+        .name
+        .clone();
+    let agent_name = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.agent_id == *agent_id)?
+        .names
+        .first()?
+        .clone();
+    let provider_name = snapshot
+        .providers
+        .iter()
+        .find(|candidate| candidate.provider == *provider)
+        .map_or_else(|| provider.clone(), |candidate| candidate.name.clone());
+    Some(UiProjectConversationSetup {
+        draft: draft.clone(),
+        project_name,
+        agent_name,
+        provider_name,
+    })
+}
+
+fn install_project_setup(model: &mut UiModel, draft: &UiMailboxDraft) {
+    let Some(setup) = project_setup_from_draft(model, draft) else {
+        return;
+    };
+    let row = project_setup_row(&setup);
+    if let Some(snapshot) = &mut model.snapshot {
+        snapshot
+            .project_setups
+            .retain(|candidate| candidate.draft.draft_id != draft.draft_id);
+        snapshot.project_setups.push(setup.clone());
+        snapshot
+            .inbox_rows
+            .retain(|candidate| candidate.id != row.id);
+        snapshot.inbox_rows.push(row.clone());
+    }
+    model.selected_row = Some(row.id);
+    model.conversation_setup = Some(setup);
+    model.conversation = None;
+}
+
 fn draft_loaded(
     model: &mut UiModel,
     effect_id: EffectId,
@@ -9434,6 +9744,7 @@ fn draft_loaded(
     if !target_matches {
         return;
     }
+    install_project_setup(model, &draft);
     model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
         draft,
         dirty: false,
@@ -9572,6 +9883,21 @@ fn mailbox_command_committed(
                 project_id,
                 thread_id,
             } => Some((project_id, thread_id)),
+            UiMailboxDraftTarget::ProjectSetup { project_id, .. } => Some((project_id, None)),
+            _ => None,
+        });
+    let setup_submission = committed_draft
+        .as_ref()
+        .and_then(|draft| match &draft.target {
+            UiMailboxDraftTarget::ProjectSetup {
+                project_id,
+                agent_id,
+                provider,
+            } => Some(UiGuidedSubmission {
+                project_id: *project_id,
+                agent_id: *agent_id,
+                provider: provider.clone(),
+            }),
             _ => None,
         });
     model.pending_mailbox = None;
@@ -9588,13 +9914,28 @@ fn mailbox_command_committed(
             matches!(action, UiMailboxAction::Project { .. }),
         );
     }
-    if let (Some(UiGuidedPending::Instruction(submission)), Some(message_id)) =
-        (model.guided_pending.clone(), message_id)
-    {
+    if let (Some(submission), Some(message_id)) = (
+        setup_submission.or_else(|| match model.guided_pending.clone() {
+            Some(UiGuidedPending::Instruction(submission)) => Some(submission),
+            _ => None,
+        }),
+        message_id,
+    ) {
         model.guided_pending = Some(UiGuidedPending::InputSnapshot {
             submission,
             message_id,
         });
+        if let Some(draft) = committed_draft.as_ref()
+            && let Some(snapshot) = &mut model.snapshot
+        {
+            snapshot
+                .project_setups
+                .retain(|setup| setup.draft.draft_id != draft.draft_id);
+            snapshot
+                .inbox_rows
+                .retain(|row| row.id != project_setup_row_id(draft.draft_id));
+        }
+        model.conversation_setup = None;
     } else if let Some((project_id, thread_id)) = project_target {
         if let Some(thread_id) = thread_id {
             select_project_conversation(model, project_id, thread_id);
@@ -9632,11 +9973,13 @@ fn draft_targets_open_conversation(model: &UiModel, draft: &UiMailboxDraft) -> b
         UiMailboxDraftTarget::Project {
             project_id,
             thread_id: None,
-        } => model.conversation.as_ref().is_some_and(|conversation| {
-            conversation.row_id == project_draft_conversation_id(project_id)
-                && model.selected_row.as_ref() == Some(&conversation.row_id)
-        }),
-        UiMailboxDraftTarget::Direct { .. } | UiMailboxDraftTarget::SelfNote => false,
+        } => {
+            let _ = project_id;
+            false
+        }
+        UiMailboxDraftTarget::ProjectSetup { .. }
+        | UiMailboxDraftTarget::Direct { .. }
+        | UiMailboxDraftTarget::SelfNote => false,
     }
 }
 
@@ -10217,12 +10560,7 @@ fn refresh_new_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
             create_new,
             ..
         }) => {
-            let project = snapshot
-                .projects
-                .iter()
-                .find(|candidate| candidate.project_id == project.project_id)
-                .cloned()
-                .unwrap_or(project);
+            let project = refreshed_project(snapshot, project);
             let picker = guided_agent_picker_from_snapshot(Some(snapshot), project);
             let UiNewModal::ChooseAgent {
                 project,
@@ -10243,18 +10581,22 @@ fn refresh_new_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
                 selected,
             })
         }
+        Some(UiNewModal::ChangeSetupAgent {
+            setup,
+            project,
+            selected,
+            ..
+        }) => {
+            let project = refreshed_project(snapshot, project);
+            refreshed_setup_agent_picker(snapshot, setup, project, selected)
+        }
         Some(UiNewModal::ChooseProvider {
             project,
             agent,
             provider,
             ..
         }) => {
-            let project = snapshot
-                .projects
-                .iter()
-                .find(|candidate| candidate.project_id == project.project_id)
-                .cloned()
-                .unwrap_or(project);
+            let project = refreshed_project(snapshot, project);
             let agent = snapshot
                 .agents
                 .iter()
@@ -10276,6 +10618,15 @@ fn refresh_new_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
         }
         other => other,
     };
+}
+
+fn refreshed_project(snapshot: &UiSnapshot, project: UiProject) -> UiProject {
+    snapshot
+        .projects
+        .iter()
+        .find(|candidate| candidate.project_id == project.project_id)
+        .cloned()
+        .unwrap_or(project)
 }
 
 fn managed_session_failed(
@@ -10865,6 +11216,7 @@ mod tests {
             providers: Vec::new(),
             agents: vec![agent([7; 32], "bob"), agent([8; 32], "alice")],
             projects: vec![release],
+            project_setups: Vec::new(),
         });
         model.mailbox_draft = Some(UiMailboxDraftPane::Loading {
             target: UiMailboxDraftTarget::Project {
@@ -10893,6 +11245,7 @@ mod tests {
             providers: Vec::new(),
             agents: vec![agent([7; 32], "alice")],
             projects: vec![release],
+            project_setups: Vec::new(),
         });
         model.mailbox_draft = Some(UiMailboxDraftPane::Loading {
             target: UiMailboxDraftTarget::Project {
@@ -10919,6 +11272,7 @@ mod tests {
             providers: Vec::new(),
             agents: vec![agent([7; 32], "alice")],
             projects: vec![project("release")],
+            project_setups: Vec::new(),
         });
         model.guided_pending = Some(UiGuidedPending::Instruction(UiGuidedSubmission {
             project_id: [1; 32],
@@ -10997,6 +11351,7 @@ mod tests {
                 providers: Vec::new(),
                 agents: Vec::new(),
                 projects: vec![project("new name")],
+                project_setups: Vec::new(),
             },
         );
         let retained = model.project_interaction.expect("close modal retained");

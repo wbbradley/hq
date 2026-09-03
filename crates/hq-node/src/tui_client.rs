@@ -42,11 +42,11 @@ use hq_tui::{
     UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget,
     UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
     UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiProvider, UiReconnectCause, UiReconnectFailureKind, UiReconnectOperation,
-    UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTheme,
-    UiThemeChoice, UiTimerKind,
+    UiProjectAction, UiProjectAssignment, UiProjectConversationSetup, UiProjectExternalWarning,
+    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
+    UiProjectResult, UiProjectThread, UiProvider, UiReconnectCause, UiReconnectFailureKind,
+    UiReconnectOperation, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection,
+    UiTheme, UiThemeChoice, UiTimerKind,
 };
 use sha2::{Digest, Sha256};
 
@@ -317,6 +317,7 @@ struct TuiPresentationData {
     providers: ProviderCatalogDto,
     agent_names: BTreeMap<[u8; 32], String>,
     project_names: BTreeMap<[u8; 32], String>,
+    mailbox_drafts: Vec<MailboxDraftDto>,
 }
 
 impl Default for TuiPresentationData {
@@ -330,6 +331,7 @@ impl Default for TuiPresentationData {
             },
             agent_names: BTreeMap::new(),
             project_names: BTreeMap::new(),
+            mailbox_drafts: Vec::new(),
         }
     }
 }
@@ -394,6 +396,28 @@ impl SharedTuiPresentation {
                 _ => None,
             })
             .collect();
+    }
+
+    fn replace_mailbox_drafts(&self, drafts: Vec<MailboxDraftDto>) {
+        if let Ok(mut presentation) = self.inner.lock() {
+            presentation.mailbox_drafts = drafts;
+        }
+    }
+
+    fn mailbox_drafts(&self) -> Vec<MailboxDraftDto> {
+        self.inner.lock().map_or_else(
+            |_| Vec::new(),
+            |presentation| presentation.mailbox_drafts.clone(),
+        )
+    }
+
+    fn upsert_mailbox_draft(&self, draft: MailboxDraftDto) {
+        if let Ok(mut presentation) = self.inner.lock() {
+            presentation
+                .mailbox_drafts
+                .retain(|candidate| candidate.draft_id != draft.draft_id);
+            presentation.mailbox_drafts.push(draft);
+        }
     }
 
     fn replace_providers(&self, providers: ProviderCatalogDto) {
@@ -478,6 +502,7 @@ impl LocalTuiClient {
                     },
                     agent_names: BTreeMap::new(),
                     project_names: BTreeMap::new(),
+                    mailbox_drafts: Vec::new(),
                 })),
             },
         }
@@ -568,12 +593,25 @@ impl LocalTuiObserver {
                 let local_installation = *self.client.installation_id().as_bytes();
                 self.presentation.replace_snapshot(&snapshot);
                 let providers = self.presentation.providers();
+                let drafts = self.presentation.mailbox_drafts();
+                let projects = match tui_project_catalog(&snapshot) {
+                    Ok(projects) => projects,
+                    Err(error) => {
+                        observations.push(TuiClientObservation::Failure {
+                            generation: connection_generation(state),
+                            failure: project_failure(&error),
+                        });
+                        return;
+                    }
+                };
                 observations.push(TuiClientObservation::MaterializedView(Box::new(
                     UiMaterializedConversationView {
-                        snapshot: tui_snapshot_with_provider_catalog(
+                        snapshot: tui_snapshot_with_projects_and_drafts(
                             local_installation,
                             &snapshot,
+                            projects,
                             &providers,
+                            &drafts,
                         ),
                         conversation: None,
                     },
@@ -669,7 +707,24 @@ impl LocalTuiObserver {
             .iter()
             .position(|row_id| row_id == desired)
             .unwrap_or(0);
-        let successor = next_rows[prior_index.min(next_rows.len() - 1)].clone();
+        let successor = next_rows
+            .iter()
+            .skip(prior_index.min(next_rows.len() - 1))
+            .chain(next_rows.iter())
+            .find(|candidate| self.presentation.conversation(candidate).is_some())
+            .cloned();
+        let Some(successor) = successor else {
+            if let Err(error) = self.client.update_subscription_conversation(None) {
+                observations.push(TuiClientObservation::Failure {
+                    generation: connection_generation(state),
+                    failure: client_failure(&error),
+                });
+            } else {
+                self.desired_row = None;
+            }
+            self.prior_inbox_rows = next_rows;
+            return;
+        };
         let selection = conversation_selection(&self.presentation, &successor);
         if let Err(failure) = selection.and_then(|selection| {
             self.client
@@ -698,9 +753,18 @@ pub(crate) fn compose_tui_clients(
     presentation.replace_snapshot(subscription_base);
     let providers = request_provider_catalog(&mut command_client)?;
     presentation.replace_providers(providers.clone());
+    let drafts = request_mailbox_drafts(&mut command_client)?;
+    presentation.replace_mailbox_drafts(drafts.clone());
     let local_installation = *event_client.installation_id().as_bytes();
-    let initial_snapshot =
-        tui_snapshot_with_provider_catalog(local_installation, subscription_base, &providers);
+    let projects =
+        tui_project_catalog(subscription_base).map_err(|error| project_failure(&error))?;
+    let initial_snapshot = tui_snapshot_with_projects_and_drafts(
+        local_installation,
+        subscription_base,
+        projects,
+        &providers,
+        &drafts,
+    );
     let initial = activate_initial_tui_view(
         &mut event_client,
         &presentation,
@@ -735,7 +799,11 @@ fn activate_initial_tui_view(
         .iter()
         .map(|row| row.id.clone())
         .collect::<Vec<_>>();
-    let mut desired_row = inbox_rows.first().cloned();
+    let mut desired_row = initial_snapshot
+        .inbox_rows
+        .iter()
+        .find(|row| row.kind == UiRowKind::Conversation)
+        .map(|row| row.id.clone());
     let view = if let Some(row_id) = desired_row.clone() {
         let selection = conversation_selection(presentation, &row_id)?;
         event_client
@@ -775,7 +843,10 @@ fn activate_initial_tui_view(
                             })
                             .unwrap_or(0);
                         let Some(successor) = next_rows
-                            .get(prior_index.min(next_rows.len().saturating_sub(1)))
+                            .iter()
+                            .skip(prior_index.min(next_rows.len().saturating_sub(1)))
+                            .chain(next_rows.iter())
+                            .find(|candidate| presentation.conversation(candidate).is_some())
                             .cloned()
                         else {
                             desired_row = None;
@@ -895,6 +966,22 @@ fn request_provider_catalog(client: &mut LocalNodeClient) -> Result<ProviderCata
     Ok(providers)
 }
 
+fn request_mailbox_drafts(client: &mut LocalNodeClient) -> Result<Vec<MailboxDraftDto>, UiFailure> {
+    let ClientEvent::Response {
+        result: ResponseResult::MailboxDrafts(drafts),
+        ..
+    } = client
+        .request(Request::MailboxDrafts)
+        .map_err(|error| client_failure(&error))?
+    else {
+        return Err(UiFailure {
+            code: "mailbox_drafts_protocol".to_owned(),
+            action: "restart HQ and reload saved message drafts".to_owned(),
+        });
+    };
+    Ok(drafts)
+}
+
 fn observation_control_failure() -> UiFailure {
     UiFailure {
         code: "conversation_selection_stale".to_owned(),
@@ -919,11 +1006,14 @@ impl TuiClientPort for LocalTuiClient {
         let projects = tui_project_catalog(&snapshot).map_err(|error| project_failure(&error))?;
         let providers = request_provider_catalog(&mut self.client)?;
         self.presentation.replace_providers(providers.clone());
-        Ok(tui_snapshot_with_projects(
+        let drafts = request_mailbox_drafts(&mut self.client)?;
+        self.presentation.replace_mailbox_drafts(drafts.clone());
+        Ok(tui_snapshot_with_projects_and_drafts(
             local_installation,
             &snapshot,
             projects,
             &providers,
+            &drafts,
         ))
     }
 
@@ -1071,6 +1161,7 @@ impl TuiClientPort for LocalTuiClient {
             .into_iter()
             .find(|draft| tui_draft_target(&draft.target) == target)
         {
+            self.presentation.upsert_mailbox_draft(draft.clone());
             return Ok(tui_draft(draft));
         }
         let request = MailboxDraftSaveRequestDto {
@@ -1090,7 +1181,10 @@ impl TuiClientPort for LocalTuiClient {
             ClientEvent::Response {
                 result: ResponseResult::MailboxDraftSave(MailboxDraftSaveOutcomeDto::Saved(draft)),
                 ..
-            } => Ok(tui_draft(draft)),
+            } => {
+                self.presentation.upsert_mailbox_draft(draft.clone());
+                Ok(tui_draft(draft))
+            }
             ClientEvent::Response {
                 result:
                     ResponseResult::MailboxDraftSave(MailboxDraftSaveOutcomeDto::Conflict(draft)),
@@ -1121,7 +1215,10 @@ impl TuiClientPort for LocalTuiClient {
             ClientEvent::Response {
                 result: ResponseResult::MailboxDraftSave(MailboxDraftSaveOutcomeDto::Saved(draft)),
                 ..
-            } => Ok(tui_draft(draft)),
+            } => {
+                self.presentation.upsert_mailbox_draft(draft.clone());
+                Ok(tui_draft(draft))
+            }
             ClientEvent::Response {
                 result:
                     ResponseResult::MailboxDraftSave(MailboxDraftSaveOutcomeDto::Conflict(draft)),
@@ -1525,6 +1622,15 @@ fn mailbox_draft_target(target: &UiMailboxDraftTarget) -> MailboxDraftTargetDto 
             project_id: Id32::new(*project_id),
             thread_id: thread_id.map(Id32::new),
         },
+        UiMailboxDraftTarget::ProjectSetup {
+            project_id,
+            agent_id,
+            provider,
+        } => MailboxDraftTargetDto::ProjectSetup {
+            project_id: Id32::new(*project_id),
+            agent_id: Id32::new(*agent_id),
+            provider: provider.clone(),
+        },
     }
 }
 
@@ -1547,6 +1653,15 @@ fn tui_draft_target(target: &MailboxDraftTargetDto) -> UiMailboxDraftTarget {
         } => UiMailboxDraftTarget::Project {
             project_id: project_id.bytes(),
             thread_id: thread_id.as_ref().map(|id| id.bytes()),
+        },
+        MailboxDraftTargetDto::ProjectSetup {
+            project_id,
+            agent_id,
+            provider,
+        } => UiMailboxDraftTarget::ProjectSetup {
+            project_id: project_id.bytes(),
+            agent_id: agent_id.bytes(),
+            provider: provider.clone(),
         },
     }
 }
@@ -2407,8 +2522,15 @@ fn tui_materialized_conversation_view(
 ) -> Result<UiMaterializedConversationView, UiFailure> {
     presentation.replace_snapshot(&view.snapshot);
     let providers = presentation.providers();
-    let snapshot =
-        tui_snapshot_with_provider_catalog(local_installation, &view.snapshot, &providers);
+    let drafts = presentation.mailbox_drafts();
+    let projects = tui_project_catalog(&view.snapshot).map_err(|error| project_failure(&error))?;
+    let snapshot = tui_snapshot_with_projects_and_drafts(
+        local_installation,
+        &view.snapshot,
+        projects,
+        &providers,
+        &drafts,
+    );
     let conversation = view
         .conversation
         .map(|selected| {
@@ -2435,6 +2557,23 @@ fn tui_snapshot_with_projects(
     snapshot: &AuthoritativeSnapshotDto,
     projects: Vec<LocalProject>,
     provider_catalog: &ProviderCatalogDto,
+) -> UiSnapshot {
+    tui_snapshot_with_projects_and_drafts(
+        local_installation,
+        snapshot,
+        projects,
+        provider_catalog,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn tui_snapshot_with_projects_and_drafts(
+    local_installation: [u8; 32],
+    snapshot: &AuthoritativeSnapshotDto,
+    projects: Vec<LocalProject>,
+    provider_catalog: &ProviderCatalogDto,
+    drafts: &[MailboxDraftDto],
 ) -> UiSnapshot {
     let human_state = tui_human_state(local_installation, snapshot);
     let projects = tui_projects(projects);
@@ -2519,10 +2658,14 @@ fn tui_snapshot_with_projects(
             .collect()
     };
     let providers = tui_providers(provider_catalog);
+    let mut inbox_rows: Vec<UiRow> = rows(UiSection::Inbox);
+    let project_setups = tui_project_setups(drafts, &projects, &agents, &providers);
+    let setup_rows = tui_project_setup_rows(&project_setups, &inbox_rows);
+    inbox_rows.extend(setup_rows);
     UiSnapshot {
         revision: snapshot.revision,
         human_state,
-        inbox_rows: rows(UiSection::Inbox),
+        inbox_rows,
         sent_rows: rows(UiSection::Sent),
         archived_rows: rows(UiSection::Archived),
         agent_rows: agents.iter().map(agent_row).collect(),
@@ -2531,7 +2674,86 @@ fn tui_snapshot_with_projects(
         providers,
         agents,
         projects,
+        project_setups,
     }
+}
+
+fn tui_project_setup_rows(
+    setups: &[UiProjectConversationSetup],
+    authoritative_rows: &[UiRow],
+) -> Vec<UiRow> {
+    setups
+        .iter()
+        .filter(|setup| {
+            !authoritative_rows.iter().any(|row| {
+                matches!(
+                    (&setup.draft.target, row.conversation_target),
+                    (
+                        UiMailboxDraftTarget::ProjectSetup { project_id, .. },
+                        Some(UiConversationTarget::Project {
+                            project_id: candidate_project,
+                            root_message,
+                            ..
+                        })
+                    ) if *project_id == candidate_project && setup.draft.draft_id == root_message
+                )
+            })
+        })
+        .map(|setup| UiRow {
+            id: format!("project-setup:{}", full_id(Id32::new(setup.draft.draft_id))),
+            title: format!("{} · {}", setup.agent_name, setup.project_name),
+            detail: "Conversation not started".to_owned(),
+            state: UiRowState::Open,
+            kind: UiRowKind::ConversationSetup,
+            conversation_target: None,
+        })
+        .collect()
+}
+
+fn tui_project_setups(
+    drafts: &[MailboxDraftDto],
+    projects: &[UiProject],
+    agents: &[UiAgent],
+    providers: &[UiProvider],
+) -> Vec<UiProjectConversationSetup> {
+    drafts
+        .iter()
+        .filter_map(|draft| {
+            let MailboxDraftTargetDto::ProjectSetup {
+                project_id,
+                agent_id,
+                provider,
+            } = &draft.target
+            else {
+                return None;
+            };
+            let project = projects
+                .iter()
+                .find(|project| project.project_id == project_id.bytes())?;
+            if project.assignment.as_ref().is_some_and(|assignment| {
+                assignment.agent_id == agent_id.bytes() && assignment.runnable
+            }) {
+                return None;
+            }
+            let project_name = project.name.clone();
+            let agent_name = agents
+                .iter()
+                .find(|agent| agent.agent_id == agent_id.bytes())?
+                .names
+                .first()?
+                .clone();
+            let provider_name = providers
+                .iter()
+                .find(|candidate| candidate.provider == *provider)
+                .map_or_else(|| provider.clone(), |candidate| candidate.name.clone());
+            Some(UiProjectConversationSetup {
+                draft: tui_draft(draft.clone()),
+                project_name,
+                agent_name,
+                provider_name,
+            })
+        })
+        .collect()
 }
 
 fn tui_providers(provider_catalog: &ProviderCatalogDto) -> Vec<UiProvider> {

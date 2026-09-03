@@ -199,6 +199,7 @@ fn retained_subscription_view_is_drawn_without_refetching_startup_state() {
         providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
+        project_setups: Vec::new(),
     };
     let observer = InitialObserver {
         idle: idle_observer(),
@@ -285,6 +286,7 @@ fn passive_draw_geometry_is_reduced_before_the_next_frame() {
                 providers: Vec::new(),
                 agents: Vec::new(),
                 projects: Vec::new(),
+                project_setups: Vec::new(),
             },
             conversation: Some(UiConversationPage {
                 title: "Alice".to_owned(),
@@ -613,6 +615,7 @@ impl TuiClientPort for EmptyClient {
             providers: Vec::new(),
             agents: Vec::new(),
             projects: Vec::new(),
+            project_setups: Vec::new(),
         })
     }
 

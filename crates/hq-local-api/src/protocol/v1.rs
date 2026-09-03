@@ -368,6 +368,11 @@ pub enum MailboxDraftTargetDto {
         project_id: Id32,
         thread_id: Option<Id32>,
     },
+    ProjectSetup {
+        project_id: Id32,
+        agent_id: Id32,
+        provider: String,
+    },
 }
 
 /// Complete passive local mailbox draft.

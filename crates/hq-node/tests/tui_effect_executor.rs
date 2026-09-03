@@ -2685,6 +2685,7 @@ fn empty_snapshot(revision: u64) -> UiSnapshot {
         providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
+        project_setups: Vec::new(),
     }
 }
 

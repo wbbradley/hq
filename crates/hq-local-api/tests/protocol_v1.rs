@@ -837,7 +837,11 @@ fn every_request_notification_and_negotiation_family_interoperates() {
         Request::MailboxDrafts,
         Request::SaveMailboxDraft(MailboxDraftSaveRequestDto {
             draft_id: Id32::new([0x11; 32]),
-            target: MailboxDraftTargetDto::SelfNote,
+            target: MailboxDraftTargetDto::ProjectSetup {
+                project_id: Id32::new([0x21; 32]),
+                agent_id: Id32::new([0x22; 32]),
+                provider: "codex".to_owned(),
+            },
             content: String::new(),
             expected_version: None,
         }),

@@ -119,12 +119,15 @@ without this coordinator.
 
 A runnable current assignment skips setup and opens the ordinary Inbox draft pane for that project.
 A compatible historical project thread resumes its exact provider, session, and thread without a
-routine provider confirmation. A target without history collects and durably accepts its first
-message in the Inbox draft pane before activation. The model then waits for the authoritative
-snapshot to join that returned message ID to its exact thread and activates or hands off on that
-thread. After a later snapshot proves the assignment runnable, the Inbox selects that exact
-conversation; the accepted message remains pending for the project workflow's exactly-once
-dispatch.
+routine provider confirmation. A target without history creates one installation-local
+conversation setup containing the exact project, agent, provider, and draft identities. Inbox
+presents it as “Conversation not started,” separate from authoritative conversation rows. Esc
+saves and closes the modeless composer without losing the setup; `r` or Enter reopens the exact
+draft, `c` explicitly replaces the chosen agent while preserving that draft identity, and choosing
+`n` plus the same project resumes it before agent selection. The model waits
+for the authoritative snapshot to join the draft/message ID to its exact thread and activates or
+hands off on that thread. The root row replaces the setup presentation, while the retained typed
+setup remains restart-recovery evidence until a later snapshot proves the assignment runnable.
 
 Within an open project conversation, `r` opens the modeless continuation draft. Sending it commits
 one typed human project message; the project-owned post-commit operation sequences and dispatches

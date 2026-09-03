@@ -309,6 +309,30 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, ava
             ));
             (" Choose agent ", lines)
         }
+        UiNewModal::ChangeSetupAgent {
+            setup,
+            project,
+            agents,
+            selected,
+        } => {
+            let mut lines = vec![
+                Line::from(format!("Conversation about {}", project.name)),
+                Line::from(format!(
+                    "Currently planned for {}. Choose an available agent instead.",
+                    setup.agent_name
+                )),
+                Line::default(),
+            ];
+            for agent in agents {
+                lines.push(project_choice_line(
+                    theme,
+                    agent.names.first().map_or("Unnamed agent", String::as_str),
+                    &agent_status_label(&agent.status),
+                    *selected == Some(agent.agent_id),
+                ));
+            }
+            (" Change agent ", lines)
+        }
         UiNewModal::ChooseProvider {
             project,
             agent,
@@ -622,6 +646,10 @@ fn dialog_help_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'stati
                 "Help for choosing an agent",
                 "An agent is a named worker. Unassigned agents can begin this project without moving other work.",
             ),
+            UiNewModal::ChangeSetupAgent { .. } => (
+                "Help for changing the planned agent",
+                "This replaces the exact agent choice retained with the unsent first message. It does not create a second conversation.",
+            ),
             UiNewModal::ChooseProvider { .. } => (
                 "Help for choosing an agent service",
                 "HQ chooses an available service automatically when it can. Choose from the available services when there is more than one.",
@@ -870,7 +898,13 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
     ];
     match model.section() {
         UiSection::Inbox | UiSection::Sent | UiSection::Archived => {
-            if model.conversation().is_some() {
+            if let Some(setup) = model.conversation_setup() {
+                actions.push(Line::from(format!(
+                    "Conversation with {} about {} has not started.",
+                    setup.agent_name, setup.project_name
+                )));
+                actions.push(Line::from("r or Enter — write the first message"));
+            } else if model.conversation().is_some() {
                 actions.push(Line::from(
                     "↑/↓ or j/k — select message · Enter — details · Esc — close conversation",
                 ));
@@ -929,6 +963,7 @@ const fn row_state_technical_label(state: UiRowState) -> &'static str {
 const fn row_kind_label(kind: UiRowKind) -> &'static str {
     match kind {
         UiRowKind::Conversation => "conversation",
+        UiRowKind::ConversationSetup => "conversation setup",
         UiRowKind::Agent => "agent",
         UiRowKind::Project => "project",
         UiRowKind::Diagnostic => "diagnostic",
@@ -2642,6 +2677,7 @@ const fn draft_target_label(target: &UiMailboxDraftTarget) -> &'static str {
         UiMailboxDraftTarget::Project {
             thread_id: None, ..
         } => "New project conversation",
+        UiMailboxDraftTarget::ProjectSetup { .. } => "First project message",
     }
 }
 
@@ -3617,6 +3653,8 @@ fn render_conversation(
         } else {
             render_conversation_entries(frame, model, theme, entries_area, conversation, cache);
         }
+    } else if let Some(setup) = model.conversation_setup() {
+        render_project_setup(frame, setup, theme, inner);
     } else if let Some(row) = model
         .selected_row_data()
         .filter(|row| row.kind != UiRowKind::Conversation)
@@ -3642,6 +3680,39 @@ fn render_conversation(
             inner,
         );
     }
+}
+
+fn render_project_setup(
+    frame: &mut Frame<'_>,
+    setup: &crate::UiProjectConversationSetup,
+    theme: &UiTheme,
+    area: Rect,
+) {
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                format!(
+                    "Conversation with {} about {} has not started",
+                    setup.agent_name, setup.project_name
+                ),
+                theme.style(UiThemeRole::Heading),
+            ),
+            Line::default(),
+            Line::from(format!(
+                "{} will be assigned when you send the first message.",
+                setup.agent_name
+            )),
+            Line::from(format!("Agent service: {}", setup.provider_name)),
+            Line::default(),
+            Line::styled(
+                "Press r or Enter to write the first message.",
+                theme.style(UiThemeRole::Accent),
+            ),
+            Line::from("Press c to choose a different available agent."),
+        ])
+        .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn render_technical_inspector(
@@ -4481,7 +4552,10 @@ fn render_row<'row>(
     width: u16,
 ) -> [Line<'row>; 2] {
     let selected = model.selected_row() == Some(row.id.as_str());
-    if row.kind == UiRowKind::Conversation {
+    if matches!(
+        row.kind,
+        UiRowKind::Conversation | UiRowKind::ConversationSetup
+    ) {
         let title_style = if selected {
             selected_style(theme, model.focus() == UiFocus::Content)
         } else {
@@ -4588,6 +4662,9 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         } else {
             " n New… · c create · / search · ? help · q quit".to_owned()
         }
+    } else if model.conversation_setup().is_some() {
+        " r/Enter write first message · c change agent · Tab switch pane · ? help · q quit"
+            .to_owned()
     } else if model.focus() == UiFocus::Conversation {
         conversation_footer(model)
     } else if model.selected_row_data().is_none() {

@@ -17,11 +17,12 @@ use hq_tui::{
     UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
     UiManagedSessionResult, UiMaterializedConversationView, UiMessageDelivery, UiMessageState,
     UiMessageTarget, UiModel, UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectCreationChoice, UiProjectFolderAction,
-    UiProjectFormField, UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind,
-    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiProjectAction, UiProjectAssignment, UiProjectConversationSetup, UiProjectCreationChoice,
+    UiProjectFolderAction, UiProjectFormField, UiProjectInteraction, UiProjectManagementAction,
+    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
+    UiProjectResult, UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider,
+    UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    update,
 };
 
 #[test]
@@ -389,8 +390,11 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
         ..builder
     };
     builder.status = UiAgentStatus::Unassigned;
+    let mut reviewer = project_agent(8, [9; 32]);
+    reviewer.names = vec!["reviewer".to_owned()];
+    reviewer.status = UiAgentStatus::Unassigned;
     let mut refreshed = projects_snapshot(2, vec![project]);
-    let agent_source = agents_snapshot(2, vec![builder]);
+    let agent_source = agents_snapshot(2, vec![builder, reviewer]);
     refreshed.agents = agent_source.agents;
     refreshed.agent_rows = agent_source.agent_rows;
     let resumed = update(
@@ -405,13 +409,13 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
     assert!(matches!(
         resumed.model.mailbox_draft(),
         Some(UiMailboxDraftPane::Loading {
-            target: UiMailboxDraftTarget::Project {
+            target: UiMailboxDraftTarget::ProjectSetup {
                 project_id,
-                thread_id: None,
+                agent_id: _,
+                provider: _,
             }
         }) if *project_id == [5; 32]
     ));
-    assert_project_draft_context(&resumed.model, [5; 32], "release", None);
     let (open_id, target) = open_draft_effect(&resumed.effects);
     let composing = update(
         resumed.model,
@@ -450,22 +454,98 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
             .iter()
             .all(|effect| !matches!(effect, UiEffect::LoadConversation { .. }))
     );
-    assert_project_draft_context(&refreshed.model, [5; 32], "release", None);
+    assert_project_setup_context(&refreshed.model, [5; 32], "release");
 
     let closed = update(refreshed.model, UiEvent::Input(UiInput::Escape))
         .expect("close the first-message composer");
     assert!(closed.model.new_modal().is_none());
     assert!(closed.model.mailbox_draft().is_none());
     assert_eq!(closed.model.focus(), UiFocus::Conversation);
-    let activated = update(closed.model, UiEvent::Input(UiInput::Activate))
-        .expect("activate the retained empty conversation");
+    let list_focused = update(closed.model.clone(), UiEvent::Input(UiInput::NextFocus))
+        .expect("tab to Inbox list");
+    assert_eq!(list_focused.model.focus(), UiFocus::Content);
+    let detail_focused = update(list_focused.model, UiEvent::Input(UiInput::NextFocus))
+        .expect("tab back to setup detail");
+    assert_eq!(detail_focused.model.focus(), UiFocus::Conversation);
+
+    let changing = update(
+        closed.model.clone(),
+        UiEvent::Input(UiInput::Character('c')),
+    )
+    .expect("choose a different agent for the retained setup");
+    assert!(matches!(
+        changing.model.new_modal(),
+        Some(UiNewModal::ChangeSetupAgent { setup, selected, .. })
+            if setup.draft.draft_id == [31; 32] && *selected == Some([7; 32])
+    ));
+    let reviewer_selected =
+        update(changing.model, UiEvent::Input(UiInput::NextItem)).expect("select reviewer");
+    let changed = update(reviewer_selected.model, UiEvent::Input(UiInput::Activate))
+        .expect("replace the typed agent choice");
+    let (_, changed_draft) = save_draft_effect(&changed.effects);
+    assert_eq!(changed_draft.draft_id, [31; 32]);
+    assert_eq!(changed_draft.content, "");
+    assert!(matches!(
+        changed_draft.target,
+        UiMailboxDraftTarget::ProjectSetup {
+            project_id,
+            agent_id,
+            ref provider,
+        } if project_id == [5; 32] && agent_id == [8; 32] && provider == "codex"
+    ));
+    assert_eq!(
+        changed
+            .model
+            .snapshot()
+            .expect("snapshot")
+            .project_setups
+            .len(),
+        1
+    );
+
+    let resumed_with_r = update(
+        closed.model.clone(),
+        UiEvent::Input(UiInput::Character('r')),
+    )
+    .expect("r resumes the retained setup");
+    assert!(matches!(
+        open_draft_effect(&resumed_with_r.effects).1,
+        UiMailboxDraftTarget::ProjectSetup { project_id, .. } if *project_id == [5; 32]
+    ));
+
+    let launcher = update(
+        closed.model.clone(),
+        UiEvent::Input(UiInput::Character('n')),
+    )
+    .expect("open New launcher");
+    let projects =
+        update(launcher.model, UiEvent::Input(UiInput::Activate)).expect("choose project work");
+    let resumed_with_n =
+        update(projects.model, UiEvent::Input(UiInput::Activate)).expect("choose the same project");
+    assert!(resumed_with_n.model.new_modal().is_none());
+    assert!(matches!(
+        open_draft_effect(&resumed_with_n.effects).1,
+        UiMailboxDraftTarget::ProjectSetup { project_id, .. } if *project_id == [5; 32]
+    ));
+    assert_eq!(
+        resumed_with_n
+            .model
+            .snapshot()
+            .expect("snapshot")
+            .project_setups
+            .len(),
+        1
+    );
+
+    let activated =
+        update(closed.model, UiEvent::Input(UiInput::Activate)).expect("resume the retained setup");
     assert!(activated.model.new_modal().is_none());
-    assert!(activated.model.mailbox_draft().is_none());
-    assert!(activated.effects.iter().all(|effect| !matches!(
+    assert!(
+        matches!(activated.model.mailbox_draft(), Some(UiMailboxDraftPane::Loading { target: UiMailboxDraftTarget::ProjectSetup { project_id, .. } }) if *project_id == [5; 32])
+    );
+    assert!(activated.effects.iter().any(|effect| matches!(
         effect,
-        UiEffect::OpenDraft { .. }
-            | UiEffect::SubmitProjectCommand { .. }
-            | UiEffect::SubmitMailboxCommand { .. }
+        UiEffect::OpenDraft { target: UiMailboxDraftTarget::ProjectSetup { project_id, .. }, .. } if *project_id == [5; 32]
     )));
 }
 
@@ -569,6 +649,43 @@ fn guided_project_failure_does_not_rearm_the_submission() {
     let agent_source = agents_snapshot(2, vec![agent]);
     pending_snapshot.agents = agent_source.agents;
     pending_snapshot.agent_rows = agent_source.agent_rows;
+    pending_snapshot.project_setups = vec![UiProjectConversationSetup {
+        draft: UiMailboxDraft {
+            draft_id: message_id,
+            target: target.clone(),
+            content: "Retain this instruction".to_owned(),
+            version: 2,
+        },
+        project_name: "release".to_owned(),
+        agent_name: "builder".to_owned(),
+        provider_name: "Codex".to_owned(),
+    }];
+
+    let restarted = update(
+        UiModel::new(UiSize {
+            width: 100,
+            height: 30,
+        }),
+        UiEvent::Started,
+    )
+    .expect("restart begins");
+    let restart_snapshot_id = snapshot_effect(&restarted.effects);
+    let recovered = update(
+        restarted.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: restart_snapshot_id,
+            snapshot: pending_snapshot.clone(),
+        },
+    )
+    .expect("restart recovers submitted setup");
+    assert!(recovered.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::SubmitProjectCommand {
+            action: UiProjectAction::Activate { project_id, agent_id, provider, .. },
+            ..
+        } if *project_id == [5; 32] && *agent_id == [7; 32] && provider == "codex"
+    )));
+
     let submitting = update(
         sent.model,
         UiEvent::SnapshotLoaded {
@@ -708,8 +825,8 @@ fn guided_project_work_only_offers_available_provider_choices_when_needed() {
     assert!(matches!(
         composing.model.mailbox_draft(),
         Some(UiMailboxDraftPane::Loading {
-            target: UiMailboxDraftTarget::Project { project_id, thread_id: None }
-        }) if *project_id == [5; 32]
+            target: UiMailboxDraftTarget::ProjectSetup { project_id, provider, .. }
+        }) if *project_id == [5; 32] && provider == "alpha"
     ));
     assert!(
         composing
@@ -3812,7 +3929,6 @@ fn new_project_conversation_tracks_local_context_then_selects_authoritative_root
             thread_id: None,
         }
     );
-    assert_project_draft_context(&opening.model, project_id, "release", None);
     let loaded = update(
         opening.model,
         UiEvent::DraftLoaded {
@@ -3854,12 +3970,7 @@ fn new_project_conversation_tracks_local_context_then_selects_authoritative_root
         },
     )
     .expect("new project root committed");
-    assert_project_draft_context(
-        &committed.model,
-        project_id,
-        "release",
-        Some("A separate topic"),
-    );
+    assert!(committed.model.conversation().is_none());
     let refresh_id = snapshot_effect(&committed.effects);
     let mut refreshed = snapshot(2, &["existing", "new"]);
     refreshed.projects = vec![project(5, "release", "/work/release")];
@@ -5957,6 +6068,7 @@ fn snapshot_for(section: UiSection, revision: u64, ids: &[&str]) -> UiSnapshot {
         providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
+        project_setups: Vec::new(),
     }
 }
 
@@ -6007,6 +6119,7 @@ fn agents_snapshot(revision: u64, agents: Vec<UiAgent>) -> UiSnapshot {
         providers: vec![available_provider("codex", "Codex", true)],
         agents,
         projects: Vec::new(),
+        project_setups: Vec::new(),
     }
 }
 
@@ -6157,6 +6270,7 @@ fn projects_snapshot(revision: u64, projects: Vec<UiProject>) -> UiSnapshot {
         providers: vec![available_provider("codex", "Codex", true)],
         agents: Vec::new(),
         projects,
+        project_setups: Vec::new(),
     }
 }
 
@@ -6175,45 +6289,21 @@ fn project_conversation_row(project: u8, thread: u8, root_message: u8, title: &s
     }
 }
 
-fn assert_project_draft_context(
-    model: &UiModel,
-    project_id: [u8; 32],
-    project_name: &str,
-    expected_body: Option<&str>,
-) {
+fn assert_project_setup_context(model: &UiModel, project_id: [u8; 32], project_name: &str) {
     assert_eq!(model.section(), UiSection::Inbox);
-    assert_eq!(
-        model
-            .project_filter()
-            .map(|filter| (filter.project_id, filter.project_name.as_str())),
-        Some((project_id, project_name))
+    assert!(model.project_filter().is_none());
+    let setup = model.conversation_setup().expect("typed setup");
+    assert!(
+        matches!(setup.draft.target, UiMailboxDraftTarget::ProjectSetup { project_id: candidate, .. } if candidate == project_id)
     );
+    assert_eq!(setup.project_name, project_name);
     assert_eq!(
         model
             .selected_row_data()
             .map(|row| (row.title.as_str(), row.detail.as_str())),
-        Some((project_name, "New project conversation"))
+        Some(("builder · release", "Conversation not started"))
     );
-    let conversation = model.conversation().expect("local project conversation");
-    assert_eq!(conversation.title, project_name);
-    assert_eq!(
-        conversation.context.as_deref(),
-        Some("New project conversation")
-    );
-    match expected_body {
-        None => assert!(conversation.entries.is_empty()),
-        Some(expected_body) => assert!(matches!(
-            conversation.entries.as_slice(),
-            [entry]
-                if matches!(
-                    &entry.presentation,
-                    UiConversationEntryPresentation::Message {
-                        author: UiConversationAuthor::You,
-                        body,
-                    } if body == expected_body
-                )
-        )),
-    }
+    assert!(model.conversation().is_none());
 }
 
 fn available_provider(provider: &str, name: &str, configured_default: bool) -> UiProvider {

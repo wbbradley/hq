@@ -2062,8 +2062,48 @@ fn run_in_pty_with_trace(
             managed_provider_sent = true;
             completion_offset = Some(bytes.len());
         }
-        if let PtyInteraction::CreateGuidedProjectWork { content, .. } = interaction
+        if let PtyInteraction::CreateGuidedProjectWork {
+            approval: false, ..
+        } = interaction
             && managed_provider_sent
+            && resize_phase == 0
+            && !resource_commit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"0/16384".len())
+                    .any(|window| window == b"0/16384")
+            })
+        {
+            master
+                .write_all(b"\x1b")
+                .expect("guided composer Esc writes");
+            master.flush().expect("guided composer Esc flushes");
+            resize_phase = 1;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(
+            interaction,
+            PtyInteraction::CreateGuidedProjectWork {
+                approval: false,
+                ..
+            }
+        ) && resize_phase == 1
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"r/Enter write first message".len())
+                    .any(|window| window == b"r/Enter write first message")
+            })
+        {
+            master.write_all(b"r").expect("guided setup resume writes");
+            master.flush().expect("guided setup resume flushes");
+            resize_phase = 2;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::CreateGuidedProjectWork {
+            content, approval, ..
+        } = interaction
+            && managed_provider_sent
+            && (approval || resize_phase == 2)
             && !resource_commit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]

@@ -276,17 +276,22 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Projects preserve selection by project and folder identity across refresh and resize. Wide layouts
   keep list and summary together; compact layouts expose one-level Back across summary, Manage
   project, Folders, and pane-owned forms.
-- Enter on a project routes by typed Inbox conversation cardinality: zero starts a draft under a
-  visible clearable project filter, one opens the exact row, and many shows the filtered list without
-  guessing from display text, assignment, recency, provider, or session.
+- Enter on a project routes by typed Inbox conversation cardinality: an existing unfinished setup
+  resumes its exact draft, zero conversations begins guided setup, one opens the exact row, and many
+  shows the explicit project conversation list without guessing from display text, assignment,
+  recency, provider, session, or row position.
 - Labeled folder, agent, lifecycle, recovery, and technical actions are state-dependent. Routine
   message delivery is automatic, and retry is absent without explicit stalled-delivery evidence.
   Only destructive and force decisions use bounded modal confirmation.
 - A project conversation row retains typed project, thread, and initiating-message identities.
   `r` continues that exact thread, while `c` creates a separate root and selects the row whose
   initiating message matches the committed message ID after authoritative refresh.
-- A guided first message is committed through the same mailbox draft/action boundary, correlated to
-  its authoritative project thread, activated exactly once, and left selected in the Inbox.
+- A guided first-message setup persists exact project, agent, provider, and draft identities across
+  Esc, refresh, reconnect, and process restart. Inbox shows one non-conversation “not started” row;
+  `r`/Enter and repeated `n` resume it without a duplicate or hidden filter, while `c` explicitly
+  replaces the chosen agent without replacing the draft identity. Submission is
+  correlated by its draft/message identity to the authoritative project thread, activated exactly
+  once after uncertain responses or restart, and replaced by that one selected conversation row.
 - Sending in an open conversation immediately inserts one non-actionable local-human `Pending` row.
   Definite commit replaces it by exact canonical identity, project delivery stays queued until typed
   dispatch evidence, definite rejection restores the exact draft, and response loss never creates a

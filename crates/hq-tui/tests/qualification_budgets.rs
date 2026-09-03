@@ -72,6 +72,7 @@ fn invalidation_of_a_large_ready_model_requests_redraw_within_the_declared_budge
         providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
+        project_setups: Vec::new(),
     };
     let ready = update(
         started.model,
@@ -169,6 +170,7 @@ fn maximum_markdown_conversation(size: UiSize, body: &str) -> UiModel {
         providers: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
+        project_setups: Vec::new(),
     };
 
     let entries = (0..MAXIMUM_TUI_CONVERSATION_PAGE)
