@@ -143,36 +143,16 @@ pub enum UiSection {
 }
 
 impl UiSection {
-    pub(crate) const ALL: [Self; 6] = [
-        Self::Inbox,
-        Self::Sent,
-        Self::Archived,
-        Self::Agents,
-        Self::Projects,
-        Self::Config,
-    ];
-
-    fn next(self) -> Self {
-        let index = Self::ALL
-            .iter()
-            .position(|candidate| *candidate == self)
-            .unwrap_or(0);
-        Self::ALL[(index + 1).min(Self::ALL.len() - 1)]
-    }
-
-    fn previous(self) -> Self {
-        let index = Self::ALL
-            .iter()
-            .position(|candidate| *candidate == self)
-            .unwrap_or(0);
-        Self::ALL[index.saturating_sub(1)]
-    }
-
-    fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|candidate| *candidate == self)
-            .unwrap_or(0)
+    const fn from_shortcut(character: char) -> Option<Self> {
+        match character {
+            '1' => Some(Self::Inbox),
+            '2' => Some(Self::Sent),
+            '3' => Some(Self::Archived),
+            '4' => Some(Self::Agents),
+            '5' => Some(Self::Projects),
+            '6' => Some(Self::Config),
+            _ => None,
+        }
     }
 }
 
@@ -193,8 +173,6 @@ fn bounded_navigation_index(current: Option<usize>, len: usize, forward: bool) -
 /// Logical focus independent of terminal coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiFocus {
-    /// Top-level section navigation.
-    Navigation,
     /// Current section content.
     Content,
     /// Open conversation history.
@@ -225,10 +203,6 @@ pub enum UiInput {
     NextFocus,
     /// Move focus backward.
     PreviousFocus,
-    /// Select the next top-level section.
-    NextSection,
-    /// Select the previous top-level section.
-    PreviousSection,
     /// Select the next logical row.
     NextItem,
     /// Select the previous logical row.
@@ -2439,6 +2413,40 @@ struct UiSectionWorkspace {
     conversation_failure: Option<ConversationFailure>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct UiSectionWorkspaces {
+    inbox: Option<UiSectionWorkspace>,
+    sent: Option<UiSectionWorkspace>,
+    archived: Option<UiSectionWorkspace>,
+    agents: Option<UiSectionWorkspace>,
+    projects: Option<UiSectionWorkspace>,
+    config: Option<UiSectionWorkspace>,
+}
+
+impl UiSectionWorkspaces {
+    const fn get(&self, section: UiSection) -> Option<&UiSectionWorkspace> {
+        match section {
+            UiSection::Inbox => self.inbox.as_ref(),
+            UiSection::Sent => self.sent.as_ref(),
+            UiSection::Archived => self.archived.as_ref(),
+            UiSection::Agents => self.agents.as_ref(),
+            UiSection::Projects => self.projects.as_ref(),
+            UiSection::Config => self.config.as_ref(),
+        }
+    }
+
+    const fn get_mut(&mut self, section: UiSection) -> &mut Option<UiSectionWorkspace> {
+        match section {
+            UiSection::Inbox => &mut self.inbox,
+            UiSection::Sent => &mut self.sent,
+            UiSection::Archived => &mut self.archived,
+            UiSection::Agents => &mut self.agents,
+            UiSection::Projects => &mut self.projects,
+            UiSection::Config => &mut self.config,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingProject {
     id: EffectId,
@@ -2574,7 +2582,7 @@ pub struct UiModel {
     pending_managed_session: Option<EffectId>,
     pending_project: Option<PendingProject>,
     pending_project_conversation: Option<([u8; 32], [u8; 32])>,
-    section_workspaces: [Option<UiSectionWorkspace>; 6],
+    section_workspaces: UiSectionWorkspaces,
     retry_timer: Option<EffectId>,
     autosave_timer: Option<EffectId>,
     completion_timer: Option<EffectId>,
@@ -2596,7 +2604,7 @@ impl UiModel {
             connection: UiConnectionState::Disconnected,
             connection_generation: 0,
             section: UiSection::Inbox,
-            focus: UiFocus::Navigation,
+            focus: UiFocus::Content,
             snapshot: None,
             selected_row: None,
             conversation: None,
@@ -2650,7 +2658,14 @@ impl UiModel {
             pending_managed_session: None,
             pending_project: None,
             pending_project_conversation: None,
-            section_workspaces: [None, None, None, None, None, None],
+            section_workspaces: UiSectionWorkspaces {
+                inbox: None,
+                sent: None,
+                archived: None,
+                agents: None,
+                projects: None,
+                config: None,
+            },
             retry_timer: None,
             autosave_timer: None,
             completion_timer: None,
@@ -3465,7 +3480,7 @@ impl UiModel {
     }
 
     fn save_section_workspace(&mut self) {
-        self.section_workspaces[self.section.index()] = Some(UiSectionWorkspace {
+        *self.section_workspaces.get_mut(self.section) = Some(UiSectionWorkspace {
             selected_row: self.selected_row.clone(),
             conversation: self.conversation.clone(),
             conversation_anchor: self.conversation_anchor.clone(),
@@ -3479,7 +3494,7 @@ impl UiModel {
     }
 
     fn restore_section_workspace(&mut self) {
-        let workspace = self.section_workspaces[self.section.index()].clone();
+        let workspace = self.section_workspaces.get(self.section).cloned();
         if let Some(workspace) = workspace {
             self.selected_row = workspace.selected_row;
             self.conversation = workspace.conversation;
@@ -3500,7 +3515,7 @@ impl UiModel {
             self.conversation_viewport_geometry = None;
             self.technical_visible = false;
             self.technical_scroll = 0;
-            self.focus = UiFocus::Navigation;
+            self.focus = UiFocus::Content;
             self.conversation_failure = None;
         }
         self.pending_conversation = None;
@@ -3516,20 +3531,6 @@ impl UiModel {
         self.restore_section_workspace();
         self.reconcile_current_section();
         self.refresh_selected_project_summary();
-    }
-
-    fn move_section(&mut self, forward: bool) -> bool {
-        let next = if forward {
-            self.section.next()
-        } else {
-            self.section.previous()
-        };
-        if next == self.section {
-            false
-        } else {
-            self.change_section(next);
-            true
-        }
     }
 
     fn schedule_timer(
@@ -4682,6 +4683,18 @@ fn apply_input(
         }
         return Ok(());
     }
+    if !text_input_is_active(model)
+        && let UiInput::Character(character) = input
+        && let Some(section) = UiSection::from_shortcut(*character)
+    {
+        if model.section != section {
+            model.change_section(section);
+            request_configuration_if_needed(model, effects)?;
+            model.request_inbox_preview(effects);
+            effects.push(UiEffect::RequestRedraw);
+        }
+        return Ok(());
+    }
     if model.section == UiSection::Config
         && (model.focus == UiFocus::Content || model.config_edit.is_some())
     {
@@ -4709,43 +4722,15 @@ fn apply_input(
                 false
             }
         }
-        UiInput::NextFocus => {
+        UiInput::NextFocus | UiInput::PreviousFocus => {
             model.focus = match model.focus {
-                UiFocus::Navigation => UiFocus::Content,
                 UiFocus::Content if model.conversation.is_some() => UiFocus::Conversation,
-                UiFocus::Content | UiFocus::Conversation => UiFocus::Navigation,
+                UiFocus::Conversation | UiFocus::Content => UiFocus::Content,
                 UiFocus::Draft => UiFocus::Draft,
             };
             true
-        }
-        UiInput::PreviousFocus => {
-            model.focus = match model.focus {
-                UiFocus::Navigation if model.conversation.is_some() => UiFocus::Conversation,
-                UiFocus::Navigation | UiFocus::Conversation => UiFocus::Content,
-                UiFocus::Content => UiFocus::Navigation,
-                UiFocus::Draft => UiFocus::Draft,
-            };
-            true
-        }
-        UiInput::NextSection => {
-            if model.viewport.width >= WIDE_WIDTH && model.focus == UiFocus::Navigation {
-                model.focus = UiFocus::Content;
-                true
-            } else if model.viewport.width < WIDE_WIDTH {
-                model.move_section(true)
-            } else {
-                return Ok(());
-            }
         }
         UiInput::MoveCursorRight => match model.focus {
-            UiFocus::Navigation => {
-                if model.viewport.width >= WIDE_WIDTH {
-                    model.focus = UiFocus::Content;
-                    true
-                } else {
-                    model.move_section(true)
-                }
-            }
             UiFocus::Content if model.conversation.is_some() => {
                 model.focus = UiFocus::Conversation;
                 model.follow_conversation_tail();
@@ -4753,18 +4738,6 @@ fn apply_input(
             }
             UiFocus::Content | UiFocus::Conversation | UiFocus::Draft => false,
         },
-        UiInput::PreviousSection => {
-            if model.viewport.width >= WIDE_WIDTH
-                && matches!(model.focus, UiFocus::Content | UiFocus::Conversation)
-            {
-                model.focus = UiFocus::Navigation;
-                true
-            } else if model.viewport.width < WIDE_WIDTH {
-                model.move_section(false)
-            } else {
-                return Ok(());
-            }
-        }
         UiInput::MoveCursorLeft => match model.focus {
             UiFocus::Conversation => {
                 if model.technical_visible {
@@ -4774,26 +4747,14 @@ fn apply_input(
                 }
                 true
             }
-            UiFocus::Content => {
-                model.focus = UiFocus::Navigation;
-                true
-            }
-            UiFocus::Navigation => {
-                if model.viewport.width < WIDE_WIDTH {
-                    model.move_section(false)
-                } else {
-                    false
-                }
-            }
-            UiFocus::Draft => false,
+            UiFocus::Content | UiFocus::Draft => false,
         },
         UiInput::NextItem => match model.focus {
             UiFocus::Conversation if model.technical_visible => {
                 model.scroll_technical_details(true)
             }
             UiFocus::Conversation => model.scroll_conversation_viewport(true),
-            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => model.move_section(true),
-            UiFocus::Navigation | UiFocus::Content => model.move_row_selection(true),
+            UiFocus::Content => model.move_row_selection(true),
             UiFocus::Draft => false,
         },
         UiInput::PreviousItem => match model.focus {
@@ -4801,8 +4762,7 @@ fn apply_input(
                 model.scroll_technical_details(false)
             }
             UiFocus::Conversation => model.scroll_conversation_viewport(false),
-            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => model.move_section(false),
-            UiFocus::Navigation | UiFocus::Content => model.move_row_selection(false),
+            UiFocus::Content => model.move_row_selection(false),
             UiFocus::Draft => false,
         },
         UiInput::Activate => activate(model, effects)?,
@@ -4866,9 +4826,7 @@ fn apply_project_workspace_input(
         model.clear_project_filter();
         return Ok(Some(true));
     }
-    let project_content_focused = model.focus == UiFocus::Content
-        || (model.viewport.width < WIDE_WIDTH && model.focus == UiFocus::Navigation);
-    if model.section != UiSection::Projects || !project_content_focused {
+    if model.section != UiSection::Projects || model.focus != UiFocus::Content {
         return Ok(None);
     }
     match (model.project_workspace_level, input) {
@@ -5392,10 +5350,6 @@ fn apply_config_input(
             effects.push(UiEffect::Exit);
             Ok(false)
         }
-        UiInput::Escape | UiInput::MoveCursorLeft => {
-            model.focus = UiFocus::Navigation;
-            Ok(true)
-        }
         UiInput::NextItem | UiInput::PreviousItem => {
             let current = UiConfigField::ALL
                 .iter()
@@ -5491,17 +5445,6 @@ fn normalize_vim_navigation(model: &UiModel, input: &UiInput) -> UiInput {
         return input.clone();
     }
     match input {
-        UiInput::Character('j' | 'k')
-            if model.focus == UiFocus::Navigation
-                && model.viewport.width >= WIDE_WIDTH
-                && model.interaction_modal.is_none()
-                && model.new_modal.is_none()
-                && model.mailbox_modal.is_none()
-                && model.project_interaction.is_none()
-                && model.agent_modal.is_none() =>
-        {
-            input.clone()
-        }
         UiInput::Character('j' | 'k')
             if model.focus == UiFocus::Conversation && model.interaction_modal.is_none() =>
         {
@@ -8833,7 +8776,7 @@ fn mailbox_shortcut(
             }
             UiFocus::Conversation => model.move_conversation_anchor(true),
             UiFocus::Content => model.move_row_selection(true),
-            UiFocus::Navigation | UiFocus::Draft => false,
+            UiFocus::Draft => false,
         }),
         'k' => Ok(match model.focus {
             UiFocus::Conversation if model.technical_visible => {
@@ -8841,7 +8784,7 @@ fn mailbox_shortcut(
             }
             UiFocus::Conversation => model.move_conversation_anchor(false),
             UiFocus::Content => model.move_row_selection(false),
-            UiFocus::Navigation | UiFocus::Draft => false,
+            UiFocus::Draft => false,
         }),
         _ => Ok(false),
     }
@@ -8943,10 +8886,6 @@ fn select_project_conversation(model: &mut UiModel, project_id: [u8; 32], thread
 }
 
 fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, UiError> {
-    if model.viewport.width >= WIDE_WIDTH && model.focus == UiFocus::Navigation {
-        model.focus = UiFocus::Content;
-        return Ok(true);
-    }
     if model.focus == UiFocus::Conversation && model.conversation_anchor.is_some() {
         return Ok(model.toggle_technical_details());
     }
@@ -9007,11 +8946,7 @@ fn escape(model: &mut UiModel) -> bool {
                 model.focus = UiFocus::Content;
                 true
             }
-            UiFocus::Content => {
-                model.focus = UiFocus::Navigation;
-                true
-            }
-            UiFocus::Navigation | UiFocus::Draft => false,
+            UiFocus::Content | UiFocus::Draft => false,
         }
     }
 }
@@ -10580,9 +10515,8 @@ mod tests {
         let mut model = model();
         model.viewport.width = 120;
         model.change_section(UiSection::Projects);
-        model.focus = UiFocus::Navigation;
 
-        let entered = update(model, UiEvent::Input(UiInput::NextItem)).expect("enter Config");
+        let entered = update(model, UiEvent::Input(UiInput::Character('6'))).expect("enter Config");
 
         assert_eq!(entered.model.section(), UiSection::Config);
         assert_eq!(

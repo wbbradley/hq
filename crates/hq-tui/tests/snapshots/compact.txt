@@ -1,16 +1,16 @@
  HQ   Inbox
  this device Connected
 ────────────────────────────────────────────────────────────────────────
-Inbox · Sent · Archived · Agents · Projects · Config
-────────────────────────────────────────────────────────────────────────
 Inbox · 3 conversations
 
 Build release
 agent-1
 Deploy production
+waiting for approval
+Investigate timeout
 ────────────────────────────────────────────────────────────────────────
 Select a conversation to view its messages.
 
 
 ────────────────────────────────────────────────────────────────────────
- Enter open · ? help · q quit
+ Enter open · ? help · q quit · 1–6 views

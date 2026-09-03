@@ -26,7 +26,7 @@ position carries authorship. HQ instead uses explicit author labels, whitespace,
 
 The presentation before this specification was approved created the reported result directly:
 
-- `render_rows` gives the Inbox list 60 percent of the post-navigation width and the Conversation
+- `render_rows` gives the Inbox list 60 percent of the available width and the Conversation
   pane 40 percent.
 - `render_conversation` prefixes its title and every state line with a space.
 - `render_conversation_entry` prefixes entry headers with three cells and bodies with five, then
@@ -188,8 +188,8 @@ technical inspector uses the compact secondary-screen behavior even on a wide te
 
 ### Wide terminals
 
-At 96 columns and above, top-level navigation keeps its current bounded width. The remaining space
-uses a bounded Inbox list rather than a percentage split:
+At 96 columns and above, the current view owns the complete content width. Inbox uses a bounded list
+rather than a percentage split:
 
 - preferred list width: 32 columns;
 - minimum list width: 24 columns;
@@ -205,22 +205,23 @@ The reported conversation then reads approximately as follows. The vertical rule
 pane boundaries; there is no outer Conversation rectangle.
 
 ```text
- HQ             │ Inbox · 1               │ Alice
- Inbox          │                         │ Project · hq
- Sent           │ Alice                   │
- Archived       │ hq · Are there any      │ You
- Agents         │ local changes that are  │ Are there any local changes that are uncommitted?
- Projects       │ uncommitted?            │
-                │                         │ Alice
-                │                         │ I’ll check the repository’s working tree and summarize
-                │                         │ any staged, unstaged, or untracked changes.
-                │                         │
-                │                         │ ✓ Checked repository status
-                │                         │
-                │                         │ Alice
-                │                         │ No. The working tree is clean—there are no staged,
-                │                         │ unstaged, or untracked changes. Current branch:
-                │                         │ `wbbradley/projects-workspace-spec`.
+ HQ   Inbox
+ Inbox · 1               │ Alice
+                         │ Project · hq
+ Alice                   │
+ hq · Are there any      │ You
+ local changes that are  │ Are there any local changes that are uncommitted?
+ uncommitted?            │
+                         │ Alice
+                         │ I’ll check the repository’s working tree and summarize
+                         │ any staged, unstaged, or untracked changes.
+                         │
+                         │ ✓ Checked repository status
+                         │
+                         │ Alice
+                         │ No. The working tree is clean—there are no staged,
+                         │ unstaged, or untracked changes. Current branch:
+                         │ `wbbradley/projects-workspace-spec`.
 ```
 
 The actual selected list row has a full-width selection style; the wireframe omits fake text
@@ -259,8 +260,6 @@ selected row and Conversation receives the remaining height. A single horizontal
 separates them.
 
 ```text
-Inbox · Sent · Archived · Agents · Projects
-────────────────────────────────────────────
 Inbox · 1
 Alice · hq
 Are there any local changes that are…
@@ -276,8 +275,8 @@ I’ll check the repository’s working tree…
 ```
 
 The transcript remains visible while the list owns focus, as already required. `l`/Right/Enter
-moves from list to transcript; `h`/Left returns to the list; another `h`/Left returns to top-level
-navigation. Nothing dismisses or unloads the selected conversation merely to change focus.
+moves from list to transcript; `h`/Left returns to the list, which is the view root. `1`-`6` switch
+views from this modeless state without dismissing or unloading its saved conversation workspace.
 
 Below 40 columns or 10 rows, the existing bounded resize message remains appropriate.
 

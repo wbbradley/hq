@@ -194,38 +194,39 @@ semantics as the Inbox workspace. There is no outer detail box.
 ### Wide terminals
 
 ```text
- HQ            │ Projects · 4          │ Project · API redesign
- Inbox         │ › API redesign        │ Open · Ready
- Sent          │   open · ready        │ Move authentication to passkeys.
- Archived      │                       │
- Agents        │   Docs refresh        │ Conversation
- Projects      │   closed              │ › Continue conversation
-               │                       │   2 conversations in Inbox
-               │   Billing cleanup     │
-               │   needs attention     │ Agent
-               │                       │   Alice · Ready
-               │                       │
-               │                       │ Folders
-               │                       │   Working folder · ~/src/api
-               │                       │   ~/src/shared · available
-               │                       │
-               │                       │ Manage project…
+ HQ   Projects
+ Projects · 4          │ Project · API redesign
+ › API redesign        │ Open · Ready
+   open · ready        │ Move authentication to passkeys.
+   Docs refresh        │ Conversation
+   closed              │ › Continue conversation
+                       │   2 conversations in Inbox
+   Billing cleanup     │
+   needs attention     │ Agent
+                       │   Alice · Ready
+                       │
+                       │ Folders
+                       │   Working folder · ~/src/api
+                       │   ~/src/shared · available
+                       │
+                       │ Manage project…
 ────────────────────────────────────────────────────────────────────────────
- Enter continue conversation · l/→ details · c create · / search · ? help
+ Enter continue conversation · l/→ details · c create · / search · ? help · 1–6 views
 ```
 
 Focus behavior:
 
-- **Navigation focus:** `j/k` changes top-level section; `l`/Right/Enter enters the project list.
 - **Project-list focus:** `j/k` changes project and immediately replaces the adjacent summary.
   Enter invokes the selected project's primary conversation action. `l`/Right or Tab enters the
-  detail pane. `h`/Left returns one level to navigation.
+  detail pane. The list is the visible root of the Projects view.
 - **Project-detail focus:** `j/k` moves among the conversation, agent, folders, recovery, and
   `Manage project…` rows. Enter opens the selected row. `h`/Left returns to the project list without
   changing project selection.
 - **Administration/form focus:** `j/k` chooses a labeled action or option; Tab/Shift-Tab traverses
   fields; `h`/Left/Esc returns one subview, preserving a safe draft form or asking about unsaved
-  changes when required. It never jumps to global navigation.
+  changes when required. It never changes the current view.
+- **Direct views:** modeless `1`-`6` open Inbox, Sent, Archived, Agents, Projects, or Config. Every
+  modal captures those keys, and active text fields receive digits literally.
 
 ### Compact terminals
 
@@ -261,7 +262,7 @@ The list and detail are ordinary screens in the Projects section, not overlays.
 
 On compact screens, Enter from the list still performs the primary conversation action; `l`/Right
 opens project detail. `h`/Left from detail returns to the exact selected project in the list, and a
-second `h`/Left returns to top-level navigation. Resize preserves project, subview, focused object,
+second `h`/Left is inert at that visible root. Resize preserves project, subview, focused object,
 and safe form state by typed identity.
 
 ### Forms, progress, and confirmation
@@ -366,8 +367,9 @@ application, and no required action exists only in a clipped shortcut wall.
   an uncertain external effect is reconciled rather than repeated manually.
 - Modal confirmations are bounded decisions, never the main project workspace. Forms, status,
   progress, normal completion, and recoverable failure remain in the owning pane.
-- Global navigation meanings win: `h`/Left is Back, Inbox `r` is reply/continue, and Inbox `a` is
-  message archive. Project operations use labeled rows rather than repurposing those keys.
+- Global modeless view shortcuts win: `1`-`6` select views, `h`/Left is Back, Inbox `r` is
+  reply/continue, and Inbox `a` is message archive. Project operations use labeled rows rather than
+  repurposing those keys.
 
 ## Migration path away from Project details
 

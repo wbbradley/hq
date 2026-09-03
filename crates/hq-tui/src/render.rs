@@ -32,30 +32,10 @@ use crate::{
 
 const MINIMUM_WIDTH: u16 = 40;
 const MINIMUM_HEIGHT: u16 = 10;
-const NAVIGATION_SELECTED_MARKER: &str = " › ";
-const NAVIGATION_UNSELECTED_MARKER: &str = "   ";
-const NAVIGATION_TRAILING_PADDING: usize = 1;
-const NAVIGATION_BORDER_WIDTH: usize = 1;
 const INBOX_LIST_MIN_WIDTH: u16 = 24;
 const INBOX_LIST_PREFERRED_WIDTH: u16 = 32;
 const INBOX_LIST_MAX_WIDTH: u16 = 36;
 const CONVERSATION_PREFERRED_MIN_WIDTH: u16 = 48;
-
-fn navigation_width() -> u16 {
-    let marker_width = NAVIGATION_SELECTED_MARKER
-        .width()
-        .max(NAVIGATION_UNSELECTED_MARKER.width());
-    let label_width = UiSection::ALL
-        .into_iter()
-        .map(|section| section_label(section).width())
-        .max()
-        .unwrap_or_default();
-    let width = marker_width
-        .saturating_add(label_width)
-        .saturating_add(NAVIGATION_TRAILING_PADDING)
-        .saturating_add(NAVIGATION_BORDER_WIDTH);
-    u16::try_from(width).unwrap_or(u16::MAX)
-}
 
 fn inbox_list_width(available: u16) -> u16 {
     let width_preserving_conversation =
@@ -108,11 +88,7 @@ pub fn render_with_cache(
     ])
     .areas(area);
     render_header(frame, model, theme, header);
-    if area.width >= WIDE_WIDTH {
-        render_wide_content(frame, model, theme, content, cache);
-    } else {
-        render_compact_content(frame, model, theme, content, cache);
-    }
+    render_rows(frame, model, theme, content, cache);
     render_footer(frame, model, theme, footer);
     render_new_modal(frame, model, theme, content);
     render_mailbox_modal(frame, model, theme, content);
@@ -868,8 +844,9 @@ const fn section_help_text(section: UiSection) -> &'static str {
 
 fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
     let mut actions = vec![
-        Line::from("↑/↓ or j/k — select · ←/→ or h/l — sections"),
-        Line::from("Tab / Shift-Tab — change focus"),
+        Line::from("1 Inbox · 2 Sent · 3 Archived"),
+        Line::from("4 Agents · 5 Projects · 6 Config"),
+        Line::from("↑/↓ or j/k — select"),
     ];
     match model.section() {
         UiSection::Inbox | UiSection::Sent | UiSection::Archived => {
@@ -2701,84 +2678,6 @@ fn render_header(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     );
 }
 
-fn render_wide_content(
-    frame: &mut Frame<'_>,
-    model: &UiModel,
-    theme: &UiTheme,
-    area: Rect,
-    cache: &mut UiRenderCache,
-) {
-    let [navigation, rows] =
-        Layout::horizontal([Constraint::Length(navigation_width()), Constraint::Min(1)])
-            .areas(area);
-    let navigation_lines = UiSection::ALL
-        .into_iter()
-        .map(|section| {
-            let selected = section == model.section();
-            let marker = if selected {
-                NAVIGATION_SELECTED_MARKER
-            } else {
-                NAVIGATION_UNSELECTED_MARKER
-            };
-            let style = if selected {
-                selected_style(theme, model.focus() == UiFocus::Navigation)
-            } else {
-                theme.style(UiThemeRole::TextMuted)
-            };
-            Line::styled(format!("{marker}{}", section_label(section)), style)
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(navigation_lines).block(Block::new().borders(Borders::RIGHT).border_style(
-            theme.style(if model.focus() == UiFocus::Navigation {
-                UiThemeRole::BorderFocused
-            } else {
-                UiThemeRole::BorderUnfocused
-            }),
-        )),
-        navigation,
-    );
-    render_rows(frame, model, theme, rows, cache);
-}
-
-fn render_compact_content(
-    frame: &mut Frame<'_>,
-    model: &UiModel,
-    theme: &UiTheme,
-    area: Rect,
-    cache: &mut UiRenderCache,
-) {
-    let [tabs, rows] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
-    let tab_line = UiSection::ALL
-        .into_iter()
-        .enumerate()
-        .flat_map(|(index, section)| {
-            let separator = (index > 0).then(|| Span::raw(" · "));
-            separator.into_iter().chain(std::iter::once(Span::styled(
-                section_label(section),
-                if section == model.section() {
-                    selected_style(theme, model.focus() == UiFocus::Navigation)
-                } else {
-                    theme.style(UiThemeRole::TextMuted)
-                },
-            )))
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(Line::from(tab_line)).block(
-            Block::new()
-                .borders(Borders::BOTTOM)
-                .border_style(theme.style(if model.focus() == UiFocus::Navigation {
-                    UiThemeRole::BorderFocused
-                } else {
-                    UiThemeRole::BorderUnfocused
-                })),
-        ),
-        tabs,
-    );
-    render_rows(frame, model, theme, rows, cache);
-}
-
 fn render_rows(
     frame: &mut Frame<'_>,
     model: &UiModel,
@@ -3492,10 +3391,6 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
         }
         Some(UiHumanState::Ready) | None => {}
     }
-    if let Some(onboarding) = onboarding_lines(model, theme) {
-        lines.extend(onboarding);
-        lines.push(Line::default());
-    }
     match model.rows() {
         Some([]) => lines.extend(empty_section_lines(model.section(), theme)),
         Some(rows) => {
@@ -3509,70 +3404,6 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
         )),
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
-fn onboarding_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'static>>> {
-    let snapshot = model.snapshot()?;
-    if model.section() != UiSection::Inbox
-        || !matches!(snapshot.human_state, UiHumanState::Ready)
-        || !snapshot.inbox_rows.is_empty()
-        || !snapshot.sent_rows.is_empty()
-        || !snapshot.archived_rows.is_empty()
-    {
-        return None;
-    }
-    let has_project = snapshot.projects.iter().any(|project| !project.archived);
-    let has_agent = snapshot
-        .agents
-        .iter()
-        .any(|agent| matches!(agent.lifecycle, crate::UiAgentLifecycle::Active));
-    let has_provider = snapshot.providers.iter().any(|provider| provider.available);
-    let mut lines = vec![Line::styled(
-        " Get started with HQ",
-        theme.style(UiThemeRole::Heading),
-    )];
-    lines.push(Line::from(" ✓ Account ready"));
-    if !has_project {
-        lines.push(Line::styled(
-            " › Current: add a project and choose the folder or resource it owns",
-            theme.style(UiThemeRole::Attention),
-        ));
-        lines.push(Line::from(
-            " Press n New… and choose “Work with an agent on a project.”",
-        ));
-        return Some(lines);
-    }
-    lines.push(Line::from(" ✓ Project ready"));
-    if !has_agent {
-        lines.push(Line::styled(
-            " › Current: create an agent to do the work",
-            theme.style(UiThemeRole::Attention),
-        ));
-        lines.push(Line::from(
-            " Press n New…; the project path can create one in place.",
-        ));
-        return Some(lines);
-    }
-    lines.push(Line::from(" ✓ Agent ready"));
-    if !has_provider {
-        lines.push(Line::styled(
-            " › Current: connect an agent service",
-            theme.style(UiThemeRole::Attention),
-        ));
-        lines.push(Line::from(
-            " Install or enable an agent service, then restart HQ to detect it.",
-        ));
-        return Some(lines);
-    }
-    lines.push(Line::from(" ✓ Agent service ready"));
-    lines.push(Line::styled(
-        " › Current: open the first project conversation",
-        theme.style(UiThemeRole::Attention),
-    ));
-    lines.push(Line::from(
-        " Press n New…. HQ will ask you to choose only if more than one service is available, then open the Inbox draft.",
-    ));
-    Some(lines)
 }
 
 fn human_issue_lines(issue: &UiHumanIssue, theme: &UiTheme) -> Vec<Line<'static>> {
@@ -4652,15 +4483,11 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         format!(" Hint · {hint}")
     } else if model.focus() == UiFocus::Draft {
         " Enter send · Ctrl-J/Shift-Enter newline · Esc close · ? help · q quit".to_owned()
-    } else if model.focus() == UiFocus::Navigation && model.viewport().width >= WIDE_WIDTH {
-        " ↑/↓ or j/k section · Enter content · ? help · q quit".to_owned()
-    } else if model.focus() == UiFocus::Navigation {
-        " ←/→ section · Enter content · ? help · q quit".to_owned()
     } else if model.section() == UiSection::Config {
         if model.config_edit().is_some() {
             " Enter save · Esc cancel · F1 help".to_owned()
         } else {
-            " j/k choose · Enter/→ edit or change · ← navigation · ? help · q quit".to_owned()
+            " j/k choose · Enter/→ edit or change · ? help · q quit".to_owned()
         }
     } else if model.section() == UiSection::Projects {
         match model.project_workspace_level() {
@@ -4693,6 +4520,19 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         " Enter open · n New… · d message · N note · ? help · q quit".to_owned()
     } else {
         " Enter open · ? help · q quit".to_owned()
+    };
+    let view_shortcuts_available = model.help_page().is_none()
+        && model.new_modal().is_none()
+        && model.mailbox_modal().is_none()
+        && model.mailbox_draft().is_none()
+        && model.agent_modal().is_none()
+        && model.project_interaction().is_none()
+        && model.interaction_modal().is_none()
+        && model.config_edit().is_none();
+    let content = if view_shortcuts_available {
+        format!("{content} · 1–6 views")
+    } else {
+        content
     };
     let style = if model.last_failure().is_some() && model.help_page().is_none() {
         theme.style(UiThemeRole::FooterWarning)
@@ -4860,8 +4700,8 @@ mod tests {
         activity_preview, completed_item_detail_lines, completed_item_detail_styled,
         conversation_entry_layout, conversation_viewport_slices, conversation_viewport_tail_origin,
         display_prefix, display_suffix, draft_context_label, inbox_list_width, inert_draft_source,
-        interaction_supersedes_live_tail, navigation_width, render_conversation_entries,
-        render_conversation_entry, text_field_line,
+        interaction_supersedes_live_tail, render_conversation_entries, render_conversation_entry,
+        text_field_line,
     };
     use crate::{
         UiActivityStatus, UiCompletedItemPresentation, UiConversationActivityKind,
@@ -4871,14 +4711,6 @@ mod tests {
     };
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use unicode_width::UnicodeWidthStr;
-
-    #[test]
-    fn navigation_width_leaves_one_cell_after_the_longest_label() {
-        let longest_row = " › Archived";
-        let longest_row_width = u16::try_from(longest_row.width()).unwrap_or(u16::MAX);
-
-        assert_eq!(navigation_width(), longest_row_width + 2);
-    }
 
     #[test]
     fn pending_interaction_supersedes_only_its_exact_running_tail() {

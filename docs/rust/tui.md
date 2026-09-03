@@ -84,8 +84,9 @@ All editable dialogs use one pure form editor rather than dialog-specific cursor
 Shift-Tab move forward and backward through fields; Up/Down and `k`/`j` change a focused choice or
 list; Left and Right move the insertion caret while a text field is open. In a text field, `j` and
 `k` remain literal input until a proper Vim editing mode exists. Text fields also support Home, End,
-Unicode-safe Backspace and Delete, and atomic bounded paste. Modal handling precedes global
-navigation, so these keys cannot accidentally change sections while a dialog is open. Text, focus,
+Unicode-safe Backspace and Delete, and atomic bounded paste. Modal handling precedes direct view
+shortcuts, so `1`-`6` and every other key remain owned by the dialog while it is open. Active text
+fields receive digits literally. Text, focus,
 caret positions, field errors, and pending submissions survive resize and authoritative refresh;
 async rejection keeps the user's input available for correction.
 
@@ -219,7 +220,7 @@ adapter and observation client negotiate, block, reconnect, and join independent
 
 `LocalTuiClient` joins each complete authoritative local API snapshot with the passive node-local
 provider catalog and maps them into one presentation bundle containing Inbox, Sent, Archived,
-Agents, Projects, and typed provider choices. Section navigation selects an already
+Agents, Projects, and typed provider choices. A direct view shortcut selects an already
 mapped slice and performs no client request, so it never replaces visible content with a loading
 state. Invalidation and explicit manual repair load a replacement bundle in the background while
 the previous complete bundle remains visible. Conversation summaries carry store-derived open,
@@ -325,20 +326,20 @@ every cleared overlay with `ui.modal.surface`. All color, underline, and modifie
 from semantic roles; a source guard prevents concrete `Color` values in `render.rs`. The complete
 role and file-format reference is in [TUI themes](../tui-themes.md).
 
-The first responsive layouts are semantic Rust-era layouts, not Bubble Tea compatibility:
+The responsive layouts give the complete content area to the current view:
 
-- at least 96 columns: persistent left section navigation plus adjacent Inbox-list and conversation
-  panes separated by single vertical dividers; the Inbox list prefers 32 columns, stays within
-  24–36 columns, and preserves a 48-column Conversation target whenever space permits;
-- 40 through 95 columns: compact horizontal section navigation above a persistent stacked
-  Inbox-list/conversation workspace with one separator;
+- at least 96 columns: adjacent Inbox-list and conversation panes separated by one vertical
+  divider; the Inbox list prefers 32 columns, stays within 24–36 columns, and preserves a 48-column
+  Conversation target whenever space permits;
+- 40 through 95 columns: a persistent stacked Inbox-list/conversation workspace with one separator;
 - below 40 columns or 10 rows: a bounded resize message that retains the quit hint.
 
-In the wide layout, Up/Down and `j`/`k` move through the vertical section list while it owns focus.
-Left/Right and `h`/`l` move one visible level at a time: top-level navigation, Inbox list, then the
-selected conversation. In compact layouts, horizontal keys move through top-level sections only
-while navigation owns focus; once inside Inbox, `h`/Left returns from conversation to its list
-before returning to top-level navigation. The conversation region is always present and renders
+`1` Inbox, `2` Sent, `3` Archived, `4` Agents, `5` Projects, and `6` Config switch directly from
+any modeless screen where text entry is not active. The current view is named in the header and
+repeating its shortcut is inert. Modals capture every key, and text entry receives digits rather
+than switching views. Within Inbox, Right/Enter moves from the list to the selected conversation;
+Left/Escape returns to the list, which is the visible root. The conversation region is always
+present and renders
 its loading, empty, unavailable, or selected state without a surrounding box. Participant-authored
 message bodies render Markdown in column-zero author/body blocks. Paragraphs, breaks, headings,
 emphasis, code, quotes, ordered/unordered/task lists, links, images, and GFM tables use one
@@ -372,11 +373,11 @@ help. Help freezes background user actions while it is open but survives resize 
 refresh. F5 requests a complete authoritative reload without closing the current dialog or losing
 its inputs.
 
-Ordinary footers stay focused on immediate actions such as `Enter open`, `c create`, and `? help`;
-the contextual overlay owns the complete shortcut reference. Guidance from an inapplicable
-shortcut is transient presentation state rather than an operation failure. It explains the missing
-prerequisite—for example, selecting a message rather than an activity update—and disappears on the
-next meaningful input. Stable failures remain visually and behaviorally distinct.
+Ordinary footers stay focused on immediate actions such as `Enter open`, `c create`, and `? help`,
+and advertise `1–6 views`; the contextual overlay names the complete view mapping. Guidance from an
+inapplicable shortcut is transient presentation state rather than an operation failure. It explains
+the missing prerequisite—for example, selecting a message rather than an activity update—and
+disappears on the next meaningful input. Stable failures remain visually and behaviorally distinct.
 
 Empty sections never collapse to a generic `No items` label. Inbox, Sent, and Archived each explain
 the kind of conversation that normally appears there and name only an action the user can take from
@@ -409,25 +410,15 @@ Keep this screen open; when setup finishes, press F5 to continue.
 
 An invitation remains an alternative account-recovery path in contextual help; it does not compete
 with the one primary first-device action. F5 replaces the account setup view with the ordinary
-Inbox and this first-run checklist:
-
-```text
-Get started with HQ
-✓ Account ready
-› Current: add a project and choose the folder or resource it owns
-Press n New… and choose “Work with an agent on a project.”
-```
-
-The checklist advances from project/resource ownership to agent creation, agent-service readiness,
-and opening the first project conversation and Inbox draft. It shows only the current action plus
-completed prerequisites.
+empty Inbox. It explains that no conversations need attention and offers `n New…`, direct message,
+and personal note actions without inferring a project, agent, or provider setup sequence.
 When more than one service is available, the guided workflow presents typed choices; one service is
 automatic, and no service becomes a distinct setup step. Users never type a provider namespace.
 The project step recommends recording an existing folder and keeps Git worktree creation behind the
 advanced project option.
 
-The following capture is the first bounded launcher reached from that checklist. Its wording assumes the user
-has never seen HQ, and its three intentions remain independent:
+The following capture is the first bounded launcher reached from the empty Inbox. Its wording
+assumes the user has never seen HQ, and its three intentions remain independent:
 
 ```text
 ┌ New… ──────────────────────────────────────────────────────────────┐
@@ -450,7 +441,7 @@ The wider acceptance ledger is deliberately split at stable boundaries: installe
 tests cover identity/account setup, folder-backed project creation, agent creation, first project
 input, direct-message discovery, restart, reconnect, and terminal restoration; pure transition and
 render tests cover multi-provider selection, exact-once setup and input dispatch, exact conversation
-return, every onboarding stage, and help retention. These tests all begin from empty state or an
+return, the ordinary empty Inbox, and help retention. These tests all begin from empty state or an
 explicit empty authoritative snapshot, so seeded demo data cannot conceal a first-run dead end.
 
 `c create` in Projects opens one intent-first chooser. Its recommended path records an existing
@@ -478,7 +469,8 @@ ordinary project changes retain its workspace selection, project activation and 
 conversation, and manual session administration returns to the agent with the exact saved
 conversation selected when known.
 
-The navigation intent is retained independently of the footer timer and across connection loss. If
+The selected destination and its typed per-view workspace are retained independently of the footer
+timer and across connection loss. If
 an already in-flight snapshot predates a completion and lacks the target, the model requests one
 bounded follow-up snapshot; if the target is still absent it reports a typed stale-target recovery
 instead of silently selecting something else. Stale effect identities remain inert.
@@ -593,11 +585,11 @@ failure into a process exit, so it never exits while terminal modes are still ow
 Before activating the terminal or attempting daemon ownership, the installed shell performs a
 read-only validation of the installation identity. A missing identity fails immediately with the
 stable `setup.identity_required` diagnostic, a plain-language reason, the `hq identity init`
-action, and the command that returns to onboarding. Identity-only nodes remain supported: after the
-first authoritative snapshot the TUI presents one primary `human create` action and an in-place F5
-continuation instead of treating the absent human account as a shell failure. Join, selection, and
-relay-recovery alternatives remain available when their typed state or contextual help makes them
-relevant.
+action, and the command that returns to the Inbox setup journey. Identity-only nodes remain
+supported: after the first authoritative snapshot the TUI presents one primary `human create`
+action and an in-place F5 continuation instead of treating the absent human account as a shell
+failure. Join, selection, and relay-recovery alternatives remain available when their typed state or
+contextual help makes them relevant.
 
 Human-account recovery is a closed typed presentation, not one aggregate ambiguous flag. The node
 mapper distinguishes no local selection, unresolved selection candidates, multiple local selection

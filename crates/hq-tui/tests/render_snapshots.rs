@@ -414,24 +414,20 @@ fn identity_only_state_renders_setup_and_recovery_actions() {
 }
 
 #[test]
-fn fresh_workspace_renders_one_ordered_onboarding_step_at_a_time() {
+fn fresh_workspace_uses_the_ordinary_empty_inbox_without_an_onboarding_checklist() {
     let size = UiSize {
         width: 104,
         height: 24,
     };
 
     let empty = render_text(&loaded_snapshot_model(size, empty_render_snapshot(1)));
-    assert!(empty.contains("Get started with HQ"), "{empty}");
-    assert!(empty.contains("Account ready"), "{empty}");
     assert!(
-        contains_visible_words_in_order(
-            &empty,
-            "Current: add a project and choose the folder or resource it owns",
-        ),
+        contains_visible_words_in_order(&empty, "No conversations need your attention."),
         "{empty}"
     );
     assert!(empty.contains("Press n New…"), "{empty}");
-    assert!(!empty.contains("provider namespace"), "{empty}");
+    assert!(!empty.contains("Get started with HQ"), "{empty}");
+    assert!(!empty.contains("Current:"), "{empty}");
 
     let mut project_only = empty_render_snapshot(2);
     project_only.projects = vec![onboarding_project()];
@@ -444,21 +440,18 @@ fn fresh_workspace_renders_one_ordered_onboarding_step_at_a_time() {
         conversation_target: None,
     }];
     let project_only = render_text(&loaded_snapshot_model(size, project_only));
-    assert!(project_only.contains("Project ready"), "{project_only}");
     assert!(
-        contains_visible_words_in_order(&project_only, "Current: create an agent to do the work"),
+        !project_only.contains("Get started with HQ"),
         "{project_only}"
     );
+    assert!(!project_only.contains("Current:"), "{project_only}");
 
     let mut agent_only = empty_render_snapshot(3);
     agent_only.projects = vec![onboarding_project()];
     agent_only.agents = vec![onboarding_agent()];
     let agent_only = render_text(&loaded_snapshot_model(size, agent_only));
-    assert!(agent_only.contains("Agent ready"), "{agent_only}");
-    assert!(
-        contains_visible_words_in_order(&agent_only, "Current: connect an agent service"),
-        "{agent_only}"
-    );
+    assert!(!agent_only.contains("Get started with HQ"), "{agent_only}");
+    assert!(!agent_only.contains("Current:"), "{agent_only}");
 
     let mut ready = empty_render_snapshot(4);
     ready.projects = vec![onboarding_project()];
@@ -470,18 +463,8 @@ fn fresh_workspace_renders_one_ordered_onboarding_step_at_a_time() {
         configured_default: true,
     }];
     let ready = render_text(&loaded_snapshot_model(size, ready));
-    assert!(ready.contains("Agent service ready"), "{ready}");
-    assert!(
-        contains_visible_words_in_order(&ready, "Current: open the first project conversation"),
-        "{ready}"
-    );
-    assert!(
-        contains_visible_words_in_order(
-            &ready,
-            "HQ will ask you to choose only if more than one service is available",
-        ),
-        "{ready}"
-    );
+    assert!(!ready.contains("Get started with HQ"), "{ready}");
+    assert!(!ready.contains("Current:"), "{ready}");
 }
 
 #[test]
@@ -678,22 +661,14 @@ fn empty_sections_and_recipient_chooser_explain_exact_next_actions() {
         ] {
             let model = empty_section_model(size, section);
             let rendered = render_text(&model);
-            if section == UiSection::Inbox && size.width < 96 {
-                assert!(rendered.contains("Get started with HQ"), "{rendered}");
-                assert!(
-                    contains_visible_words_in_order(&rendered, "Press n New"),
-                    "{rendered}"
-                );
-            } else {
-                assert!(
-                    contains_visible_words_in_order(&rendered, explanation),
-                    "{section:?} at {size:?}:\n{rendered}"
-                );
-                assert!(
-                    contains_visible_words_in_order(&rendered, action),
-                    "{section:?} at {size:?}:\n{rendered}"
-                );
-            }
+            assert!(
+                contains_visible_words_in_order(&rendered, explanation),
+                "{section:?} at {size:?}:\n{rendered}"
+            );
+            assert!(
+                contains_visible_words_in_order(&rendered, action),
+                "{section:?} at {size:?}:\n{rendered}"
+            );
             assert!(!rendered.contains(" No items"));
             if section == UiSection::Projects {
                 assert!(rendered.contains("ownership of its folders"));
@@ -744,6 +719,8 @@ fn contextual_help_covers_every_section_with_and_without_a_selection() {
                     "missing section phrase for {section:?} at {size:?}:\n{rendered}"
                 );
                 assert!(rendered.contains("Available actions"));
+                assert!(rendered.contains("1 Inbox · 2 Sent · 3 Archived"));
+                assert!(rendered.contains("4 Agents · 5 Projects · 6 Config"));
                 assert!(rendered.contains("F1/?/Esc close help"));
                 if selected {
                     assert!(rendered.contains("Selected: Example item"));
@@ -2273,52 +2250,36 @@ fn contextual_help_model(size: UiSize, section: UiSection, selected: bool) -> Ui
             projects: Vec::new(),
         },
     );
-    let section_steps = match section {
-        UiSection::Inbox => 0,
-        UiSection::Sent => 1,
-        UiSection::Archived => 2,
-        UiSection::Agents => 3,
-        UiSection::Projects => 4,
-        UiSection::Config => 5,
-    };
-    let section_input = if size.width >= 96 {
-        UiInput::NextItem
-    } else {
-        UiInput::NextSection
-    };
-    for _ in 0..section_steps {
-        model = update(model, UiEvent::Input(section_input.clone()))
-            .expect("select help section")
-            .model;
-    }
+    model = update(
+        model,
+        UiEvent::Input(UiInput::Character(section_shortcut(section))),
+    )
+    .expect("select help section")
+    .model;
     update(model, UiEvent::Input(UiInput::Character('?')))
         .expect("open contextual help")
         .model
 }
 
 fn empty_section_model(size: UiSize, section: UiSection) -> UiModel {
-    let mut model = loaded_snapshot_model(size, empty_render_snapshot(42));
-    let section_steps = match section {
-        UiSection::Inbox => 0,
-        UiSection::Sent => 1,
-        UiSection::Archived => 2,
-        UiSection::Agents => 3,
-        UiSection::Projects => 4,
-        UiSection::Config => 5,
-    };
-    let section_input = if size.width >= 96 {
-        UiInput::NextItem
-    } else {
-        UiInput::NextSection
-    };
-    for _ in 0..section_steps {
-        model = update(model, UiEvent::Input(section_input.clone()))
-            .expect("select empty section")
-            .model;
+    let model = loaded_snapshot_model(size, empty_render_snapshot(42));
+    update(
+        model,
+        UiEvent::Input(UiInput::Character(section_shortcut(section))),
+    )
+    .expect("select empty section")
+    .model
+}
+
+const fn section_shortcut(section: UiSection) -> char {
+    match section {
+        UiSection::Inbox => '1',
+        UiSection::Sent => '2',
+        UiSection::Archived => '3',
+        UiSection::Agents => '4',
+        UiSection::Projects => '5',
+        UiSection::Config => '6',
     }
-    update(model, UiEvent::Input(UiInput::NextFocus))
-        .expect("focus empty section")
-        .model
 }
 
 const fn section_help_phrase(section: UiSection) -> &'static str {
@@ -2513,7 +2474,7 @@ fn agent_status_rows_model(size: UiSize) -> UiModel {
         conversation_target: None,
     })
     .collect();
-    let mut model = loaded_snapshot_model(
+    let model = loaded_snapshot_model(
         size,
         UiSnapshot {
             revision: 42,
@@ -2529,18 +2490,8 @@ fn agent_status_rows_model(size: UiSize) -> UiModel {
             projects: Vec::new(),
         },
     );
-    let section_input = if size.width >= 96 {
-        UiInput::NextItem
-    } else {
-        UiInput::MoveCursorRight
-    };
-    for _ in 0..3 {
-        model = update(model, UiEvent::Input(section_input.clone()))
-            .expect("next cached section")
-            .model;
-    }
-    update(model, UiEvent::Input(UiInput::NextFocus))
-        .expect("focus agent rows")
+    update(model, UiEvent::Input(UiInput::Character('4')))
+        .expect("open Agents")
         .model
 }
 
@@ -2596,18 +2547,8 @@ fn agent_details_model_with_status_and_providers(
             projects: Vec::new(),
         },
     );
-    let section_input = if size.width >= 96 {
-        UiInput::NextItem
-    } else {
-        UiInput::MoveCursorRight
-    };
-    for _ in 0..3 {
-        model = update(model, UiEvent::Input(section_input.clone()))
-            .expect("next cached section")
-            .model;
-    }
-    model = update(model, UiEvent::Input(UiInput::NextFocus))
-        .expect("focus agent content")
+    model = update(model, UiEvent::Input(UiInput::Character('4')))
+        .expect("open Agents")
         .model;
     update(model, UiEvent::Input(UiInput::Activate))
         .expect("inspect agent")
@@ -2768,7 +2709,7 @@ fn project_model_with_state(
         }],
     })
     .collect();
-    let mut model = loaded_snapshot_model(
+    let model = loaded_snapshot_model(
         size,
         UiSnapshot {
             revision: 44,
@@ -2791,18 +2732,8 @@ fn project_model_with_state(
             projects,
         },
     );
-    let section_input = if size.width >= 96 {
-        UiInput::NextItem
-    } else {
-        UiInput::MoveCursorRight
-    };
-    for _ in 0..4 {
-        model = update(model, UiEvent::Input(section_input.clone()))
-            .expect("next cached section")
-            .model;
-    }
-    update(model, UiEvent::Input(UiInput::NextFocus))
-        .expect("focus project content")
+    update(model, UiEvent::Input(UiInput::Character('5')))
+        .expect("open Projects")
         .model
 }
 
@@ -2896,10 +2827,8 @@ fn conversation_model_with_content(
         },
     )
     .expect("conversation page");
-    let content = update(observed.model, UiEvent::Input(UiInput::NextFocus))
-        .expect("focus conversation list");
     let opened =
-        update(content.model, UiEvent::Input(UiInput::Activate)).expect("focus conversation");
+        update(observed.model, UiEvent::Input(UiInput::Activate)).expect("focus conversation");
     update(opened.model, UiEvent::Input(UiInput::Character('k')))
         .expect("select message")
         .model

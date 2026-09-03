@@ -37,6 +37,11 @@ fn crossterm_events_normalize_to_the_closed_ui_vocabulary() {
             KeyModifiers::NONE,
             UiInput::Character('q'),
         ),
+        (
+            KeyCode::Char('6'),
+            KeyModifiers::NONE,
+            UiInput::Character('6'),
+        ),
         (KeyCode::Tab, KeyModifiers::NONE, UiInput::NextFocus),
         (
             KeyCode::BackTab,

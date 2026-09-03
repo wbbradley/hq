@@ -128,8 +128,7 @@ fn fresh_account_setup_continues_into_guided_work_across_restart() {
     );
     for phrase in [
         "No human account is selected",
-        "Get started with HQ",
-        "add a project",
+        "Inbox · 0 conversations",
         "Work with an agent on a project",
         "Help for New",
     ] {
@@ -260,7 +259,7 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
         "installed inbox",
         "https://example.test/preview",
         "You",
-        "← Inbox",
+        "a archive",
         "Enter open",
     ] {
         assert!(
@@ -281,6 +280,44 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
                 .windows(obsolete.len())
                 .any(|window| window == obsolete.as_bytes()),
             "Inbox navigation retained {obsolete:?}: {:?}",
+            run.bytes
+        );
+    }
+    assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+}
+
+#[test]
+fn installed_modeless_shortcuts_reach_all_six_views() {
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+    assert!(
+        hq_output(&state_root, &["human", "create"])
+            .status
+            .success()
+    );
+
+    let run = run_in_pty(&state_root, true, PtyInteraction::VisitEveryView);
+    assert!(
+        run.status.success(),
+        "direct view shortcuts failed: {:?}",
+        run.bytes
+    );
+    for (view, rendered_probe) in [
+        ("Inbox", "Inbox"),
+        ("Sent", "Sent"),
+        ("Archived", "Archived"),
+        ("Agents", "gents ·"),
+        ("Projects", "Projects"),
+        ("Config", "Config"),
+    ] {
+        assert!(
+            run.bytes
+                .windows(rendered_probe.len())
+                .any(|window| window == rendered_probe.as_bytes()),
+            "direct shortcuts never rendered {view:?}: {:?}",
             run.bytes
         );
     }
@@ -344,21 +381,22 @@ fn installed_markdown_content_is_inert_and_resource_free() {
         "adversarial Inbox navigation failed: {:?}",
         run.bytes
     );
+    let rendered = text_without_csi_sequences(&run.bytes);
     for phrase in [
         "Adversarial Markdown",
         "CSI_MARKER",
         "OSC_MARKER",
-        "raw HTML",
+        "raw",
+        "HTML",
         "https://example.test/inert",
         "https://192.0.2.1/never-load.png",
         "CODE_MARKER",
-        "nested item",
-        "← Inbox",
+        "nested",
+        "continuation",
+        "a archive",
     ] {
         assert!(
-            run.bytes
-                .windows(phrase.len())
-                .any(|window| window == phrase.as_bytes()),
+            rendered.contains(phrase),
             "installed Markdown omitted {phrase:?}: {:?}",
             run.bytes
         );
@@ -1134,6 +1172,7 @@ struct PtyRun {
 enum PtyInteraction<'content> {
     QuitOnStart,
     QuitAfterSetup,
+    VisitEveryView,
     OpenNewLauncher,
     CompleteFreshSetupAndReconnect,
     SubmitSelfNote(&'content str),
@@ -1268,6 +1307,7 @@ fn run_in_pty_with_trace(
     let mut oversized_to_before_keys = Vec::new();
     let mut before_to_after_keys = Vec::new();
     let mut oversized_phase = 0_u8;
+    let mut view_shortcut_phase = 0_u8;
     let mut next_state_probe_at = Instant::now();
     let status = loop {
         let previous_output_length = bytes.len();
@@ -1321,17 +1361,16 @@ fn run_in_pty_with_trace(
                 PtyInteraction::SubmitSelfNote(_) | PtyInteraction::SubmitPastedSelfNote { .. } => {
                     vec![b"N"]
                 }
-                PtyInteraction::NavigateInboxConversation { .. }
+                PtyInteraction::VisitEveryView
+                | PtyInteraction::NavigateInboxConversation { .. }
                 | PtyInteraction::ScrollOversizedConversation { .. }
                 | PtyInteraction::ReplyToProjectConversation { .. } => Vec::new(),
                 PtyInteraction::CreateAgent(_) => {
-                    vec![b"\x1b[C", b"\x1b[C", b"\x1b[C", b"c"]
+                    vec![b"4", b"c"]
                 }
-                PtyInteraction::StartRejectedSession => {
-                    vec![b"\x1b[C", b"\x1b[C", b"\x1b[C", b"\t"]
-                }
+                PtyInteraction::StartRejectedSession => vec![b"4"],
                 PtyInteraction::CreateExistingProject { .. } => {
-                    vec![b"\x1b[C", b"\x1b[C", b"\x1b[C", b"\x1b[C", b"c", b"\r"]
+                    vec![b"5", b"c", b"\r"]
                 }
                 PtyInteraction::CreateGuidedProjectWork { .. } => {
                     vec![b"n", b"\r", b"\r", b"\r"]
@@ -1340,11 +1379,9 @@ fn run_in_pty_with_trace(
                 | PtyInteraction::CloseProject { .. }
                 | PtyInteraction::OpenProject { .. }
                 | PtyInteraction::SetProjectArchived { .. } => {
-                    vec![b"\x1b[C", b"\x1b[C", b"\x1b[C", b"\x1b[C", b"\t"]
+                    vec![b"5"]
                 }
-                PtyInteraction::CreateWorktreeProject { .. } => {
-                    vec![b"\x1b[C", b"\x1b[C", b"\x1b[C", b"\x1b[C", b"w"]
-                }
+                PtyInteraction::CreateWorktreeProject { .. } => vec![b"5", b"w"],
             };
             for key in keys {
                 master.write_all(key).expect("initial TUI key writes");
@@ -1357,13 +1394,38 @@ fn run_in_pty_with_trace(
                 PtyInteraction::QuitOnStart | PtyInteraction::QuitAfterSetup
             );
         }
+        if matches!(interaction, PtyInteraction::VisitEveryView) && initial_key_sent && !exit_sent {
+            let (probe, next_key) = match view_shortcut_phase {
+                0 => ("Inbox", b'2'),
+                1 => ("Sent", b'3'),
+                2 => ("Archived", b'4'),
+                3 => ("gents ·", b'5'),
+                4 => ("Projects", b'6'),
+                5 => ("Config", b'1'),
+                6 => ("Inbox", 0x03),
+                _ => unreachable!("view shortcut phase is bounded"),
+            };
+            let offset = completion_offset.unwrap_or(0);
+            if bytes[offset..]
+                .windows(probe.len())
+                .any(|window| window == probe.as_bytes())
+            {
+                master
+                    .write_all(&[next_key])
+                    .expect("direct view shortcut writes");
+                master.flush().expect("direct view shortcut flushes");
+                view_shortcut_phase += 1;
+                completion_offset = Some(bytes.len());
+                exit_sent = next_key == 0x03;
+            }
+        }
         if matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
             && initial_key_sent
             && !content_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Get started with HQ".len())
-                    .any(|window| window == b"Get started with HQ")
+                    .windows(b"No conversations need your attention.".len())
+                    .any(|window| window == b"No conversations need your attention.")
             })
         {
             let restarted = hq_output(state_root, &["daemon", "restart"]);
@@ -1457,7 +1519,7 @@ fn run_in_pty_with_trace(
                 .any(|window| window == marker.as_bytes())
         {
             master
-                .write_all(b"\t\r")
+                .write_all(b"\r")
                 .expect("Inbox conversation entry keys write");
             master.flush().expect("Inbox conversation entry keys flush");
             content_sent = true;
@@ -1468,8 +1530,8 @@ fn run_in_pty_with_trace(
             && !managed_action_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows("← Inbox".len())
-                    .any(|window| window == "← Inbox".as_bytes())
+                    .windows("a archive".len())
+                    .any(|window| window == "a archive".as_bytes())
             })
         {
             let keys = if visit_bounds {
@@ -1553,7 +1615,7 @@ fn run_in_pty_with_trace(
                 .iter()
                 .filter(|position| **position < marker_positions[2])
                 .count();
-            let mut keys = vec![b'\t'];
+            let mut keys = Vec::new();
             keys.extend(std::iter::repeat_n(b'j', oversized_rank));
             keys.push(b'\r');
             oversized_to_before_keys = navigation_keys(oversized_rank, before_rank);
@@ -1571,8 +1633,8 @@ fn run_in_pty_with_trace(
             && completion_offset.is_some_and(|offset| {
                 let rendered = &bytes[offset..];
                 rendered
-                    .windows("← Inbox".len())
-                    .any(|window| window == "← Inbox".as_bytes())
+                    .windows("a archive".len())
+                    .any(|window| window == "a archive".as_bytes())
                     && rendered
                         .windows(last.len())
                         .any(|window| window == last.as_bytes())
@@ -1709,7 +1771,7 @@ fn run_in_pty_with_trace(
                 .any(|window| window == initial.as_bytes())
         {
             master
-                .write_all(b"\t\r")
+                .write_all(b"\r")
                 .expect("project conversation entry keys write");
             master
                 .flush()
@@ -2405,6 +2467,27 @@ fn assert_approval_boundary_trace(path: &Path, private_message: &str) {
 fn mailbox_contains(state_root: &Path, content: &str) -> bool {
     let output = hq_output(state_root, &["--output", "json", "list", "--all"]);
     output.status.success() && String::from_utf8_lossy(&output.stdout).contains(content)
+}
+
+fn text_without_csi_sequences(bytes: &[u8]) -> String {
+    let mut text = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'[') {
+            index += 2;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+        } else {
+            text.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&text).into_owned()
 }
 
 fn agent_exists(state_root: &Path, name: &str) -> bool {
