@@ -6494,17 +6494,8 @@ fn finish_draft_close(model: &mut UiModel) {
     model.mailbox_draft = None;
     model.focus = UiFocus::Conversation;
     model.follow_conversation_tail();
-    let Some(UiGuidedPending::Instruction(submission)) = model.guided_pending.take() else {
-        return;
-    };
-    if let Some(project) = model.snapshot.as_ref().and_then(|snapshot| {
-        snapshot
-            .projects
-            .iter()
-            .find(|project| project.project_id == submission.project_id)
-            .cloned()
-    }) {
-        model.new_modal = Some(guided_agent_picker(model, project));
+    if matches!(model.guided_pending, Some(UiGuidedPending::Instruction(_))) {
+        model.guided_pending = None;
     }
 }
 

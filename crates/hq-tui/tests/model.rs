@@ -234,7 +234,7 @@ fn guided_project_work_resumes_ready_assignment_without_session_setup() {
 }
 
 #[test]
-fn cancelling_a_guided_first_instruction_returns_to_agent_selection() {
+fn cancelling_a_guided_first_instruction_returns_to_the_project_conversation() {
     let agent = project_agent(7, [9; 32]);
     let project = project(5, "release", "/work/release");
     let mut model = loaded_projects_model_with_agents(1, vec![project], vec![agent]);
@@ -257,10 +257,9 @@ fn cancelling_a_guided_first_instruction_returns_to_agent_selection() {
             .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
     );
     assert!(cancelled.model.project_interaction().is_none());
-    assert!(matches!(
-        cancelled.model.new_modal(),
-        Some(UiNewModal::ChooseAgent { project, .. }) if project.project_id == [5; 32]
-    ));
+    assert!(cancelled.model.new_modal().is_none());
+    assert!(cancelled.model.mailbox_draft().is_none());
+    assert_eq!(cancelled.model.focus(), UiFocus::Conversation);
 }
 
 #[test]
@@ -366,6 +365,7 @@ fn guided_project_work_can_create_its_missing_project_and_continue() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn guided_project_work_can_create_its_missing_agent_and_continue() {
     let project = project(5, "release", "/work/release");
     let mut model = loaded_projects_model(1, vec![project.clone()]);
@@ -421,8 +421,22 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
         }) if *project_id == [5; 32]
     ));
     assert_project_draft_context(&resumed.model, [5; 32], "release", None);
+    let (open_id, target) = open_draft_effect(&resumed.effects);
+    let composing = update(
+        resumed.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                draft_id: [31; 32],
+                version: 0,
+                target: target.clone(),
+                content: String::new(),
+            },
+        },
+    )
+    .expect("first-message composer loaded");
 
-    let refreshing = update(resumed.model, UiEvent::Invalidated { revision: 3 })
+    let refreshing = update(composing.model, UiEvent::Invalidated { revision: 3 })
         .expect("refresh while composing new project conversation");
     let snapshot_id = snapshot_effect(&refreshing.effects);
     let mut current = refreshing
@@ -446,6 +460,22 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
             .all(|effect| !matches!(effect, UiEffect::LoadConversation { .. }))
     );
     assert_project_draft_context(&refreshed.model, [5; 32], "release", None);
+
+    let closed = update(refreshed.model, UiEvent::Input(UiInput::Escape))
+        .expect("close the first-message composer");
+    assert!(closed.model.new_modal().is_none());
+    assert!(closed.model.mailbox_draft().is_none());
+    assert_eq!(closed.model.focus(), UiFocus::Conversation);
+    let activated = update(closed.model, UiEvent::Input(UiInput::Activate))
+        .expect("activate the retained empty conversation");
+    assert!(activated.model.new_modal().is_none());
+    assert!(activated.model.mailbox_draft().is_none());
+    assert!(activated.effects.iter().all(|effect| !matches!(
+        effect,
+        UiEffect::OpenDraft { .. }
+            | UiEffect::SubmitProjectCommand { .. }
+            | UiEffect::SubmitMailboxCommand { .. }
+    )));
 }
 
 #[test]
