@@ -20,7 +20,11 @@ use std::{
 use nix::{
     fcntl::{FcntlArg, OFlag, fcntl},
     pty::{Winsize, openpty},
-    sys::termios::{Termios, tcgetattr},
+    sys::{
+        signal::{Signal, kill},
+        termios::{Termios, tcgetattr},
+    },
+    unistd::Pid,
 };
 
 use support::TestDirectory;
@@ -181,6 +185,72 @@ fn explicit_and_bare_tui_render_and_restore_the_pseudoterminal() {
         );
         assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
     }
+}
+
+#[test]
+fn installed_tui_survives_resize_interruptions_racing_a_model_wake() {
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let project_path = directory.path().join("resize-project");
+    let boundary_trace = directory.path().join("resize-boundaries.jsonl");
+    std::fs::create_dir(&project_path).expect("project path creates");
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+    assert!(
+        hq_output(&state_root, &["human", "create"])
+            .status
+            .success()
+    );
+    let created = hq_output(
+        &state_root,
+        &[
+            "project",
+            "create",
+            "resize-project",
+            "--path",
+            project_path.to_str().expect("UTF-8 project path"),
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "project create failed: {created:?}"
+    );
+    let project_id = project_id(&state_root, "resize-project");
+    let marker = "wake after repeated resize interruptions";
+
+    let run = run_in_pty_with_trace(
+        &state_root,
+        true,
+        PtyInteraction::ResizeWhileIdle {
+            project_id: &project_id,
+            marker,
+        },
+        Some(&boundary_trace),
+    );
+
+    assert!(run.status.success(), "resized TUI failed: {:?}", run.bytes);
+    assert!(
+        run.resize_redrawn,
+        "resize did not produce a terminal redraw"
+    );
+    assert!(
+        run.bytes
+            .windows(marker.len())
+            .any(|window| window == marker.as_bytes()),
+        "model wake did not redraw the new project input: {:?}",
+        run.bytes
+    );
+    assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+    let trace = std::fs::read_to_string(&boundary_trace).expect("boundary trace reads");
+    assert!(
+        trace.contains("\"kind\":\"tui_observation_received\""),
+        "subscribed observations did not cross the TUI boundary: {trace}"
+    );
+    assert!(
+        !trace.contains("\"kind\":\"tui_terminal_failed\""),
+        "resize interruption became a terminal failure: {trace}"
+    );
 }
 
 #[test]
@@ -1166,6 +1236,7 @@ struct PtyRun {
     bytes: Vec<u8>,
     before: Termios,
     after: Termios,
+    resize_redrawn: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1175,6 +1246,10 @@ enum PtyInteraction<'content> {
     VisitEveryView,
     OpenNewLauncher,
     CompleteFreshSetupAndReconnect,
+    ResizeWhileIdle {
+        project_id: &'content str,
+        marker: &'content str,
+    },
     SubmitSelfNote(&'content str),
     SubmitPastedSelfNote {
         content: &'content str,
@@ -1308,6 +1383,7 @@ fn run_in_pty_with_trace(
     let mut before_to_after_keys = Vec::new();
     let mut oversized_phase = 0_u8;
     let mut view_shortcut_phase = 0_u8;
+    let mut resize_phase = 0_u8;
     let mut next_state_probe_at = Instant::now();
     let status = loop {
         let previous_output_length = bytes.len();
@@ -1361,7 +1437,8 @@ fn run_in_pty_with_trace(
                 PtyInteraction::SubmitSelfNote(_) | PtyInteraction::SubmitPastedSelfNote { .. } => {
                     vec![b"N"]
                 }
-                PtyInteraction::VisitEveryView
+                PtyInteraction::ResizeWhileIdle { .. }
+                | PtyInteraction::VisitEveryView
                 | PtyInteraction::NavigateInboxConversation { .. }
                 | PtyInteraction::ScrollOversizedConversation { .. }
                 | PtyInteraction::ReplyToProjectConversation { .. } => Vec::new(),
@@ -1393,6 +1470,43 @@ fn run_in_pty_with_trace(
                 interaction,
                 PtyInteraction::QuitOnStart | PtyInteraction::QuitAfterSetup
             );
+        }
+        if let PtyInteraction::ResizeWhileIdle { .. } = interaction
+            && initial_key_sent
+            && resize_phase == 0
+        {
+            set_pty_dimensions(&pair.slave, 24, 100);
+            let process_id = Pid::from_raw(
+                i32::try_from(child.id()).expect("TUI process identifier fits platform PID"),
+            );
+            for _ in 0..3 {
+                kill(process_id, Signal::SIGWINCH).expect("SIGWINCH reaches the TUI");
+                thread::sleep(Duration::from_millis(10));
+            }
+            completion_offset = Some(bytes.len());
+            resize_phase = 1;
+        }
+        if let PtyInteraction::ResizeWhileIdle { project_id, marker } = interaction
+            && resize_phase == 1
+            && completion_offset.is_some_and(|offset| bytes.len() > offset)
+        {
+            let sent = hq_output(state_root, &["project", "send", project_id, marker]);
+            assert!(sent.status.success(), "model wake fixture failed: {sent:?}");
+            completion_offset = Some(bytes.len());
+            resize_phase = 2;
+        }
+        if let PtyInteraction::ResizeWhileIdle { marker, .. } = interaction
+            && resize_phase == 2
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(marker.len())
+                    .any(|window| window == marker.as_bytes())
+            })
+        {
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
         }
         if matches!(interaction, PtyInteraction::VisitEveryView) && initial_key_sent && !exit_sent {
             let (probe, next_key) = match view_shortcut_phase {
@@ -2354,6 +2468,7 @@ fn run_in_pty_with_trace(
         bytes,
         before,
         after,
+        resize_redrawn: resize_phase >= 2,
     }
 }
 
@@ -2694,6 +2809,17 @@ fn stdio_clone(descriptor: &OwnedFd) -> Stdio {
     Stdio::from(File::from(
         descriptor.try_clone().expect("terminal descriptor clones"),
     ))
+}
+
+fn set_pty_dimensions(descriptor: &OwnedFd, rows: u16, columns: u16) {
+    let status = Command::new("stty")
+        .args(["rows", &rows.to_string(), "cols", &columns.to_string()])
+        .stdin(stdio_clone(descriptor))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("stty runs");
+    assert!(status.success(), "stty could not resize the pseudoterminal");
 }
 
 fn initialize_identity(state_root: &Path) {

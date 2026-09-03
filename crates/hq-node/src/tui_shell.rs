@@ -5,7 +5,7 @@ use std::{
     fmt,
     io::Stdout,
     os::fd::{AsFd, BorrowedFd},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossterm::{
@@ -23,6 +23,7 @@ use hq_tui::{
     update,
 };
 use nix::{
+    errno::Errno,
     poll::{PollFd, PollFlags, PollTimeout, poll},
     unistd::{Uid, User},
 };
@@ -35,6 +36,90 @@ use crate::{
     TuiThemeEnvironment, TuiThemeError, local_client::installed_local_client_config,
     resolve_tui_theme, tui_client::compose_tui_clients,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalPollReadiness {
+    TimedOut,
+    Executor,
+    Input,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalPollDeadline {
+    Infinite,
+    Finite(Instant),
+}
+
+impl TerminalPollDeadline {
+    fn from_wait<N>(wait: Option<Duration>, now: &mut N) -> Result<Self, TuiTerminalError>
+    where
+        N: FnMut() -> Instant,
+    {
+        wait.map_or(Ok(Self::Infinite), |wait| {
+            now()
+                .checked_add(wait)
+                .map(Self::Finite)
+                .ok_or(TuiTerminalError::Poll)
+        })
+    }
+
+    fn timeout_at<N>(self, now: &mut N) -> Result<PollTimeout, TuiTerminalError>
+    where
+        N: FnMut() -> Instant,
+    {
+        match self {
+            Self::Infinite => Ok(PollTimeout::NONE),
+            Self::Finite(deadline) => {
+                PollTimeout::try_from(deadline.saturating_duration_since(now()))
+                    .map_err(|_| TuiTerminalError::Poll)
+            }
+        }
+    }
+}
+
+fn poll_terminal_with<N, E, P>(
+    wait: Option<Duration>,
+    mut now: N,
+    mut next_event: E,
+    mut poll_ready: P,
+) -> Result<Option<TuiTerminalEvent>, TuiTerminalError>
+where
+    N: FnMut() -> Instant,
+    E: FnMut() -> Result<Option<TuiTerminalEvent>, TuiTerminalError>,
+    P: FnMut(PollTimeout) -> Result<TerminalPollReadiness, Errno>,
+{
+    let deadline = TerminalPollDeadline::from_wait(wait, &mut now)?;
+    loop {
+        if let Some(event) = next_event()? {
+            return Ok(Some(event));
+        }
+        let timeout = deadline.timeout_at(&mut now)?;
+        match poll_ready(timeout) {
+            Ok(TerminalPollReadiness::TimedOut | TerminalPollReadiness::Executor) => {
+                return Ok(None);
+            }
+            Ok(TerminalPollReadiness::Input) => return next_event(),
+            Err(Errno::EINTR) => {}
+            Err(error) => {
+                return Err(terminal_io_error(
+                    TuiTerminalPhase::Poll,
+                    &std::io::Error::from_raw_os_error(error as i32),
+                ));
+            }
+        }
+    }
+}
+
+fn next_crossterm_event() -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
+    if !event::poll(Duration::ZERO)
+        .map_err(|error| terminal_io_error(TuiTerminalPhase::Poll, &error))?
+    {
+        return Ok(None);
+    }
+    event::read()
+        .map(|observation| normalize_crossterm_event(&observation))
+        .map_err(|error| terminal_io_error(TuiTerminalPhase::Poll, &error))
+}
 
 /// Passive terminal observation after backend-specific normalization.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -337,45 +422,26 @@ impl TuiTerminalPort for CrosstermTerminal {
         executor_wake: BorrowedFd<'_>,
         wait: Option<Duration>,
     ) -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
-        if event::poll(Duration::ZERO)
-            .map_err(|error| terminal_io_error(TuiTerminalPhase::Poll, &error))?
-        {
-            return event::read()
-                .map(|observation| normalize_crossterm_event(&observation))
-                .map_err(|error| terminal_io_error(TuiTerminalPhase::Poll, &error));
-        }
-        let stdin = std::io::stdin();
         let interest = PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR;
-        let mut descriptors = [
-            PollFd::new(stdin.as_fd(), interest),
-            PollFd::new(executor_wake, interest),
-        ];
-        let timeout = wait
-            .map_or(Ok(PollTimeout::NONE), PollTimeout::try_from)
-            .map_err(|_| TuiTerminalError::Poll)?;
-        if poll(&mut descriptors, timeout).map_err(|error| {
-            terminal_io_error(
-                TuiTerminalPhase::Poll,
-                &std::io::Error::from_raw_os_error(error as i32),
-            )
-        })? == 0
-        {
-            return Ok(None);
-        }
-        if !descriptors[0]
-            .revents()
-            .is_some_and(|ready| ready.intersects(interest))
-        {
-            return Ok(None);
-        }
-        if !event::poll(Duration::ZERO)
-            .map_err(|error| terminal_io_error(TuiTerminalPhase::Poll, &error))?
-        {
-            return Ok(None);
-        }
-        event::read()
-            .map(|observation| normalize_crossterm_event(&observation))
-            .map_err(|error| terminal_io_error(TuiTerminalPhase::Poll, &error))
+        poll_terminal_with(wait, Instant::now, next_crossterm_event, |timeout| {
+            let stdin = std::io::stdin();
+            let mut descriptors = [
+                PollFd::new(stdin.as_fd(), interest),
+                PollFd::new(executor_wake, interest),
+            ];
+            let ready = poll(&mut descriptors, timeout)?;
+            if ready == 0 {
+                return Ok(TerminalPollReadiness::TimedOut);
+            }
+            if descriptors[0]
+                .revents()
+                .is_some_and(|ready| ready.intersects(interest))
+            {
+                Ok(TerminalPollReadiness::Input)
+            } else {
+                Ok(TerminalPollReadiness::Executor)
+            }
+        })
     }
 
     fn draw(
@@ -803,5 +869,172 @@ impl<T: TuiTerminalPort> Drop for TerminalGuard<T> {
             let _ = self.terminal.restore();
             self.armed = false;
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use super::*;
+
+    #[test]
+    fn interrupted_poll_rechecks_the_terminal_event_queue() {
+        let started = Instant::now();
+        let mut observations = VecDeque::from([
+            None,
+            None,
+            Some(TuiTerminalEvent::Resized(UiSize {
+                width: 100,
+                height: 24,
+            })),
+        ]);
+        let mut waits = VecDeque::from([Err(Errno::EINTR), Err(Errno::EINTR)]);
+
+        let event = poll_terminal_with(
+            None,
+            || started,
+            || Ok(observations.pop_front().expect("bounded event probes")),
+            |timeout| {
+                assert_eq!(timeout, PollTimeout::NONE);
+                waits.pop_front().expect("bounded poll attempts")
+            },
+        )
+        .expect("interruptions are retryable");
+
+        assert_eq!(
+            event,
+            Some(TuiTerminalEvent::Resized(UiSize {
+                width: 100,
+                height: 24,
+            }))
+        );
+        assert!(waits.is_empty());
+    }
+
+    #[test]
+    fn interrupted_poll_preserves_one_finite_deadline() {
+        let started = Instant::now();
+        let mut times = VecDeque::from([
+            started,
+            started,
+            started + Duration::from_millis(40),
+            started + Duration::from_millis(90),
+        ]);
+        let mut results = VecDeque::from([
+            Err(Errno::EINTR),
+            Err(Errno::EINTR),
+            Ok(TerminalPollReadiness::TimedOut),
+        ]);
+        let mut timeouts = Vec::new();
+
+        let event = poll_terminal_with(
+            Some(Duration::from_millis(100)),
+            || times.pop_front().expect("bounded clock observations"),
+            || Ok(None),
+            |timeout| {
+                timeouts.push(timeout);
+                results.pop_front().expect("bounded poll attempts")
+            },
+        )
+        .expect("interruptions are retryable");
+
+        assert_eq!(event, None);
+        assert_eq!(
+            timeouts,
+            [
+                PollTimeout::try_from(Duration::from_millis(100)).unwrap(),
+                PollTimeout::try_from(Duration::from_millis(60)).unwrap(),
+                PollTimeout::try_from(Duration::from_millis(10)).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn interrupted_poll_checks_readiness_once_at_an_expired_deadline() {
+        let started = Instant::now();
+        let mut times = VecDeque::from([started, started, started + Duration::from_millis(101)]);
+        let mut results = VecDeque::from([Err(Errno::EINTR), Ok(TerminalPollReadiness::TimedOut)]);
+        let mut timeouts = Vec::new();
+
+        let event = poll_terminal_with(
+            Some(Duration::from_millis(100)),
+            || times.pop_front().expect("bounded clock observations"),
+            || Ok(None),
+            |timeout| {
+                timeouts.push(timeout);
+                results.pop_front().expect("bounded poll attempts")
+            },
+        )
+        .expect("deadline expiry is orderly");
+
+        assert_eq!(event, None);
+        assert_eq!(
+            timeouts,
+            [
+                PollTimeout::try_from(Duration::from_millis(100)).unwrap(),
+                PollTimeout::ZERO,
+            ]
+        );
+    }
+
+    #[test]
+    fn interrupted_infinite_poll_remains_infinite_until_ready() {
+        let started = Instant::now();
+        let mut results = VecDeque::from([
+            Err(Errno::EINTR),
+            Err(Errno::EINTR),
+            Ok(TerminalPollReadiness::Executor),
+        ]);
+        let mut timeouts = Vec::new();
+
+        let event = poll_terminal_with(
+            None,
+            || started,
+            || Ok(None),
+            |timeout| {
+                timeouts.push(timeout);
+                results.pop_front().expect("bounded poll attempts")
+            },
+        )
+        .expect("interruptions are retryable");
+
+        assert_eq!(event, None);
+        assert_eq!(timeouts, [PollTimeout::NONE; 3]);
+    }
+
+    #[test]
+    fn executor_wake_racing_an_interruption_returns_control_to_the_shell() {
+        let started = Instant::now();
+        let mut results = VecDeque::from([Err(Errno::EINTR), Ok(TerminalPollReadiness::Executor)]);
+
+        let event = poll_terminal_with(
+            None,
+            || started,
+            || Ok(None),
+            |_| results.pop_front().expect("bounded poll attempts"),
+        )
+        .expect("executor readiness survives an interruption");
+
+        assert_eq!(event, None);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn non_interruption_poll_error_preserves_typed_os_evidence() {
+        let started = Instant::now();
+
+        let error = poll_terminal_with(None, || started, || Ok(None), |_| Err(Errno::EIO))
+            .expect_err("real poll failures remain fatal");
+
+        assert_eq!(
+            error,
+            TuiTerminalError::OperatingSystem {
+                phase: TuiTerminalPhase::Poll,
+                kind: TuiTerminalIoKind::Other,
+                code: Some(Errno::EIO as i32),
+            }
+        );
     }
 }

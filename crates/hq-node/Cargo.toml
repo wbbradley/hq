@@ -41,7 +41,7 @@ zeroize.workspace = true
 nix.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
-nix = { workspace = true, features = ["term"] }
+nix = { workspace = true, features = ["signal", "term"] }
 
 [[bin]]
 name = "hq"

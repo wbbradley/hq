@@ -292,6 +292,13 @@ exact UI deadline. It drains and reduces every ready event, then redraws before 
 Consequently an interaction notification already received on the subscribed socket cannot wait for
 terminal input, command completion, or a sampling interval before its first dialog frame.
 
+Unix resize delivery may interrupt the descriptor wait with `EINTR`. The shell treats only that
+result as transient, rechecks Crossterm's queued events and both readiness descriptors, and then
+waits again. A finite wait keeps one monotonic deadline and recomputes its remaining duration after
+every interruption; resize signals therefore cannot restart UI timers or turn the event-driven loop
+into periodic polling. Other polling failures retain their typed terminal phase, error kind, and OS
+code and still restore the terminal before exit.
+
 The command worker allocates command/message identities, semantic time, and auxiliary randomness
 once, then the reconnecting runner retains and replays that exact command frame until a durable
 receipt is known. No TUI component resolves human authority, thread roots, recipient validity, or
