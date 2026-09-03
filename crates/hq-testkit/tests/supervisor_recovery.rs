@@ -20,9 +20,10 @@ use hq_domain::{
 use hq_harness::{
     HarnessActivity, HarnessBufferedEvent, HarnessCancellationOutcome, HarnessCapabilities,
     HarnessCapability, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState,
-    HarnessDrainOutcome, HarnessEnvironment, HarnessError, HarnessErrorClass, HarnessEvent,
-    HarnessEventCheckpoint, HarnessEventNotifier, HarnessEventPoll, HarnessFactory,
-    HarnessInstance, HarnessInstanceRequest, HarnessInteractiveAnswer, HarnessInteractiveRequest,
+    HarnessDiagnosticEvent, HarnessDiagnosticSink, HarnessDiagnosticTarget, HarnessDrainOutcome,
+    HarnessEnvironment, HarnessError, HarnessErrorClass, HarnessEvent, HarnessEventCheckpoint,
+    HarnessEventNotifier, HarnessEventPoll, HarnessFactory, HarnessInstance,
+    HarnessInstanceRequest, HarnessInteractiveAnswer, HarnessInteractiveRequest,
     HarnessInteractiveResponse, HarnessLaunchRequest, HarnessLeaseOutcome, HarnessOutput,
     HarnessOutputKind, HarnessOwnerToken, HarnessPersistencePort, HarnessProjectDelivery,
     HarnessReadySession, HarnessRegistry, HarnessRequestId, HarnessRequestKind, HarnessResponderId,
@@ -209,17 +210,19 @@ fn ready_progress_flood_coalesces_before_canonical_persistence() {
     }));
     let state = Arc::new(MemoryState::default());
     let persistence = Arc::new(MemoryPersistence::available());
+    let diagnostics = Arc::new(RecordingDiagnostics::default());
     let runtime = HarnessSupervisor::new(
         HarnessSupervisorConfig {
             event_capacity: NonZeroUsize::new(64).expect("capacity is nonzero"),
             ..HarnessSupervisorConfig::default()
         },
-        dependencies(
+        dependencies_with_diagnostics(
             registry(provider_id.clone(), session_id, provider),
             state,
             persistence.clone(),
             Arc::new(TestClock::new(10)),
             Arc::new(TestTokens::default()),
+            diagnostics.clone(),
         ),
     )
     .expect("supervisor config validates");
@@ -236,6 +239,20 @@ fn ready_progress_flood_coalesces_before_canonical_persistence() {
     assert_eq!(activities[0].sequence.get(), 32);
     assert_eq!(activities[0].content.as_str(), "progress 32");
     drop(activities);
+    let recorded = diagnostics.events.lock().expect("diagnostics lock");
+    assert!(recorded.iter().any(|event| {
+        event.target == HarnessDiagnosticTarget::ReadyDrain
+            && event.coalesced_values == 31
+            && event.events_polled >= 32
+            && event.pending_values == 0
+            && event.queue_high_water == 1
+    }));
+    assert!(
+        recorded
+            .iter()
+            .any(|event| event.target == HarnessDiagnosticTarget::Persistence)
+    );
+    drop(recorded);
     runtime.shutdown().expect("worker shuts down");
 }
 
@@ -933,6 +950,7 @@ fn supervisor(dependencies: HarnessSupervisorDependencies) -> HarnessSupervisor 
             state_query_items: 32,
             lease_duration: Duration::from_secs(1),
             event_capacity: NonZeroUsize::new(2).expect("capacity is nonzero"),
+            ready_drain_budget: Duration::from_millis(10),
             drain_wait: Duration::from_millis(1),
         },
         dependencies,
@@ -967,6 +985,24 @@ fn dependencies(
     clock: Arc<TestClock>,
     tokens: Arc<TestTokens>,
 ) -> HarnessSupervisorDependencies {
+    dependencies_with_diagnostics(
+        registry,
+        state,
+        persistence,
+        clock,
+        tokens,
+        Arc::new(hq_harness::DiscardHarnessDiagnostics),
+    )
+}
+
+fn dependencies_with_diagnostics(
+    registry: Arc<HarnessRegistry>,
+    state: Arc<MemoryState>,
+    persistence: Arc<MemoryPersistence>,
+    clock: Arc<TestClock>,
+    tokens: Arc<TestTokens>,
+    diagnostics: Arc<dyn HarnessDiagnosticSink>,
+) -> HarnessSupervisorDependencies {
     HarnessSupervisorDependencies {
         registry,
         state,
@@ -974,6 +1010,18 @@ fn dependencies(
         clock,
         tokens,
         events: HarnessEventNotifier::default(),
+        diagnostics,
+    }
+}
+
+#[derive(Default)]
+struct RecordingDiagnostics {
+    events: Mutex<Vec<HarnessDiagnosticEvent>>,
+}
+
+impl HarnessDiagnosticSink for RecordingDiagnostics {
+    fn record(&self, event: HarnessDiagnosticEvent) {
+        self.events.lock().expect("diagnostics lock").push(event);
     }
 }
 

@@ -3,11 +3,12 @@
 use std::{
     fs::{File, OpenOptions},
     io::Write,
-    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::Path,
     sync::{Arc, Mutex},
 };
 
+use hq_harness::{HarnessDiagnosticEvent, HarnessDiagnosticSink, HarnessDiagnosticTarget};
 use nix::time::{ClockId, clock_gettime};
 use serde::Serialize;
 
@@ -16,6 +17,9 @@ pub const BOUNDARY_TRACE_ENVIRONMENT: &str = "HQ_BOUNDARY_TRACE";
 
 const TRACE_SCHEMA: &str = "hq.boundary.v1";
 const MAX_RECORD_BYTES: usize = 2_048;
+const MAX_TRACE_FILE_BYTES: u64 = 1_048_576;
+const DIAGNOSTIC_DIRECTORY: &str = "diagnostics";
+const DIAGNOSTIC_FILE: &str = "boundaries.jsonl";
 
 /// Closed process roles that can own a latency boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -25,6 +29,50 @@ pub enum BoundaryProcess {
     Node,
     /// Interactive terminal client.
     Tui,
+    /// One-shot or reconnecting local protocol client.
+    Client,
+}
+
+/// Closed real-terminal phase vocabulary used in diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiTerminalPhase {
+    /// Initial backend construction or terminal-mode activation.
+    Activate,
+    /// Terminal dimension observation.
+    Size,
+    /// Terminal or executor readiness polling.
+    Poll,
+    /// Frame rendering and flush.
+    Draw,
+    /// Terminal-mode restoration.
+    Restore,
+}
+
+/// Stable privacy-safe classification of one terminal I/O failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiTerminalIoKind {
+    /// The terminal resource was absent.
+    NotFound,
+    /// Access to the terminal resource was denied.
+    PermissionDenied,
+    /// A terminal connection was reset.
+    ConnectionReset,
+    /// A terminal stream closed while writing.
+    BrokenPipe,
+    /// The terminal operation would have blocked.
+    WouldBlock,
+    /// The terminal operation exceeded its deadline.
+    TimedOut,
+    /// The terminal operation was interrupted.
+    Interrupted,
+    /// The terminal operation is unsupported.
+    Unsupported,
+    /// The terminal stream ended before a complete operation.
+    UnexpectedEof,
+    /// Another operating-system I/O category occurred.
+    Other,
 }
 
 /// Closed body-free event vocabulary for the interactive delivery pipeline.
@@ -57,6 +105,18 @@ pub enum BoundaryKind {
     TuiModelUpdated,
     /// The first frame containing the correlated interaction was drawn.
     TuiDialogDrawn,
+    /// The real terminal boundary failed with closed phase and OS evidence.
+    TuiTerminalFailed,
+    /// A harness worker-catalog lock wait crossed the reporting threshold.
+    HarnessWorkerCatalogLock,
+    /// A harness persistence-owner lock wait crossed the reporting threshold.
+    HarnessPersistenceLock,
+    /// One canonical harness persistence operation completed.
+    HarnessPersistence,
+    /// One bounded provider-event drain completed.
+    HarnessReadyDrain,
+    /// A live protocol response did not match its readiness artifact generation.
+    StaleReadiness,
 }
 
 /// Optional stable correlation identities; no field accepts arbitrary text.
@@ -80,13 +140,33 @@ pub struct BoundaryIds {
     pub tui_effect: Option<u64>,
     /// Authoritative store revision.
     pub revision: Option<u64>,
+    /// Monotonic operation duration.
+    pub elapsed_ns: Option<u64>,
+    /// Retained normalized values after a bounded drain.
+    pub pending_values: Option<u64>,
+    /// Highest retained normalized value count during a bounded drain.
+    pub queue_high_water: Option<u64>,
+    /// Replaceable values coalesced during a bounded drain.
+    pub coalesced_values: Option<u64>,
+    /// Provider values polled during a bounded drain.
+    pub events_polled: Option<u64>,
+    /// Exact terminal phase for a terminal-failure record.
+    pub terminal_phase: Option<TuiTerminalPhase>,
+    /// Stable terminal I/O category when an operating-system error was available.
+    pub terminal_io_kind: Option<TuiTerminalIoKind>,
+    /// Platform terminal error number when supplied by the operating system.
+    pub terminal_os_code: Option<i32>,
 }
 
 /// Cloneable best-effort append sink; absence or failure never affects authority.
 #[derive(Clone)]
 pub struct BoundaryTrace {
     process: BoundaryProcess,
-    writer: Option<Arc<Mutex<File>>>,
+    writer: Option<Arc<Mutex<BoundedTraceWriter>>>,
+}
+
+struct BoundedTraceWriter {
+    file: File,
 }
 
 impl BoundaryTrace {
@@ -96,6 +176,27 @@ impl BoundaryTrace {
             return Self::disabled(process);
         };
         Self::open(Path::new(&path), process)
+    }
+
+    /// Opens the environment override or the default private bounded state diagnostic.
+    pub fn from_state(state_root: &Path, process: BoundaryProcess) -> Self {
+        if let Some(path) = std::env::var_os(BOUNDARY_TRACE_ENVIRONMENT) {
+            return Self::open(Path::new(&path), process);
+        }
+        Self::open_state(state_root, process)
+    }
+
+    fn open_state(state_root: &Path, process: BoundaryProcess) -> Self {
+        if !state_root.is_absolute() {
+            return Self::disabled(process);
+        }
+        let directory = state_root.join(DIAGNOSTIC_DIRECTORY);
+        if std::fs::create_dir_all(&directory).is_err()
+            || std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).is_err()
+        {
+            return Self::disabled(process);
+        }
+        Self::open(&directory.join(DIAGNOSTIC_FILE), process)
     }
 
     /// Opens one absolute append-only destination, degrading safely when invalid or unavailable.
@@ -109,7 +210,12 @@ impl BoundaryTrace {
             .mode(0o600)
             .open(path)
             .ok()
-            .map(|file| Arc::new(Mutex::new(file)));
+            .and_then(|file| {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .ok()
+                    .map(|()| file)
+            })
+            .map(|file| Arc::new(Mutex::new(BoundedTraceWriter { file })));
         Self { process, writer }
     }
 
@@ -129,7 +235,7 @@ impl BoundaryTrace {
         let Some(monotonic_ns) = monotonic_nanoseconds() else {
             return;
         };
-        let record = EncodedBoundaryRecord::new(self.process, kind, monotonic_ns, ids);
+        let record = EncodedBoundaryRecord::new(self.process, kind, monotonic_ns, &ids);
         let Ok(mut bytes) = serde_json::to_vec(&record) else {
             return;
         };
@@ -138,8 +244,44 @@ impl BoundaryTrace {
             return;
         }
         if let Ok(mut writer) = writer.lock() {
-            let _ = writer.write(&bytes);
+            writer.write(&bytes);
         }
+    }
+}
+
+impl BoundedTraceWriter {
+    fn write(&mut self, bytes: &[u8]) {
+        let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let current = self.file.metadata().map(|metadata| metadata.len()).ok();
+        if current.is_some_and(|length| length.saturating_add(bytes_len) > MAX_TRACE_FILE_BYTES)
+            && self.file.set_len(0).is_err()
+        {
+            return;
+        }
+        let _ = self.file.write_all(bytes);
+    }
+}
+
+impl HarnessDiagnosticSink for BoundaryTrace {
+    fn record(&self, event: HarnessDiagnosticEvent) {
+        let kind = match event.target {
+            HarnessDiagnosticTarget::WorkerCatalogLock => BoundaryKind::HarnessWorkerCatalogLock,
+            HarnessDiagnosticTarget::PersistenceLock => BoundaryKind::HarnessPersistenceLock,
+            HarnessDiagnosticTarget::Persistence => BoundaryKind::HarnessPersistence,
+            HarnessDiagnosticTarget::ReadyDrain => BoundaryKind::HarnessReadyDrain,
+        };
+        BoundaryTrace::record(
+            self,
+            kind,
+            BoundaryIds {
+                elapsed_ns: Some(duration_nanoseconds(event.elapsed)),
+                pending_values: Some(saturating_u64(event.pending_values)),
+                queue_high_water: Some(saturating_u64(event.queue_high_water)),
+                coalesced_values: Some(saturating_u64(event.coalesced_values)),
+                events_polled: Some(saturating_u64(event.events_polled)),
+                ..BoundaryIds::default()
+            },
+        );
     }
 }
 
@@ -177,6 +319,22 @@ struct EncodedBoundaryRecord {
     tui_effect_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elapsed_ns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_values: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_high_water: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coalesced_values: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    events_polled: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_phase: Option<TuiTerminalPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_io_kind: Option<TuiTerminalIoKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_os_code: Option<i32>,
 }
 
 impl EncodedBoundaryRecord {
@@ -184,7 +342,7 @@ impl EncodedBoundaryRecord {
         process: BoundaryProcess,
         kind: BoundaryKind,
         monotonic_ns: u64,
-        ids: BoundaryIds,
+        ids: &BoundaryIds,
     ) -> Self {
         Self {
             schema: TRACE_SCHEMA,
@@ -200,8 +358,24 @@ impl EncodedBoundaryRecord {
             subscription_generation: ids.subscription_generation,
             tui_effect_id: ids.tui_effect,
             revision: ids.revision,
+            elapsed_ns: ids.elapsed_ns,
+            pending_values: ids.pending_values,
+            queue_high_water: ids.queue_high_water,
+            coalesced_values: ids.coalesced_values,
+            events_polled: ids.events_polled,
+            terminal_phase: ids.terminal_phase,
+            terminal_io_kind: ids.terminal_io_kind,
+            terminal_os_code: ids.terminal_os_code,
         }
     }
+}
+
+fn duration_nanoseconds(duration: std::time::Duration) -> u64 {
+    duration.as_nanos().try_into().unwrap_or(u64::MAX)
+}
+
+fn saturating_u64(value: usize) -> u64 {
+    value.try_into().unwrap_or(u64::MAX)
 }
 
 fn monotonic_nanoseconds() -> Option<u64> {
@@ -312,5 +486,51 @@ mod tests {
         assert_eq!(records.len(), 128);
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(directory);
+    }
+
+    #[test]
+    fn default_state_trace_is_private_and_bounded() {
+        let state = std::env::temp_dir().join(format!(
+            "hq-boundary-state-{}-{}",
+            std::process::id(),
+            monotonic_nanoseconds().expect("monotonic clock")
+        ));
+        let trace = BoundaryTrace::open_state(&state, BoundaryProcess::Node);
+        for revision in 0..10_000 {
+            trace.record(
+                BoundaryKind::HarnessReadyDrain,
+                BoundaryIds {
+                    operation: Some([0xab; 32]),
+                    provider_request: Some([0xcd; 32]),
+                    revision: Some(revision),
+                    elapsed_ns: Some(1_000),
+                    pending_values: Some(64),
+                    queue_high_water: Some(64),
+                    coalesced_values: Some(63),
+                    events_polled: Some(64),
+                    ..BoundaryIds::default()
+                },
+            );
+        }
+        let directory = state.join(DIAGNOSTIC_DIRECTORY);
+        let path = directory.join(DIAGNOSTIC_FILE);
+        let metadata = std::fs::metadata(&path).expect("trace metadata");
+        assert!(metadata.len() <= MAX_TRACE_FILE_BYTES);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&directory)
+                .expect("diagnostic directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let contents = std::fs::read_to_string(&path).expect("trace reads");
+        assert!(
+            contents
+                .lines()
+                .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+        );
+        let _ = std::fs::remove_dir_all(state);
     }
 }

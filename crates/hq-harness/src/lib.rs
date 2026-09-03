@@ -22,7 +22,8 @@ pub use environment::{
 };
 pub use registry::{HarnessRegistry, RegisteredProviderView};
 pub use supervisor::{
-    HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEventCheckpoint,
+    DiscardHarnessDiagnostics, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState,
+    HarnessDiagnosticEvent, HarnessDiagnosticSink, HarnessDiagnosticTarget, HarnessEventCheckpoint,
     HarnessEventPumpReport, HarnessLaunchRequest, HarnessLeaseOutcome, HarnessOwnerToken,
     HarnessPendingInteraction, HarnessPersistencePort, HarnessProjectDelivery, HarnessReadySession,
     HarnessResponderId, HarnessSessionControlOutcome, HarnessSessionOperation,

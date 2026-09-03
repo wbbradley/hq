@@ -16,8 +16,8 @@ use std::{
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use hq_node::{
     TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiObservationInterrupt,
-    TuiObservationPort, TuiTerminalError, TuiTerminalEvent, TuiTerminalPort,
-    normalize_crossterm_event, run_tui_shell,
+    TuiObservationPort, TuiShellError, TuiTerminalError, TuiTerminalEvent, TuiTerminalIoKind,
+    TuiTerminalPhase, TuiTerminalPort, normalize_crossterm_event, run_tui_shell,
 };
 use hq_tui::{
     UiConversationAuthor, UiConversationEntry, UiConversationEntryGeometry,
@@ -329,6 +329,24 @@ fn terminal_errors_and_partial_activation_restore_exactly_once() {
     assert_eq!(
         activation_log.lock().expect("activation log").as_slice(),
         &["activate", "restore"]
+    );
+}
+
+#[test]
+fn terminal_diagnostic_preserves_phase_error_kind_and_os_code_without_backend_prose() {
+    let error = TuiShellError::Terminal(TuiTerminalError::OperatingSystem {
+        phase: TuiTerminalPhase::Restore,
+        kind: TuiTerminalIoKind::BrokenPipe,
+        code: Some(32),
+    });
+
+    assert_eq!(
+        error.diagnostic(),
+        (
+            "tui.terminal_failed",
+            "the interactive terminal failed during restoration (error kind: broken_pipe; OS code: 32)"
+                .to_owned(),
+        )
     );
 }
 

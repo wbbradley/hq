@@ -174,7 +174,10 @@ impl LocalSessionPump {
             boot_nonce: config.boot_nonce,
             next_connection: NonZeroU64::new(1),
             prefer_listener: true,
-            trace: BoundaryTrace::from_environment(BoundaryProcess::Node),
+            trace: foundation.runtime_paths().root().parent().map_or_else(
+                || BoundaryTrace::disabled(BoundaryProcess::Node),
+                |state_root| BoundaryTrace::from_state(state_root, BoundaryProcess::Node),
+            ),
         })
     }
 

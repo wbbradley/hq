@@ -31,9 +31,9 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use crate::{
     BoundaryIds, BoundaryKind, BoundaryProcess, BoundaryTrace, IdentityError, IdentityErrorClass,
     LocalNodeClient, LocalNodeEventClient, MonotonicTuiClock, StatePaths, TuiClientPort, TuiClock,
-    TuiEffectExecutor, TuiObservationPort, TuiThemeEnvironment, TuiThemeError,
-    local_client::installed_local_client_config, resolve_tui_theme,
-    tui_client::compose_tui_clients,
+    TuiEffectExecutor, TuiObservationPort, TuiTerminalIoKind, TuiTerminalPhase,
+    TuiThemeEnvironment, TuiThemeError, local_client::installed_local_client_config,
+    resolve_tui_theme, tui_client::compose_tui_clients,
 };
 
 /// Passive terminal observation after backend-specific normalization.
@@ -60,6 +60,15 @@ pub enum TuiTerminalError {
     Draw,
     /// One or more terminal modes could not be restored.
     Restore,
+    /// A real terminal operation failed with structured operating-system evidence.
+    OperatingSystem {
+        /// Exact terminal phase that failed.
+        phase: TuiTerminalPhase,
+        /// Stable operating-system error category.
+        kind: TuiTerminalIoKind,
+        /// Platform error number when supplied by the operating system.
+        code: Option<i32>,
+    },
 }
 
 impl fmt::Display for TuiTerminalError {
@@ -69,6 +78,86 @@ impl fmt::Display for TuiTerminalError {
 }
 
 impl std::error::Error for TuiTerminalError {}
+
+impl TuiTerminalError {
+    fn action(self) -> String {
+        match self {
+            Self::OperatingSystem { phase, kind, code } => {
+                let code = code.map_or_else(|| "none".to_owned(), |value| value.to_string());
+                format!(
+                    "the interactive terminal failed during {} (error kind: {}; OS code: {code})",
+                    phase.as_str(),
+                    kind.as_str()
+                )
+            }
+            Self::Activate => "the interactive terminal failed during activation".to_owned(),
+            Self::Size => "the interactive terminal failed while reading its size".to_owned(),
+            Self::Poll => "the interactive terminal failed while polling input".to_owned(),
+            Self::Draw => "the interactive terminal failed while drawing a frame".to_owned(),
+            Self::Restore => "the interactive terminal failed during restoration".to_owned(),
+        }
+    }
+
+    fn diagnostic_parts(self) -> (TuiTerminalPhase, Option<TuiTerminalIoKind>, Option<i32>) {
+        match self {
+            Self::Activate => (TuiTerminalPhase::Activate, None, None),
+            Self::Size => (TuiTerminalPhase::Size, None, None),
+            Self::Poll => (TuiTerminalPhase::Poll, None, None),
+            Self::Draw => (TuiTerminalPhase::Draw, None, None),
+            Self::Restore => (TuiTerminalPhase::Restore, None, None),
+            Self::OperatingSystem { phase, kind, code } => (phase, Some(kind), code),
+        }
+    }
+}
+
+impl TuiTerminalPhase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Activate => "activation",
+            Self::Size => "size observation",
+            Self::Poll => "input polling",
+            Self::Draw => "frame drawing",
+            Self::Restore => "restoration",
+        }
+    }
+}
+
+impl TuiTerminalIoKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::PermissionDenied => "permission_denied",
+            Self::ConnectionReset => "connection_reset",
+            Self::BrokenPipe => "broken_pipe",
+            Self::WouldBlock => "would_block",
+            Self::TimedOut => "timed_out",
+            Self::Interrupted => "interrupted",
+            Self::Unsupported => "unsupported",
+            Self::UnexpectedEof => "unexpected_eof",
+            Self::Other => "other",
+        }
+    }
+}
+
+fn terminal_io_error(phase: TuiTerminalPhase, error: &std::io::Error) -> TuiTerminalError {
+    let kind = match error.kind() {
+        std::io::ErrorKind::NotFound => TuiTerminalIoKind::NotFound,
+        std::io::ErrorKind::PermissionDenied => TuiTerminalIoKind::PermissionDenied,
+        std::io::ErrorKind::ConnectionReset => TuiTerminalIoKind::ConnectionReset,
+        std::io::ErrorKind::BrokenPipe => TuiTerminalIoKind::BrokenPipe,
+        std::io::ErrorKind::WouldBlock => TuiTerminalIoKind::WouldBlock,
+        std::io::ErrorKind::TimedOut => TuiTerminalIoKind::TimedOut,
+        std::io::ErrorKind::Interrupted => TuiTerminalIoKind::Interrupted,
+        std::io::ErrorKind::Unsupported => TuiTerminalIoKind::Unsupported,
+        std::io::ErrorKind::UnexpectedEof => TuiTerminalIoKind::UnexpectedEof,
+        _ => TuiTerminalIoKind::Other,
+    };
+    TuiTerminalError::OperatingSystem {
+        phase,
+        kind,
+        code: error.raw_os_error(),
+    }
+}
 
 /// Closed outer-shell failure without terminal, transport, or model prose.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,9 +214,9 @@ impl TuiShellError {
                     "cannot load the selected theme: {error}\nRun `hq config themes` to inspect choices, or `hq config set theme none` to restore automatic selection."
                 ),
             ),
-            Self::Terminal(_) => (
+            Self::Terminal(error) => (
                 "tui.terminal_failed",
-                "the interactive terminal could not be activated, drawn, or restored".to_owned(),
+                error.action(),
             ),
             Self::Model => (
                 "tui.model_failed",
@@ -202,7 +291,8 @@ impl CrosstermTerminal {
     /// Constructs a terminal backend without changing process terminal modes.
     pub fn new(theme: UiTheme) -> Result<Self, TuiTerminalError> {
         let backend = CrosstermBackend::new(std::io::stdout());
-        let terminal = Terminal::new(backend).map_err(|_| TuiTerminalError::Activate)?;
+        let terminal = Terminal::new(backend)
+            .map_err(|error| terminal_io_error(TuiTerminalPhase::Activate, &error))?;
         Ok(Self {
             terminal,
             theme,
@@ -214,24 +304,28 @@ impl CrosstermTerminal {
 
 impl TuiTerminalPort for CrosstermTerminal {
     fn activate(&mut self) -> Result<(), TuiTerminalError> {
-        enable_raw_mode().map_err(|_| TuiTerminalError::Activate)?;
+        enable_raw_mode().map_err(|error| terminal_io_error(TuiTerminalPhase::Activate, &error))?;
         self.activation = TerminalActivation::Raw;
         execute!(self.terminal.backend_mut(), EnterAlternateScreen)
-            .map_err(|_| TuiTerminalError::Activate)?;
+            .map_err(|error| terminal_io_error(TuiTerminalPhase::Activate, &error))?;
         self.activation = TerminalActivation::AlternateScreen;
         execute!(self.terminal.backend_mut(), EnableMouseCapture)
-            .map_err(|_| TuiTerminalError::Activate)?;
+            .map_err(|error| terminal_io_error(TuiTerminalPhase::Activate, &error))?;
         self.activation = TerminalActivation::MouseCapture;
         execute!(self.terminal.backend_mut(), EnableBracketedPaste)
-            .map_err(|_| TuiTerminalError::Activate)?;
+            .map_err(|error| terminal_io_error(TuiTerminalPhase::Activate, &error))?;
         self.activation = TerminalActivation::BracketedPaste;
-        execute!(self.terminal.backend_mut(), Hide).map_err(|_| TuiTerminalError::Activate)?;
+        execute!(self.terminal.backend_mut(), Hide)
+            .map_err(|error| terminal_io_error(TuiTerminalPhase::Activate, &error))?;
         self.activation = TerminalActivation::CursorHidden;
         Ok(())
     }
 
     fn size(&mut self) -> Result<UiSize, TuiTerminalError> {
-        let size = self.terminal.size().map_err(|_| TuiTerminalError::Size)?;
+        let size = self
+            .terminal
+            .size()
+            .map_err(|error| terminal_io_error(TuiTerminalPhase::Size, &error))?;
         Ok(UiSize {
             width: size.width,
             height: size.height,
@@ -243,10 +337,12 @@ impl TuiTerminalPort for CrosstermTerminal {
         executor_wake: BorrowedFd<'_>,
         wait: Option<Duration>,
     ) -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
-        if event::poll(Duration::ZERO).map_err(|_| TuiTerminalError::Poll)? {
+        if event::poll(Duration::ZERO)
+            .map_err(|error| terminal_io_error(TuiTerminalPhase::Poll, &error))?
+        {
             return event::read()
                 .map(|observation| normalize_crossterm_event(&observation))
-                .map_err(|_| TuiTerminalError::Poll);
+                .map_err(|error| terminal_io_error(TuiTerminalPhase::Poll, &error));
         }
         let stdin = std::io::stdin();
         let interest = PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR;
@@ -257,7 +353,13 @@ impl TuiTerminalPort for CrosstermTerminal {
         let timeout = wait
             .map_or(Ok(PollTimeout::NONE), PollTimeout::try_from)
             .map_err(|_| TuiTerminalError::Poll)?;
-        if poll(&mut descriptors, timeout).map_err(|_| TuiTerminalError::Poll)? == 0 {
+        if poll(&mut descriptors, timeout).map_err(|error| {
+            terminal_io_error(
+                TuiTerminalPhase::Poll,
+                &std::io::Error::from_raw_os_error(error as i32),
+            )
+        })? == 0
+        {
             return Ok(None);
         }
         if !descriptors[0]
@@ -266,12 +368,14 @@ impl TuiTerminalPort for CrosstermTerminal {
         {
             return Ok(None);
         }
-        if !event::poll(Duration::ZERO).map_err(|_| TuiTerminalError::Poll)? {
+        if !event::poll(Duration::ZERO)
+            .map_err(|error| terminal_io_error(TuiTerminalPhase::Poll, &error))?
+        {
             return Ok(None);
         }
         event::read()
             .map(|observation| normalize_crossterm_event(&observation))
-            .map_err(|_| TuiTerminalError::Poll)
+            .map_err(|error| terminal_io_error(TuiTerminalPhase::Poll, &error))
     }
 
     fn draw(
@@ -285,7 +389,7 @@ impl TuiTerminalPort for CrosstermTerminal {
             .draw(|frame| {
                 observation = hq_tui::render_with_cache(frame, model, theme, cache);
             })
-            .map_err(|_| TuiTerminalError::Draw)?;
+            .map_err(|error| terminal_io_error(TuiTerminalPhase::Draw, &error))?;
         Ok(observation)
     }
 
@@ -296,28 +400,34 @@ impl TuiTerminalPort for CrosstermTerminal {
     }
 
     fn restore(&mut self) -> Result<(), TuiTerminalError> {
-        let mut failed = false;
-        if self.activation >= TerminalActivation::CursorHidden {
-            failed |= execute!(self.terminal.backend_mut(), Show).is_err();
+        let mut failure = None;
+        if self.activation >= TerminalActivation::CursorHidden
+            && let Err(error) = execute!(self.terminal.backend_mut(), Show)
+        {
+            failure.get_or_insert_with(|| terminal_io_error(TuiTerminalPhase::Restore, &error));
         }
-        if self.activation >= TerminalActivation::BracketedPaste {
-            failed |= execute!(self.terminal.backend_mut(), DisableBracketedPaste).is_err();
+        if self.activation >= TerminalActivation::BracketedPaste
+            && let Err(error) = execute!(self.terminal.backend_mut(), DisableBracketedPaste)
+        {
+            failure.get_or_insert_with(|| terminal_io_error(TuiTerminalPhase::Restore, &error));
         }
-        if self.activation >= TerminalActivation::MouseCapture {
-            failed |= execute!(self.terminal.backend_mut(), DisableMouseCapture).is_err();
+        if self.activation >= TerminalActivation::MouseCapture
+            && let Err(error) = execute!(self.terminal.backend_mut(), DisableMouseCapture)
+        {
+            failure.get_or_insert_with(|| terminal_io_error(TuiTerminalPhase::Restore, &error));
         }
-        if self.activation >= TerminalActivation::AlternateScreen {
-            failed |= execute!(self.terminal.backend_mut(), LeaveAlternateScreen).is_err();
+        if self.activation >= TerminalActivation::AlternateScreen
+            && let Err(error) = execute!(self.terminal.backend_mut(), LeaveAlternateScreen)
+        {
+            failure.get_or_insert_with(|| terminal_io_error(TuiTerminalPhase::Restore, &error));
         }
-        if self.activation >= TerminalActivation::Raw {
-            failed |= disable_raw_mode().is_err();
+        if self.activation >= TerminalActivation::Raw
+            && let Err(error) = disable_raw_mode()
+        {
+            failure.get_or_insert_with(|| terminal_io_error(TuiTerminalPhase::Restore, &error));
         }
         self.activation = TerminalActivation::Inactive;
-        if failed {
-            Err(TuiTerminalError::Restore)
-        } else {
-            Ok(())
-        }
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -385,7 +495,28 @@ where
     O: TuiObservationPort + 'static,
     C: TuiClock,
 {
-    let trace = BoundaryTrace::from_environment(BoundaryProcess::Tui);
+    run_tui_shell_with_trace(
+        terminal,
+        client,
+        observer,
+        clock,
+        &BoundaryTrace::from_environment(BoundaryProcess::Tui),
+    )
+}
+
+fn run_tui_shell_with_trace<T, P, O, C>(
+    terminal: T,
+    client: P,
+    observer: O,
+    clock: C,
+    trace: &BoundaryTrace,
+) -> Result<(), TuiShellError>
+where
+    T: TuiTerminalPort,
+    P: TuiClientPort + 'static,
+    O: TuiObservationPort + 'static,
+    C: TuiClock,
+{
     let mut drawn_interactions = BTreeSet::new();
     let home_directory = current_user_home_directory();
     let mut observer = observer;
@@ -410,7 +541,7 @@ where
 
     while !executor.exit_requested() {
         while let Some(event) = executor.poll_event() {
-            trace_tui_event(&trace, BoundaryKind::TuiObservationReceived, &event);
+            trace_tui_event(trace, BoundaryKind::TuiObservationReceived, &event);
             if let UiEvent::ConfigurationSaved {
                 effect_id,
                 theme: Some(theme),
@@ -422,7 +553,7 @@ where
             }
             let transition = update(model, event).map_err(|_| TuiShellError::Model)?;
             model = transition.model;
-            trace_current_interaction(&trace, BoundaryKind::TuiModelUpdated, &model);
+            trace_current_interaction(trace, BoundaryKind::TuiModelUpdated, &model);
             executor
                 .execute(transition.effects)
                 .map_err(|_| TuiShellError::Executor)?;
@@ -561,6 +692,7 @@ fn current_user_home_directory() -> Option<String> {
 /// Composes the installed subscribed client and real terminal shell for one state root.
 pub fn run_installed_tui(state: StatePaths) -> Result<(), TuiShellError> {
     state.validate_identity().map_err(TuiShellError::Identity)?;
+    let trace = BoundaryTrace::from_state(state.root(), BoundaryProcess::Tui);
     let theme = resolve_installed_tui_theme(&state, &TuiThemeEnvironment::from_environment())?;
     let build = BuildMetadata::new(
         "hq",
@@ -579,8 +711,34 @@ pub fn run_installed_tui(state: StatePaths) -> Result<(), TuiShellError> {
     let (client, observer) =
         compose_tui_clients(command_client, event_client, state, &subscription_base)
             .map_err(|_| TuiShellError::Client)?;
-    let terminal = CrosstermTerminal::new(theme)?;
-    run_tui_shell(terminal, client, observer, MonotonicTuiClock::default())
+    let terminal = CrosstermTerminal::new(theme).map_err(|error| {
+        record_terminal_failure(&trace, error);
+        TuiShellError::Terminal(error)
+    })?;
+    let result = run_tui_shell_with_trace(
+        terminal,
+        client,
+        observer,
+        MonotonicTuiClock::default(),
+        &trace,
+    );
+    if let Err(TuiShellError::Terminal(error)) = &result {
+        record_terminal_failure(&trace, *error);
+    }
+    result
+}
+
+fn record_terminal_failure(trace: &BoundaryTrace, error: TuiTerminalError) {
+    let (phase, kind, code) = error.diagnostic_parts();
+    trace.record(
+        BoundaryKind::TuiTerminalFailed,
+        BoundaryIds {
+            terminal_phase: Some(phase),
+            terminal_io_kind: kind,
+            terminal_os_code: code,
+            ..BoundaryIds::default()
+        },
+    );
 }
 
 /// Loads and resolves the immutable startup theme before any terminal mode is activated.

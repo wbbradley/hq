@@ -144,7 +144,7 @@ fn open_generation(
     >,
     ForegroundNodeError,
 > {
-    let trace = BoundaryTrace::from_environment(BoundaryProcess::Node);
+    let trace = BoundaryTrace::from_state(config.state.root(), BoundaryProcess::Node);
     let foundation = NodeFoundation::open(NodeFoundationConfig::new(
         config.state.clone(),
         config.runtime.clone(),

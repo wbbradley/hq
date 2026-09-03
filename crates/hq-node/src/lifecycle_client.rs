@@ -7,7 +7,10 @@ use hq_local_api::protocol::v1::{
     Response, ResponseResult, V1, VersionRange, WireMessage,
 };
 
-use crate::{ReadinessRecord, RuntimeArtifactErrorClass, RuntimePaths, unix_frame};
+use crate::{
+    BoundaryIds, BoundaryKind, BoundaryProcess, BoundaryTrace, ReadinessRecord,
+    RuntimeArtifactErrorClass, RuntimePaths, unix_frame,
+};
 
 /// Explicit inputs for one bounded lifecycle request.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,9 +125,20 @@ impl LifecycleClient {
         let Response::Success(ResponseResult::Lifecycle(status)) = response.response else {
             return Err(LifecycleClientError::Protocol);
         };
-        validate_readiness_generation(&status, readiness.as_ref())?;
+        if let Err(error) = validate_readiness_generation(&status, readiness.as_ref()) {
+            record_stale_readiness(&self.config.runtime);
+            return Err(error);
+        }
         Ok(LifecycleObservation { status, readiness })
     }
+}
+
+fn record_stale_readiness(runtime: &RuntimePaths) {
+    let Some(state_root) = runtime.root().parent() else {
+        return;
+    };
+    BoundaryTrace::from_state(state_root, BoundaryProcess::Client)
+        .record(BoundaryKind::StaleReadiness, BoundaryIds::default());
 }
 
 fn validate_readiness_generation(

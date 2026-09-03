@@ -17,14 +17,14 @@ use hq_application::{
     ProviderCatalog, QueryInteractions, QueryProviders, SessionControl,
 };
 use hq_harness::{
-    HarnessActivity, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEnvironment,
-    HarnessError, HarnessErrorClass, HarnessEventNotifier, HarnessInteractiveAnswer,
-    HarnessInteractiveResponse, HarnessLaunchRequest, HarnessOutput, HarnessOwnerToken,
-    HarnessPersistencePort, HarnessProjectDelivery, HarnessRegistry, HarnessRequestKind,
-    HarnessResponderId, HarnessSessionControlOutcome, HarnessSessionOperation,
-    HarnessSessionOperationKind, HarnessSessionOperationState, HarnessSessionRequest,
-    HarnessSubmission, HarnessSupervisor, HarnessSupervisorConfig, HarnessSupervisorDependencies,
-    HarnessTokenSource,
+    DiscardHarnessDiagnostics, HarnessActivity, HarnessClock, HarnessDeliveryRecord,
+    HarnessDeliveryState, HarnessEnvironment, HarnessError, HarnessErrorClass,
+    HarnessEventNotifier, HarnessInteractiveAnswer, HarnessInteractiveResponse,
+    HarnessLaunchRequest, HarnessOutput, HarnessOwnerToken, HarnessPersistencePort,
+    HarnessProjectDelivery, HarnessRegistry, HarnessRequestKind, HarnessResponderId,
+    HarnessSessionControlOutcome, HarnessSessionOperation, HarnessSessionOperationKind,
+    HarnessSessionOperationState, HarnessSessionRequest, HarnessSubmission, HarnessSupervisor,
+    HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessTokenSource,
 };
 use hq_projects::{ProjectRuntimeDelivery, ProjectRuntimePort, ProjectRuntimeRequest};
 use hq_store::Store;
@@ -116,6 +116,7 @@ impl HarnessNodeComponent {
                     clock,
                     tokens,
                     events: event_notifications.clone(),
+                    diagnostics: Arc::new(DiscardHarnessDiagnostics),
                 },
                 default_provider,
                 canonical,
@@ -136,6 +137,7 @@ impl HarnessNodeComponent {
     #[must_use]
     pub fn with_boundary_trace(mut self, trace: BoundaryTrace) -> Self {
         if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.dependencies.diagnostics = Arc::new(trace.clone());
             inner.trace = trace;
         }
         self

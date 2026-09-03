@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     num::{NonZeroU64, NonZeroUsize},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -371,6 +371,49 @@ pub trait HarnessTokenSource: Send + Sync {
     fn next_token(&self) -> Result<HarnessOwnerToken, HarnessError>;
 }
 
+/// Closed privacy-safe timing targets emitted by the supervisor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HarnessDiagnosticTarget {
+    /// Wait to enter the worker catalog.
+    WorkerCatalogLock,
+    /// Wait to become the sole canonical persistence owner.
+    PersistenceLock,
+    /// One canonical event persistence operation.
+    Persistence,
+    /// One bounded ready-event drain.
+    ReadyDrain,
+}
+
+/// Body-free operational evidence for diagnosing responsiveness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HarnessDiagnosticEvent {
+    /// Closed operation being measured.
+    pub target: HarnessDiagnosticTarget,
+    /// Monotonic duration spent in the operation.
+    pub elapsed: Duration,
+    /// Retained normalized values at the end of a drain, otherwise zero.
+    pub pending_values: usize,
+    /// Highest retained normalized value count observed during a drain.
+    pub queue_high_water: usize,
+    /// Replaceable values coalesced during a drain, otherwise zero.
+    pub coalesced_values: usize,
+    /// Provider values polled during a drain, otherwise zero.
+    pub events_polled: usize,
+}
+
+/// Best-effort observer that must never affect supervisor authority.
+pub trait HarnessDiagnosticSink: Send + Sync {
+    /// Records one body-free event; implementations must fail inertly.
+    fn record(&self, event: HarnessDiagnosticEvent);
+}
+
+/// Default inert diagnostic observer.
+pub struct DiscardHarnessDiagnostics;
+
+impl HarnessDiagnosticSink for DiscardHarnessDiagnostics {
+    fn record(&self, _event: HarnessDiagnosticEvent) {}
+}
+
 /// Bounded synchronous supervisor configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HarnessSupervisorConfig {
@@ -382,6 +425,8 @@ pub struct HarnessSupervisorConfig {
     pub lease_duration: Duration,
     /// Maximum normalized events pending per worker.
     pub event_capacity: NonZeroUsize,
+    /// Maximum wall time spent admitting ready events before yielding.
+    pub ready_drain_budget: Duration,
     /// Maximum adapter drain wait during ordered shutdown.
     pub drain_wait: Duration,
 }
@@ -393,6 +438,7 @@ impl Default for HarnessSupervisorConfig {
             state_query_items: 256,
             lease_duration: Duration::from_secs(30),
             event_capacity: NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN),
+            ready_drain_budget: Duration::from_millis(25),
             drain_wait: Duration::from_secs(2),
         }
     }
@@ -413,6 +459,8 @@ pub struct HarnessSupervisorDependencies {
     pub tokens: Arc<dyn HarnessTokenSource>,
     /// Coalescing provider-event notification shared with every live adapter session.
     pub events: HarnessEventNotifier,
+    /// Best-effort body-free operational diagnostics.
+    pub diagnostics: Arc<dyn HarnessDiagnosticSink>,
 }
 
 /// Memory-only request to start or exactly resume one logical worker.
@@ -486,6 +534,8 @@ pub struct HarnessEventPumpReport {
     pub workers_failed: usize,
     /// Normalized persistence items still owned after this pass.
     pub pending_values: usize,
+    /// Highest pending normalized value count observed across merged passes.
+    pub pending_values_high_water: usize,
     /// Live workers remaining after this pass.
     pub live_workers: usize,
     /// Bounded stable failure classes observed without provider prose.
@@ -541,6 +591,9 @@ pub struct HarnessSupervisor {
     dependencies: HarnessSupervisorDependencies,
     workers: Mutex<BTreeMap<AgentId, HarnessWorker>>,
     persistence: Mutex<()>,
+    worker_lock_wait_high_ns: AtomicU64,
+    persistence_lock_wait_high_ns: AtomicU64,
+    persistence_high_ns: AtomicU64,
     responders: Mutex<BTreeSet<HarnessResponderId>>,
     accepting: AtomicBool,
 }
@@ -557,6 +610,7 @@ impl HarnessSupervisor {
             || config.state_query_items > MAX_HARNESS_SUPERVISOR_STATE_ITEMS
             || config.event_capacity.get() > MAX_HARNESS_SUPERVISOR_STATE_ITEMS
             || config.lease_duration.is_zero()
+            || config.ready_drain_budget.is_zero()
             || config.drain_wait.is_zero()
         {
             return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
@@ -566,6 +620,9 @@ impl HarnessSupervisor {
             dependencies,
             workers: Mutex::new(BTreeMap::new()),
             persistence: Mutex::new(()),
+            worker_lock_wait_high_ns: AtomicU64::new(0),
+            persistence_lock_wait_high_ns: AtomicU64::new(0),
+            persistence_high_ns: AtomicU64::new(0),
             responders: Mutex::new(BTreeSet::new()),
             accepting: AtomicBool::new(true),
         })
@@ -1019,6 +1076,7 @@ impl HarnessSupervisor {
                     ))
             })
             .sum();
+        report.pending_values_high_water = report.pending_values;
         report.live_workers = workers.len();
         Ok(report)
     }
@@ -1048,7 +1106,10 @@ impl HarnessSupervisor {
             let Some((context, event)) = next else {
                 return Ok(());
             };
-            persist_one(&self.dependencies, agent_id, &context, &event)?;
+            let started = Instant::now();
+            let result = persist_one(&self.dependencies, agent_id, &context, &event);
+            retain_duration_high_water(&self.persistence_high_ns, started.elapsed());
+            result?;
             let mut workers = self.lock_workers()?;
             let worker = workers
                 .get_mut(&agent_id)
@@ -1061,13 +1122,21 @@ impl HarnessSupervisor {
     }
 
     fn lock_persistence(&self) -> Result<std::sync::MutexGuard<'_, ()>, HarnessError> {
-        self.persistence
+        let started = Instant::now();
+        let result = self
+            .persistence
             .lock()
-            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))
+            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable));
+        retain_duration_high_water(&self.persistence_lock_wait_high_ns, started.elapsed());
+        result
     }
 
     /// Drains currently ready provider events with bounded work per live source.
     pub fn drain_ready_events(&self) -> Result<HarnessEventPumpReport, HarnessError> {
+        let started = Instant::now();
+        let deadline = started
+            .checked_add(self.config.ready_drain_budget)
+            .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?;
         let mut aggregate = HarnessEventPumpReport::default();
         let mut exhausted_budget = false;
         for _ in 0..self.config.event_capacity.get() {
@@ -1076,18 +1145,40 @@ impl HarnessSupervisor {
                 pass.events_polled > 0 || pass.workers_closed > 0 || pass.workers_failed > 0;
             merge_pump_report(&mut aggregate, pass, self.config.max_workers);
             if aggregate.live_workers == 0 {
+                self.record_drain(started.elapsed(), &aggregate);
                 return Ok(aggregate);
             }
             if !progressed {
                 break;
             }
             exhausted_budget = true;
+            if Instant::now() >= deadline {
+                break;
+            }
         }
-        let persisted = self.poll_events()?;
-        merge_pump_report(&mut aggregate, persisted, self.config.max_workers);
+        if let Err(error) = self.drain_buffered_events() {
+            retain_pump_failure(&mut aggregate, error.class, self.config.max_workers);
+        }
+        let workers = self.lock_workers()?;
+        aggregate.pending_values = workers
+            .values()
+            .map(|worker| {
+                worker.events.len()
+                    + usize::from(matches!(
+                        worker.staged.as_ref(),
+                        Some(HarnessEvent::Output(_) | HarnessEvent::Activity(_))
+                    ))
+            })
+            .sum();
+        aggregate.pending_values_high_water = aggregate
+            .pending_values_high_water
+            .max(aggregate.pending_values);
+        aggregate.live_workers = workers.len();
+        drop(workers);
         if exhausted_budget && aggregate.live_workers > 0 {
             self.dependencies.events.notify()?;
         }
+        self.record_drain(started.elapsed(), &aggregate);
         Ok(aggregate)
     }
 
@@ -1252,6 +1343,7 @@ impl HarnessSupervisor {
     /// Stops intake, drains, force-stops when necessary, and releases every exact owner.
     pub fn shutdown(&self) -> Result<HarnessSupervisorReport, HarnessError> {
         let intake_failure = self.stop_intake().err();
+        let _persistence = self.lock_persistence()?;
         let workers = std::mem::take(&mut *self.lock_workers()?);
         let mut report = HarnessSupervisorReport::default();
         if let Some(error) = intake_failure {
@@ -1270,9 +1362,13 @@ impl HarnessSupervisor {
     fn lock_workers(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, BTreeMap<AgentId, HarnessWorker>>, HarnessError> {
-        self.workers
+        let started = Instant::now();
+        let result = self
+            .workers
             .lock()
-            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))
+            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable));
+        retain_duration_high_water(&self.worker_lock_wait_high_ns, started.elapsed());
+        result
     }
 
     fn lock_responders(
@@ -1290,6 +1386,67 @@ impl HarnessSupervisor {
             Err(HarnessError::new(HarnessErrorClass::IntakeClosed))
         }
     }
+
+    fn record_drain(&self, elapsed: Duration, report: &HarnessEventPumpReport) {
+        if report.events_polled > 0
+            || report.pending_values > 0
+            || elapsed >= Duration::from_millis(10)
+        {
+            self.record_diagnostic(HarnessDiagnosticEvent {
+                target: HarnessDiagnosticTarget::ReadyDrain,
+                elapsed,
+                pending_values: report.pending_values,
+                queue_high_water: report.pending_values_high_water,
+                coalesced_values: report.snapshots_replaced,
+                events_polled: report.events_polled,
+            });
+        }
+        self.record_duration_high_water(
+            HarnessDiagnosticTarget::Persistence,
+            &self.persistence_high_ns,
+            Duration::ZERO,
+        );
+        self.record_duration_high_water(
+            HarnessDiagnosticTarget::WorkerCatalogLock,
+            &self.worker_lock_wait_high_ns,
+            Duration::from_millis(10),
+        );
+        self.record_duration_high_water(
+            HarnessDiagnosticTarget::PersistenceLock,
+            &self.persistence_lock_wait_high_ns,
+            Duration::from_millis(10),
+        );
+    }
+
+    fn record_duration_high_water(
+        &self,
+        target: HarnessDiagnosticTarget,
+        high_water: &AtomicU64,
+        minimum: Duration,
+    ) {
+        let elapsed = Duration::from_nanos(high_water.swap(0, Ordering::AcqRel));
+        if !elapsed.is_zero() && elapsed >= minimum {
+            self.record_diagnostic(HarnessDiagnosticEvent {
+                target,
+                elapsed,
+                pending_values: 0,
+                queue_high_water: 0,
+                coalesced_values: 0,
+                events_polled: 0,
+            });
+        }
+    }
+
+    fn record_diagnostic(&self, event: HarnessDiagnosticEvent) {
+        self.dependencies.diagnostics.record(event);
+    }
+}
+
+fn retain_duration_high_water(high_water: &AtomicU64, duration: Duration) {
+    let nanoseconds = u64::try_from(duration.as_nanos())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    high_water.fetch_max(nanoseconds, Ordering::AcqRel);
 }
 
 #[derive(Clone, Copy)]
@@ -2046,6 +2203,9 @@ fn merge_pump_report(
     target.workers_closed = target.workers_closed.saturating_add(source.workers_closed);
     target.workers_failed = target.workers_failed.saturating_add(source.workers_failed);
     target.pending_values = source.pending_values;
+    target.pending_values_high_water = target
+        .pending_values_high_water
+        .max(source.pending_values_high_water);
     target.live_workers = source.live_workers;
     for failure in source.failures {
         retain_pump_failure(target, failure, limit);
