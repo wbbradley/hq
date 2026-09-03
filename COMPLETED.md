@@ -1,5 +1,60 @@
 # Completed
 
+## 2026-09-02 — Interruption-resilient TUI terminal polling
+
+The Crossterm terminal boundary now retries only Unix `EINTR`, rechecking queued terminal events
+and both input and executor readiness before each blocking attempt. Finite waits retain one
+monotonic deadline and recompute their remaining timeout after every interruption; infinite waits
+remain infinite. Other polling failures preserve their existing typed phase, I/O kind, and OS code.
+
+Six deterministic tests cover repeated interruption, queued resize delivery, finite deadline
+recomputation and expiry, indefinite retry, a racing executor wake, and non-interruption error
+evidence. An installed PTY regression changes the real terminal dimensions, delivers repeated
+`SIGWINCH` while idle, races an authoritative project update, and proves that the TUI redraws,
+receives the model update, accepts orderly quit, emits no terminal-failure diagnostic, and restores
+the exact terminal modes. The terminal-loop contract now documents these semantics. Formatting,
+strict locked workspace Clippy, and the complete locked all-target/all-feature workspace suite,
+including all 20 installed terminal tests, pass.
+
+### Original plan entry
+
+### Keep the TUI alive across terminal resize interruptions
+
+The event-driven terminal wait currently treats Unix `EINTR` as a fatal polling failure.
+Crossterm uses `SIGWINCH` for resize observation, so tmux focus or pane changes can terminate only
+the interactive client while daemon-owned agent work continues.
+
+- Refactor the Crossterm polling boundary to retry only `Errno::EINTR`. Preserve an infinite wait
+  as infinite, and represent a finite wait with one monotonic deadline so repeated interruptions
+  recompute the remaining duration instead of restarting timers for reconnect, draft autosave, or
+  completion dismissal.
+- Recheck Crossterm's zero-duration event queue after each interruption so a pending resize is
+  normalized through `TuiTerminalEvent::Resized`; also re-evaluate terminal and executor-wake
+  readiness so a concurrent model invalidation cannot be lost or delayed. Avoid a signal-storm
+  busy loop.
+- Keep every non-`EINTR` polling error fatal with its existing typed terminal phase, I/O kind, and
+  OS code, and preserve Ctrl-C cancellation, event-driven wakeups, and terminal restoration
+  semantics.
+- Add a deterministic polling seam and focused tests for repeated interruption before readiness,
+  finite-deadline expiry, indefinite retry, executor wake racing an interruption, queued resize
+  delivery, and unchanged non-interruption error evidence.
+- Extend the installed Unix PTY coverage to deliver real `SIGWINCH` and dimension changes,
+  including repeated signals while idle. Prove the process remains alive, redraws at the new size,
+  still accepts ordinary input and orderly quit, emits no terminal-failure diagnostic, and restores
+  the exact terminal modes. Include an executor/model wake near an interruption to cover the
+  observed race without depending on timing inference.
+- Update the TUI terminal-loop contract documentation to state that signal interruptions are
+  retried without turning exact UI deadlines into periodic polling.
+
+Dependencies: the existing Crossterm/nix polling boundary, monotonic timing support, executor wake
+pair, and installed PTY harness; no new external dependency is expected.
+
+Completion condition: tmux-style resize/focus signals cannot end the TUI, exact deadlines and wake
+delivery remain intact across repeated interruptions, real poll failures retain their typed
+diagnostic evidence, and deterministic plus installed PTY regressions enforce the behavior.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-02 — Responsive provider activity pipeline
 
 Replaceable provider activity is now coalesced twice before it can amplify work: the Codex JSONL
