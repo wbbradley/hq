@@ -47,6 +47,81 @@ shutdown/restart.
 
 <!-- End of archived plan entry. -->
 
+## 2026-09-02 — Direct TUI view shortcuts
+
+The TUI now gives the current workspace the full content area at every supported width. The wide
+sidebar, compact tab strip, invisible navigation focus, sequential section inputs, and Inbox
+onboarding checklist are gone. Modeless non-editing screens switch directly with `1` Inbox through
+`6` Config while modal dialogs capture those keys and active editors receive literal digits.
+
+Per-view state is stored behind named typed fields, preserving stable selections, conversations,
+viewport anchors, project state, Config loading, and Inbox observation behavior without
+list-position identity. Contextual help, footers, snapshots, design documentation, shell coverage,
+and installed PTY journeys now describe and exercise the shortcut-based information architecture.
+Formatting, strict workspace Clippy, the complete workspace suite, and all 19 installed-terminal
+tests pass.
+
+### Original plan entry
+
+### Simplify the TUI around direct view shortcuts
+
+Remove the persistent section navigator and first-run checklist so each screen presents one clear
+workspace and users move directly between workspaces with documented global shortcuts.
+
+- Delete the Inbox-only `Get started with HQ` checklist in `crates/hq-tui/src/render.rs`, including
+  every `Current: ...` step and its project, agent, and provider inference. A fresh empty Inbox
+  should render only the ordinary concise empty-state explanation and its available actions; keep
+  human-account setup and recovery guidance intact.
+- Replace the wide left sidebar and compact horizontal tabs with a single full-content layout. Keep
+  the current view name visible in the header, give the reclaimed columns and rows to the Inbox,
+  Sent, Archived, Agents, Projects, and Config content, and retain responsive conversation,
+  project-detail, modal, footer, and too-small behavior where it remains applicable.
+- Add direct model-owned shortcuts `1` Inbox, `2` Sent, `3` Archived, `4` Agents, `5` Projects, and
+  `6` Config. They must behave consistently at every terminal width and change `UiSection` through
+  the existing section-transition boundary so stable per-view selection, conversation
+  anchor/viewport, project workspace state, lazy Config loading, and Inbox observation subscription
+  behavior remain correct. Pressing the shortcut for the current view is idempotent.
+- Apply those shortcuts only on ordinary modeless screens when no text entry has focus. Compose
+  bodies, configuration edits, and any other active text field receive the digits literally. Every
+  modal experience, including help and non-text dialogs, captures all input according to normal
+  modal focus/scope rules; `1`-`6` must neither switch the underlying view nor dismiss or leak
+  through the modal.
+- Remove the obsolete navigation layer from the pure UI model and interaction grammar. Initial and
+  restored screens focus their content; Tab, arrows, and Escape traverse only visible content
+  levels; and no input can focus an invisible section navigator. Retire sequential section
+  navigation state/inputs and width-dependent sidebar/tab branches where they no longer express a
+  visible capability. Retain `UiSection` and stable per-section workspace restoration without
+  deriving identity from section labels or positions.
+- Preserve the recently fixed compose invariant: closing a composer returns to its owning
+  conversation/context and never resurrects an earlier modal. Direct view switching must not retain
+  stale modal ancestry that a later Escape can reveal.
+- Update contextual help and screen footers to advertise the direct view shortcuts in plain
+  language without crowding out context-specific actions. Remove guidance such as `sections`,
+  `navigation`, and back paths that point to the deleted navigator. Each screen must still make the
+  current view, available actions, and the next Escape outcome understandable without HQ-internal
+  vocabulary.
+- Update `docs/rust/tui.md` and `docs/rust/projects-workspace.md` to describe the shortcut-based
+  information architecture and revised focus/back behavior. Do not preserve the former sidebar/tab
+  design as compatibility behavior.
+- Drive the change with pure-model tests for all six direct transitions, current-view idempotence,
+  per-view workspace restoration, Config lazy loading, Inbox observation changes, modal capture,
+  text-entry precedence, and compose/Escape regression behavior. Replace wide/compact render
+  snapshots and focused-style assertions so they prove the navigator and checklist are absent,
+  content uses the reclaimed area, and header/help/footer expose the bindings. Update shell and PTY
+  coverage in `crates/hq-node/tests/tui_terminal_shell.rs` and
+  `crates/hq-node/tests/unix_tui_terminal.rs`, including the fresh-account walkthrough that
+  currently waits for `Get started with HQ`, to exercise installed-terminal direct switching and
+  the simplified empty Inbox.
+
+Completion condition: at supported wide and compact sizes, no sidebar, tab strip,
+`Get started with HQ`, or `Current:` guidance is rendered; every modeless non-editing workspace can
+switch directly to all six views with `1`-`6`; text fields retain literal digit input; modal input
+cannot affect the underlying view; Escape cannot revive stale dialogs; stable view state and typed
+effect routing remain intact; and the relevant model, render, shell, and PTY tests, formatting,
+strict linting, and warranted full suite pass.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-02 — Theme-aware shell command highlighting
 
 Completed agent command source is now parsed with Tree-sitter's Bash grammar and highlighted in
