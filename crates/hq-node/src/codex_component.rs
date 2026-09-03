@@ -5,7 +5,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use hq_application::QueryDomain;
 use hq_codex::{
     CODEX_PROVIDER_ID, CodexDiagnosticSink, CodexFactory, CodexFactoryConfig, CodexLaunch,
-    CodexLaunchResolver, CodexProcessStarter,
+    CodexLaunchResolver, CodexOperationalDiagnosticSink, CodexProcessStarter,
 };
 use hq_domain::{ProviderId, ResourceScheme};
 use hq_harness::{HarnessError, HarnessErrorClass, HarnessInstanceRequest, HarnessRegistry};
@@ -96,6 +96,7 @@ pub fn compose_codex_registry<P>(
     config: ForegroundCodexConfig,
     starter: Arc<dyn CodexProcessStarter>,
     diagnostics: Arc<dyn CodexDiagnosticSink>,
+    operational_diagnostics: Arc<dyn CodexOperationalDiagnosticSink>,
 ) -> Result<HarnessRegistry, HarnessError>
 where
     P: QueryDomain + Send + Sync + 'static,
@@ -110,6 +111,7 @@ where
         starter,
         resolver,
         diagnostics,
+        operational_diagnostics,
         call_timeout: config.call_timeout,
         process_grace: config.process_grace,
         frame_capacity: config.frame_capacity,
@@ -256,6 +258,7 @@ mod tests {
             ForegroundCodexConfig::default(),
             Arc::new(Starter),
             Arc::new(Diagnostics),
+            Arc::new(hq_codex::DiscardCodexDiagnostics),
         )
         .expect("registry composes");
         let capabilities = registry

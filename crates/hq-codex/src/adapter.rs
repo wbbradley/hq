@@ -53,6 +53,8 @@ pub struct CodexFactoryConfig {
     pub resolver: Arc<dyn CodexLaunchResolver>,
     /// Private sink for bounded, untrusted provider diagnostics.
     pub diagnostics: Arc<dyn CodexDiagnosticSink>,
+    /// Body-free transport coalescing diagnostics.
+    pub operational_diagnostics: Arc<dyn crate::CodexOperationalDiagnosticSink>,
     /// Maximum wait for one correlated protocol response.
     pub call_timeout: Duration,
     /// Grace period before child termination escalates to kill.
@@ -122,7 +124,11 @@ impl HarnessFactory for CodexFactory {
         let launch = self.config.resolver.resolve(&request)?;
         validate_launch(&launch)?;
         let pipes = self.config.starter.start(&launch, &request.environment)?;
-        let mut transport = JsonlTransport::start(pipes.output, self.config.frame_capacity)?;
+        let mut transport = JsonlTransport::start_with_diagnostics(
+            pipes.output,
+            self.config.frame_capacity,
+            Arc::clone(&self.config.operational_diagnostics),
+        )?;
         transport.bind_input(pipes.input);
         let stderr = spawn_stderr_drain(pipes.errors, Arc::clone(&self.config.diagnostics))?;
         Ok(Box::new(CodexInstance {

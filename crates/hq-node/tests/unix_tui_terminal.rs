@@ -13,6 +13,7 @@ use std::{
     path::Path,
     process::{Command, ExitStatus, Stdio},
     sync::{Mutex, MutexGuard},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -825,6 +826,158 @@ fn installed_fake_codex_approval_round_trips_through_the_tui() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
+fn installed_progress_flood_keeps_new_clients_responsive_and_restartable() {
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let worktree = directory.path().join("flood-worktree");
+    let provider_bin = directory.path().join("provider-bin");
+    std::fs::create_dir(&worktree).expect("flood working tree");
+    std::fs::create_dir(&provider_bin).expect("provider bin directory");
+    install_fake_codex(&provider_bin, false);
+    std::fs::write(provider_bin.join("progress-flood"), b"enabled")
+        .expect("progress flood marker writes");
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let search_path = format!("{}:{inherited_path}", provider_bin.display());
+
+    initialize_identity(&state_root);
+    let daemon = start_foreground_daemon(&state_root, &search_path, &provider_bin.join("codex"));
+    let human = hq_output_with_search_path(&state_root, &["human", "create"], &search_path);
+    assert!(human.status.success(), "human create failed: {human:?}");
+
+    let run = thread::scope(|scope| {
+        let tui = scope.spawn(|| {
+            run_in_pty(
+                &state_root,
+                true,
+                PtyInteraction::CreateGuidedProjectWork {
+                    name: "flood-project",
+                    path: worktree.to_str().expect("UTF-8 flood path"),
+                    agent: "flood-agent",
+                    content: "exercise the progress flood",
+                    search_path: &search_path,
+                    approval: false,
+                },
+            )
+        });
+        wait_for_path(&provider_bin.join("flood-started"), Duration::from_secs(5));
+
+        for arguments in [
+            &["daemon", "readiness"][..],
+            &["--output", "json", "project", "list"][..],
+            &["daemon", "readiness"][..],
+        ] {
+            let started = Instant::now();
+            let output = hq_output(&state_root, arguments);
+            assert!(
+                output.status.success(),
+                "concurrent client failed: {output:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "concurrent client exceeded one second: {:?}",
+                started.elapsed()
+            );
+        }
+
+        let resident_kib = process_resident_kib(
+            daemon
+                .child
+                .as_ref()
+                .expect("daemon child remains owned")
+                .id(),
+        );
+        assert!(
+            resident_kib < 512 * 1024,
+            "daemon resident memory exceeded 512 MiB: {resident_kib} KiB"
+        );
+        wait_for_path(
+            &provider_bin.join("flood-finished"),
+            Duration::from_secs(20),
+        );
+        tui.join().expect("flood TUI thread joins")
+    });
+    assert!(run.status.success(), "flood TUI failed: {:?}", run.bytes);
+    assert_eq!(run.before, run.after, "flood TUI did not restore modes");
+
+    let completion_deadline = Instant::now() + Duration::from_secs(5);
+    while !mailbox_contains(&state_root, "finished-turn-1") {
+        assert!(
+            Instant::now() < completion_deadline,
+            "flood turn did not complete"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let listing = hq_output(&state_root, &["--output", "json", "list", "--all"]);
+    assert!(
+        listing.status.success(),
+        "post-flood listing failed: {listing:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&listing.stdout)
+            .match_indices("progress-")
+            .count()
+            <= 1,
+        "replaceable progress escaped canonical coalescing"
+    );
+
+    let diagnostics =
+        std::fs::read_to_string(state_root.join("diagnostics").join("boundaries.jsonl"))
+            .expect("default diagnostics read");
+    let records = diagnostics
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect::<Vec<_>>();
+    let drains = records
+        .iter()
+        .filter(|record| record["kind"] == "harness_ready_drain")
+        .collect::<Vec<_>>();
+    let transport_coalesced = records
+        .iter()
+        .filter(|record| record["kind"] == "codex_transport_coalesced")
+        .map(|record| record["coalesced_values"].as_u64().unwrap_or(0))
+        .sum::<u64>();
+    assert!(
+        drains
+            .iter()
+            .map(|record| record["events_polled"].as_u64().unwrap_or(0))
+            .sum::<u64>()
+            .saturating_add(transport_coalesced)
+            >= 2_000,
+        "diagnostics did not account for the flood"
+    );
+    assert!(
+        drains
+            .iter()
+            .all(|record| record["queue_high_water"].as_u64().unwrap_or(0) <= 4),
+        "normalized queue exceeded its flood bound"
+    );
+    assert!(
+        drains
+            .iter()
+            .map(|record| record["coalesced_values"].as_u64().unwrap_or(0))
+            .sum::<u64>()
+            .saturating_add(transport_coalesced)
+            > 0,
+        "installed flood did not exercise coalescing"
+    );
+
+    let restarted = hq_output(&state_root, &["daemon", "restart"]);
+    assert!(
+        restarted.status.success(),
+        "daemon restart failed: {restarted:?}"
+    );
+    let ready = hq_output(&state_root, &["daemon", "readiness"]);
+    assert!(
+        ready.status.success(),
+        "restarted daemon was not ready: {ready:?}"
+    );
+    let stopped = hq_output(&state_root, &["daemon", "stop"]);
+    assert!(stopped.status.success(), "daemon stop failed: {stopped:?}");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn installed_tui_project_lifecycle_matches_the_cli() {
     let _scenario = serial_scenario();
     let directory = TestDirectory::new();
@@ -1343,7 +1496,7 @@ fn run_in_pty_with_trace(
             })
         {
             master
-                .write_all(b"\x1b[Fh")
+                .write_all(b"\x1b[F\x1b[D")
                 .expect("Inbox End and back keys write");
             master.flush().expect("Inbox End and back keys flush");
             managed_provider_sent = true;
@@ -2314,6 +2467,32 @@ fn project_has_dispatch_count(state_root: &Path, name: &str, expected: usize) ->
         && project["dispatches"].as_array().map(Vec::len) == Some(expected)
 }
 
+fn wait_for_path(path: &Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "path did not appear: {}; flood position: {:?}",
+            path.display(),
+            std::fs::read_to_string(path.with_file_name("flood-position")).ok()
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn process_resident_kib(process_id: u32) -> u64 {
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &process_id.to_string()])
+        .stdin(Stdio::null())
+        .output()
+        .expect("ps runs");
+    assert!(output.status.success(), "ps failed: {output:?}");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("resident KiB parses")
+}
+
 fn hq_output(state_root: &Path, arguments: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_hq"));
     command.arg("--state-root").arg(state_root);
@@ -2382,6 +2561,19 @@ for line in sys.stdin:
         turn = {"id": turn_id, "status": "inProgress", "items": []}
         print(json.dumps({"method": "turn/started", "params": {"threadId": thread_id, "turn": turn}}), flush=True)
         print(json.dumps({"id": request_id, "result": {"turn": turn}}), flush=True)
+        if os.path.exists(os.path.join(os.path.dirname(__file__), "progress-flood")):
+            with open(os.path.join(os.path.dirname(__file__), "flood-started"), "w") as marker:
+                marker.write("started")
+            for sequence in range(2000):
+                if sequence % 100 == 0:
+                    with open(os.path.join(os.path.dirname(__file__), "flood-position"), "w") as marker:
+                        marker.write(str(sequence))
+                progress = {"method": "item/commandExecution/outputDelta", "params": {"threadId": thread_id, "turnId": turn_id, "itemId": f"command-{turn_number}", "delta": f"progress-{sequence}"}}
+                print(json.dumps(progress), flush=True)
+                if sequence % 200 == 199:
+                    time.sleep(0.1)
+            with open(os.path.join(os.path.dirname(__file__), "flood-finished"), "w") as marker:
+                marker.write("finished")
         if os.path.exists(os.path.join(os.path.dirname(__file__), "request-approval")):
             approval_id = 900 + turn_number
             approval = {"id": approval_id, "method": "item/commandExecution/requestApproval", "params": {"threadId": thread_id, "turnId": turn_id, "itemId": f"command-{turn_number}", "command": "cargo test", "cwd": os.getcwd(), "reason": "Run the test command?"}}

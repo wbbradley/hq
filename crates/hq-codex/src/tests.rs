@@ -1329,6 +1329,7 @@ mod adapter {
                 },
             }),
             diagnostics: sink,
+            operational_diagnostics: Arc::new(crate::DiscardCodexDiagnostics),
             call_timeout: Duration::from_millis(40),
             process_grace: Duration::from_secs(1),
             frame_capacity: 16,

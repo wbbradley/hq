@@ -11,7 +11,9 @@ use std::{
 use hq_harness::{HarnessError, HarnessErrorClass, HarnessEventNotifier};
 use serde::Serialize;
 
-use crate::protocol::WireMessage;
+#[cfg(test)]
+use crate::DiscardCodexDiagnostics;
+use crate::{CodexOperationalDiagnosticSink, protocol::WireMessage};
 
 pub(crate) const MAX_CODEX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
@@ -49,9 +51,18 @@ pub(crate) struct JsonlTransport {
 }
 
 impl JsonlTransport {
+    #[cfg(test)]
     pub(crate) fn start(
         output: Box<dyn Read + Send>,
         capacity: usize,
+    ) -> Result<Self, HarnessError> {
+        Self::start_with_diagnostics(output, capacity, Arc::new(DiscardCodexDiagnostics))
+    }
+
+    pub(crate) fn start_with_diagnostics(
+        output: Box<dyn Read + Send>,
+        capacity: usize,
+        diagnostics: Arc<dyn CodexOperationalDiagnosticSink>,
     ) -> Result<Self, HarnessError> {
         if capacity == 0 {
             return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
@@ -61,7 +72,7 @@ impl JsonlTransport {
         let reader_notifier = Arc::clone(&notifier);
         let reader = thread::Builder::new()
             .name("hq-codex-jsonl".to_owned())
-            .spawn(move || read_frames(output, &sender, &reader_notifier))
+            .spawn(move || read_frames(output, &sender, &reader_notifier, diagnostics.as_ref()))
             .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?;
         Ok(Self {
             input: None,
@@ -137,10 +148,13 @@ fn read_frames(
     mut output: Box<dyn Read + Send>,
     sender: &SyncSender<TransportRead>,
     notifier: &Mutex<Option<HarnessEventNotifier>>,
+    diagnostics: &dyn CodexOperationalDiagnosticSink,
 ) {
     let mut pending = Vec::new();
     let mut chunk = [0_u8; 8 * 1024];
     loop {
+        let mut ready = Vec::new();
+        let mut coalesced = 0usize;
         let count = match output.read(&mut chunk) {
             Ok(0) => {
                 let terminal = if pending.is_empty() {
@@ -175,11 +189,13 @@ fn read_frames(
                 pending.clear();
                 match parsed {
                     Ok(message) if valid_envelope(&message) => {
-                        if !send_incoming(sender, notifier, TransportRead::Message(message)) {
-                            return;
-                        }
+                        coalesced = coalesced
+                            .saturating_add(usize::from(push_coalesced(&mut ready, message)));
                     }
                     Ok(_) | Err(_) => {
+                        if !send_messages(sender, notifier, ready) {
+                            return;
+                        }
                         send_incoming(
                             sender,
                             notifier,
@@ -200,7 +216,65 @@ fn read_frames(
                 pending.push(*byte);
             }
         }
+        if coalesced > 0 {
+            diagnostics.transport_coalesced(coalesced);
+        }
+        if !send_messages(sender, notifier, ready) {
+            return;
+        }
     }
+}
+
+fn push_coalesced(messages: &mut Vec<WireMessage>, message: WireMessage) -> bool {
+    let replace = messages.last().is_some_and(|previous| {
+        replaceable_notification_key(previous).is_some_and(|previous_key| {
+            replaceable_notification_key(&message) == Some(previous_key)
+        })
+    });
+    if replace {
+        if let Some(previous) = messages.last_mut() {
+            *previous = message;
+        }
+    } else {
+        messages.push(message);
+    }
+    replace
+}
+
+fn replaceable_notification_key(message: &WireMessage) -> Option<(&str, &str, &str, &str)> {
+    if message.id.is_some() {
+        return None;
+    }
+    let method = message.method.as_deref()?;
+    if !matches!(
+        method,
+        "item/plan/delta"
+            | "item/commandExecution/outputDelta"
+            | "item/fileChange/outputDelta"
+            | "item/mcpToolCall/progress"
+    ) {
+        return None;
+    }
+    let params = message.params.as_ref()?.as_object()?;
+    Some((
+        method,
+        params.get("threadId")?.as_str()?,
+        params.get("turnId")?.as_str()?,
+        params.get("itemId")?.as_str()?,
+    ))
+}
+
+fn send_messages(
+    sender: &SyncSender<TransportRead>,
+    notifier: &Mutex<Option<HarnessEventNotifier>>,
+    messages: Vec<WireMessage>,
+) -> bool {
+    for message in messages {
+        if !send_incoming(sender, notifier, TransportRead::Message(message)) {
+            return false;
+        }
+    }
+    true
 }
 
 fn send_incoming(
@@ -237,13 +311,30 @@ fn valid_envelope(message: &WireMessage) -> bool {
 #[cfg(test)]
 mod tests {
     use std::{
+        fmt::Write as _,
         io::{self, Cursor, Read},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
     use hq_harness::HarnessEventNotifier;
 
-    use super::{JsonlTransport, MAX_CODEX_FRAME_BYTES, TransportFailure, TransportRead};
+    use super::{
+        CodexOperationalDiagnosticSink, JsonlTransport, MAX_CODEX_FRAME_BYTES, TransportFailure,
+        TransportRead,
+    };
+
+    #[derive(Default)]
+    struct RecordingOperationalDiagnostics(AtomicUsize);
+
+    impl CodexOperationalDiagnosticSink for RecordingOperationalDiagnostics {
+        fn transport_coalesced(&self, count: usize) {
+            self.0.fetch_add(count, Ordering::SeqCst);
+        }
+    }
 
     #[test]
     fn accepts_partial_reads_and_additive_fields() -> Result<(), Box<dyn std::error::Error>> {
@@ -332,6 +423,65 @@ mod tests {
         assert!(notifier.wait(Some(Duration::from_secs(1)))?);
         assert!(matches!(transport.try_receive(), TransportRead::Message(_)));
         assert!(matches!(transport.try_receive(), TransportRead::Closed));
+        Ok(())
+    }
+
+    #[test]
+    fn one_read_coalesces_adjacent_replaceable_progress_before_channel_backpressure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut input = String::new();
+        for sequence in 0..20 {
+            writeln!(
+                input,
+                "{{\"method\":\"item/commandExecution/outputDelta\",\"params\":{{\"threadId\":\"thread\",\"turnId\":\"turn\",\"itemId\":\"command\",\"delta\":\"progress-{sequence}\"}}}}"
+            )?;
+        }
+        let diagnostics = Arc::new(RecordingOperationalDiagnostics::default());
+        let mut transport = JsonlTransport::start_with_diagnostics(
+            Box::new(Cursor::new(input.into_bytes())),
+            2,
+            diagnostics.clone(),
+        )?;
+        transport.join_reader()?;
+        assert_eq!(diagnostics.0.load(Ordering::SeqCst), 19);
+
+        let TransportRead::Message(message) = transport.try_receive() else {
+            return Err(io::Error::other("latest progress was not queued").into());
+        };
+        assert_eq!(
+            message
+                .params
+                .as_ref()
+                .and_then(|params| params.get("delta"))
+                .and_then(serde_json::Value::as_str),
+            Some("progress-19")
+        );
+        assert!(matches!(transport.try_receive(), TransportRead::Closed));
+        Ok(())
+    }
+
+    #[test]
+    fn transport_coalescing_does_not_cross_a_durable_protocol_message()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let progress = |delta: &str| {
+            serde_json::from_value::<crate::protocol::WireMessage>(serde_json::json!({
+                "method": "item/commandExecution/outputDelta",
+                "params": {
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "itemId": "command",
+                    "delta": delta,
+                }
+            }))
+        };
+        let mut messages = Vec::new();
+        assert!(!super::push_coalesced(&mut messages, progress("before")?));
+        assert!(!super::push_coalesced(
+            &mut messages,
+            serde_json::from_value(serde_json::json!({"id": 7, "result": {}}))?,
+        ));
+        assert!(!super::push_coalesced(&mut messages, progress("after")?));
+        assert_eq!(messages.len(), 3);
         Ok(())
     }
 

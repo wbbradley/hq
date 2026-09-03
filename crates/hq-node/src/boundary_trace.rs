@@ -8,6 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use hq_codex::CodexOperationalDiagnosticSink;
 use hq_harness::{HarnessDiagnosticEvent, HarnessDiagnosticSink, HarnessDiagnosticTarget};
 use nix::time::{ClockId, clock_gettime};
 use serde::Serialize;
@@ -117,6 +118,8 @@ pub enum BoundaryKind {
     HarnessReadyDrain,
     /// A live protocol response did not match its readiness artifact generation.
     StaleReadiness,
+    /// Replaceable Codex notifications were coalesced before transport queue admission.
+    CodexTransportCoalesced,
 }
 
 /// Optional stable correlation identities; no field accepts arbitrary text.
@@ -279,6 +282,18 @@ impl HarnessDiagnosticSink for BoundaryTrace {
                 queue_high_water: Some(saturating_u64(event.queue_high_water)),
                 coalesced_values: Some(saturating_u64(event.coalesced_values)),
                 events_polled: Some(saturating_u64(event.events_polled)),
+                ..BoundaryIds::default()
+            },
+        );
+    }
+}
+
+impl CodexOperationalDiagnosticSink for BoundaryTrace {
+    fn transport_coalesced(&self, count: usize) {
+        self.record(
+            BoundaryKind::CodexTransportCoalesced,
+            BoundaryIds {
+                coalesced_values: Some(saturating_u64(count)),
                 ..BoundaryIds::default()
             },
         );

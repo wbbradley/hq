@@ -8,9 +8,9 @@ mod transport;
 
 pub use adapter::{CodexFactory, CodexFactoryConfig};
 pub use process::{
-    CodexDiagnosticSink, CodexLaunch, CodexLaunchResolver, CodexProcessControl, CodexProcessPipes,
-    CodexProcessStarter, CodexWaitOutcome, DiscardCodexDiagnostics, ExecCodexProcessStarter,
-    FixedCodexLaunchResolver,
+    CodexDiagnosticSink, CodexLaunch, CodexLaunchResolver, CodexOperationalDiagnosticSink,
+    CodexProcessControl, CodexProcessPipes, CodexProcessStarter, CodexWaitOutcome,
+    DiscardCodexDiagnostics, ExecCodexProcessStarter, FixedCodexLaunchResolver,
 };
 
 /// Exact Codex CLI baseline that generated the checked-in app-server schema.

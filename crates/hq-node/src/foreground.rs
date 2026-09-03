@@ -175,6 +175,7 @@ fn open_generation(
         codex,
         Arc::new(hq_codex::ExecCodexProcessStarter),
         Arc::new(hq_codex::DiscardCodexDiagnostics),
+        Arc::new(trace.clone()),
     )
     .map_err(|_| ForegroundNodeError::Composition)?;
     let persistence = Arc::new(CanonicalHarnessPersistence::new(

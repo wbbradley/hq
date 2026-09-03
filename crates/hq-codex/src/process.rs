@@ -106,12 +106,22 @@ pub trait CodexDiagnosticSink: Send + Sync {
     fn line(&self, line: &str);
 }
 
+/// Body-free operational diagnostics for the bounded app-server transport.
+pub trait CodexOperationalDiagnosticSink: Send + Sync {
+    /// Records adjacent replaceable notifications discarded before queue admission.
+    fn transport_coalesced(&self, count: usize);
+}
+
 /// Default diagnostic sink that discards all provider stderr.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DiscardCodexDiagnostics;
 
 impl CodexDiagnosticSink for DiscardCodexDiagnostics {
     fn line(&self, _line: &str) {}
+}
+
+impl CodexOperationalDiagnosticSink for DiscardCodexDiagnostics {
+    fn transport_coalesced(&self, _count: usize) {}
 }
 
 /// Standard-library app-server process starter.
