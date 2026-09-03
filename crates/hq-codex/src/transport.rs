@@ -334,6 +334,8 @@ mod tests {
         fn transport_coalesced(&self, count: usize) {
             self.0.fetch_add(count, Ordering::SeqCst);
         }
+
+        fn interaction_received(&self, _operation_id: [u8; 32], _request_id: [u8; 32]) {}
     }
 
     #[test]

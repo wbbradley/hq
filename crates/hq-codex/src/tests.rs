@@ -139,9 +139,9 @@ mod adapter {
     use sha2::{Digest, Sha256};
 
     use crate::{
-        CodexDiagnosticSink, CodexFactory, CodexFactoryConfig, CodexLaunch, CodexProcessControl,
-        CodexProcessPipes, CodexProcessStarter, CodexWaitOutcome, ExecCodexProcessStarter,
-        FixedCodexLaunchResolver,
+        CodexDiagnosticSink, CodexFactory, CodexFactoryConfig, CodexLaunch,
+        CodexOperationalDiagnosticSink, CodexProcessControl, CodexProcessPipes,
+        CodexProcessStarter, CodexWaitOutcome, ExecCodexProcessStarter, FixedCodexLaunchResolver,
     };
     use crate::{
         protocol::{
@@ -284,6 +284,21 @@ mod adapter {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingOperationalSink {
+        interactions: Mutex<Vec<([u8; 32], [u8; 32])>>,
+    }
+
+    impl CodexOperationalDiagnosticSink for RecordingOperationalSink {
+        fn transport_coalesced(&self, _count: usize) {}
+
+        fn interaction_received(&self, operation_id: [u8; 32], request_id: [u8; 32]) {
+            if let Ok(mut interactions) = self.interactions.lock() {
+                interactions.push((operation_id, request_id));
+            }
+        }
+    }
+
     #[test]
     fn start_submit_normalize_and_answer_request() -> Result<(), Box<dyn std::error::Error>> {
         let spec = ServerSpec {
@@ -293,7 +308,9 @@ mod adapter {
         };
         let starter = Arc::new(FakeStarter::new([spec]));
         let sink = Arc::new(RecordingSink::default());
-        let factory = factory(Arc::clone(&starter), Arc::clone(&sink))?;
+        let operational = Arc::new(RecordingOperationalSink::default());
+        let factory =
+            factory_with_operational(Arc::clone(&starter), Arc::clone(&sink), operational.clone())?;
         let instance = factory.create_instance(instance_request())?;
         let mut opened = instance.open_session(HarnessSessionRequest::Start)?;
         assert_eq!(opened.session_id.as_str(), "thr-test");
@@ -320,6 +337,16 @@ mod adapter {
         else {
             return Err("expected interactive request".into());
         };
+        assert_eq!(
+            *operational
+                .interactions
+                .lock()
+                .map_err(|_| "operational diagnostic sink was poisoned")?,
+            vec![(
+                *request.operation_id.as_bytes(),
+                *request.request_id.as_bytes()
+            )]
+        );
         opened
             .session
             .answer_interactive(HarnessInteractiveAnswer {
@@ -1317,6 +1344,14 @@ mod adapter {
         starter: Arc<FakeStarter>,
         sink: Arc<RecordingSink>,
     ) -> Result<CodexFactory, HarnessError> {
+        factory_with_operational(starter, sink, Arc::new(crate::DiscardCodexDiagnostics))
+    }
+
+    fn factory_with_operational(
+        starter: Arc<FakeStarter>,
+        sink: Arc<RecordingSink>,
+        operational_diagnostics: Arc<dyn CodexOperationalDiagnosticSink>,
+    ) -> Result<CodexFactory, HarnessError> {
         CodexFactory::new(CodexFactoryConfig {
             starter,
             resolver: Arc::new(FixedCodexLaunchResolver {
@@ -1329,7 +1364,7 @@ mod adapter {
                 },
             }),
             diagnostics: sink,
-            operational_diagnostics: Arc::new(crate::DiscardCodexDiagnostics),
+            operational_diagnostics,
             call_timeout: Duration::from_millis(40),
             process_grace: Duration::from_secs(1),
             frame_capacity: 16,

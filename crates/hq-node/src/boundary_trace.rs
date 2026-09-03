@@ -94,6 +94,8 @@ pub enum BoundaryKind {
     CodexSubmitted,
     /// A normalized provider event reached the harness owner.
     ProviderEventReceived,
+    /// A validated provider interaction entered the Codex adapter.
+    ProviderInteractionReceived,
     /// A pending provider interaction became queryable.
     InteractionPublished,
     /// A local revision invalidation was published.
@@ -298,6 +300,17 @@ impl CodexOperationalDiagnosticSink for BoundaryTrace {
             },
         );
     }
+
+    fn interaction_received(&self, operation_id: [u8; 32], request_id: [u8; 32]) {
+        self.record(
+            BoundaryKind::ProviderInteractionReceived,
+            BoundaryIds {
+                operation: Some(operation_id),
+                provider_request: Some(request_id),
+                ..BoundaryIds::default()
+            },
+        );
+    }
 }
 
 impl std::fmt::Debug for BoundaryTrace {
@@ -445,6 +458,28 @@ mod tests {
         assert_eq!(value["operation_id"], "ab".repeat(32));
         assert_eq!(value["provider_request_id"], "cd".repeat(32));
         assert!(value.get("message").is_none());
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(directory);
+    }
+
+    #[test]
+    fn codex_interaction_ingress_records_only_correlated_identities() {
+        let directory = std::env::temp_dir().join(format!(
+            "hq-boundary-interaction-{}-{}",
+            std::process::id(),
+            monotonic_nanoseconds().expect("monotonic clock")
+        ));
+        std::fs::create_dir(&directory).expect("trace directory");
+        let path = directory.join("boundaries.jsonl");
+        let trace = BoundaryTrace::open(&path, BoundaryProcess::Node);
+        CodexOperationalDiagnosticSink::interaction_received(&trace, [0xab; 32], [0xcd; 32]);
+
+        let bytes = std::fs::read(&path).expect("trace bytes");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("trace JSON");
+        assert_eq!(value["kind"], "provider_interaction_received");
+        assert_eq!(value["operation_id"], "ab".repeat(32));
+        assert_eq!(value["provider_request_id"], "cd".repeat(32));
+        assert_eq!(value.as_object().expect("record object").len(), 6);
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(directory);
     }

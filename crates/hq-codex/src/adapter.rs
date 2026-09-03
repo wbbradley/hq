@@ -124,10 +124,11 @@ impl HarnessFactory for CodexFactory {
         let launch = self.config.resolver.resolve(&request)?;
         validate_launch(&launch)?;
         let pipes = self.config.starter.start(&launch, &request.environment)?;
+        let operational_diagnostics = Arc::clone(&self.config.operational_diagnostics);
         let mut transport = JsonlTransport::start_with_diagnostics(
             pipes.output,
             self.config.frame_capacity,
-            Arc::clone(&self.config.operational_diagnostics),
+            Arc::clone(&operational_diagnostics),
         )?;
         transport.bind_input(pipes.input);
         let stderr = spawn_stderr_drain(pipes.errors, Arc::clone(&self.config.diagnostics))?;
@@ -138,6 +139,7 @@ impl HarnessFactory for CodexFactory {
             stderr: Some(stderr),
             call_timeout: self.config.call_timeout,
             process_grace: self.config.process_grace,
+            operational_diagnostics,
         }))
     }
 }
@@ -149,6 +151,7 @@ struct CodexInstance {
     stderr: Option<JoinHandle<()>>,
     call_timeout: Duration,
     process_grace: Duration,
+    operational_diagnostics: Arc<dyn crate::CodexOperationalDiagnosticSink>,
 }
 
 impl HarnessInstance for CodexInstance {
@@ -197,6 +200,7 @@ struct CodexSession {
     stderr: Option<JoinHandle<()>>,
     call_timeout: Duration,
     process_grace: Duration,
+    operational_diagnostics: Arc<dyn crate::CodexOperationalDiagnosticSink>,
     thread_id: String,
     next_call_id: u64,
     intake_open: bool,
@@ -272,6 +276,7 @@ impl CodexSession {
             stderr: instance.stderr,
             call_timeout: instance.call_timeout,
             process_grace: instance.process_grace,
+            operational_diagnostics: instance.operational_diagnostics,
             thread_id: String::new(),
             next_call_id: 0,
             intake_open: true,
@@ -516,6 +521,12 @@ impl CodexSession {
         if requests.is_empty() {
             self.fail_closed(id, method, &params)?;
             return Ok(());
+        }
+        for request in &requests {
+            self.operational_diagnostics.interaction_received(
+                *request.operation_id.as_bytes(),
+                *request.request_id.as_bytes(),
+            );
         }
         self.request_groups.insert(
             group,

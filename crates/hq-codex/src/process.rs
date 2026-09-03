@@ -110,6 +110,9 @@ pub trait CodexDiagnosticSink: Send + Sync {
 pub trait CodexOperationalDiagnosticSink: Send + Sync {
     /// Records adjacent replaceable notifications discarded before queue admission.
     fn transport_coalesced(&self, count: usize);
+
+    /// Records one validated provider interaction entering the adapter.
+    fn interaction_received(&self, operation_id: [u8; 32], request_id: [u8; 32]);
 }
 
 /// Default diagnostic sink that discards all provider stderr.
@@ -122,6 +125,8 @@ impl CodexDiagnosticSink for DiscardCodexDiagnostics {
 
 impl CodexOperationalDiagnosticSink for DiscardCodexDiagnostics {
     fn transport_coalesced(&self, _count: usize) {}
+
+    fn interaction_received(&self, _operation_id: [u8; 32], _request_id: [u8; 32]) {}
 }
 
 /// Standard-library app-server process starter.
