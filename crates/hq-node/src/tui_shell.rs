@@ -523,8 +523,8 @@ fn normalize_key(key: KeyEvent) -> Option<TuiTerminalEvent> {
         let input = match key.code {
             KeyCode::Char('a' | 'A') => UiInput::MoveCursorHome,
             KeyCode::Char('e' | 'E') => UiInput::MoveCursorEnd,
-            KeyCode::Char('u' | 'U') => UiInput::DeleteToLineEnd,
-            KeyCode::Char('k' | 'K') => UiInput::DeleteToLineStart,
+            KeyCode::Char('k' | 'K') => UiInput::DeleteToLineEnd,
+            KeyCode::Char('u' | 'U') => UiInput::DeleteToLineStart,
             KeyCode::Char('d' | 'D') => UiInput::Delete,
             _ => return None,
         };

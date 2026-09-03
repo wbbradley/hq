@@ -1106,8 +1106,8 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
         let help = render_text(&help);
         assert!(help.contains("Ctrl-A/Home line start"), "{help}");
         assert!(help.contains("Delete/Ctrl-D delete right"), "{help}");
-        assert!(help.contains("Ctrl-U delete to line end"), "{help}");
-        assert!(help.contains("Ctrl-K delete to line start"), "{help}");
+        assert!(help.contains("Ctrl-K delete to line end"), "{help}");
+        assert!(help.contains("Ctrl-U delete to line start"), "{help}");
     }
 }
 

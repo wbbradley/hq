@@ -136,8 +136,8 @@ fn compose_control_keys_normalize_to_text_editing_intents() {
     for (character, expected) in [
         ('a', UiInput::MoveCursorHome),
         ('e', UiInput::MoveCursorEnd),
-        ('u', UiInput::DeleteToLineEnd),
-        ('k', UiInput::DeleteToLineStart),
+        ('k', UiInput::DeleteToLineEnd),
+        ('u', UiInput::DeleteToLineStart),
         ('d', UiInput::Delete),
     ] {
         assert_eq!(

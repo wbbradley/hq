@@ -626,7 +626,7 @@ fn dialog_help_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'stati
             Line::from("←/→ move one character · ↑/↓ move one line"),
             Line::from("Ctrl-A/Home line start · Ctrl-E/End line end"),
             Line::from("Backspace delete left · Delete/Ctrl-D delete right"),
-            Line::from("Ctrl-U delete to line end · Ctrl-K delete to line start"),
+            Line::from("Ctrl-K delete to line end · Ctrl-U delete to line start"),
             Line::from("Ctrl-J/Shift-Enter newline · Enter send · Esc close"),
             Line::default(),
             Line::from("t — technical details · F1 / Esc — close help"),
