@@ -12654,3 +12654,45 @@ Dependencies: the pure TUI reducer and effect-identity model; retry-safe project
 Completion condition: creating an isolated worktree from the global `n` workflow may take multiple daemon turns or reconnect, but success always consumes the creation child, selects the exact new project, and advances once to choose or create an agent and then its conversation setup; every Escape has the documented destination and can never reveal stale creation ancestry; no project or Git operation is duplicated.
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-04 — Live daemon-owned installation configuration
+
+Installation settings now have one daemon-owned, lock-retaining configuration manager that
+serializes field replacements, validates and atomically persists each complete candidate, and
+publishes it in memory only after persistence succeeds. The strict local API exposes canonical
+configuration reads and field-specific updates; CLI and TUI clients use that live boundary while
+retaining an exclusive offline fallback and conservative response-loss diagnostics.
+
+Future Codex launches resolve model and permissive policy from the latest committed snapshot, and
+provider catalogs resolve their preferred provider live without mutating existing processes or
+durable bindings. The inert relay-default representation and command were removed in favor of the
+typed live relay policy. Configuration UI saves retain exact field/effect identity, apply themes
+only after acknowledgement, and reload authoritative state after failure or re-entry.
+
+Manager, protocol, server, client, CLI, TUI, launch, concurrency, persistence-failure, restart, and
+installed-daemon coverage was added. Formatting, strict locked workspace Clippy, and the complete
+locked all-target/all-feature workspace test suite pass.
+
+### Original plan entry
+
+### Make installation configuration daemon-owned and live for future launches
+
+`hq config set` and the TUI Config page currently try to acquire exclusive state-directory ownership even when the daemon already owns it, so valid changes fail with the generic
+`identity.operation_failed`. The daemon also captures Codex defaults and the preferred provider at
+startup, which means writing `local-config.v1.json` alone cannot update later launch decisions in
+the active generation.
+
+- Add a strict local-API configuration query and field-specific update contract, with DTO conversion at the node boundary for the complete canonical configuration and typed patches for theme, preferred provider, Codex model, and Codex yolo. Keep unsigned installation configuration separate from canonical domain facts. Do not send paths, configuration contents, or secrets in invalidations or diagnostics.
+- Introduce one daemon-owned configuration manager that retains the validated current snapshot and the sole persistence capability minted under `StateDirectoryOwner`. Serialize updates, rebuild the complete `LocalConfiguration` through its validator, atomically persist it, and publish the in-memory snapshot only after persistence succeeds. Use field-specific replacement rather than stale whole-object writes so simultaneous CLI and TUI edits to different fields cannot overwrite one another.
+- Route CLI configuration reads and setters through the running daemon when it owns the state directory; retain the exclusive offline persistence path when no daemon exists so configuration remains usable before startup. Close the probe/ownership race by retrying the daemon path when offline acquisition reports an active owner. Preserve strict human and JSON output, and replace the generic identity failure with an actionable configuration-unavailable or uncertain diagnostic when the daemon cannot confirm the result.
+- Route TUI configuration loading and saving through the same local API and remove its attempt to acquire `StateDirectoryOwner`. Reload authoritative configuration when entering or explicitly refreshing Config so a long-running TUI observes changes made by another client. Retain requester-local theme validation and immediate theme application after the daemon acknowledges persistence; failed or stale edits reload the daemon snapshot instead of presenting optimistic values as saved.
+- Replace startup-copied provider settings with a shared read-only live configuration source at the launch and selection boundaries. Resolve Codex yolo and model from the latest committed snapshot for every subsequently launched provider process, including a stopped session that launches a new process; never mutate an already-running provider process or imply that a new conversation reusing it changed policy. Resolve the preferred provider live for later catalog/default choices without rewriting any existing agent, provider, session, project, or thread binding.
+- Remove the inert `LocalConfiguration.relays`, `config set relays`, and matching TUI field, and direct relay membership changes to the existing typed `hq relay add/remove` API, whose durable policy includes access and authentication and already wakes the live relay engine. Update the pre-release configuration schema coherently rather than retaining a compatibility reader or two competing relay representations.
+- Treat response loss conservatively: a field replacement is safe for the user to reconcile by rereading configuration, but do not blindly replay it across a later competing update. Correlate each TUI save completion to its exact effect, keep another client's acknowledged field changes intact, and show the canonical daemon response after success.
+- Add pure manager/composition, local-protocol/server/client, CLI, TUI-model, and installed Unix/PTY tests. Cover a daemon plus TUI already running while CLI changes yolo; persistence across restart; a later fake-Codex launch receiving the new permissive/model values while an existing process is unchanged; live preferred-provider changes; concurrent different-field edits; same-field races; persistence failure; response loss/reconnect; owner-acquisition races; immediate requester theme application; Config reload in another client; and the absence of the old generic identity error. Update `docs/rust/identity-persistence.md`, `docs/rust/cli.md`, `docs/rust/node-lifecycle.md`, `docs/rust/tui.md`, `docs/nostr.md`, the behavior ledger, and acceptance scenarios for daemon ownership, exact live boundaries, offline fallback, and relay-policy consolidation.
+
+Dependencies: the exclusive state-directory owner and atomic configuration writer; the local API session/client path; the foreground Codex launch resolver and harness provider catalog; existing relay policy commands and live relay wake pipeline.
+
+Completion condition: while a daemon and TUI are running, `hq config set codex.yolo true` succeeds, is returned by daemon-backed reads, and remains persisted after restart; every Codex process launched afterward uses permissive policy while already-running processes and durable session/thread bindings remain unchanged; CLI and TUI edits cannot clobber unrelated fields; and relay configuration has one effective live path rather than an inert duplicate.
+
+<!-- End of archived plan entry. -->
