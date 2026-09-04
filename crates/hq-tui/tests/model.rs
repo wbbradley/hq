@@ -12,12 +12,12 @@ use hq_tui::{
     UiConversationEntryGeometry, UiConversationEntryPresentation, UiConversationPage,
     UiConversationTarget, UiConversationViewportObservation, UiConversationViewportPosition,
     UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput,
-    UiInteraction, UiInteractionChoice, UiInteractionKind, UiInteractionModal,
-    UiInteractionResponse, UiMailboxAction, UiMailboxDraft, UiMailboxDraftPane,
-    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiManagedSessionResult, UiMaterializedConversationView, UiMessageDelivery, UiMessageState,
-    UiMessageTarget, UiModel, UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectConversationSetup, UiProjectCreationChoice,
+    UiInteraction, UiInteractionChoice, UiInteractionKind, UiInteractionResponse,
+    UiInteractionTarget, UiMailboxAction, UiMailboxDraft, UiMailboxDraftPane, UiMailboxDraftTarget,
+    UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
+    UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiMessageTarget, UiModel,
+    UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject, UiProjectAction,
+    UiProjectAssignment, UiProjectConversationSetup, UiProjectCreationChoice,
     UiProjectFolderAction, UiProjectFormField, UiProjectInteraction, UiProjectManagementAction,
     UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
     UiProjectResult, UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider,
@@ -1512,6 +1512,24 @@ fn modal_and_text_entry_contexts_capture_number_shortcuts() {
     assert_eq!(captured.model.section(), UiSection::Inbox);
     assert_eq!(captured.model.new_modal(), retained.as_ref());
 
+    let mut question = command_approval(8, "thread-a");
+    question.kind = UiInteractionKind::Question;
+    question.target = UiInteractionTarget::Modal;
+    let provider_modal = update(
+        opened_conversation(vec![entry("activity", true)]),
+        UiEvent::InteractionsObserved {
+            interactions: vec![question],
+        },
+    )
+    .expect("provider question opens modally");
+    let captured = update(
+        provider_modal.model,
+        UiEvent::Input(UiInput::Character('4')),
+    )
+    .expect("provider modal captures digit");
+    assert_eq!(captured.model.section(), UiSection::Inbox);
+    assert!(captured.model.interaction_modal().is_some());
+
     let help = update(
         loaded_model(snapshot(2, &[])),
         UiEvent::Input(UiInput::Character('?')),
@@ -2158,7 +2176,7 @@ fn conversation_viewport_scrolls_visual_rows_independently_from_entry_navigation
 }
 
 #[test]
-fn entering_a_conversation_and_submitting_an_interaction_restore_follow_tail() {
+fn inline_command_approval_preserves_the_conversation_viewport() {
     let model = opened_conversation(vec![
         entry("message-1", false),
         entry("message-2", false),
@@ -2208,30 +2226,25 @@ fn entering_a_conversation_and_submitting_an_interaction_restore_follow_tail() {
                     label: "Deny".to_owned(),
                 }],
                 allow_text: false,
+                target: UiInteractionTarget::Conversation {
+                    row_id: "thread-a".to_owned(),
+                },
             }],
         },
     )
     .expect("interaction opens");
+    assert_eq!(prompted.model.focus(), UiFocus::Conversation);
+    let focused =
+        update(prompted.model, UiEvent::Input(UiInput::NextFocus)).expect("focus command approval");
+    assert_eq!(focused.model.focus(), UiFocus::Approval);
     let submitted =
-        update(prompted.model, UiEvent::Input(UiInput::Activate)).expect("denial submitted");
+        update(focused.model, UiEvent::Input(UiInput::Activate)).expect("denial submitted");
     assert_eq!(submitted.model.conversation_anchor(), Some("activity-3"));
-    assert!(submitted.model.conversation_follows_tail());
-
-    let scrolled_again = update(submitted.model, UiEvent::Input(UiInput::PreviousItem))
-        .expect("manual scroll after interaction");
-    let content = update(
-        scrolled_again.model,
-        UiEvent::Input(UiInput::MoveCursorLeft),
-    )
-    .expect("return to inbox selection");
-    let activated = update(content.model, UiEvent::Input(UiInput::Activate))
-        .expect("activate selected conversation");
-    assert_eq!(activated.model.conversation_anchor(), Some("activity-3"));
-    assert!(activated.model.conversation_follows_tail());
+    assert!(!submitted.model.conversation_follows_tail());
 }
 
 #[test]
-fn command_approval_owns_vim_navigation_over_conversation_focus() {
+fn command_approval_navigation_is_scoped_to_explicit_inline_focus() {
     let model = opened_conversation(vec![entry("activity", true)]);
     assert_eq!(model.focus(), UiFocus::Conversation);
     let prompted = update(
@@ -2263,23 +2276,44 @@ fn command_approval_owns_vim_navigation_over_conversation_focus() {
                     },
                 ],
                 allow_text: false,
+                target: UiInteractionTarget::Conversation {
+                    row_id: "thread-a".to_owned(),
+                },
             }],
         },
     )
     .expect("approval opens");
 
-    let next = update(prompted.model, UiEvent::Input(UiInput::Character('j')))
+    let unfocused = update(prompted.model, UiEvent::Input(UiInput::Character('j')))
+        .expect("conversation navigation remains active");
+    assert_eq!(unfocused.model.focus(), UiFocus::Conversation);
+    assert_eq!(
+        unfocused
+            .model
+            .current_command_approval()
+            .map(|state| state.selected),
+        Some(0)
+    );
+    let focused =
+        update(unfocused.model, UiEvent::Input(UiInput::NextFocus)).expect("Tab focuses approval");
+    assert_eq!(focused.model.focus(), UiFocus::Approval);
+    let next = update(focused.model, UiEvent::Input(UiInput::Character('j')))
         .expect("j selects next approval choice");
-    assert!(matches!(
-        next.model.interaction_modal(),
-        Some(UiInteractionModal::Prompt { selected: 1, .. })
-    ));
+    assert_eq!(
+        next.model
+            .current_command_approval()
+            .map(|state| state.selected),
+        Some(1)
+    );
     let previous = update(next.model, UiEvent::Input(UiInput::Character('k')))
         .expect("k selects previous approval choice");
-    assert!(matches!(
-        previous.model.interaction_modal(),
-        Some(UiInteractionModal::Prompt { selected: 0, .. })
-    ));
+    assert_eq!(
+        previous
+            .model
+            .current_command_approval()
+            .map(|state| state.selected),
+        Some(0)
+    );
     let next = update(previous.model, UiEvent::Input(UiInput::Character('j')))
         .expect("select session approval");
     let submitted =
@@ -2291,6 +2325,264 @@ fn command_approval_owns_vim_navigation_over_conversation_focus() {
             ..
         } if value == "acceptForSession"
     )));
+}
+
+#[test]
+fn inline_approval_suspends_and_restores_the_exact_draft_without_capturing_views() {
+    let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
+    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("open reply");
+    let (open_id, _) = open_draft_effect(&opening.effects);
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target: UiMailboxDraftTarget::Reply {
+                    message_id: [3; 32],
+                },
+                content: "retained text".to_owned(),
+                version: 7,
+            },
+        },
+    )
+    .expect("draft loads");
+    assert_eq!(loaded.model.focus(), UiFocus::Draft);
+
+    let observed = update(
+        loaded.model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("approval observed");
+    assert_eq!(observed.model.focus(), UiFocus::Approval);
+    assert!(matches!(
+        observed.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Editing { draft, .. })
+            if draft.content == "retained text" && draft.version == 7
+    ));
+
+    let agents = update(observed.model, UiEvent::Input(UiInput::Character('4')))
+        .expect("hidden draft does not capture global shortcut");
+    assert_eq!(agents.model.section(), UiSection::Agents);
+    let inbox = update(agents.model, UiEvent::Input(UiInput::Character('1')))
+        .expect("return to blocked conversation");
+    assert_eq!(inbox.model.focus(), UiFocus::Approval);
+
+    let left = update(inbox.model, UiEvent::Input(UiInput::Escape))
+        .expect("Escape leaves approval without answering");
+    assert_eq!(left.model.focus(), UiFocus::Conversation);
+    assert!(
+        left.effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::AnswerInteraction { .. }))
+    );
+    let refocused =
+        update(left.model, UiEvent::Input(UiInput::NextFocus)).expect("Tab returns to approval");
+    let submitted =
+        update(refocused.model, UiEvent::Input(UiInput::Activate)).expect("approval submits");
+    let effect_id = submitted
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::AnswerInteraction { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("answer effect");
+    let answered = update(
+        submitted.model,
+        UiEvent::InteractionAnswered {
+            effect_id,
+            request_id: [7; 32],
+            outcome: hq_tui::UiInteractionAnswerOutcome::Answered,
+        },
+    )
+    .expect("answer completes");
+    assert_eq!(answered.model.focus(), UiFocus::Draft);
+    assert!(matches!(
+        answered.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Editing { draft, .. })
+            if draft.content == "retained text" && draft.version == 7
+    ));
+}
+
+#[test]
+fn simultaneous_command_approvals_follow_only_the_selected_conversation() {
+    let loaded = materialized_transition(
+        snapshot(1, &["thread-a", "thread-b"]),
+        UiConversationPage {
+            row_id: "thread-a".to_owned(),
+            title: "Alice".to_owned(),
+            context: None,
+            entries: vec![entry("activity-a", true)],
+            next_cursor: None,
+        },
+    );
+    let model = update(loaded.model, UiEvent::Input(UiInput::Activate))
+        .expect("open first conversation")
+        .model;
+    let observed = update(
+        model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![
+                command_approval(7, "thread-a"),
+                command_approval(8, "thread-b"),
+            ],
+        },
+    )
+    .expect("approvals observed");
+    assert_eq!(
+        observed
+            .model
+            .current_command_approval()
+            .map(|state| state.interaction.request_id),
+        Some([7; 32])
+    );
+    let content =
+        update(observed.model, UiEvent::Input(UiInput::MoveCursorLeft)).expect("return to list");
+    let selected = update(content.model, UiEvent::Input(UiInput::NextItem))
+        .expect("select second conversation");
+    let switched = update(
+        selected.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a", "thread-b"]),
+                conversation: Some(UiConversationPage {
+                    row_id: "thread-b".to_owned(),
+                    title: "Bob".to_owned(),
+                    context: None,
+                    entries: vec![entry("activity-b", true)],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("second conversation loads");
+    assert_eq!(
+        switched
+            .model
+            .current_command_approval()
+            .map(|state| state.interaction.request_id),
+        Some([8; 32])
+    );
+}
+
+#[test]
+fn a_command_approval_does_not_block_replies_in_another_conversation() {
+    let loaded = materialized_transition(
+        snapshot(1, &["thread-a", "thread-b"]),
+        UiConversationPage {
+            row_id: "thread-a".to_owned(),
+            title: "Alice".to_owned(),
+            context: None,
+            entries: vec![entry("activity-a", true)],
+            next_cursor: None,
+        },
+    );
+    let opened =
+        update(loaded.model, UiEvent::Input(UiInput::Activate)).expect("open first conversation");
+    let observed = update(
+        opened.model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("first conversation is blocked");
+    let list = update(observed.model, UiEvent::Input(UiInput::MoveCursorLeft))
+        .expect("return to conversation list");
+    let selected =
+        update(list.model, UiEvent::Input(UiInput::NextItem)).expect("select second conversation");
+    let switched = update(
+        selected.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a", "thread-b"]),
+                conversation: Some(UiConversationPage {
+                    row_id: "thread-b".to_owned(),
+                    title: "Bob".to_owned(),
+                    context: None,
+                    entries: vec![actionable_entry("bob-message", [5; 32])],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("second conversation loads");
+    let conversation = update(switched.model, UiEvent::Input(UiInput::MoveCursorRight))
+        .expect("focus second conversation");
+    let reply = update(conversation.model, UiEvent::Input(UiInput::Character('r')))
+        .expect("reply remains available");
+    assert!(matches!(
+        open_draft_effect(&reply.effects).1,
+        UiMailboxDraftTarget::Reply { message_id } if *message_id == [5; 32]
+    ));
+}
+
+#[test]
+fn inline_approval_completion_requires_the_exact_request_and_restores_retry_state() {
+    let opened = opened_conversation(vec![entry("activity-a", true)]);
+    let observed = update(
+        opened,
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("approval observed");
+    let focused =
+        update(observed.model, UiEvent::Input(UiInput::NextFocus)).expect("focus approval");
+    let submitted =
+        update(focused.model, UiEvent::Input(UiInput::Activate)).expect("submit approval");
+    let effect_id = submitted
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::AnswerInteraction { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("answer effect");
+
+    let wrong = update(
+        submitted.model,
+        UiEvent::InteractionAnswered {
+            effect_id,
+            request_id: [8; 32],
+            outcome: hq_tui::UiInteractionAnswerOutcome::Answered,
+        },
+    )
+    .expect("wrong request is ignored");
+    assert_eq!(
+        wrong
+            .model
+            .current_command_approval()
+            .and_then(|approval| approval.submitting),
+        Some(effect_id)
+    );
+    let failed = update(
+        wrong.model,
+        UiEvent::InteractionAnswerFailed {
+            effect_id,
+            request_id: [7; 32],
+            failure: UiFailure {
+                code: "transport_lost".to_owned(),
+                action: "retry".to_owned(),
+            },
+        },
+    )
+    .expect("exact failure restores approval");
+    let approval = failed
+        .model
+        .current_command_approval()
+        .expect("approval remains available");
+    assert_eq!(approval.submitting, None);
+    assert_eq!(approval.selected, 0);
+    assert_eq!(
+        approval
+            .failure
+            .as_ref()
+            .map(|failure| failure.code.as_str()),
+        Some("transport_lost")
+    );
 }
 
 #[test]
@@ -6691,6 +6983,29 @@ fn opened_conversation(entries: Vec<UiConversationEntry>) -> UiModel {
     update(observed.model, UiEvent::Input(UiInput::Activate))
         .expect("open conversation")
         .model
+}
+
+fn command_approval(identity: u8, row_id: &str) -> UiInteraction {
+    UiInteraction {
+        agent_id: [6; 32],
+        agent_name: "alice".to_owned(),
+        project_id: None,
+        project_name: None,
+        provider: "codex".to_owned(),
+        session: "conversation-1".to_owned(),
+        request_id: [identity; 32],
+        operation_id: [9; 32],
+        kind: UiInteractionKind::CommandApproval,
+        prompt: "Run command?".to_owned(),
+        choices: vec![UiInteractionChoice {
+            value: "accept".to_owned(),
+            label: "Allow once".to_owned(),
+        }],
+        allow_text: false,
+        target: UiInteractionTarget::Conversation {
+            row_id: row_id.to_owned(),
+        },
+    }
 }
 
 fn observe_conversation_viewport(

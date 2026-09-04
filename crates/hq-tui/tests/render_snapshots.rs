@@ -6,13 +6,15 @@ use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentLifecycle, UiAgentMailbox,
     UiAgentProjectAssignment, UiAgentSession, UiAgentStatus, UiConversationActivityKind,
     UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
-    UiEffect, UiEvent, UiFailure, UiHumanState, UiInput, UiMailboxDraft, UiMailboxDraftTarget,
-    UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiModel, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectConversationSetup, UiProjectExternalWarning,
-    UiProjectFolderAction, UiProjectManagementAction, UiProjectOutcome, UiProjectResource,
-    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus,
-    UiProjectThread, UiProvider, UiRenderCache, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
-    UiSnapshot, UiTechnicalSection, UiTheme, UiThemeRole, render, render_with_cache, update,
+    UiEffect, UiEvent, UiFailure, UiHumanState, UiInput, UiInteraction, UiInteractionChoice,
+    UiInteractionKind, UiInteractionTarget, UiInteractionTargetIssue, UiMailboxDraft,
+    UiMailboxDraftTarget, UiMaterializedConversationView, UiMessageDelivery, UiMessageState,
+    UiModel, UiProject, UiProjectAction, UiProjectAssignment, UiProjectConversationSetup,
+    UiProjectExternalWarning, UiProjectFolderAction, UiProjectManagementAction, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectSummaryFocus, UiProjectThread, UiProvider, UiRenderCache, UiRow, UiRowKind,
+    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTheme, UiThemeRole, render,
+    render_with_cache, update,
 };
 use ratatui::{
     Terminal,
@@ -58,6 +60,100 @@ fn passive_inbox_surfaces_never_render_first_page_loading_text() {
         assert!(!render_text(&ready_model(size)).contains("Loading messages"));
         assert!(!render_text(&conversation_model(size)).contains("Loading messages"));
     }
+}
+
+#[test]
+fn command_approval_renders_inline_without_covering_the_workspace() {
+    for size in [
+        UiSize {
+            width: 104,
+            height: 24,
+        },
+        UiSize {
+            width: 72,
+            height: 20,
+        },
+    ] {
+        let model = conversation_model(size);
+        let observed = update(
+            model,
+            UiEvent::InteractionsObserved {
+                interactions: vec![UiInteraction {
+                    agent_id: [1; 32],
+                    agent_name: "Alice".to_owned(),
+                    project_id: Some([2; 32]),
+                    project_name: Some("HQ".to_owned()),
+                    provider: "codex".to_owned(),
+                    session: "session".to_owned(),
+                    request_id: [3; 32],
+                    operation_id: [4; 32],
+                    kind: UiInteractionKind::CommandApproval,
+                    prompt: "Run cargo test?".to_owned(),
+                    choices: vec![
+                        UiInteractionChoice {
+                            value: "accept".to_owned(),
+                            label: "Allow once".to_owned(),
+                        },
+                        UiInteractionChoice {
+                            value: "decline".to_owned(),
+                            label: "Deny".to_owned(),
+                        },
+                    ],
+                    allow_text: false,
+                    target: UiInteractionTarget::Conversation {
+                        row_id: "deploy-9".to_owned(),
+                    },
+                }],
+            },
+        )
+        .expect("approval appears inline");
+        let rendered = render_text(&observed.model);
+        assert!(rendered.contains("Command for Alice · HQ"));
+        assert!(rendered.contains("Run cargo test?"));
+        assert!(rendered.contains("Allow once"));
+        assert!(
+            rendered.contains("Deploy production"),
+            "{size:?}\n{rendered}"
+        );
+        assert!(rendered.contains("Alice"), "{size:?}\n{rendered}");
+        assert!(rendered.contains("Inbox"));
+        assert!(!rendered.contains("Command approval needed"));
+    }
+}
+
+#[test]
+fn unresolved_command_approval_renders_nonmodal_recovery_evidence() {
+    let observed = update(
+        ready_model(UiSize {
+            width: 104,
+            height: 24,
+        }),
+        UiEvent::InteractionsObserved {
+            interactions: vec![UiInteraction {
+                agent_id: [1; 32],
+                agent_name: "Alice".to_owned(),
+                project_id: None,
+                project_name: None,
+                provider: "codex".to_owned(),
+                session: "session".to_owned(),
+                request_id: [3; 32],
+                operation_id: [4; 32],
+                kind: UiInteractionKind::CommandApproval,
+                prompt: "Run cargo test?".to_owned(),
+                choices: Vec::new(),
+                allow_text: false,
+                target: UiInteractionTarget::Unresolved {
+                    reason: UiInteractionTargetIssue::OperationMismatch,
+                },
+            }],
+        },
+    )
+    .expect("unresolved approval retained");
+    let rendered = render_text(&observed.model);
+    assert!(observed.model.interaction_modal().is_none());
+    assert!(rendered.contains("command request(s)"), "{rendered}");
+    assert!(rendered.contains("running command"), "{rendered}");
+    assert!(rendered.contains("Press F5"), "{rendered}");
 }
 
 #[test]

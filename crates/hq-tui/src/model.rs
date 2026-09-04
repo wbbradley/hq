@@ -210,6 +210,8 @@ pub enum UiFocus {
     Conversation,
     /// Modeless message draft inside the Inbox workspace.
     Draft,
+    /// Inline command approval attached to the open conversation.
+    Approval,
 }
 
 /// Page shown by the persistent contextual-help overlay.
@@ -748,6 +750,51 @@ pub struct UiInteraction {
     pub choices: Vec<UiInteractionChoice>,
     /// Whether bounded free text is accepted.
     pub allow_text: bool,
+    /// Typed placement for this request.
+    pub target: UiInteractionTarget,
+}
+
+/// Typed placement or recovery result for one provider interaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiInteractionTarget {
+    /// A true modal request that captures the complete UI.
+    Modal,
+    /// A command approval attached to one exact conversation.
+    Conversation {
+        /// Stable conversation row identity derived from its typed key.
+        row_id: String,
+    },
+    /// A command approval that could not be attached without guessing.
+    Unresolved {
+        /// Closed reason retained for recovery and technical details.
+        reason: UiInteractionTargetIssue,
+    },
+}
+
+/// Closed reason a command approval could not be attached to a conversation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiInteractionTargetIssue {
+    /// No conversation and binding satisfy the request identities.
+    Missing,
+    /// More than one conversation satisfies the request identities.
+    Ambiguous,
+    /// The loaded conversation has running work for a different operation.
+    OperationMismatch,
+}
+
+/// Request-keyed inline command approval state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiCommandApproval {
+    /// Complete provider request and exact conversation target.
+    pub interaction: UiInteraction,
+    /// Selected provider-supplied choice.
+    pub selected: usize,
+    /// Exact answer effect in flight, when any.
+    pub submitting: Option<EffectId>,
+    /// Last scoped answer failure, retained for retry.
+    pub failure: Option<UiFailure>,
+    /// Focus restored after this approval disappears.
+    restore_focus: UiFocus,
 }
 
 /// Closed typed terminal response emitted by the pure model.
@@ -788,6 +835,10 @@ pub enum UiInteractionModal {
     Submitting {
         /// Complete request retained for recovery.
         interaction: UiInteraction,
+        /// Selected offered choice retained for retry.
+        selected: usize,
+        /// Bounded free-text draft retained for retry.
+        text: String,
     },
 }
 
@@ -2184,6 +2235,8 @@ pub enum UiEvent {
     InteractionAnswered {
         /// Identity of the completed response effect.
         effect_id: EffectId,
+        /// Exact provider request completed by this effect.
+        request_id: [u8; 32],
         /// Typed terminal outcome.
         outcome: UiInteractionAnswerOutcome,
     },
@@ -2191,6 +2244,8 @@ pub enum UiEvent {
     InteractionAnswerFailed {
         /// Identity of the failed response effect.
         effect_id: EffectId,
+        /// Exact provider request attempted by this effect.
+        request_id: [u8; 32],
         /// Stable actionable failure.
         failure: UiFailure,
     },
@@ -2650,7 +2705,9 @@ pub struct UiModel {
     agent_modal: Option<UiAgentModal>,
     interactions: VecDeque<UiInteraction>,
     interaction_modal: Option<UiInteractionModal>,
-    pending_interaction: Option<EffectId>,
+    command_approvals: BTreeMap<[u8; 32], UiCommandApproval>,
+    command_approval_order: VecDeque<[u8; 32]>,
+    pending_interactions: BTreeMap<EffectId, [u8; 32]>,
     project_interaction: Option<UiProjectInteraction>,
     project_summary: Option<UiProjectSummary>,
     project_workspace_level: UiProjectWorkspaceLevel,
@@ -2724,7 +2781,9 @@ impl UiModel {
             agent_modal: None,
             interactions: VecDeque::new(),
             interaction_modal: None,
-            pending_interaction: None,
+            command_approvals: BTreeMap::new(),
+            command_approval_order: VecDeque::new(),
+            pending_interactions: BTreeMap::new(),
             project_interaction: None,
             project_summary: None,
             project_workspace_level: UiProjectWorkspaceLevel::List,
@@ -3219,9 +3278,64 @@ impl UiModel {
         self.interaction_modal.as_ref()
     }
 
-    /// Borrows the current highest-priority live interaction.
+    /// Borrows the interaction visible in the current modal or conversation.
     pub fn current_interaction(&self) -> Option<&UiInteraction> {
-        self.interactions.front()
+        match self.interaction_modal.as_ref() {
+            Some(
+                UiInteractionModal::Prompt { interaction, .. }
+                | UiInteractionModal::Submitting { interaction, .. },
+            ) => Some(interaction),
+            None => self
+                .current_command_approval()
+                .map(|state| &state.interaction),
+        }
+    }
+
+    /// Borrows the first source-ordered command approval for the open conversation.
+    pub fn current_command_approval(&self) -> Option<&UiCommandApproval> {
+        let row_id = self.conversation.as_ref()?.row_id.as_str();
+        self.command_approval_order.iter().find_map(|request_id| {
+            let state = self.command_approvals.get(request_id)?;
+            matches!(
+                &state.interaction.target,
+                UiInteractionTarget::Conversation { row_id: target } if target == row_id
+            )
+            .then_some(state)
+        })
+    }
+
+    /// Returns the number of command approvals retained as unresolved recovery evidence.
+    pub fn unresolved_command_approval_count(&self) -> usize {
+        self.command_approvals
+            .values()
+            .filter(|state| {
+                matches!(
+                    state.interaction.target,
+                    UiInteractionTarget::Unresolved { .. }
+                )
+            })
+            .count()
+    }
+
+    /// Iterates source-ordered command approvals that HQ cannot safely place.
+    pub fn unresolved_command_approvals(&self) -> impl Iterator<Item = &UiInteraction> {
+        self.command_approval_order.iter().filter_map(|request_id| {
+            let state = self.command_approvals.get(request_id)?;
+            matches!(
+                state.interaction.target,
+                UiInteractionTarget::Unresolved { .. }
+            )
+            .then_some(&state.interaction)
+        })
+    }
+
+    /// Reports whether a retained draft is temporarily replaced by its command approval.
+    pub fn draft_suspended_by_command_approval(&self) -> bool {
+        self.mailbox_draft.is_some()
+            && self
+                .command_approvals
+                .values()
+                .any(|state| state.restore_focus == UiFocus::Draft)
     }
 
     /// Borrows the current project interaction.
@@ -4486,11 +4600,19 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         UiEvent::InteractionsObserved { interactions } => {
             interactions_observed(&mut model, interactions, &mut effects);
         }
-        UiEvent::InteractionAnswered { effect_id, outcome } => {
-            interaction_answered(&mut model, effect_id, outcome, &mut effects);
+        UiEvent::InteractionAnswered {
+            effect_id,
+            request_id,
+            outcome,
+        } => {
+            interaction_answered(&mut model, effect_id, request_id, outcome, &mut effects);
         }
-        UiEvent::InteractionAnswerFailed { effect_id, failure } => {
-            interaction_answer_failed(&mut model, effect_id, failure, &mut effects);
+        UiEvent::InteractionAnswerFailed {
+            effect_id,
+            request_id,
+            failure,
+        } => {
+            interaction_answer_failed(&mut model, effect_id, request_id, failure, &mut effects);
         }
         UiEvent::ConversationLoaded { effect_id, page } => {
             conversation_loaded(&mut model, effect_id, page, &mut effects)?;
@@ -4665,10 +4787,59 @@ fn interactions_observed(
     interactions: Vec<UiInteraction>,
     effects: &mut Vec<UiEffect>,
 ) {
-    model.interactions = interactions.into();
+    let prior_inline_restore = model
+        .current_command_approval()
+        .map(|state| state.restore_focus);
+    let (commands, modals): (Vec<_>, Vec<_>) = interactions
+        .into_iter()
+        .partition(|interaction| interaction.kind == UiInteractionKind::CommandApproval);
+    model.interactions = modals.into();
+
+    let previous = std::mem::take(&mut model.command_approvals);
+    let mut order = VecDeque::new();
+    for interaction in commands {
+        let request_id = interaction.request_id;
+        order.push_back(request_id);
+        let mut state = previous.get(&request_id).cloned().unwrap_or_else(|| {
+            let restore_focus = if model.mailbox_draft.is_some() {
+                UiFocus::Draft
+            } else {
+                UiFocus::Conversation
+            };
+            UiCommandApproval {
+                interaction: interaction.clone(),
+                selected: 0,
+                submitting: None,
+                failure: None,
+                restore_focus,
+            }
+        });
+        state.selected = state
+            .selected
+            .min(interaction.choices.len().saturating_sub(1));
+        state.interaction = interaction;
+        model.command_approvals.insert(request_id, state);
+    }
+    model.command_approval_order = order;
+    model.pending_interactions.retain(|_, request_id| {
+        model.command_approvals.contains_key(request_id)
+            || model
+                .interactions
+                .iter()
+                .any(|interaction| interaction.request_id == *request_id)
+    });
+
     match model.interaction_modal.take() {
-        Some(UiInteractionModal::Submitting { interaction }) => {
-            model.interaction_modal = Some(UiInteractionModal::Submitting { interaction });
+        Some(UiInteractionModal::Submitting {
+            interaction,
+            selected,
+            text,
+        }) => {
+            model.interaction_modal = Some(UiInteractionModal::Submitting {
+                interaction,
+                selected,
+                text,
+            });
         }
         Some(UiInteractionModal::Prompt {
             interaction,
@@ -4692,7 +4863,51 @@ fn interactions_observed(
         }
         None => show_next_interaction(model),
     }
+    reconcile_command_approval_focus(model, prior_inline_restore);
     effects.push(UiEffect::RequestRedraw);
+}
+
+fn reconcile_command_approval_focus(model: &mut UiModel, prior_restore: Option<UiFocus>) {
+    if model.interaction_modal.is_some() {
+        return;
+    }
+    if model.current_command_approval().is_some() {
+        if matches!(model.focus, UiFocus::Draft) {
+            model.focus = UiFocus::Approval;
+        }
+    } else if model.focus == UiFocus::Approval {
+        model.focus = if prior_restore == Some(UiFocus::Draft) && model.mailbox_draft.is_some() {
+            UiFocus::Draft
+        } else {
+            UiFocus::Conversation
+        };
+    }
+    restore_saved_inbox_focus_if_unblocked(model, prior_restore);
+}
+
+fn restore_saved_inbox_focus_if_unblocked(model: &mut UiModel, restore: Option<UiFocus>) {
+    let Some(workspace) = model.section_workspaces.inbox.as_mut() else {
+        return;
+    };
+    if workspace.focus != UiFocus::Approval {
+        return;
+    }
+    let still_blocked = workspace.conversation.as_ref().is_some_and(|conversation| {
+        model.command_approvals.values().any(|state| {
+            matches!(
+                &state.interaction.target,
+                UiInteractionTarget::Conversation { row_id }
+                    if row_id == &conversation.row_id
+            )
+        })
+    });
+    if !still_blocked {
+        workspace.focus = if restore == Some(UiFocus::Draft) && model.mailbox_draft.is_some() {
+            UiFocus::Draft
+        } else {
+            UiFocus::Conversation
+        };
+    }
 }
 
 fn show_next_interaction(model: &mut UiModel) {
@@ -4711,24 +4926,31 @@ fn show_next_interaction(model: &mut UiModel) {
 fn interaction_answered(
     model: &mut UiModel,
     effect_id: EffectId,
+    request_id: [u8; 32],
     outcome: UiInteractionAnswerOutcome,
     effects: &mut Vec<UiEffect>,
 ) {
-    if model.pending_interaction != Some(effect_id) {
+    if model.pending_interactions.get(&effect_id) != Some(&request_id) {
         return;
     }
-    model.pending_interaction = None;
-    let request_id = match model.interaction_modal.take() {
-        Some(UiInteractionModal::Submitting { interaction }) => Some(interaction.request_id),
-        other => {
-            model.interaction_modal = other;
-            None
+    model.pending_interactions.remove(&effect_id);
+    let removed_command = model.command_approvals.remove(&request_id);
+    model
+        .command_approval_order
+        .retain(|candidate| *candidate != request_id);
+    if removed_command.is_none() {
+        let matching_modal = matches!(
+            model.interaction_modal.as_ref(),
+            Some(UiInteractionModal::Submitting { interaction, .. })
+                if interaction.request_id == request_id
+        );
+        if matching_modal {
+            model.interaction_modal = None;
+            model
+                .interactions
+                .retain(|interaction| interaction.request_id != request_id);
+            show_next_interaction(model);
         }
-    };
-    if let Some(request_id) = request_id {
-        model
-            .interactions
-            .retain(|interaction| interaction.request_id != request_id);
     }
     if outcome == UiInteractionAnswerOutcome::Stale {
         model.last_failure = Some(UiFailure {
@@ -4738,26 +4960,49 @@ fn interaction_answered(
                     .to_owned(),
         });
     }
-    show_next_interaction(model);
+    if let Some(command) = removed_command {
+        if model.focus == UiFocus::Approval && model.current_command_approval().is_none() {
+            model.focus =
+                if command.restore_focus == UiFocus::Draft && model.mailbox_draft.is_some() {
+                    UiFocus::Draft
+                } else {
+                    UiFocus::Conversation
+                };
+        }
+        restore_saved_inbox_focus_if_unblocked(model, Some(command.restore_focus));
+    }
     effects.push(UiEffect::RequestRedraw);
 }
 
 fn interaction_answer_failed(
     model: &mut UiModel,
     effect_id: EffectId,
+    request_id: [u8; 32],
     failure: UiFailure,
     effects: &mut Vec<UiEffect>,
 ) {
-    if model.pending_interaction != Some(effect_id) {
+    if model.pending_interactions.get(&effect_id) != Some(&request_id) {
         return;
     }
-    model.pending_interaction = None;
-    if let Some(UiInteractionModal::Submitting { interaction }) = model.interaction_modal.take() {
-        model.interaction_modal = Some(UiInteractionModal::Prompt {
-            interaction,
-            selected: 0,
-            text: String::new(),
-        });
+    model.pending_interactions.remove(&effect_id);
+    if let Some(command) = model.command_approvals.get_mut(&request_id)
+        && command.submitting == Some(effect_id)
+    {
+        command.submitting = None;
+        command.failure = Some(failure.clone());
+    } else {
+        model.interaction_modal = match model.interaction_modal.take() {
+            Some(UiInteractionModal::Submitting {
+                interaction,
+                selected,
+                text,
+            }) if interaction.request_id == request_id => Some(UiInteractionModal::Prompt {
+                interaction,
+                selected,
+                text,
+            }),
+            other => other,
+        };
     }
     model.last_failure = Some(failure);
     effects.push(UiEffect::RequestRedraw);
@@ -4877,6 +5122,13 @@ fn apply_input(
         }
         return Ok(());
     }
+    if model.focus == UiFocus::Approval && model.current_command_approval().is_some() {
+        let changed = apply_command_approval_input(model, input, effects)?;
+        if changed || dismissed_completion {
+            effects.push(UiEffect::RequestRedraw);
+        }
+        return Ok(());
+    }
     if let Some(changed) = apply_project_workspace_input(model, input, effects)? {
         if changed || dismissed_completion {
             effects.push(UiEffect::RequestRedraw);
@@ -4901,8 +5153,12 @@ fn apply_input(
                 {
                     UiFocus::Conversation
                 }
+                UiFocus::Conversation if model.current_command_approval().is_some() => {
+                    UiFocus::Approval
+                }
                 UiFocus::Conversation | UiFocus::Content => UiFocus::Content,
                 UiFocus::Draft => UiFocus::Draft,
+                UiFocus::Approval => UiFocus::Conversation,
             };
             true
         }
@@ -4914,7 +5170,7 @@ fn apply_input(
                 model.follow_conversation_tail();
                 true
             }
-            UiFocus::Content | UiFocus::Conversation | UiFocus::Draft => false,
+            UiFocus::Content | UiFocus::Conversation | UiFocus::Draft | UiFocus::Approval => false,
         },
         UiInput::MoveCursorLeft => match model.focus {
             UiFocus::Conversation => {
@@ -4925,7 +5181,7 @@ fn apply_input(
                 }
                 true
             }
-            UiFocus::Content | UiFocus::Draft => false,
+            UiFocus::Content | UiFocus::Draft | UiFocus::Approval => false,
         },
         UiInput::NextItem => match model.focus {
             UiFocus::Conversation if model.technical_visible => {
@@ -4933,7 +5189,7 @@ fn apply_input(
             }
             UiFocus::Conversation => model.scroll_conversation_viewport(true),
             UiFocus::Content => model.move_row_selection(true),
-            UiFocus::Draft => false,
+            UiFocus::Draft | UiFocus::Approval => false,
         },
         UiInput::PreviousItem => match model.focus {
             UiFocus::Conversation if model.technical_visible => {
@@ -4941,7 +5197,7 @@ fn apply_input(
             }
             UiFocus::Conversation => model.scroll_conversation_viewport(false),
             UiFocus::Content => model.move_row_selection(false),
-            UiFocus::Draft => false,
+            UiFocus::Draft | UiFocus::Approval => false,
         },
         UiInput::Activate => activate(model, effects)?,
         UiInput::LoadMore => load_more(model, effects)?,
@@ -5665,10 +5921,11 @@ fn text_input_is_active(model: &UiModel) -> bool {
     ) {
         return true;
     }
-    matches!(
-        model.mailbox_draft,
-        Some(UiMailboxDraftPane::Editing { .. })
-    )
+    !model.draft_suspended_by_command_approval()
+        && matches!(
+            model.mailbox_draft,
+            Some(UiMailboxDraftPane::Editing { .. })
+        )
 }
 
 fn apply_open_modal_input(
@@ -5691,7 +5948,7 @@ fn apply_open_modal_input(
     if model.mailbox_modal.is_some() {
         return apply_mailbox_modal_input(model, input.clone(), effects).map(Some);
     }
-    if model.mailbox_draft.is_some() {
+    if model.mailbox_draft.is_some() && !model.draft_suspended_by_command_approval() {
         return apply_draft_input(model, input.clone(), effects).map(Some);
     }
     Ok(None)
@@ -5756,9 +6013,13 @@ fn apply_interaction_modal_input(
     };
     if let Some(response) = response {
         let id = model.allocate_effect()?;
-        model.pending_interaction = Some(id);
+        model
+            .pending_interactions
+            .insert(id, interaction.request_id);
         model.interaction_modal = Some(UiInteractionModal::Submitting {
             interaction: interaction.clone(),
+            selected,
+            text,
         });
         effects.push(UiEffect::AnswerInteraction {
             id,
@@ -5774,6 +6035,81 @@ fn apply_interaction_modal_input(
         });
     }
     Ok(true)
+}
+
+fn apply_command_approval_input(
+    model: &mut UiModel,
+    input: &UiInput,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    let Some(request_id) = model
+        .current_command_approval()
+        .map(|state| state.interaction.request_id)
+    else {
+        model.focus = UiFocus::Conversation;
+        return Ok(true);
+    };
+    let Some(mut state) = model.command_approvals.remove(&request_id) else {
+        return Ok(false);
+    };
+    if state.submitting.is_some() {
+        model.command_approvals.insert(request_id, state);
+        return Ok(false);
+    }
+    let changed = match input {
+        UiInput::Escape | UiInput::PreviousFocus => {
+            model.focus = UiFocus::Conversation;
+            true
+        }
+        UiInput::NextFocus => {
+            model.focus = UiFocus::Content;
+            true
+        }
+        UiInput::NextItem if !state.interaction.choices.is_empty() => {
+            state.selected = bounded_navigation_index(
+                Some(state.selected),
+                state.interaction.choices.len(),
+                true,
+            )
+            .unwrap_or(state.selected);
+            state.failure = None;
+            true
+        }
+        UiInput::PreviousItem if !state.interaction.choices.is_empty() => {
+            state.selected = bounded_navigation_index(
+                Some(state.selected),
+                state.interaction.choices.len(),
+                false,
+            )
+            .unwrap_or(state.selected);
+            state.failure = None;
+            true
+        }
+        UiInput::Activate => {
+            if let Some(response) = state
+                .interaction
+                .choices
+                .get(state.selected)
+                .map(|choice| UiInteractionResponse::Choice(choice.value.clone()))
+            {
+                let id = model.allocate_effect()?;
+                model.pending_interactions.insert(id, request_id);
+                state.submitting = Some(id);
+                state.failure = None;
+                effects.push(UiEffect::AnswerInteraction {
+                    id,
+                    interaction: state.interaction.clone(),
+                    response,
+                });
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    };
+    model.command_approvals.insert(request_id, state);
+    Ok(changed)
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
@@ -9277,6 +9613,9 @@ fn mailbox_shortcut(
             Ok(false)
         }
         'r' => {
+            if model.current_command_approval().is_some() {
+                return Ok(false);
+            }
             if model.section == UiSection::Agents {
                 return Ok(false);
             }
@@ -9377,7 +9716,7 @@ fn mailbox_shortcut(
             }
             UiFocus::Conversation => model.move_conversation_anchor(true),
             UiFocus::Content => model.move_row_selection(true),
-            UiFocus::Draft => false,
+            UiFocus::Draft | UiFocus::Approval => false,
         }),
         'k' => Ok(match model.focus {
             UiFocus::Conversation if model.technical_visible => {
@@ -9385,7 +9724,7 @@ fn mailbox_shortcut(
             }
             UiFocus::Conversation => model.move_conversation_anchor(false),
             UiFocus::Content => model.move_row_selection(false),
-            UiFocus::Draft => false,
+            UiFocus::Draft | UiFocus::Approval => false,
         }),
         _ => Ok(false),
     }
@@ -9553,6 +9892,10 @@ fn escape(model: &mut UiModel) -> bool {
         match model.focus {
             UiFocus::Conversation => {
                 model.focus = UiFocus::Content;
+                true
+            }
+            UiFocus::Approval => {
+                model.focus = UiFocus::Conversation;
                 true
             }
             UiFocus::Content | UiFocus::Draft => false,
@@ -11294,11 +11637,11 @@ mod tests {
         UiConfiguration, UiEffect, UiError, UiEvent, UiFailure, UiFocus, UiFormField, UiFormKind,
         UiFormState, UiGuidedSubmission, UiHumanState, UiInput, UiInteraction,
         UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind, UiInteractionModal,
-        UiInteractionResponse, UiMailboxDraftPane, UiMailboxDraftTarget, UiModel, UiNewWorkflow,
-        UiProject, UiProjectAction, UiProjectAssignment, UiProjectInteraction,
-        UiProjectResourceCheck, UiProjectThread, UiSection, UiSize, UiSnapshot, UiThemeChoice,
-        apply_project_interaction_input, edit_text, normalize_path_input,
-        refresh_project_interaction, update,
+        UiInteractionResponse, UiInteractionTarget, UiMailboxDraftPane, UiMailboxDraftTarget,
+        UiModel, UiNewWorkflow, UiProject, UiProjectAction, UiProjectAssignment,
+        UiProjectInteraction, UiProjectResourceCheck, UiProjectThread, UiSection, UiSize,
+        UiSnapshot, UiThemeChoice, apply_project_interaction_input, edit_text,
+        normalize_path_input, refresh_project_interaction, update,
     };
 
     #[test]
@@ -11552,6 +11895,7 @@ mod tests {
             submitted.model,
             UiEvent::InteractionAnswered {
                 effect_id,
+                request_id: [4; 32],
                 outcome: UiInteractionAnswerOutcome::Stale,
             },
         )
@@ -11594,6 +11938,7 @@ mod tests {
             submitted.model,
             UiEvent::InteractionAnswerFailed {
                 effect_id,
+                request_id: [6; 32],
                 failure: super::UiFailure {
                     code: "transport_lost".to_owned(),
                     action: "retry".to_owned(),
@@ -11860,7 +12205,7 @@ mod tests {
             session: "session-1".to_owned(),
             request_id: [identity; 32],
             operation_id: [7; 32],
-            kind: UiInteractionKind::CommandApproval,
+            kind: UiInteractionKind::Question,
             prompt: "Run the command?".to_owned(),
             choices: choices
                 .iter()
@@ -11870,6 +12215,7 @@ mod tests {
                 })
                 .collect(),
             allow_text,
+            target: UiInteractionTarget::Modal,
         }
     }
 

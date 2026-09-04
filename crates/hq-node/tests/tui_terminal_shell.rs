@@ -23,9 +23,9 @@ use hq_tui::{
     UiConversationAuthor, UiConversationEntry, UiConversationEntryGeometry,
     UiConversationEntryPresentation, UiConversationPage, UiConversationViewportObservation,
     UiConversationViewportPosition, UiFailure, UiHumanState, UiInput, UiInteraction,
-    UiInteractionKind, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft,
-    UiMailboxDraftTarget, UiMaterializedConversationView, UiMessageState, UiModel, UiRow,
-    UiRowKind, UiRowState, UiSize, UiSnapshot,
+    UiInteractionKind, UiInteractionTarget, UiMailboxAction, UiMailboxCommandResult,
+    UiMailboxDraft, UiMailboxDraftTarget, UiMaterializedConversationView, UiMessageState, UiModel,
+    UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
 };
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
@@ -234,6 +234,36 @@ fn idle_shell_wakes_and_draws_a_provider_interaction_without_terminal_polling() 
         wake: observer_wake,
         interrupt: IdleInterrupt(notify_observer),
         published: false,
+        initial: Some(UiMaterializedConversationView {
+            snapshot: UiSnapshot {
+                revision: 1,
+                human_state: UiHumanState::Ready,
+                inbox_rows: vec![UiRow {
+                    id: "thread-a".to_owned(),
+                    title: "Alice".to_owned(),
+                    detail: "working".to_owned(),
+                    state: UiRowState::Open,
+                    kind: UiRowKind::Conversation,
+                    conversation_target: None,
+                }],
+                sent_rows: Vec::new(),
+                archived_rows: Vec::new(),
+                agent_rows: Vec::new(),
+                project_rows: Vec::new(),
+                direct_targets: Vec::new(),
+                providers: Vec::new(),
+                agents: Vec::new(),
+                projects: Vec::new(),
+                project_setups: Vec::new(),
+            },
+            conversation: Some(UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
+                row_id: "thread-a".to_owned(),
+                entries: Vec::new(),
+                next_cursor: None,
+            }),
+        }),
     };
 
     assert_eq!(
@@ -478,7 +508,7 @@ impl TuiTerminalPort for WakeDrivenTerminal {
         &mut self,
         model: &UiModel,
     ) -> Result<Option<UiConversationViewportObservation>, TuiTerminalError> {
-        if model.interaction_modal().is_some() {
+        if model.current_command_approval().is_some() {
             self.dialog_drawn.store(true, Ordering::SeqCst);
         }
         Ok(None)
@@ -697,9 +727,14 @@ struct InteractionObserver {
     wake: mpsc::Receiver<()>,
     interrupt: IdleInterrupt,
     published: bool,
+    initial: Option<UiMaterializedConversationView>,
 }
 
 impl TuiObservationPort for InteractionObserver {
+    fn take_initial_view(&mut self) -> Option<UiMaterializedConversationView> {
+        self.initial.take()
+    }
+
     fn next_observations(&mut self) -> Vec<TuiClientObservation> {
         let _ = self.wake.recv();
         if self.published {
@@ -719,6 +754,9 @@ impl TuiObservationPort for InteractionObserver {
             prompt: "List the directory?".to_owned(),
             choices: Vec::new(),
             allow_text: false,
+            target: UiInteractionTarget::Conversation {
+                row_id: "thread-a".to_owned(),
+            },
         }])]
     }
 

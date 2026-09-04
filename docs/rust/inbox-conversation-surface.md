@@ -139,8 +139,9 @@ line at column zero, separated by the same whitespace rhythm:
 ```
 
 The symbol, verb, and style all reflect typed activity status. Exactly one current live state
-occupies the conversation tail: a pending provider question or approval takes precedence; otherwise
-it says `Agent is working…` until useful uncompleted progress exists, then uses that typed progress.
+occupies the conversation tail: a pending command approval for this exact conversation takes
+precedence; otherwise it says `Agent is working…` until useful uncompleted progress exists, then
+uses that typed progress.
 New human input suppresses earlier progress until the provider advances, and terminal lifecycle
 evidence replaces running state rather than coexisting.
 Failure and interruption remain visible. Completed commands show separately retained command text,
@@ -309,6 +310,20 @@ When the selected conversation changes from a running agent turn to a newly term
 opens a follow-up draft for that exact project thread or latest replyable direct message. Loading an
 already-finished conversation does not open one, another running agent turn defers it, and an
 existing draft is never replaced.
+
+### Inline command approval
+
+A command approval occupies the same lower region as the modeless draft, leaving the selected
+transcript and its viewport visible. Tab gives the control explicit focus; arrows or `j`/`k` choose
+only among provider-supplied decisions, Enter answers, and Escape returns to the transcript without
+answering. While it is present, an existing draft remains saved and hidden for that exact
+conversation, then returns with its content, version, and focus after completion. `1`-`6` still
+switch views, and unrelated conversations can open and send replies.
+
+Placement requires one exact typed conversation and matching running operation. A missing,
+ambiguous, or contradictory target produces a visible nonmodal recovery notice with F5 guidance;
+technical disclosure retains provider, session, operation, and request identities. Provider
+questions and permissions whose scope is not one conversation remain true modal windows.
 
 ## Focus, selection, and scrolling
 

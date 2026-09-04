@@ -102,8 +102,11 @@ record exists for that exact source/provider/session/operation/item. A newer loc
 message suppresses older progress until provider activity advances after it; the typed running turn
 is the fallback. The newest remaining active operation becomes the final row. A terminal turn
 removes that operation from live selection and remains once in canonical history. Continuation
-pages never carry a second copy. A memory-only pending provider interaction supersedes ordinary
-running/progress presentation in the TUI without discarding canonical history.
+pages never carry a second copy. A memory-only command approval is attached by exact typed
+agent/project/provider/session identity and checked against the running operation. It replaces the
+composer region only in that conversation without becoming canonical history; unresolved mapping
+remains explicit recovery evidence instead of being guessed. Other provider interaction kinds keep
+their global modal scope.
 
 Canonical activity facts are permanent. The disposable view retains snapshot winners, every
 completed record, and the canonically newest 200 progress winners per source/provider session.

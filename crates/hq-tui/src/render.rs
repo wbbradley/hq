@@ -18,13 +18,14 @@ use crate::{
     UiConversationEntryGeometry, UiConversationEntryPresentation,
     UiConversationViewportObservation, UiFocus, UiHelpPage, UiHumanIssue,
     UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanState, UiInteractionKind,
-    UiInteractionModal, UiMailboxAction, UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiMessageDelivery, UiMessageState, UiModel,
-    UiNewChoice, UiNewModal, UiProjectAction, UiProjectAssignedAgentStatus,
-    UiProjectCreationChoice, UiProjectFolderAction, UiProjectFolderOwnership, UiProjectFormField,
-    UiProjectInteraction, UiProjectLifecycle, UiProjectManagementAction, UiProjectOutcome,
-    UiProjectRecoverySummary, UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel,
-    UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, UiTheme, UiThemeRole,
+    UiInteractionModal, UiInteractionTarget, UiInteractionTargetIssue, UiMailboxAction,
+    UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
+    UiManagedSessionOutcome, UiMessageDelivery, UiMessageState, UiModel, UiNewChoice, UiNewModal,
+    UiProjectAction, UiProjectAssignedAgentStatus, UiProjectCreationChoice, UiProjectFolderAction,
+    UiProjectFolderOwnership, UiProjectFormField, UiProjectInteraction, UiProjectLifecycle,
+    UiProjectManagementAction, UiProjectOutcome, UiProjectRecoverySummary, UiProjectSummaryFocus,
+    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
+    UiTechnicalSection, UiTheme, UiThemeRole,
     message_markdown::MessageRenderCache,
     model::WIDE_WIDTH,
     shell_highlight::{ShellHighlightCache, ShellSegment, ShellTokenKind},
@@ -114,7 +115,11 @@ fn render_interaction_modal(
             selected,
             text,
         } => (interaction, false, *selected, text.as_str()),
-        UiInteractionModal::Submitting { interaction } => (interaction, true, 0, ""),
+        UiInteractionModal::Submitting {
+            interaction,
+            selected,
+            text,
+        } => (interaction, true, *selected, text.as_str()),
     };
     let width = available.width.saturating_sub(4).clamp(1, 82);
     let height = available.height.clamp(1, 22);
@@ -2780,8 +2785,10 @@ fn render_rows(
             render_summary_rows(frame, model, theme, summaries);
             render_inbox_detail(frame, model, theme, conversation, Borders::LEFT, cache);
         } else {
-            let conversation_owns_space =
-                matches!(model.focus(), UiFocus::Conversation | UiFocus::Draft);
+            let conversation_owns_space = matches!(
+                model.focus(),
+                UiFocus::Conversation | UiFocus::Draft | UiFocus::Approval
+            );
             let constraints = if conversation_owns_space {
                 [Constraint::Length(4), Constraint::Min(1)]
             } else {
@@ -3270,7 +3277,24 @@ fn render_inbox_detail(
     outer_border: Borders,
     cache: &mut UiRenderCache,
 ) {
-    if model.mailbox_draft().is_some() {
+    if let Some(approval) = model.current_command_approval() {
+        let approval_height = (area.height / 3).max(7).min(area.height.saturating_sub(2));
+        let [conversation, approval_area] =
+            Layout::vertical([Constraint::Min(2), Constraint::Length(approval_height)]).areas(area);
+        if model.technical_visible() {
+            render_technical_inspector(frame, model, theme, conversation, outer_border, cache);
+        } else {
+            render_conversation(frame, model, theme, conversation, outer_border, cache);
+        }
+        render_command_approval(
+            frame,
+            model,
+            theme,
+            approval,
+            approval_area,
+            Borders::TOP | outer_border,
+        );
+    } else if model.mailbox_draft().is_some() && !model.draft_suspended_by_command_approval() {
         let draft_height = (area.height / 3).max(6).min(area.height.saturating_sub(2));
         let [conversation, draft] =
             Layout::vertical([Constraint::Min(2), Constraint::Length(draft_height)]).areas(area);
@@ -3301,6 +3325,79 @@ fn render_inbox_detail(
     } else {
         render_conversation(frame, model, theme, area, outer_border, cache);
     }
+}
+
+fn render_command_approval(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    approval: &crate::UiCommandApproval,
+    area: Rect,
+    borders: Borders,
+) {
+    let interaction = &approval.interaction;
+    let title = interaction.project_name.as_ref().map_or_else(
+        || format!(" Command for {} ", interaction.agent_name),
+        |project| format!(" Command for {} · {project} ", interaction.agent_name),
+    );
+    let block = Block::new()
+        .borders(borders)
+        .title(Span::styled(title, theme.style(UiThemeRole::Attention)))
+        .border_style(theme.style(if model.focus() == UiFocus::Approval {
+            UiThemeRole::BorderFocused
+        } else {
+            UiThemeRole::BorderUnfocused
+        }));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut lines = vec![Line::from(interaction.prompt.clone())];
+    for (index, choice) in interaction.choices.iter().enumerate() {
+        lines.push(Line::styled(
+            format!(
+                "{} {}",
+                if index == approval.selected {
+                    "›"
+                } else {
+                    " "
+                },
+                choice.label
+            ),
+            if index == approval.selected {
+                selected_style(theme, model.focus() == UiFocus::Approval)
+            } else {
+                theme.style(UiThemeRole::Text)
+            },
+        ));
+    }
+    if let Some(failure) = &approval.failure {
+        lines.push(Line::styled(
+            format!("Could not send the response · {}", failure.action),
+            theme.style(UiThemeRole::Error),
+        ));
+    }
+    if model.technical_visible() {
+        lines.push(Line::styled(
+            format!(
+                "provider={} · session={} · operation={} · request={}",
+                interaction.provider,
+                interaction.session,
+                short_identity(interaction.operation_id),
+                short_identity(interaction.request_id),
+            ),
+            theme.style(UiThemeRole::TextMuted),
+        ));
+    }
+    lines.push(Line::styled(
+        if approval.submitting.is_some() {
+            "Sending your response…"
+        } else if model.focus() == UiFocus::Approval {
+            "↑/↓ or j/k choose · Enter confirm · Esc leave"
+        } else {
+            "Tab focus command choices"
+        },
+        theme.style(UiThemeRole::Footer),
+    ));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_draft_pane(
@@ -3498,6 +3595,45 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
         }
         Some(UiHumanState::Ready) | None => {}
     }
+    let unresolved = model.unresolved_command_approval_count();
+    if unresolved > 0 {
+        lines.push(Line::styled(
+            format!(" {unresolved} command request(s) need conversation recovery."),
+            theme.style(UiThemeRole::Attention),
+        ));
+        for interaction in model.unresolved_command_approvals() {
+            let reason = match interaction.target {
+                UiInteractionTarget::Unresolved {
+                    reason: UiInteractionTargetIssue::Missing,
+                } => "the conversation is not available",
+                UiInteractionTarget::Unresolved {
+                    reason: UiInteractionTargetIssue::Ambiguous,
+                } => "more than one conversation matches",
+                UiInteractionTarget::Unresolved {
+                    reason: UiInteractionTargetIssue::OperationMismatch,
+                } => "the running command does not match",
+                UiInteractionTarget::Modal | UiInteractionTarget::Conversation { .. } => continue,
+            };
+            lines.push(Line::from(format!(
+                " {}: {reason}.",
+                interaction.agent_name
+            )));
+            if model.technical_visible() {
+                lines.push(Line::styled(
+                    format!(
+                        " Technical: provider={} · session={} · operation={} · request={}",
+                        interaction.provider,
+                        interaction.session,
+                        short_identity(interaction.operation_id),
+                        short_identity(interaction.request_id)
+                    ),
+                    theme.style(UiThemeRole::TextTechnical),
+                ));
+            }
+        }
+        lines.push(Line::from(" Press F5 to refresh and place it safely."));
+        lines.push(Line::default());
+    }
     match model.rows() {
         Some([]) => lines.extend(empty_section_lines(model.section(), theme)),
         Some(rows) => {
@@ -3611,21 +3747,23 @@ fn render_conversation(
     cache: &mut UiRenderCache,
 ) {
     let conversation = model.conversation();
-    let block =
-        Block::new()
-            .borders(divider)
-            .border_style(if model.focus() == UiFocus::Conversation {
-                theme.style(UiThemeRole::BorderFocused)
-            } else {
-                theme.style(UiThemeRole::BorderUnfocused)
-            });
+    let block = Block::new().borders(divider).border_style(
+        if matches!(model.focus(), UiFocus::Conversation | UiFocus::Approval) {
+            theme.style(UiThemeRole::BorderFocused)
+        } else {
+            theme.style(UiThemeRole::BorderUnfocused)
+        },
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if let Some(conversation) = conversation {
         let mut header = vec![Line::styled(
             conversation.title.as_str(),
-            pane_title_style(theme, model.focus() == UiFocus::Conversation),
+            pane_title_style(
+                theme,
+                matches!(model.focus(), UiFocus::Conversation | UiFocus::Approval),
+            ),
         )];
         if let Some(context) = &conversation.context {
             header.push(Line::styled(
@@ -4656,6 +4794,8 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         format!(" Done · {notice}")
     } else if let Some(hint) = model.transient_help() {
         format!(" Hint · {hint}")
+    } else if model.focus() == UiFocus::Approval {
+        " j/k choose · Enter confirm · Esc leave · Tab switch pane · ? help · q quit".to_owned()
     } else if model.focus() == UiFocus::Draft {
         " Enter send · Ctrl-J/Shift-Enter newline · Esc close · ? help · q quit".to_owned()
     } else if model.section() == UiSection::Config {
@@ -4702,7 +4842,7 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     let view_shortcuts_available = model.help_page().is_none()
         && model.new_modal().is_none()
         && model.mailbox_modal().is_none()
-        && model.mailbox_draft().is_none()
+        && (model.mailbox_draft().is_none() || model.draft_suspended_by_command_approval())
         && model.agent_modal().is_none()
         && model.project_interaction().is_none()
         && model.interaction_modal().is_none()
@@ -4905,6 +5045,9 @@ mod tests {
             prompt: "Run tests?".to_owned(),
             choices: Vec::new(),
             allow_text: false,
+            target: crate::UiInteractionTarget::Conversation {
+                row_id: "conversation".to_owned(),
+            },
         };
         let mut entry = UiConversationEntry {
             id: "tail".to_owned(),

@@ -930,8 +930,8 @@ fn installed_fake_codex_approval_round_trips_through_the_tui() {
     assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
     assert!(
         run.bytes
-            .windows(b"Command approval needed".len())
-            .any(|window| window == b"Command approval needed"),
+            .windows(b"Command for approval-agent".len())
+            .any(|window| window == b"Command for approval-agent"),
         "approval prompt was not rendered: {:?}",
         run.bytes
     );
@@ -1413,6 +1413,7 @@ fn run_in_pty_with_trace(
     let mut managed_provider_sent = false;
     let mut resource_commit_sent = false;
     let mut interaction_answer_sent = false;
+    let mut approval_navigation_phase = 0_u8;
     let mut exit_sent = false;
     let mut oversized_to_before_keys = Vec::new();
     let mut before_to_after_keys = Vec::new();
@@ -2135,15 +2136,45 @@ fn run_in_pty_with_trace(
         if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
             && resource_commit_sent
             && !interaction_answer_sent
+            && approval_navigation_phase == 0
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Command approval needed".len())
-                    .any(|window| window == b"Command approval needed")
+                    .windows(b"Command for approval-agent".len())
+                    .any(|window| window == b"Command for approval-agent")
             })
         {
-            master.write_all(b"\r").expect("approval choice writes");
+            master.write_all(b"4").expect("Agents shortcut writes");
+            master.flush().expect("approval choice flushes");
+            approval_navigation_phase = 1;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
+            && approval_navigation_phase == 1
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Agents".len())
+                    .any(|window| window == b"Agents")
+            })
+        {
+            master.write_all(b"1").expect("Inbox shortcut writes");
+            master.flush().expect("Inbox shortcut flushes");
+            approval_navigation_phase = 2;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
+            && approval_navigation_phase == 2
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Inbox".len())
+                    .any(|window| window == b"Inbox")
+            })
+        {
+            master
+                .write_all(b"\t\r")
+                .expect("approval focus and choice write");
             master.flush().expect("approval choice flushes");
             interaction_answer_sent = true;
+            approval_navigation_phase = 3;
             completion_offset = Some(bytes.len());
         }
         if let PtyInteraction::CreateGuidedWorktreeProject {

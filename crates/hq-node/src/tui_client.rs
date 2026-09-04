@@ -1,7 +1,7 @@
 //! Reconnecting local-client mapping and the single TUI effect executor.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
     os::{fd::AsFd, unix::net::UnixStream},
     sync::{
@@ -40,14 +40,15 @@ use hq_tui::{
     UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanIssue,
     UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState,
     UiInteraction, UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind,
-    UiInteractionResponse, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft,
-    UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
-    UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject,
-    UiProjectAction, UiProjectAssignment, UiProjectConversationSetup, UiProjectExternalWarning,
-    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
-    UiProjectResult, UiProjectThread, UiProvider, UiReconnectCause, UiReconnectFailureKind,
-    UiReconnectOperation, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection,
-    UiTheme, UiThemeChoice, UiTimerKind,
+    UiInteractionResponse, UiInteractionTarget, UiInteractionTargetIssue, UiMailboxAction,
+    UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction,
+    UiManagedSessionOutcome, UiManagedSessionResult, UiMaterializedConversationView,
+    UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject, UiProjectAction,
+    UiProjectAssignment, UiProjectConversationSetup, UiProjectExternalWarning, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectThread, UiProvider, UiReconnectCause, UiReconnectFailureKind, UiReconnectOperation,
+    UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTheme,
+    UiThemeChoice, UiTimerKind,
 };
 use sha2::{Digest, Sha256};
 
@@ -312,6 +313,7 @@ pub struct LocalTuiObserver {
     control: LocalTuiObservationControl,
     prior_inbox_rows: Vec<String>,
     desired_row: Option<String>,
+    pending_interactions: Option<Vec<PendingInteractionDto>>,
 }
 
 #[derive(Clone)]
@@ -331,7 +333,25 @@ struct TuiPresentationData {
     providers: ProviderCatalogDto,
     agent_names: BTreeMap<[u8; 32], String>,
     project_names: BTreeMap<[u8; 32], String>,
+    project_threads: Vec<ProjectThreadPresentation>,
+    running_operations: BTreeMap<String, Vec<RunningOperationPresentation>>,
     mailbox_drafts: Vec<MailboxDraftDto>,
+}
+
+#[derive(Clone)]
+struct ProjectThreadPresentation {
+    project_id: [u8; 32],
+    agent_id: [u8; 32],
+    provider: String,
+    session: String,
+    thread_id: [u8; 32],
+}
+
+#[derive(Clone)]
+struct RunningOperationPresentation {
+    provider: String,
+    session: String,
+    operation_id: [u8; 32],
 }
 
 impl Default for TuiPresentationData {
@@ -345,6 +365,8 @@ impl Default for TuiPresentationData {
             },
             agent_names: BTreeMap::new(),
             project_names: BTreeMap::new(),
+            project_threads: Vec::new(),
+            running_operations: BTreeMap::new(),
             mailbox_drafts: Vec::new(),
         }
     }
@@ -410,6 +432,34 @@ impl SharedTuiPresentation {
                 _ => None,
             })
             .collect();
+        presentation.project_threads = snapshot
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SnapshotItem::ProjectThread {
+                    project_id,
+                    agent_id,
+                    provider,
+                    session,
+                    thread_id,
+                } => Some(ProjectThreadPresentation {
+                    project_id: project_id.bytes(),
+                    agent_id: agent_id.bytes(),
+                    provider: provider.clone(),
+                    session: session.clone(),
+                    thread_id: thread_id.bytes(),
+                }),
+                _ => None,
+            })
+            .collect();
+        let conversation_rows = presentation
+            .conversation_keys
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        presentation
+            .running_operations
+            .retain(|row_id, _| conversation_rows.contains(row_id));
     }
 
     fn replace_mailbox_drafts(&self, drafts: Vec<MailboxDraftDto>) {
@@ -476,6 +526,97 @@ impl SharedTuiPresentation {
             .and_then(|presentation| presentation.project_names.get(&project_id).cloned())
             .unwrap_or_else(|| format!("Project {}", short_id(Id32::new(project_id))))
     }
+
+    fn replace_running_operations(&self, row_id: String, entries: &[ConversationEntryDto]) {
+        let operations = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ConversationEntryDto::Activity(activity)
+                    if matches!(activity.status, ActivityStatusDto::Running) =>
+                {
+                    Some(RunningOperationPresentation {
+                        provider: activity.provider.clone(),
+                        session: activity.session.clone(),
+                        operation_id: activity.operation.bytes(),
+                    })
+                }
+                ConversationEntryDto::Message(_) | ConversationEntryDto::Activity(_) => None,
+            })
+            .collect();
+        if let Ok(mut presentation) = self.inner.lock() {
+            presentation.running_operations.insert(row_id, operations);
+        }
+    }
+
+    fn interaction_target(&self, interaction: &PendingInteractionDto) -> UiInteractionTarget {
+        let Ok(presentation) = self.inner.lock() else {
+            return UiInteractionTarget::Unresolved {
+                reason: UiInteractionTargetIssue::Missing,
+            };
+        };
+        let mut candidates = BTreeSet::new();
+        if let Some(project_id) = interaction.project_id.map(Id32::bytes) {
+            for thread in &presentation.project_threads {
+                if thread.project_id == project_id
+                    && thread.agent_id == interaction.agent_id.bytes()
+                    && thread.provider == interaction.provider
+                    && thread.session == interaction.session
+                {
+                    let row_id = conversation_identity(ConversationKeyDto::ProjectThread {
+                        project: Id32::new(thread.project_id),
+                        thread: Id32::new(thread.thread_id),
+                    });
+                    if presentation.conversation_keys.contains_key(&row_id) {
+                        candidates.insert(row_id);
+                    }
+                }
+            }
+        } else {
+            for (row_id, key) in &presentation.conversation_keys {
+                let ConversationKeyDto::ProviderSession {
+                    provider, session, ..
+                } = key
+                else {
+                    continue;
+                };
+                let Some(context) = presentation.conversation_presentations.get(row_id) else {
+                    continue;
+                };
+                let ConversationContextDto::Direct { participant } = &context.context else {
+                    continue;
+                };
+                if provider == &interaction.provider
+                    && session == &interaction.session
+                    && participant.agent.map(Id32::bytes) == Some(interaction.agent_id.bytes())
+                {
+                    candidates.insert(row_id.clone());
+                }
+            }
+        }
+        let mut candidates = candidates.into_iter();
+        let Some(row_id) = candidates.next() else {
+            return UiInteractionTarget::Unresolved {
+                reason: UiInteractionTargetIssue::Missing,
+            };
+        };
+        if candidates.next().is_some() {
+            return UiInteractionTarget::Unresolved {
+                reason: UiInteractionTargetIssue::Ambiguous,
+            };
+        }
+        if let Some(operations) = presentation.running_operations.get(&row_id)
+            && !operations.iter().any(|operation| {
+                operation.provider == interaction.provider
+                    && operation.session == interaction.session
+                    && operation.operation_id == interaction.operation_id.bytes()
+            })
+        {
+            return UiInteractionTarget::Unresolved {
+                reason: UiInteractionTargetIssue::OperationMismatch,
+            };
+        }
+        UiInteractionTarget::Conversation { row_id }
+    }
 }
 
 #[derive(Clone)]
@@ -516,6 +657,8 @@ impl LocalTuiClient {
                     },
                     agent_names: BTreeMap::new(),
                     project_names: BTreeMap::new(),
+                    project_threads: Vec::new(),
+                    running_operations: BTreeMap::new(),
                     mailbox_drafts: Vec::new(),
                 })),
             },
@@ -567,6 +710,7 @@ impl LocalTuiObserver {
             control: LocalTuiObservationControl { selection, wake },
             prior_inbox_rows,
             desired_row,
+            pending_interactions: None,
         }
     }
 
@@ -632,6 +776,7 @@ impl LocalTuiObserver {
                         conversation: None,
                     },
                 )));
+                self.remap_pending_interactions(observations);
             }
             Ok(Some(ClientEvent::AuthoritativeConversationView(view))) => {
                 self.map_authoritative_conversation_view(view, state, observations);
@@ -639,12 +784,10 @@ impl LocalTuiObserver {
             Ok(Some(ClientEvent::Response {
                 result: ResponseResult::PendingInteractions(interactions),
                 ..
-            })) => observations.push(TuiClientObservation::Interactions(
-                interactions
-                    .into_iter()
-                    .map(|interaction| tui_interaction(interaction, &self.presentation))
-                    .collect(),
-            )),
+            })) => {
+                self.pending_interactions = Some(interactions);
+                self.remap_pending_interactions(observations);
+            }
             Ok(
                 Some(
                     ClientEvent::Response {
@@ -696,6 +839,7 @@ impl LocalTuiObserver {
             && !next_rows.is_empty()
         {
             self.select_successor_after_removal(&desired, next_rows, state, observations);
+            self.remap_pending_interactions(observations);
             return;
         }
         if next_rows.is_empty() {
@@ -709,6 +853,20 @@ impl LocalTuiObserver {
                 failure,
             }),
         }
+        self.remap_pending_interactions(observations);
+    }
+
+    fn remap_pending_interactions(&self, observations: &mut Vec<TuiClientObservation>) {
+        let Some(interactions) = &self.pending_interactions else {
+            return;
+        };
+        observations.push(TuiClientObservation::Interactions(
+            interactions
+                .iter()
+                .cloned()
+                .map(|interaction| tui_interaction(interaction, &self.presentation))
+                .collect(),
+        ));
     }
 
     fn select_successor_after_removal(
@@ -924,6 +1082,19 @@ fn tui_interaction(
 ) -> UiInteraction {
     let agent_id = interaction.agent_id.bytes();
     let project_id = interaction.project_id.map(Id32::bytes);
+    let kind = match interaction.kind {
+        InteractionKindDto::Question => UiInteractionKind::Question,
+        InteractionKindDto::CommandApproval => UiInteractionKind::CommandApproval,
+        InteractionKindDto::FileApproval => UiInteractionKind::FileApproval,
+        InteractionKindDto::Permission => UiInteractionKind::Permission,
+        InteractionKindDto::McpUrl => UiInteractionKind::McpUrl,
+        InteractionKindDto::McpForm => UiInteractionKind::McpForm,
+    };
+    let target = if kind == UiInteractionKind::CommandApproval {
+        presentation.interaction_target(&interaction)
+    } else {
+        UiInteractionTarget::Modal
+    };
     UiInteraction {
         agent_id,
         agent_name: presentation.agent_name(agent_id),
@@ -933,14 +1104,7 @@ fn tui_interaction(
         session: terminal_text(&interaction.session),
         request_id: interaction.request_id.bytes(),
         operation_id: interaction.operation_id.bytes(),
-        kind: match interaction.kind {
-            InteractionKindDto::Question => UiInteractionKind::Question,
-            InteractionKindDto::CommandApproval => UiInteractionKind::CommandApproval,
-            InteractionKindDto::FileApproval => UiInteractionKind::FileApproval,
-            InteractionKindDto::Permission => UiInteractionKind::Permission,
-            InteractionKindDto::McpUrl => UiInteractionKind::McpUrl,
-            InteractionKindDto::McpForm => UiInteractionKind::McpForm,
-        },
+        kind,
         prompt: terminal_text(&interaction.prompt),
         choices: interaction
             .choices
@@ -951,6 +1115,7 @@ fn tui_interaction(
             })
             .collect(),
         allow_text: interaction.allow_text,
+        target,
     }
 }
 
@@ -2390,13 +2555,16 @@ fn client_worker<P: TuiClientPort>(
                 interaction,
                 response,
             }) => {
+                let request_id = interaction.request_id;
                 let event = match client.answer_interaction(interaction, response) {
                     Ok(outcome) => UiEvent::InteractionAnswered {
                         effect_id: id,
+                        request_id,
                         outcome,
                     },
                     Err(failure) => UiEvent::InteractionAnswerFailed {
                         effect_id: id,
+                        request_id,
                         failure,
                     },
                 };
@@ -2615,7 +2783,8 @@ fn tui_materialized_conversation_view(
     let conversation = view
         .conversation
         .map(|selected| {
-            let row_id = conversation_identity(selected.key);
+            let row_id = conversation_identity(selected.key.clone());
+            presentation.replace_running_operations(row_id.clone(), &selected.page.items);
             let (_, context) = presentation
                 .conversation(&row_id)
                 .ok_or_else(observation_control_failure)?;
@@ -4182,8 +4351,9 @@ const fn timer_kind_order(kind: UiTimerKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        conversation_identity, conversation_title, local_project_command, terminal_structured_text,
-        ui_project_outcome,
+        ConversationPresentationContext, ProjectThreadPresentation, RunningOperationPresentation,
+        SharedTuiPresentation, conversation_identity, conversation_title, local_project_command,
+        terminal_structured_text, tui_interaction, ui_project_outcome,
     };
     use crate::local_client::{
         LocalProjectCommand, LocalProjectOutcome, LocalProjectResourceCheck,
@@ -4191,8 +4361,154 @@ mod tests {
     };
     use hq_local_api::protocol::v1::{
         ConversationContextDto, ConversationKeyDto, ConversationParticipantDto, Id32,
+        InteractionChoiceDto, InteractionKindDto, MailboxAddressDto, PendingInteractionDto,
     };
-    use hq_tui::{UiProjectAction, UiProjectOutcome};
+    use hq_tui::{
+        UiInteractionTarget, UiInteractionTargetIssue, UiProjectAction, UiProjectOutcome,
+    };
+
+    fn pending_command(project_id: Option<Id32>) -> PendingInteractionDto {
+        PendingInteractionDto {
+            agent_id: Id32::new([1; 32]),
+            project_id,
+            provider: "codex".to_owned(),
+            session: "session-1".to_owned(),
+            request_id: Id32::new([2; 32]),
+            operation_id: Id32::new([3; 32]),
+            kind: InteractionKindDto::CommandApproval,
+            prompt: "Run tests?".to_owned(),
+            choices: vec![InteractionChoiceDto {
+                value: "accept".to_owned(),
+                label: "Accept".to_owned(),
+            }],
+            allow_text: false,
+        }
+    }
+
+    fn participant() -> ConversationParticipantDto {
+        ConversationParticipantDto {
+            agent: Some(Id32::new([1; 32])),
+            installation: Some(Id32::new([4; 32])),
+            mailbox: Some(Id32::new([5; 32])),
+            name: Some("alice".to_owned()),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn command_approval_target_requires_one_exact_direct_conversation_and_operation() {
+        let presentation = SharedTuiPresentation::default();
+        let key = ConversationKeyDto::ProviderSession {
+            counterparty_installation: Id32::new([4; 32]),
+            counterparty_mailbox: Id32::new([5; 32]),
+            provider: "codex".to_owned(),
+            session: "session-1".to_owned(),
+        };
+        let row_id = conversation_identity(key.clone());
+        {
+            let mut data = presentation.inner.lock().expect("presentation lock");
+            data.conversation_keys.insert(row_id.clone(), key);
+            data.conversation_presentations.insert(
+                row_id.clone(),
+                ConversationPresentationContext {
+                    context: ConversationContextDto::Direct {
+                        participant: participant(),
+                    },
+                    local_human: MailboxAddressDto {
+                        installation_id: Id32::new([8; 32]),
+                        mailbox_id: Id32::new([9; 32]),
+                    },
+                },
+            );
+            data.running_operations.insert(
+                row_id.clone(),
+                vec![RunningOperationPresentation {
+                    provider: "codex".to_owned(),
+                    session: "session-1".to_owned(),
+                    operation_id: [3; 32],
+                }],
+            );
+        }
+
+        let mapped = tui_interaction(pending_command(None), &presentation);
+        assert_eq!(
+            mapped.target,
+            UiInteractionTarget::Conversation {
+                row_id: row_id.clone()
+            }
+        );
+
+        presentation
+            .inner
+            .lock()
+            .expect("presentation lock")
+            .running_operations
+            .get_mut(&row_id)
+            .expect("loaded operations")[0]
+            .operation_id = [7; 32];
+        let mismatched = tui_interaction(pending_command(None), &presentation);
+        assert_eq!(
+            mismatched.target,
+            UiInteractionTarget::Unresolved {
+                reason: UiInteractionTargetIssue::OperationMismatch
+            }
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn command_approval_target_rejects_ambiguous_direct_and_resolves_exact_project_thread() {
+        let presentation = SharedTuiPresentation::default();
+        for mailbox in [[5; 32], [6; 32]] {
+            let key = ConversationKeyDto::ProviderSession {
+                counterparty_installation: Id32::new([4; 32]),
+                counterparty_mailbox: Id32::new(mailbox),
+                provider: "codex".to_owned(),
+                session: "session-1".to_owned(),
+            };
+            let row_id = conversation_identity(key.clone());
+            let mut data = presentation.inner.lock().expect("presentation lock");
+            data.conversation_keys.insert(row_id.clone(), key);
+            data.conversation_presentations.insert(
+                row_id,
+                ConversationPresentationContext {
+                    context: ConversationContextDto::Direct {
+                        participant: participant(),
+                    },
+                    local_human: MailboxAddressDto {
+                        installation_id: Id32::new([8; 32]),
+                        mailbox_id: Id32::new([9; 32]),
+                    },
+                },
+            );
+        }
+        assert_eq!(
+            tui_interaction(pending_command(None), &presentation).target,
+            UiInteractionTarget::Unresolved {
+                reason: UiInteractionTargetIssue::Ambiguous
+            }
+        );
+
+        let project = Id32::new([10; 32]);
+        let thread = Id32::new([11; 32]);
+        let key = ConversationKeyDto::ProjectThread { project, thread };
+        let row_id = conversation_identity(key.clone());
+        {
+            let mut data = presentation.inner.lock().expect("presentation lock");
+            data.conversation_keys.insert(row_id.clone(), key);
+            data.project_threads.push(ProjectThreadPresentation {
+                project_id: project.bytes(),
+                agent_id: [1; 32],
+                provider: "codex".to_owned(),
+                session: "session-1".to_owned(),
+                thread_id: thread.bytes(),
+            });
+        }
+        assert_eq!(
+            tui_interaction(pending_command(Some(project)), &presentation).target,
+            UiInteractionTarget::Conversation { row_id }
+        );
+    }
 
     #[test]
     fn structured_terminal_text_strips_escape_sequences_and_preserves_lines() {

@@ -252,7 +252,12 @@ filters do not scan or reorder message bodies.
 Selecting a summary replaces a capacity-one desired-row slot and wakes the observation owner; rapid
 selection therefore collapses to the latest stable row even while an ordinary command is blocked.
 The observer shares an encapsulated typed key/presentation directory with the command adapter, but
-has no mutation authority. Only PageDown sends an ordinary `ConversationPage` request, always with
+has no mutation authority. It maps each pending command approval to exactly one conversation from
+the request's agent, project, provider, and session identities, then verifies the operation against
+the loaded running activity. The retained pending set is remapped whenever its snapshot or page
+evidence changes. Missing, ambiguous, and operation-mismatched requests stay nonmodal as explicit
+refreshable recovery evidence; display names, arrival order, and current selection are never used
+to guess a target. Only PageDown sends an ordinary `ConversationPage` request, always with
 a nonempty opaque older-history cursor. First-page loading text is never rendered; the retained
 coherent detail remains visible until its replacement arrives.
 Returned message/activity unions remain in reducer order. The page mapper classifies an author as
@@ -543,13 +548,15 @@ technical help. The Agents and Projects footers expose their
 
 Transient activity is already consolidated below this model. Refresh replaces the one live tail
 entry in place; terminal evidence removes it and continuation pages cannot duplicate it. A newer
-human message prevents an older progress snapshot from being moved beneath that message. Pending
-provider questions and approvals arrive over the subscribed connection and open one highest-priority
-dialog with the ordinary agent name, exact prompt, humanized stable choices, optional bounded text,
-and explicit cancel. Submission retains the request until an answered or stale outcome; transport
-failure restores the prompt. Exact provider/session/operation evidence remains visible as technical
-detail. A reader following the tail moves to a genuine replacement; a reader on another fact keeps
-that stable fact anchor.
+human message prevents an older progress snapshot from being moved beneath that message. A command
+approval replaces only its exact conversation's lower composer region, preserves the transcript
+viewport and any saved draft, and accepts explicit focus with Tab. Escape leaves it unanswered;
+global view shortcuts remain available, and returning to that conversation restores its approval.
+Other conversations remain replyable. Other provider questions and permissions retain the bounded
+modal dialog because their interaction scope is global. Submission is correlated by both effect and
+request identity until an answered or stale outcome; transport failure restores the exact choice.
+Exact provider/session/operation evidence remains visible as technical detail. A reader following
+the tail moves to a genuine replacement; a reader on another fact keeps that stable fact anchor.
 primary inspect, create, search, and help controls; responsive tests cover wide and compact
 modeless-draft, agent-detail, and managed-switch rendering. Styling
 supplements these text markers and is not the sole carrier of state.
