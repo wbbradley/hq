@@ -1621,6 +1621,31 @@ fn blocking_runner_idle_poll_preserves_the_active_connection() {
     )
     .expect("runner config");
 
+    assert_eq!(
+        runner.poll_event_or_state_change(Duration::from_secs(1)),
+        Ok(None)
+    );
+    assert!(matches!(
+        runner.connection_state(),
+        ClientConnectionState::Connecting(generation) if generation.value() == 1
+    ));
+    assert_eq!(
+        runner.poll_event_or_state_change(Duration::from_secs(1)),
+        Ok(None)
+    );
+    assert!(matches!(
+        runner.connection_state(),
+        ClientConnectionState::Negotiating(generation) if generation.value() == 1
+    ));
+    assert_eq!(
+        runner.poll_event_or_state_change(Duration::from_secs(1)),
+        Ok(None)
+    );
+    assert!(matches!(
+        runner.connection_state(),
+        ClientConnectionState::Active(generation) if generation.value() == 1
+    ));
+
     assert_eq!(runner.poll_event(Duration::from_millis(1)), Ok(None));
     assert!(matches!(
         runner.connection_state(),

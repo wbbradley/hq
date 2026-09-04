@@ -28,8 +28,9 @@ use hq_domain::{
 use hq_local_api::{
     ClientEvent, InitialView,
     protocol::v1::{
-        BuildMetadata, LifecycleRequest, LifecycleState, MutationAttemptDto, MutationOutcomeDto,
-        MutationRequest, Request, ResponseResult, SnapshotItem,
+        AuthoritativeSnapshotDto, BuildMetadata, LifecycleRequest, LifecycleState,
+        MutationAttemptDto, MutationOutcomeDto, MutationRequest, Request, ResponseResult,
+        SnapshotItem,
     },
 };
 use hq_node::{
@@ -282,6 +283,56 @@ fn local_event_client(state: StatePaths) -> LocalNodeEventClient {
         ProcessNodeLauncher::new(env!("CARGO_BIN_EXE_hq").into()),
     )
     .expect("subscribed local event client")
+}
+
+fn wait_for_project_input_sequence(
+    subscriber: &mut LocalNodeEventClient,
+    project_id: ProjectId,
+    expected_sequence: u64,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let event = subscriber
+            .next_observation()
+            .expect("subscribed project input observation");
+        let reached_sequence = matches!(
+            event,
+            Some(ClientEvent::Snapshot(ref snapshot))
+                if snapshot.items.iter().any(|item| matches!(
+                    item,
+                    SnapshotItem::Project {
+                        project_id: observed_project,
+                        input_sequence,
+                        ..
+                    } if observed_project.bytes() == *project_id.as_bytes()
+                        && *input_sequence >= expected_sequence
+                ))
+        );
+        if reached_sequence {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "subscribed project input did not reach sequence {expected_sequence}"
+        );
+    }
+}
+
+fn only_project_identity(
+    snapshot: &AuthoritativeSnapshotDto,
+    encoded_project_id: &str,
+) -> ProjectId {
+    let mut identities = snapshot.items.iter().filter_map(|item| match item {
+        SnapshotItem::Project { project_id, .. } => Some(ProjectId::from_bytes(project_id.bytes())),
+        _ => None,
+    });
+    let project_id = identities.next().expect("created project is projected");
+    assert!(
+        identities.next().is_none(),
+        "fresh test state contains exactly one project"
+    );
+    assert_eq!(encode_hex(*project_id.as_bytes()), encoded_project_id);
+    project_id
 }
 
 fn commit_plan(client: &mut LocalNodeClient, identity: u8, plan: FactPlan) {
@@ -1486,6 +1537,12 @@ fn project_send_sequences_argument_and_stdin_work_and_survives_restart() {
         .as_str()
         .expect("project identity")
         .to_owned();
+    let state = StatePaths::new(state_root.clone()).expect("state paths");
+    let mut subscriber = local_event_client(state);
+    let subscription_snapshot = subscriber
+        .activate_subscription()
+        .expect("project input subscription activates");
+    let project_identity = only_project_identity(&subscription_snapshot, &project_id);
 
     let argument = admin_output(
         &state_root,
@@ -1523,6 +1580,8 @@ fn project_send_sequences_argument_and_stdin_work_and_survives_restart() {
     );
     let stdin: serde_json::Value = serde_json::from_slice(&stdin.stdout).expect("stdin send JSON");
     assert_eq!(stdin["data"]["project_id"], project_id);
+
+    wait_for_project_input_sequence(&mut subscriber, project_identity, 2);
 
     let shown = project_json(&state_root, &["show", &project_id]);
     assert_eq!(shown["data"]["projects"][0]["input_sequence"], 2);

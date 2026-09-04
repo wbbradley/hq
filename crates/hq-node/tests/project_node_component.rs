@@ -125,6 +125,7 @@ struct BlockingInputs {
 struct BlockingInputState {
     blocked: bool,
     calls: usize,
+    plans: usize,
     fail: bool,
     planned: Vec<ProjectCommandRequest>,
 }
@@ -170,6 +171,23 @@ impl BlockingInputs {
         }
     }
 
+    fn wait_for_plans(&self, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut state = self.state.0.lock().expect("blocking inputs");
+        while state.plans < expected {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("automatic planning before deadline");
+            let waited = self
+                .state
+                .1
+                .wait_timeout(state, remaining)
+                .expect("blocking planning wait");
+            state = waited.0;
+            assert!(!waited.1.timed_out(), "automatic planning timed out");
+        }
+    }
+
     fn calls(&self) -> usize {
         self.state.0.lock().expect("blocking inputs").calls
     }
@@ -203,7 +221,10 @@ impl PlanAutomaticProjectCommands for BlockingInputs {
         &self,
         _limit: usize,
     ) -> Result<AutomaticProjectCommandPlan, ApplicationError> {
-        let requests = std::mem::take(&mut self.state.0.lock().expect("blocking inputs").planned);
+        let mut state = self.state.0.lock().expect("blocking inputs");
+        state.plans += 1;
+        let requests = std::mem::take(&mut state.planned);
+        self.state.1.notify_all();
         Ok(AutomaticProjectCommandPlan {
             requests,
             truncated: false,
@@ -294,7 +315,7 @@ fn test_store() -> (std::path::PathBuf, Store) {
 fn startup_repairs_before_admission_and_drain_checkpoints_after_intake_closes() {
     let worker = FakeWorker::default();
     let trace = Arc::clone(&worker.trace);
-    let planned = Arc::new(Mutex::new(Vec::new()));
+    let inputs = BlockingInputs::default();
     let mut component = ProjectNodeComponent::new(
         ProjectNodeConfig {
             recovery_limit: NonZeroUsize::new(16).expect("nonzero"),
@@ -302,10 +323,7 @@ fn startup_repairs_before_admission_and_drain_checkpoints_after_intake_closes() 
         },
         worker,
         FakeResources,
-        FakeInputs {
-            trace: Arc::clone(&trace),
-            planned,
-        },
+        inputs.clone(),
     );
 
     assert!(component.control_project(request()).is_err());
@@ -318,17 +336,18 @@ fn startup_repairs_before_admission_and_drain_checkpoints_after_intake_closes() 
             .expect("intake is open"),
         ProjectCommandOutcome::Accepted { .. }
     ));
+    inputs.wait_for_plans(3);
     component.stop_intake().expect("intake closes");
     assert!(component.control_project(request()).is_err());
     assert_eq!(
         component.drain().expect("drain checkpoints"),
         ComponentDrain::Complete
     );
+    assert_eq!(inputs.calls(), 5);
+    inputs.wait_for_plans(5);
     assert_eq!(
         trace.lock().expect("trace").as_slice(),
-        [
-            "inputs", "repair", "plan", "control", "repair", "inputs", "plan", "inputs", "plan"
-        ]
+        ["repair", "control", "repair", "repair"]
     );
 }
 
