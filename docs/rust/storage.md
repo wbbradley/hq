@@ -116,25 +116,228 @@ conversation-local orders. Framework and
 domain reasons use explicit exhaustive integer codecs, including nested authority reasons and typed
 role parameters. Debug prose and generic domain serialization are not persistence formats.
 
-## Incremental materialization
+## Current whole-corpus materialization path
 
-Every complete report exposes aggregate membership for projected and unusable facts. Storage
-normalizes undirected causal relationships, shared aggregate membership, transitive projection
-support, and conflict participants into `reduction_affected_dependencies`. Selection starts with
-the new fact and traverses the union of the persisted and fresh graph, so a disappearing conflict
-or support edge cannot hide a required retraction. A policy change conservatively selects every
-known vertex. Every changed decision, frontier, projection, and support set must cite an affected
-identity or the transaction fails with `ReductionFailed`.
+The current ordinary-ingest path is incremental only in the narrow sense that its final SQL patch
+does not rewrite equal rows. Before that patch, every new fact performs work over the complete
+history:
 
-`reduce_complete` remains the one executable policy definition and the fresh result is the
-continuous equality oracle. Storage stages that expected representation in an isolated in-memory
-schema through the same strict relational codecs, compares typed SQLite values by primary key, and
-applies only exact differences to the live transaction. Removed and same-key changed rows are
-deleted child-first, while changes and additions are inserted parent-first with deferred
-foreign-key checking. No unchanged row is deleted or rewritten. The complete structural and four
-domain packages are then loaded and required to equal the batch snapshots before operational state
-can advance. This avoids a second, drifting partial implementation of domain policy while making
-ordinary materialization writes incremental.
+| Work | Current operation | Bound for `F` facts and `R` rebuildable rows |
+| --- | --- | ---: |
+| Existing state | Load the complete reduction index and all four projection packages | `O(R)` |
+| Canonical evidence | Load and cryptographically reverify every exact event and compare every parent and authority edge | `O(F + causal edges)` plus signatures |
+| Reduction | Clone all semantic facts into each of four complete reducers, stabilize every decision, derive every aggregate, projection, conflict, and order | At least `O(F)` per domain; frontier and reachability work can be higher |
+| Impact normalization | Expand causal, aggregate, projection-support, and conflict sets into fact-to-fact edges | `O(sum(group_size²))` rows and work |
+| Staging | Create an in-memory SQLite database, copy canonical tables, and insert the complete expected rebuildable state | `O(F + R)` |
+| Difference | Read every rebuildable table from the live and staged databases into ordered maps and compare them | `O(R log R)` time and `O(R)` transient memory |
+| Verification | Reload the complete structural and four projection packages and compare typed values | `O(R)` |
+
+`validate_incremental_change` starts with the new fact and traverses the union of the old and new
+affected graphs. It checks that every observed decision or projection change cites a conservatively
+affected identity. It does not select the facts passed to a reducer, the projections materialized,
+or the tables diffed. A policy change selects every vertex. The affected graph is therefore a
+continuous complete-batch assertion, not an incremental execution plan.
+
+`reduce_complete` remains the only executable policy definition. The staging path correctly
+deletes changed rows child-first, inserts parent-first, and leaves equal rows untouched, but those
+write savings do not bound the preceding reads, reduction, staging, difference, or verification.
+
+## Canonical-ingest scaling evidence
+
+`crates/hq-store/tests/canonical_ingest_scaling.rs` builds a content-redacted provider-session
+history with repeated values under one exact activity key, other item keys, a completed item, a
+durable conversation entry, and an unrelated read. The ordinary test asserts structural growth;
+setting `HQ_STORE_SCALING_REPORT=1` prints diagnostic timings. One local debug run on 2026-09-03
+produced:
+
+| Same-key replacements | Canonical facts after append | Affected rows | Database bytes | Complete snapshot | Repair | One append | Conversation read after append |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 40 | 1,140 | 942,080 | 42.9 ms | 62.4 ms | 110.9 ms | 0.63 ms |
+| 64 | 72 | 4,308 | 1,400,832 | 81.8 ms | 136.2 ms | 228.2 ms | 0.63 ms |
+| 128 | 136 | 16,788 | 2,756,608 | 182.0 ms | 358.5 ms | 649.6 ms | 0.76 ms |
+| 256 | 264 | 66,324 | 7,442,432 | 431.7 ms | 1.09 s | 2.18 s | 0.77 ms |
+| 512 | 520 | 263,700 | 24,756,224 | 1.24 s | 3.91 s | 8.36 s | 0.87 ms |
+
+Wall-clock values are diagnostic rather than portable test expectations. Row counts are the stable
+evidence: doubling same-key history approaches four times as many affected rows. The isolated
+`connect_sets` characterization proves why. A group of `n` facts emits `n × (n - 1)` directed
+rows. The live Alice workload showed the same failure at product scale: 1,287 canonical facts,
+1,298,228 affected rows, about 85 MiB in that table, and 6.6–7.4 second activity commits. Reads then
+wait behind the active transaction on the single store actor; a fast read after the append says
+nothing about the delay experienced while that append is running.
+
+An additional index cannot remove these costs. `reduction_affected_dependencies` is already a
+`WITHOUT ROWID` table keyed by `(source_id, affected_id)`, exactly the order used by its only
+persistent traversal load. A reverse covering index could speed a new reverse lookup, but no such
+lookup is in the current production path and it would retain every quadratic row. Caching parsed
+facts or the preceding snapshot can remove repeated decoding and allocation, but complete reduction,
+group expansion, staging, table scans, and equality checks would remain history-wide. An index-only
+or cache-only change is therefore pressure relief, not an asymptotic fix.
+
+## Impact-structure necessity audit
+
+| Structure or evidence | Required meaning | Production readers | Current bound and disposition |
+| --- | --- | --- | --- |
+| `canonical_facts` plus exact bytes | Immutable signed knowledge and duplicate identity | Corpus load, duplicate reconciliation, repair | One row per fact; retain as authority |
+| `fact_parents` and `fact_authorities` | Direct causal and typed authority evidence, including missing parents | Corpus reverification and causal graph construction | Direct declared edges; retain |
+| `reduction_reverse_dependencies` | Present and missing-parent waiters | Complete index load, affected validation, health/recovery | Direct causal edges; retain and add reverse lookup only if an incremental query needs it |
+| Decision blocker and authority rows | Exact unresolved, unusable, and failed-authority diagnostics | Projection loaders, health/recovery, details views | Direct evidence per decision; patch by affected fact |
+| Aggregate membership | Every fact sharing a typed reducer aggregate, including unusable facts | Frontier, conflict, and retraction evaluation | Not stored as a group; currently expanded to a clique. Store exact membership instead |
+| Projection support | Exact usable facts justifying one typed projection | Projection equality, retraction, diagnostics | Support is stored with projections and also expanded to a clique. Reuse normalized membership |
+| Conflict participants | Exact facts in one typed conflict observation | Decisions, conflict diagnostics, retraction | Existing conflict/participant tables already model a group; stop duplicating it as a clique |
+| `reduction_affected_dependencies` | Conservative old-plus-new impact discovery | `validate_incremental_change`, complete index health, tests | Pairwise and potentially quadratic; no consumer uses it to bound computation. Delete after group traversal lands |
+| Dependency, presentation, and conversation order | Deterministic client-visible and diagnostic order | Indexed queries and health/recovery | Ordered output rows; update only affected domains/conversations |
+| Materialized authority, conversation, agent, and project packages | Typed application read model | Application and local API queries | Patch by exact affected projection key; retain complete repair codecs |
+
+Direct causal edges, missing-parent waiters, aggregate membership, projection support, and conflicts
+are semantically different. They must not be collapsed into one untyped edge because their update
+and deletion rules differ. Presentation and conversation order are derived outputs, not authority
+for impact. Display text, timestamps, list positions, and unchecked digests never select affected
+state.
+
+## Bounded canonical-ingest design
+
+### Normalized typed impact groups
+
+Replace the dense affected table with two strict tables in the pre-release schema:
+
+```sql
+CREATE TABLE reduction_impact_groups (
+    group_id BLOB PRIMARY KEY NOT NULL CHECK(typeof(group_id) = 'blob' AND length(group_id) = 32),
+    domain INTEGER NOT NULL CHECK(domain BETWEEN 1 AND 4),
+    group_kind INTEGER NOT NULL CHECK(group_kind BETWEEN 1 AND 3),
+    exact_key BLOB NOT NULL CHECK(typeof(exact_key) = 'blob'),
+    UNIQUE(domain, group_kind, exact_key)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_impact_members (
+    group_id BLOB NOT NULL REFERENCES reduction_impact_groups(group_id) ON DELETE CASCADE,
+    fact_id BLOB NOT NULL REFERENCES reduction_vertices(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (group_id, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX reduction_impact_members_by_fact
+ON reduction_impact_members(fact_id, group_id);
+```
+
+The closed group kinds are aggregate membership, projection support, and conflict participation.
+Each reducer domain owns a strict codec for its aggregate and projection key; a conflict key contains
+the closed reason plus the exact identity whose collision or constraint is being evaluated. The
+group ID is a domain-separated SHA-256 digest of `(domain, group_kind, exact_key)`, but every insert
+and load compares those exact fields. Equal digest with unequal typed input is corruption, not
+authority. The reverse membership index answers “which groups contain this fact”; the primary key
+answers “which facts are in this group.” One group of `n` facts uses `n` membership rows instead of
+`n × (n - 1)` edges. Overlapping groups remain traversable to a fixed point without precomputing
+their transitive closure.
+
+Existing direct reverse dependencies remain separate. Existing projection-support and conflict
+participant tables may become the canonical membership source if their strict keys cover every
+required old-plus-new lookup; otherwise they are populated from the same typed group delta. The
+implementation must not persist two independently derived copies indefinitely.
+
+### Affected-key reduction
+
+The complete and bounded paths must share reducer policy. Decompose each `DomainReducer` into pure
+operations that the complete driver can call for every key and the bounded driver can call for a
+selected set:
+
+```text
+classify(fact_id, facts, decisions) -> FactDecision
+aggregate_keys(fact_id, facts, decisions) -> typed keys
+evaluate_aggregate(key, facts, decisions) -> members + frontier
+projection_keys(affected facts and aggregates) -> typed keys
+evaluate_projection(key, facts, decisions) -> value + support
+evaluate_conflicts(affected aggregates) -> typed conflicts
+order(affected conversation or domain) -> exact ordered facts
+```
+
+`reduce_complete` remains a coordinator over all facts and keys. A new bounded coordinator consumes
+the same functions and produces a typed delta rather than a competing report implementation.
+Ordinary ingest proceeds as follows inside one immediate transaction:
+
+1. Reconcile an exact duplicate by canonical lineage, then append and verify the new exact fact and
+   its declared parent/authority edges.
+2. Seed a work queue with the new fact, direct causal children waiting on it, direct parents, and
+   every old impact group containing those identities.
+3. Reclassify queued facts. When a decision, aggregate key, group membership, frontier, conflict, or
+   projection support changes, enqueue the union of the old and new group members and direct causal
+   dependants. Continue to a fixed point.
+4. Recompute only affected typed aggregates, projections, conflicts, and conversation/domain orders.
+   Old-plus-new membership is mandatory so disappearing support or conflict evidence retracts the
+   old row instead of hiding it.
+5. Patch only rows named by the typed delta. Verify strict codecs, membership references, counts for
+   the changed packages, and unchanged revision/lineage invariants without scanning unrelated
+   tables.
+6. Derive admitted outbox intents, allocate the revision, store canonical lineage, and commit all
+   evidence and projections atomically. Any uncertainty drops the transaction; exact replay remains
+   the recovery path.
+
+A policy change, explicit repair, or failed health check uses complete reduction and replacement.
+Complete-corpus reverification and byte-for-byte equality remain startup/repair behavior and the
+differential test oracle, not ordinary append behavior.
+
+### Cache, ingress, and actor boundaries
+
+The first bounded implementation should use targeted indexed reads. A store-actor-owned verified
+corpus or reducer-state cache is optional only after those measurements exist. If added, it is built
+from reverified durable state, changed only after SQLite commit, discarded after any uncertain
+transaction or integrity error, and rebuilt after restart. It cannot answer duplicate equality from
+memory, mask external corruption, replace canonical bytes, or become another policy implementation.
+
+Provider ingress should coalesce only replaceable running progress before a canonical fact is
+authored. The key is the complete typed `ActivityKey`—source mailbox, provider, session, operation,
+item, kind, logical key, and runtime—and the highest valid sequence wins. Already signed facts are
+immutable and are never dropped. Completed items, terminal agent turns, interactions, messages,
+final output, receipts, revisions, and lineage flush losslessly. A drain processes at most 32
+notifications or 10 milliseconds before yielding; durable events flush immediately. Do not combine
+many canonical appends into one unbounded SQLite transaction. With FIFO store requests and one
+bounded append per request, an already queued mailbox, project, configuration, or interaction read
+is serviced between write units rather than after an entire provider burst.
+
+### Implementation and rollback map
+
+- **Scaling evidence:** retain the structural fixture and typed-membership prototype added with
+  this design. They are the regression baseline and contain no user content.
+- **Compact impact schema:** replace the affected table and digest fields with typed groups and
+  memberships, switch closure/health readers, and require complete repair equality. Because HQ is
+  pre-release, change schema v1 coherently rather than carrying a compatibility table. Reverting
+  this change returns to the preceding schema with no canonical-data migration promise.
+- **Reusable reducer evaluations:** extract per-fact and per-key functions while keeping
+  `reduce_complete` output byte-for-byte equal. This is policy-neutral and can land before the
+  bounded driver.
+- **Bounded materializer:** introduce the fixed-point delta coordinator and direct row patchers
+  behind the existing atomic ingest API. Differentially compare every generated prefix with complete
+  repair during tests. A transaction failure preserves the preceding state; explicit repair is the
+  operational rollback path.
+- **Bounded provider ingress:** coalesce only eligible pre-fact progress and enforce the drain yield
+  limits independently of store correctness.
+- **Optional verified cache:** add only if post-materializer profiles still justify its memory and
+  invalidation complexity.
+
+Delete `reduction_affected_dependencies`, its count/digest field, `connect_sets`, and the old closure
+loader only after all production readers use typed groups, old-plus-new closure tests cover every
+domain, impact rows satisfy the linear-membership budget, and complete repair reproduces the same
+typed projections.
+
+### Acceptance budgets
+
+- Impact metadata is `O(facts + direct causal edges + exact group memberships)`. The same-key
+  activity fixture uses no fact-pair table; doubling 512 replacements to 1,024 increases impact rows
+  and database bytes by at most 2.2 times, not approximately four times.
+- Ordinary append SQL tracing observes no unbounded `canonical_facts` scan, in-memory schema
+  construction, rebuildable-table scan, or unrelated-row rewrite. Structural counters bound facts,
+  groups, projection keys, and rows visited by the computed old-plus-new closure.
+- Every generated prefix and shuffled arrival schedule is byte-for-byte equal to `reduce_complete`
+  and explicit repair for decisions, blockers, frontiers, projections, support, conflicts, and
+  order. Late parents, revoke/regrant, disappearing support, project conflicts, duplicates,
+  response loss, transaction failpoints, reopen, and policy replacement are mandatory cases.
+- A sustained 1,000-update provider fixture mixed with unrelated reads services each read after at
+  most the active append plus one bounded ingress unit. The qualification default is 100 ms on an
+  otherwise idle supported development machine and remains environment-configurable; queue-order
+  and work-count assertions are the non-flaky gate.
+- Complete explicit repair continues to reverify all canonical bytes and reproduce byte-for-byte
+  equivalent typed projection packages. Healthy incremental state is never accepted because a cache
+  or row count merely looks plausible.
 
 ## Indexed conversation pages
 

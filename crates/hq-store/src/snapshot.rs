@@ -861,6 +861,180 @@ fn reduction_error(_: hq_reducer::ReduceError) -> StoreError {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    enum PrototypeImpactGroup {
+        Aggregate {
+            domain: ReductionDomain,
+            key: Vec<u8>,
+        },
+        ProjectionSupport {
+            domain: ReductionDomain,
+            key: Vec<u8>,
+        },
+    }
+
+    #[derive(Default)]
+    struct PrototypeMemberships {
+        identities: BTreeMap<[u8; 32], PrototypeImpactGroup>,
+        members: BTreeMap<[u8; 32], BTreeSet<FactId>>,
+    }
+
+    impl PrototypeMemberships {
+        fn insert(
+            &mut self,
+            identity: PrototypeImpactGroup,
+            members: BTreeSet<FactId>,
+        ) -> Result<(), ()> {
+            let digest = prototype_group_digest(&identity);
+            self.insert_with_digest(digest, identity, members)
+        }
+
+        fn insert_with_digest(
+            &mut self,
+            digest: [u8; 32],
+            identity: PrototypeImpactGroup,
+            members: BTreeSet<FactId>,
+        ) -> Result<(), ()> {
+            if self
+                .identities
+                .get(&digest)
+                .is_some_and(|existing| existing != &identity)
+            {
+                return Err(());
+            }
+            self.identities.insert(digest, identity);
+            self.members.insert(digest, members);
+            Ok(())
+        }
+
+        fn membership_rows(&self) -> usize {
+            self.members.values().map(BTreeSet::len).sum()
+        }
+
+        fn affected_closure(&self, roots: impl IntoIterator<Item = FactId>) -> BTreeSet<FactId> {
+            let mut affected = roots.into_iter().collect::<BTreeSet<_>>();
+            loop {
+                let before = affected.len();
+                for members in self.members.values() {
+                    if !affected.is_disjoint(members) {
+                        affected.extend(members);
+                    }
+                }
+                if affected.len() == before {
+                    return affected;
+                }
+            }
+        }
+    }
+
+    fn prototype_group_digest(identity: &PrototypeImpactGroup) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"hq-impact-group-prototype-v1\0");
+        match identity {
+            PrototypeImpactGroup::Aggregate { domain, key } => {
+                digest.update([1]);
+                digest.update(encode_domain(*domain).to_be_bytes());
+                digest.update(key);
+            }
+            PrototypeImpactGroup::ProjectionSupport { domain, key } => {
+                digest.update([2]);
+                digest.update(encode_domain(*domain).to_be_bytes());
+                digest.update(key);
+            }
+        }
+        digest.finalize().into()
+    }
+
+    fn prototype_fact(value: u8) -> FactId {
+        FactId::from_bytes([value; 32])
+    }
+
+    #[test]
+    fn pairwise_set_connection_materializes_a_directed_clique() {
+        let members = (1..=32).map(prototype_fact).collect::<BTreeSet<_>>();
+        let mut dependencies = BTreeMap::new();
+
+        connect_sets(&mut dependencies, [&members]);
+
+        assert_eq!(
+            dependencies.values().map(BTreeSet::len).sum::<usize>(),
+            members.len() * (members.len() - 1)
+        );
+        for member in &members {
+            assert_eq!(
+                dependencies.get(member).map(BTreeSet::len),
+                Some(members.len() - 1)
+            );
+            assert!(
+                !dependencies
+                    .get(member)
+                    .is_some_and(|related| related.contains(member))
+            );
+        }
+    }
+
+    #[test]
+    fn typed_group_membership_preserves_overlapping_closure_with_linear_rows() {
+        let first = (1..=3).map(prototype_fact).collect::<BTreeSet<_>>();
+        let second = (3..=5).map(prototype_fact).collect::<BTreeSet<_>>();
+        let mut memberships = PrototypeMemberships::default();
+        assert_eq!(
+            memberships.insert(
+                PrototypeImpactGroup::Aggregate {
+                    domain: ReductionDomain::Conversation,
+                    key: b"activity-key".to_vec(),
+                },
+                first,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            memberships.insert(
+                PrototypeImpactGroup::ProjectionSupport {
+                    domain: ReductionDomain::Conversation,
+                    key: b"activity-retention".to_vec(),
+                },
+                second,
+            ),
+            Ok(())
+        );
+
+        assert_eq!(memberships.membership_rows(), 6);
+        assert_eq!(
+            memberships.affected_closure([prototype_fact(1)]),
+            (1..=5).map(prototype_fact).collect()
+        );
+    }
+
+    #[test]
+    fn typed_group_digest_collision_is_rejected_against_exact_identity() {
+        let digest = [0x44; 32];
+        let mut memberships = PrototypeMemberships::default();
+        assert_eq!(
+            memberships.insert_with_digest(
+                digest,
+                PrototypeImpactGroup::Aggregate {
+                    domain: ReductionDomain::Conversation,
+                    key: b"first".to_vec(),
+                },
+                [prototype_fact(1)].into_iter().collect(),
+            ),
+            Ok(())
+        );
+        assert!(
+            memberships
+                .insert_with_digest(
+                    digest,
+                    PrototypeImpactGroup::Aggregate {
+                        domain: ReductionDomain::Conversation,
+                        key: b"second".to_vec(),
+                    },
+                    [prototype_fact(2)].into_iter().collect(),
+                )
+                .is_err()
+        );
+    }
+
     #[test]
     fn every_closed_reason_codec_round_trips() {
         let authority = [

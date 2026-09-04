@@ -176,6 +176,11 @@ outcome without specifying those representations.
 | SEC-004 | receiver-clock-invariance | Same facts are ingested with different receipt clocks | Reduce | Reports equal except excluded ingestion diagnostics | Clock independence |
 | SEC-005 | relay-order-invariance | Same encrypted logical facts are observed in different wrapper/relay order | Reduce semantic facts | Reports equal; relay observations absent from reducer | Transport independence |
 | SEC-006 | unusable-bridge-attack | Unauthorized intermediary links valid grant to attacker child | Reduce | Intermediary unusable and child unresolved/unauthorized; no usable reachability | Authority laundering defense |
+| STO-001 | compact-impact-membership | Many facts share one typed aggregate or projection-support key and some facts belong to overlapping groups | Materialize impact metadata and traverse from each member | One exact group membership per fact and direct causal edge; closure matches the complete oracle without a fact-pair clique | Bounded impact metadata |
+| STO-002 | bounded-append-equality | Generated mixed-domain histories arrive in every prefix, shuffled order, and exact replay schedule | Apply bounded ingest, then complete reduction and explicit repair | Decisions, blockers, frontiers, projections, support, conflicts, presentation order, and conversation order are byte-for-byte equal | Incremental oracle equality |
+| STO-003 | old-new-impact-retraction | Late parent, revoke/regrant, disappearing projection support, resolved conflict, project fork, and policy replacement alter prior derived state | Traverse old and new typed groups to a fixed point | Every affected prior row updates or retracts; unrelated rows and conversations are untouched | Retraction completeness |
+| STO-004 | bounded-ingest-crash-recovery | Fail each boundary after canonical insert, impact update, projection patch, revision, outbox, and cache preparation | Abort, reopen, replay exact input, and explicitly repair | Transaction preserves the preceding complete state or the complete new state; cache is discarded on uncertainty and repair exactly converges | Crash consistency |
+| STO-005 | provider-burst-read-fairness | One provider emits 1,000 replaceable progress updates mixed with durable output while mailbox, project, configuration, and interaction reads are queued | Coalesce eligible pre-fact values and process bounded store writes | Durable evidence is lossless, replaceable values retain the exact latest typed winner, and every read is serviced after at most the active append plus one bounded ingress unit | Interactive latency |
 | REG-001 | REG-AUTHORITY-MAXIMAL-REGRANT | Revoke plus several historical/concurrent acceptances and partial/full regrant branches | Reduce all topological schedules | Only acceptance on regrant descending every maximal revoke grants authority | Former Go regression |
 | REG-002 | REG-CONVERSATION-COMPARATOR | Equal-time mixed messages/activity with late parent and delayed occurrence | Batch, incremental, page, rebuild, and UI-normalized consumption | One parent-first total order everywhere; no local lookalike sort | Former Go regression |
 | REG-003 | REG-INDEXED-PAGINATION | Large conversation with equal-time mixed entries and stable page limit | Concatenate all cursor pages and measure later-page work | Concatenation equals reducer order and later pages avoid full-history load/sort | Former Go regression |
@@ -215,6 +220,15 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   the SQLite query plan for indexed range selection.
 - Incremental write tests protect unrelated projection rows with aborting update/delete triggers;
   a semantically unrelated append must commit without firing them, then equal batch and repair.
+- Impact metadata contains direct causal edges and exact typed group memberships, never pairwise or
+  persisted transitive closure. Doubling the 512-entry same-key activity fixture to 1,024 entries
+  grows impact rows and database bytes by no more than 2.2 times.
+- Ordinary append SQL tracing observes no unbounded canonical-fact scan, in-memory schema rebuild,
+  complete rebuildable-table scan, or unrelated-row rewrite. Structural counters bind work to the
+  old-plus-new affected causal and typed-group closure.
+- The provider-burst fixture asserts FIFO service between bounded writes independently of elapsed
+  time, then applies the configurable 100 ms qualification budget on an idle supported development
+  machine.
 
 ## Application service gates
 
