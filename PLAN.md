@@ -2,32 +2,162 @@
 
 ## Next Up
 
-### Remove yanked wNAF from the k256 dependency graph
+### Design a bounded canonical-ingest path without dense impact closure
 
-HQ's workspace and protocol-fuzz lockfiles resolve `k256` 0.14.0 to yanked `wnaf` 0.14.0, so
-locked builds emit a registry warning and dependency-policy checks retain a withdrawn release.
-`k256` 0.14.0 remains the current stable release and permits `wnaf` 0.14.1; upstream yanked 0.14.0
-to require corrected scalar-representation endianness bounds rather than because HQ selected an
-obsolete `k256` API.
+Ordinary canonical ingest is described as incremental, but every new fact currently reloads and
+reverifies the complete corpus, runs all four complete reducers, constructs a fresh in-memory
+SQLite database, inserts the complete expected projection state, reads every rebuildable table from
+both databases into ordered maps, patches their differences, and reloads all persisted projections
+for equality. The persisted affected-dependency index compounds that history-wide work:
+`normalize_report` turns every aggregate, conflict, and transitive projection-support set into a
+pairwise clique. In the observed Alice workload, 1,287 canonical facts produced 1,298,228 affected
+edges and approximately 85 MiB of affected-edge storage; each later activity commit took roughly
+6.6–7.4 seconds and starved unrelated draft reads behind the single store actor. The existing
+`(source_id, affected_id)` primary key already covers closure traversal, and the closure currently
+validates changed-row coverage without actually limiting reducer or patch work, so another SQL
+index cannot fix the dominant behavior. An in-memory corpus or snapshot cache may reduce parsing
+and allocation constants but cannot change cumulative whole-history-per-fact scaling.
 
-- Refresh the `k256` dependency resolution in both `Cargo.lock` and
-  `crates/hq-protocol/fuzz/Cargo.lock` so they select the latest compatible, non-yanked `wnaf`
-  release (0.14.1 at task creation). Use a targeted lockfile update: do not unlock unrelated
-  dependencies, add an unnecessary direct `wnaf` dependency, switch to an unpublished Git
-  revision, or enable additional `k256` default features.
-- Keep the workspace's explicit `k256` feature contract (`default-features = false`, `ecdh`, and
-  `schnorr`) and confirm the resolved graph remains compatible with Rust 1.98. Preserve the exact
-  BIP-340 event signing/verification and NIP-44 ECDH/envelope behavior exercised by `hq-protocol`
-  and `hq-relay`.
-- Verify both dependency graphs contain no yanked `wnaf` 0.14.0, ordinary locked workspace builds
-  and the locked `hq-node` installation no longer print the warning, the protocol fuzz workspace
-  resolves under its checked-in lockfile, and `scripts/verify-rust-dependencies.sh` accepts both
-  graphs. Run the protocol signed-event/vector tests, relay NIP-44/envelope tests, and the full
-  workspace suite to catch cryptographic or feature-resolution regressions.
+- Add a deterministic, content-redacted scaling fixture under `crates/hq-store/tests` that models
+  sustained `HarnessActivityRecorded` traffic with repeated values under one typed activity key,
+  multiple item keys, completed items, durable output, and unrelated conversations. Measure
+  workloads at increasing sizes and attribute elapsed work, allocations or retained rows where
+  practical to corpus load/reverification, each reducer domain, normalization, staged-schema
+  population, table diffing, final readback, and actor queue delay. Reuse the qualification-test
+  lease and configurable timing-budget pattern, but make structural assertions—queries executed,
+  rows visited/written, and table cardinality—the non-flaky correctness gates.
+- Write a complexity and necessity audit of `snapshot::build_complete_snapshot`,
+  `normalize_report`/`connect_sets`, `database::ingest_in_transaction`,
+  `validate_incremental_change`, `repair::patch_in_transaction`, projection-support persistence,
+  and the store actor. Distinguish direct causal edges, missing-parent waiters, typed aggregate
+  membership, direct and transitive projection support, conflicts, presentation order, and
+  conversation order. For each structure, identify its production readers, whether it is required
+  for correctness or only continuous batch-oracle validation, its worst-case row count, and whether
+  an existing primary or covering index already serves its actual queries.
+- Prove the source of the dense graph with generated fixtures. Include one large support or
+  aggregate set and show that pairwise `connect_sets` produces `n × (n - 1)` directed rows even
+  though the equivalent dependency relation can be represented with linear fact-to-group
+  membership. Separately demonstrate that removing the clique alone leaves whole-corpus reduction,
+  staging, diffing, and verification work on every append, so an index-only or cache-only proposal
+  is not accepted as the final design.
+- Evaluate and prototype compact impact representations that preserve typed identity and old-plus-
+  new invalidation semantics without materializing pairwise or transitive closure. Prefer a
+  normalized bipartite model—fact to exact causal, aggregate, projection-support, or conflict
+  group, followed by group to member—or an equivalently bounded representation. Store collision-
+  checked typed group identity rather than deriving authority from display text or an unchecked
+  digest. Traverse direct causal/support edges on demand and establish explicit row-count and
+  traversal bounds for high fanout, disappearing support, late parents, revocation/regrant, forks,
+  and policy replacement.
+- Evaluate the healthy ingest architecture separately from explicit repair. The recommended design
+  must keep one reducer policy implementation while allowing an incremental driver to select
+  affected facts and typed aggregate/projection keys, recompute only those values to a fixed point,
+  and patch only their relational rows. Identify the reducer APIs that must be decomposed into
+  reusable per-key or dependency-closed evaluation so complete repair and incremental ingest invoke
+  the same classification and projection rules rather than maintaining competing policy
+  implementations. Keep complete-corpus reverification, full reduction, replacement, and typed
+  equality in startup/explicit repair and differential tests rather than every successful append.
+- Assess a store-actor-owned verified-corpus or reducer-state cache only as an optional constant-
+  factor optimization. Specify how it is established from validated durable state, updated only
+  after transaction commit, discarded on uncertainty, and reconstructed after restart. It must
+  never become authority, hide external corruption, weaken exact duplicate detection, or replace
+  durable causal and projection identities. Compare this option against targeted indexed reads so
+  the design does not retain an unnecessary second copy of the complete corpus.
+- Assess bounded multi-fact ingestion and pre-persistence activity coalescing as independent pressure
+  relief rather than substitutes for bounded store work. Determine which progress values are
+  semantically replaceable under the exact `ActivityKey`, runtime, sequence, operation, and item
+  identities, and which output, completed-item, interaction, terminal, receipt, revision, and
+  lineage evidence must remain lossless. If batching is recommended, define transaction-size and
+  actor-fairness bounds so a large provider burst cannot become one long write that still starves
+  mailbox-draft, project, configuration, or interaction reads.
+- Produce an implementation sequence with schema/API changes, ownership boundaries, rollback
+  points, and deletion criteria for the current `reduction_affected_dependencies` contract.
+  Because HQ is pre-release, prefer one coherent current schema over retaining the dense table or a
+  compatibility migration. Separate the immediate dense-index removal/normalization, bounded
+  activity ingestion, incremental reducer/materializer work, and optional cache so each can land
+  with differential evidence and without making a temporary optimization the permanent
+  architecture.
+- Specify test-first coverage for incremental-versus-complete equality across every prefix and
+  shuffled arrival order; late parents and high fanout; capability revoke/regrant; disappearing
+  support and conflicts; project forks and global resource constraints; policy changes; duplicate
+  and response-loss replay; transaction failpoints; reopen and explicit repair; sustained activity
+  mixed with unrelated reads; and exact conversation ordering/retention. Require SQL-trace tests
+  proving ordinary append performs no full canonical scan, in-memory schema reconstruction,
+  rebuildable-table scan, or unrelated-row rewrite once the implementation lands.
+- Define measurable acceptance budgets for the implementation: persistent impact metadata grows
+  linearly with facts plus direct memberships rather than fact pairs; doubling a same-key activity
+  workload does not quadruple database rows or retained memory; ordinary append work is bounded by
+  the affected causal/key closure; actor reads are serviced between bounded write units; and
+  complete repair still reproduces byte-for-byte equivalent typed projections. Document the
+  measured baseline, considered alternatives, chosen design, rejected index/cache-only approaches,
+  security and crash-consistency invariants, and final implementation map in
+  `docs/rust/storage.md` and the storage acceptance scenarios without recording message or activity
+  content.
 
-Dependencies: the current RustCrypto `k256` 0.14.x dependency graph and the separately locked
-protocol-fuzz workspace.
+Dependencies: the complete reducer and repair oracle; strict rebuildable-state codecs and
+transaction failpoints; the existing store actor; typed activity, aggregate, conversation, project,
+authority, and operation identities. This investigation is independent of the queued New-workflow,
+live-configuration, and inline-command-approval tasks, though its eventual implementation should
+remove latency that affects all three.
 
-Completion condition: every checked-in lockfile resolves `k256` through non-yanked `wnaf` 0.14.1
-or a newer compatible stable release, locked builds are warning-free, and HQ's BIP-340 and NIP-44
-compatibility tests remain unchanged and passing.
+Completion condition: the repository contains a reproducible scaling fixture and phase-by-phase
+evidence explaining the observed CPU, latency, memory, and row growth; it conclusively distinguishes
+indexing and caching improvements from the architectural work needed to change asymptotic behavior;
+and it documents a testable, schema-specific implementation design in which ordinary ingest can be
+bounded by typed affected state, impact metadata is linear rather than pairwise, complete reduction
+remains the repair/equality oracle, and sustained provider activity cannot starve unrelated
+interactive reads.
+
+### Continue guided New after creating a project
+
+The global `n` project-work coordinator delegates project creation to the separate Projects interaction, but records only the untyped marker `UiGuidedPending::ProjectCreation`. An immediate existing-folder completion happens to install `ProjectSnapshot { project_id }`; an isolated- worktree command normally first returns `Running`, which is instead left as a project outcome while the pending marker can neither correlate later snapshots nor resume the flow. The worktree may finish and appear authoritatively, yet the UI remains stranded, and Escape clears the child surface and reconstructs an earlier New dialog rather than continuing with the created project.
+
+- Add failing pure-model coverage for the exact `n` -> create project -> isolated worktree path before changing the reducer. Exercise an initial `Running` result followed by authoritative completion and project appearance, and prove the current `ProjectCreation` marker cannot advance. Also cover immediate completion so both project-creation modes share one contract.
+- Replace the loose coupling among `new_modal`, `guided_pending`, `project_interaction`, and hard-coded Escape reconstruction with a typed New-workflow coordinator. Model an active workflow node, retained stable selections, and an optional delegated child activity with an explicit return continuation and closed Completed, Cancelled, and NeedsRecovery outcomes. Keep presentation modality separate from navigation: true New dialogs capture all input, a delegated modeless Projects or Agents surface alone owns input while active, and no hidden modal remains underneath it. Do not use a generic stack of cloned screens, display labels, snapshot positions, or form contents as authority.
+- Launch ordinary existing-folder and isolated-worktree creation as the same typed child activity from the project picker. Preserve the parent project-work intent and its prior selection while the child is active. Escape from the worktree form returns through explicit child navigation (form -> creation choice -> project picker), Escape from the agent chooser returns to the project picker with the newly created project still selected, and Escape from that picker returns to the New launcher. A successful child is consumed, so later Escape can never reveal its form, chooser, running outcome, or stale modal ancestry.
+- Treat asynchronous worktree provisioning as an operation, not a completed button press. Retain its exact command, operation, and derived project identities in a typed pending child; show a plain-language non-cancellable working state; and reconcile that exact operation across invalidations, snapshot refresh, response loss, and reconnect until it is completed, rejected, or reconcilable. Expose a stable operation handle or typed status/reconcile boundary through the TUI client and local API rather than generating a new command identity, repeating Git effects, or inferring success solely from a same-named project.
+- On completed creation, wait for the authoritative snapshot containing exactly `result.project_id`, update the retained project-picker selection to that ID, then advance once to `ChooseAgent` for that exact project. Prefer or select an eligible existing agent or the create- agent row according to the existing policy, and continue through provider, setup, and composer normally. Ignore stale or out-of-order effects by effect plus operation identity. If the target is still absent after the bounded refresh/reconcile contract, retain actionable recovery evidence instead of selecting another project.
+- Route project rejection and reconcilable external-Git outcomes through the child's NeedsRecovery path while retaining its continuation and all entered values. Returning from recovery restores the exact actionable child state; retry reuses the durable command identity where permitted. Definite cancellation before submission authors no command, while an already-running Git operation is never presented as cancelled merely because the user pressed Escape.
+- Reuse the same child-activity completion interface for agent creation in the New path so project and agent detours obey one continuation and Back contract, while leaving direct messages, notes, standalone Projects and Agents administration, and domain operations independent. Preserve the completed project-conversation-setup behavior: after agent choice, the first composer remains modeless and Escape retains one typed not-yet-started setup.
+- Update modal and form rendering plus contextual help to name the current intention and next action (`Creating the hq-acp worktree…`, then `Choose or create an agent for hq-acp`) and state the actual Escape destination. Do not expose internal workflow, saga, reducer, or continuation vocabulary.
+- Add pure transition tests for both creation modes, immediate and multi-refresh completion, multiple projects where the created ID is not first, existing/no/multiple agents, every Escape edge, rejection and reconcilable recovery, duplicate or out-of-order completion, response loss, reconnect, and no duplicate Git command. Add render coverage for active child, working, and agent states and an installed PTY journey that starts with `n`, provisions a real isolated worktree through a `Running` response, reaches the exact created project's agent choice or composer, and proves Escape cannot resurrect the creation UI. Update `docs/rust/tui.md`, `docs/rust/projects-workspace.md`, the behavior ledger, and acceptance scenarios with the workflow-versus-modality and explicit Back/continuation contract.
+
+Dependencies: the pure TUI reducer and effect-identity model; retry-safe project-command and saga identities and the local API; authoritative project snapshots; existing typed project-conversation setup persistence.
+
+Completion condition: creating an isolated worktree from the global `n` workflow may take multiple daemon turns or reconnect, but success always consumes the creation child, selects the exact new project, and advances once to choose or create an agent and then its conversation setup; every Escape has the documented destination and can never reveal stale creation ancestry; no project or Git operation is duplicated.
+
+### Make installation configuration daemon-owned and live for future launches
+
+`hq config set` and the TUI Config page currently try to acquire exclusive state-directory ownership even when the daemon already owns it, so valid changes fail with the generic
+`identity.operation_failed`. The daemon also captures Codex defaults and the preferred provider at
+startup, which means writing `local-config.v1.json` alone cannot update later launch decisions in
+the active generation.
+
+- Add a strict local-API configuration query and field-specific update contract, with DTO conversion at the node boundary for the complete canonical configuration and typed patches for theme, preferred provider, Codex model, and Codex yolo. Keep unsigned installation configuration separate from canonical domain facts. Do not send paths, configuration contents, or secrets in invalidations or diagnostics.
+- Introduce one daemon-owned configuration manager that retains the validated current snapshot and the sole persistence capability minted under `StateDirectoryOwner`. Serialize updates, rebuild the complete `LocalConfiguration` through its validator, atomically persist it, and publish the in-memory snapshot only after persistence succeeds. Use field-specific replacement rather than stale whole-object writes so simultaneous CLI and TUI edits to different fields cannot overwrite one another.
+- Route CLI configuration reads and setters through the running daemon when it owns the state directory; retain the exclusive offline persistence path when no daemon exists so configuration remains usable before startup. Close the probe/ownership race by retrying the daemon path when offline acquisition reports an active owner. Preserve strict human and JSON output, and replace the generic identity failure with an actionable configuration-unavailable or uncertain diagnostic when the daemon cannot confirm the result.
+- Route TUI configuration loading and saving through the same local API and remove its attempt to acquire `StateDirectoryOwner`. Reload authoritative configuration when entering or explicitly refreshing Config so a long-running TUI observes changes made by another client. Retain requester-local theme validation and immediate theme application after the daemon acknowledges persistence; failed or stale edits reload the daemon snapshot instead of presenting optimistic values as saved.
+- Replace startup-copied provider settings with a shared read-only live configuration source at the launch and selection boundaries. Resolve Codex yolo and model from the latest committed snapshot for every subsequently launched provider process, including a stopped session that launches a new process; never mutate an already-running provider process or imply that a new conversation reusing it changed policy. Resolve the preferred provider live for later catalog/default choices without rewriting any existing agent, provider, session, project, or thread binding.
+- Remove the inert `LocalConfiguration.relays`, `config set relays`, and matching TUI field, and direct relay membership changes to the existing typed `hq relay add/remove` API, whose durable policy includes access and authentication and already wakes the live relay engine. Update the pre-release configuration schema coherently rather than retaining a compatibility reader or two competing relay representations.
+- Treat response loss conservatively: a field replacement is safe for the user to reconcile by rereading configuration, but do not blindly replay it across a later competing update. Correlate each TUI save completion to its exact effect, keep another client's acknowledged field changes intact, and show the canonical daemon response after success.
+- Add pure manager/composition, local-protocol/server/client, CLI, TUI-model, and installed Unix/PTY tests. Cover a daemon plus TUI already running while CLI changes yolo; persistence across restart; a later fake-Codex launch receiving the new permissive/model values while an existing process is unchanged; live preferred-provider changes; concurrent different-field edits; same-field races; persistence failure; response loss/reconnect; owner-acquisition races; immediate requester theme application; Config reload in another client; and the absence of the old generic identity error. Update `docs/rust/identity-persistence.md`, `docs/rust/cli.md`, `docs/rust/node-lifecycle.md`, `docs/rust/tui.md`, `docs/nostr.md`, the behavior ledger, and acceptance scenarios for daemon ownership, exact live boundaries, offline fallback, and relay-policy consolidation.
+
+Dependencies: the exclusive state-directory owner and atomic configuration writer; the local API session/client path; the foreground Codex launch resolver and harness provider catalog; existing relay policy commands and live relay wake pipeline.
+
+Completion condition: while a daemon and TUI are running, `hq config set codex.yolo true` succeeds, is returned by daemon-backed reads, and remains persisted after restart; every Codex process launched afterward uses permissive policy while already-running processes and durable session/thread bindings remain unchanged; CLI and TUI edits cannot clobber unrelated fields; and relay configuration has one effective live path rather than an inert duplicate.
+
+### Put command approval in its blocked conversation
+
+A pending `CommandApproval` is currently promoted into `UiInteractionModal`, rendered as a centered overlay after every workspace, and handled before global navigation. One agent command therefore captures the whole TUI even though the request already carries the stable agent, project, provider-session, operation, and request identities needed to associate it with one conversation. The global `interactions.front()` also suppresses a running transcript tail without first proving that the visible conversation owns that operation.
+
+- Split command approvals from the true modal provider-interaction path in `crates/hq-tui/src/model.rs`. Retain Question, FileApproval, Permission, McpUrl, and McpForm as modal experiences with their existing focus and scope capture; represent each `CommandApproval` as request-keyed modeless state attached to exactly one conversation, including its selected choice and submitting or failure state. Do not choose a target from display text, timestamps, queue order, current selection, or list position.
+- Resolve the stable conversation identity at the `crates/hq-node/src/tui_client.rs` presentation boundary from typed evidence. For project work, require one exact project, agent, provider, and session thread binding and its `ProjectThread` conversation key; for non-project agent work, require one exact agent participant, provider, and session `ProviderSession` conversation key. Use the operation identity to verify the matching running activity whenever its page is available. Preserve an unresolved or ambiguous request as nonmodal recovery evidence rather than attaching it to the wrong conversation, and update the presentation cache coherently when authoritative snapshots replace conversation or thread bindings.
+- Replace `render_interaction_modal` for command approvals with a bounded inline approval control in the lower conversation pane where the reply composer appears. It must name the agent and project context, show the bounded command prompt and stable provider choices, expose submitting or retry state and progressive technical disclosure, and suppress only the exact correlated running tail. Cover wide and compact layouts without clearing or covering the Inbox list, header, other conversations, or other workspaces.
+- Give the inline control an explicit logical focus separate from conversation history and draft editing. When focused, j/k or arrows choose the provider-supplied option and Enter sends that exact stable value. Escape leaves the control without answering or discarding its request; denial or cancellation must remain an explicit provider-supplied action. Tab and Shift-Tab can leave and return to the control, and modeless global view shortcuts remain available except while an actually visible free-text field owns input. Navigating to another view or conversation must neither answer nor discard the approval; returning to the blocked conversation restores its request-keyed selection and submission state.
+- Block composing or submitting a reply only in the conversation whose command is awaiting approval. If that conversation already has a loading, dirty, saving, or saved draft when the request appears, retain its exact draft identity, content, caret, autosave or submission evidence, and intended focus while the approval control replaces it; restore that same editor after the request is answered, explicitly cancelled, becomes stale, or disappears authoritatively. Hidden draft text must not capture global shortcuts. Other conversations retain normal `r`, Enter, draft, archive, and navigation behavior while the approval remains pending.
+- Remove the global-front interaction coupling: simultaneous command approvals in different conversations remain independently visible and actionable when each conversation is selected, while a true modal interaction still captures the UI above them. Correlate every answer completion or failure by both `EffectId` and request identity so navigation, refreshed pending interaction lists, response uncertainty, reconnect, and out-of-order completion cannot update a different control. An answer failure restores only that request with its prior choice; an `Answered` or `Stale` outcome removes only that request and reveals the retained composer or ordinary conversation pane.
+- Replace modal-specific command-approval tests with pure-model, client-mapping, render, shell-wakeup, and installed PTY coverage. Prove exact and ambiguous correlation, two conversations with simultaneous requests, switching views and replying in an unblocked conversation, returning to the blocked conversation, draft replacement and restoration, Tab and 1–6 behavior, other interaction kinds retaining modal capture, refresh, reconnect, resize, answer failure or staleness, and exact running-tail suppression. Extend the installed fake-Codex approval scenario to leave the conversation while approval is pending, use another modeless surface, return, approve, and observe the provider turn finish.
+- Update `docs/rust/tui.md`, `docs/rust/inbox-conversation-surface.md`, `docs/rust/conversation-model.md`, and `docs/rust/acceptance-scenarios.md` to distinguish thread-scoped inline command approval from true modal provider questions and document focus, draft suspension and restoration, typed correlation, global shortcuts, and unresolved-target recovery.
+
+Dependencies: the existing session-owned pending-interaction responder and exact-once answer pipeline; authoritative conversation keys and project-thread bindings; modeless Inbox draft persistence; the global modeless view shortcuts already implemented.
+
+Completion condition: a command approval replaces the reply pane only for its exactly correlated conversation; the user can switch views, use and reply in other conversations, and return without losing either the approval or a suspended draft; answering updates only that stable request and restores the reply pane; and every non-command interaction continues to capture the full UI as a true modal.

@@ -1,5 +1,54 @@
 # Completed
 
+## 2026-09-03 — Non-yanked k256 dependency graph and deterministic synchronization tests
+
+Both the workspace and protocol-fuzz lockfiles now resolve `k256` 0.14.0 through non-yanked
+`wnaf` 0.14.1 without changing manifests or the explicit ECDH/Schnorr feature contract. Rust 1.98
+feature resolution, dependency policy, locked workspace and fuzz builds, locked `hq-node`
+installation, BIP-340 vectors, NIP-44/envelope behavior, strict Clippy, and the normal parallel full
+workspace suite all pass without the yanked-release warning.
+
+Three synchronization flakes exposed during the full-suite runs were removed rather than retried
+away. The reconnecting-client test establishes each typed connection state before testing an idle
+deadline; the project-send CLI test waits on an authoritative subscribed snapshot for the exact
+project and input sequence; and the project-component drain test uses condition-variable planning
+checkpoints to distinguish the command-triggered pass from the final drain pass. None use sleeps,
+display text, or scheduler-controlled pass coalescing. Repeated stress runs cover all three repairs.
+
+### Original plan entry
+
+### Remove yanked wNAF from the k256 dependency graph
+
+HQ's workspace and protocol-fuzz lockfiles resolve `k256` 0.14.0 to yanked `wnaf` 0.14.0, so
+locked builds emit a registry warning and dependency-policy checks retain a withdrawn release.
+`k256` 0.14.0 remains the current stable release and permits `wnaf` 0.14.1; upstream yanked 0.14.0
+to require corrected scalar-representation endianness bounds rather than because HQ selected an
+obsolete `k256` API.
+
+- Refresh the `k256` dependency resolution in both `Cargo.lock` and
+  `crates/hq-protocol/fuzz/Cargo.lock` so they select the latest compatible, non-yanked `wnaf`
+  release (0.14.1 at task creation). Use a targeted lockfile update: do not unlock unrelated
+  dependencies, add an unnecessary direct `wnaf` dependency, switch to an unpublished Git
+  revision, or enable additional `k256` default features.
+- Keep the workspace's explicit `k256` feature contract (`default-features = false`, `ecdh`, and
+  `schnorr`) and confirm the resolved graph remains compatible with Rust 1.98. Preserve the exact
+  BIP-340 event signing/verification and NIP-44 ECDH/envelope behavior exercised by `hq-protocol`
+  and `hq-relay`.
+- Verify both dependency graphs contain no yanked `wnaf` 0.14.0, ordinary locked workspace builds
+  and the locked `hq-node` installation no longer print the warning, the protocol fuzz workspace
+  resolves under its checked-in lockfile, and `scripts/verify-rust-dependencies.sh` accepts both
+  graphs. Run the protocol signed-event/vector tests, relay NIP-44/envelope tests, and the full
+  workspace suite to catch cryptographic or feature-resolution regressions.
+
+Dependencies: the current RustCrypto `k256` 0.14.x dependency graph and the separately locked
+protocol-fuzz workspace.
+
+Completion condition: every checked-in lockfile resolves `k256` through non-yanked `wnaf` 0.14.1
+or a newer compatible stable release, locked builds are warning-free, and HQ's BIP-340 and NIP-44
+compatibility tests remain unchanged and passing.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-03 — Restart-safe unstarted project conversations
 
 Project first-message preparation is now a persisted `ProjectSetup` draft target carrying exact
