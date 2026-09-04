@@ -402,8 +402,8 @@ fn identity_command() -> Command {
 
 fn config_command() -> Command {
     Command::new("config")
-        .about("Manage typed local defaults offline")
-        .long_about("Manage typed local defaults under exclusive offline ownership.")
+        .about("Inspect or change installation settings")
+        .long_about("Inspect or change installation settings through the running daemon. When the daemon is stopped, HQ updates the same settings under exclusive offline ownership.")
         .subcommands([
             leaf("get", "Show all local defaults"),
             leaf("themes", "List bundled and user-defined TUI themes"),
@@ -412,12 +412,6 @@ fn config_command() -> Command {
                     Arg::new("provider")
                         .required(true)
                         .value_name("PROVIDER|none"),
-                ),
-                Command::new("relays").arg(
-                    Arg::new("relays")
-                        .required(true)
-                        .num_args(1..)
-                        .value_name("URL|none"),
                 ),
                 Command::new("theme")
                     .about("Select a startup TUI theme or restore automatic selection")
@@ -434,6 +428,9 @@ fn config_command() -> Command {
                             .value_parser(["true", "false"])
                             .value_name("true|false"),
                     ),
+                Command::new("codex.model")
+                    .about("Select the model used by future managed Codex process launches")
+                    .arg(Arg::new("model").required(true).value_name("MODEL|none")),
             ]),
         ])
 }
@@ -1002,23 +999,6 @@ fn map_config(matches: &ArgMatches) -> Result<ConfigurationCommand, CliError> {
                 value => Some(ProviderId::new(value).map_err(|_| CliError::Arguments)?),
             },
         },
-        "relays" => {
-            let values = args
-                .get_many::<String>("relays")
-                .ok_or(CliError::Arguments)?
-                .collect::<Vec<_>>();
-            let relays = if values.len() == 1 && values[0] == "none" {
-                Vec::new()
-            } else if values.iter().any(|value| *value == "none") {
-                return Err(CliError::Arguments);
-            } else {
-                values
-                    .into_iter()
-                    .map(|value| relay_text(value))
-                    .collect::<Result<Vec<_>, _>>()?
-            };
-            ConfigurationCommand::SetRelays { relays }
-        }
         "theme" => ConfigurationCommand::SetTheme {
             theme: match text(args, "theme")? {
                 "none" => None,
@@ -1029,6 +1009,12 @@ fn map_config(matches: &ArgMatches) -> Result<ConfigurationCommand, CliError> {
         },
         "codex.yolo" => ConfigurationCommand::SetCodexYolo {
             enabled: text(args, "enabled")? == "true",
+        },
+        "codex.model" => ConfigurationCommand::SetCodexModel {
+            model: match text(args, "model")? {
+                "none" => None,
+                value => Some(value.to_owned()),
+            },
         },
         _ => return Err(CliError::Arguments),
     })

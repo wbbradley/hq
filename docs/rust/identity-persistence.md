@@ -80,20 +80,20 @@ Absent configuration means empty explicit defaults. A present file is bounded to
 is exact canonical JSON in this member order:
 
 ```json
-{"version":1,"relays":["wss://relay.example"],"default_provider":"provider","theme":"gruvbox-dark-medium"}
+{"version":1,"default_provider":"provider","theme":"gruvbox-dark-medium"}
 ```
 
 `default_provider` is required and may be `null`. `theme` is an optional bounded built-in/user name
-or absolute theme-file path. It is omitted when unset so canonical files written before theme
-support remain byte-for-byte accepted; an explicit `null` is noncanonical. Relays are a sorted, duplicate-free list of at
-most 16 nonempty ASCII `ws://` or `wss://` endpoints, each at most 2048 bytes. The optional provider
+or absolute theme-file path. It is omitted when unset; an explicit `null` is noncanonical. The optional provider
 uses the domain's nonempty 64-byte `ProviderId` bound. Configuration has no conversion into a
 semantic payload and is replaced independently from identity and canonical history. Codex defaults
 contain a boolean yolo policy and an optional bounded single-line model selector.
 
-`LocalConfiguration` is passive DTO data, so its relay, provider, theme, and Codex-default fields are public. Construction
-canonicalizes and validates the value, and persistence reconstructs it through the same validator;
-direct caller mutation therefore cannot persist duplicates, excess entries, or noncanonical order.
+The daemon owns one serialized configuration manager for the lifetime of its state-directory lock.
+Each update replaces one typed field, rebuilds and validates the complete value, atomically persists
+it, and only then publishes the in-memory snapshot. A failed write leaves both views unchanged.
+Offline commands mint the same capability only when no daemon owns the directory. Relay membership
+is not duplicated here; `hq relay add/remove` owns its complete access and authentication policy.
 
 ## First-start declaration
 

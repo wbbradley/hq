@@ -20,8 +20,8 @@ use crate::{
     LocalSessionPumpConfig, LocalSessionRegistryConfig, NodeComponent, NodeComponents,
     NodeFoundation, NodeFoundationConfig, NodeOwner, NodeOwnerStartError, NodeStartupError,
     ProjectNodeConfig, RelayNodeComponent, RelayNodeConfig, RuntimePaths, ShutdownIntent,
-    StandardProjectNodeComponent, StatePaths, WakingApplicationStore, compose_codex_registry,
-    compose_standard_project_component,
+    StandardProjectNodeComponent, StatePaths, WakingApplicationStore,
+    compose_codex_registry_with_configuration, compose_standard_project_component,
 };
 
 /// Explicit capacities and paths for one foreground node process.
@@ -169,10 +169,15 @@ fn open_generation(
         application.clone(),
         foundation.public_identity().installation_id,
     ));
-    let codex = foreground_codex_config(foundation.configuration());
-    let registry = compose_codex_registry(
+    let configuration = foundation
+        .configuration()
+        .map_err(|_| ForegroundNodeError::Composition)?;
+    let configuration_manager = foundation.configuration_manager();
+    let codex = foreground_codex_config(&configuration);
+    let registry = compose_codex_registry_with_configuration(
         gateway,
         codex,
+        configuration_manager.clone(),
         Arc::new(hq_codex::ExecCodexProcessStarter),
         Arc::new(hq_codex::DiscardCodexDiagnostics),
         Arc::new(trace.clone()),
@@ -189,8 +194,9 @@ fn open_generation(
         Arc::new(registry),
         persistence,
         canonical,
-        foundation.configuration().default_provider.clone(),
+        configuration.default_provider,
     )
+    .with_configuration(configuration_manager)
     .with_boundary_trace(trace.clone());
     let project = compose_standard_project_component(
         ProjectNodeConfig {

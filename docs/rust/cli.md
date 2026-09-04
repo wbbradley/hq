@@ -60,9 +60,10 @@ ready, stopped, rejected, and uncertain as distinct outcomes and does not equate
 with runtime presence. Installed pseudoterminal coverage exercises explicit-provider start and a
 typed rejection; installed CLI restart coverage exercises stop and stale exact resume.
 
-`identity init|show|export|import` and `config get|set|themes` are deliberately offline operations. They
-acquire the same exclusive state owner as the node and refuse a live owner instead of reading or
-writing behind it. Initialization and import never overwrite an identity. Export and import require
+`identity init|show|export|import` are deliberately offline operations. `config get|set|themes`
+uses the running daemon when present and otherwise acquires exclusive offline ownership. If daemon
+startup races the offline probe, configuration retries through the daemon rather than surfacing the
+state-lock error. Initialization and import never overwrite an identity. Export and import require
 an absolute package path and the literal `--password-stdin`; exactly one bounded UTF-8 password line
 is then consumed from stdin, normalized and zeroized. The secret is never accepted as argv, echoed,
 retained in a diagnostic, or sent over the local API. A closed, oversized, malformed, or multiline
@@ -78,12 +79,13 @@ mode or the alternate screen, so a missing or invalid selected file produces an 
 terminal diagnostic. See [TUI themes](../tui-themes.md) for built-ins, Base16 import, and the native
 role schema.
 
-`config set codex.yolo true` makes newly launched managed Codex sessions use approval policy
+`config set codex.yolo true` makes newly launched managed Codex processes use approval policy
 `never` and sandbox mode `danger-full-access`; set it to `false` to restore Codex defaults. Because
-the foreground generation captures Codex defaults at startup, restart the daemon after changing
-Codex yolo or model settings. The TUI Config page can edit every installation-local setting and
-applies theme changes immediately; non-theme daemon settings apply on its next start. Only enable
-Codex yolo inside an externally secured environment.
+the launch resolver reads committed configuration for every new process, no daemon restart is
+required. `config set codex.model MODEL|none` follows the same future-process boundary. Existing
+processes and durable session/thread bindings do not change. The TUI Config page uses the same
+field-specific daemon API, reloads on entry or refresh, and applies an acknowledged theme change
+immediately. Only enable Codex yolo inside an externally secured environment.
 
 `human create [LABEL]` starts or connects to the node, reconciles the reserved human mailbox,
 authors the installation's deterministic but separately namespaced creator-account identity when
@@ -313,11 +315,11 @@ dependency-incomplete history, and the boundary that humans own identity, author
 selection, and retirement administration.
 
 Identity output has only the installation ID, signing public key, and public fingerprint.
-Configuration output has the optional provider, complete canonical relay list, theme, and Codex
+Configuration output has the optional provider, theme, and Codex
 defaults (yolo and optional model). Identity and configuration are
-passive data with public fields. Configuration setters replace one complete typed field, rebuild
-the validated value, and the persistence adapter revalidates public fields again immediately before
-the atomic write. Human, peer, mailbox, relay/health, route-history, capability-history,
+passive data with public fields. Configuration setters replace one typed field through the current
+exclusive owner and return the complete committed value. Relay policy is changed only through
+`hq relay add/remove`. Human, peer, mailbox, relay/health, route-history, capability-history,
 named-agent, session, project-catalog, and project-operation presentation records are also passive
 public-field values; command enums
 and the live client capability remain closed behavioral types. The clean unshipped local API v1

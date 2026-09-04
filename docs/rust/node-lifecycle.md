@@ -123,8 +123,11 @@ only copied environment bytes to the neutral supervisor. After exact readiness i
 authors the immutable mailbox/session binding, repository context, and complete-frontier selection;
 an uncertain canonical commit remains uncertain and is replayed under deterministic stage
 identities. Foreground composition injects this canonical adapter and is the only production root
-that registers the Codex factory. It resolves provider-private executable, model, permissive mode,
-developer instructions, and validated working-tree launch policy there. Project activation carries
+that registers the Codex factory. The daemon-owned configuration manager holds the exclusive
+persistence capability and supplies a read-only live snapshot at provider-catalog and process-launch
+boundaries. The resolver selects provider-private executable, current model and permissive mode,
+developer instructions, and validated working-tree launch policy there. A committed change affects
+later processes but never mutates an existing process or durable session/thread binding. Project activation carries
 its selected directory through the passive runtime request before the later canonical runnable
 acknowledgement. Restart drains all children and a replacement generation reconstructs the registry
 and ownership graph from the retained foundation state.

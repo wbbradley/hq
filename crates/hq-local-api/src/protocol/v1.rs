@@ -38,6 +38,10 @@ pub const MAX_CANONICAL_EVIDENCE_BYTES: usize = 512 * 1024;
 pub const MAX_RELAY_STATUS_POLICIES: usize = hq_application::MAX_RELAY_STATUS_POLICIES;
 /// Maximum provider registrations returned by one passive catalog query.
 pub const MAX_PROVIDER_CATALOG_ITEMS: usize = 32;
+/// Maximum persisted terminal-theme selector bytes.
+pub const MAX_CONFIGURATION_THEME_BYTES: usize = 1_024;
+/// Maximum persisted Codex model selector bytes.
+pub const MAX_CONFIGURATION_MODEL_BYTES: usize = 256;
 
 const MUTATION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-mutation\0";
 const MAILBOX_COMMAND_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-mailbox-command\0";
@@ -1689,6 +1693,34 @@ pub struct EvidenceIngestOutcomeDto {
     pub inserted: bool,
 }
 
+/// Complete canonical unsigned installation configuration visible to local clients.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationConfigurationDto {
+    /// Optional preferred provider namespace.
+    pub default_provider: Option<String>,
+    /// Optional terminal theme selector.
+    pub theme: Option<String>,
+    /// Optional Codex model selector for future process launches.
+    pub codex_model: Option<String>,
+    /// Whether future Codex process launches bypass approvals and sandboxing.
+    pub codex_yolo: bool,
+}
+
+/// One field-specific installation-configuration replacement.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "field", content = "value", rename_all = "snake_case")]
+pub enum InstallationConfigurationPatchDto {
+    /// Replace or clear the preferred provider.
+    DefaultProvider(Option<String>),
+    /// Replace or clear the terminal theme selector.
+    Theme(Option<String>),
+    /// Replace or clear the Codex model selector.
+    CodexModel(Option<String>),
+    /// Enable or disable permissive Codex launches.
+    CodexYolo(bool),
+}
+
 /// Closed local API v1 request families.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
@@ -1701,6 +1733,10 @@ pub enum Request {
     AuthoritativeConversationView(AuthoritativeConversationViewRequestDto),
     /// Load providers registered with this running installation.
     ProviderCatalog,
+    /// Load the daemon-owned installation configuration.
+    InstallationConfiguration,
+    /// Atomically replace exactly one installation-configuration field.
+    UpdateInstallationConfiguration(InstallationConfigurationPatchDto),
     /// Load one bounded reducer-ordered conversation page.
     ConversationPage(ConversationPageRequest),
     /// Load every bounded installation-local mailbox draft.
@@ -2888,6 +2924,8 @@ pub enum ResponseResult {
     AuthoritativeConversationView(AuthoritativeConversationViewDto),
     /// Passive provider registrations and configured preference.
     ProviderCatalog(ProviderCatalogDto),
+    /// Complete daemon-owned installation configuration.
+    InstallationConfiguration(InstallationConfigurationDto),
     /// Bounded conversation page.
     ConversationPage(ConversationPageDto),
     /// Every bounded installation-local mailbox draft.
@@ -3115,6 +3153,7 @@ impl WireMessage {
         Ok(message)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn validate(&self) -> Result<(), ValueError> {
         match self {
             Self::ClientHello(hello) => {
@@ -3163,6 +3202,9 @@ impl WireMessage {
                     validate_id_set(&request.roots, MAX_CANONICAL_EVIDENCE_ITEMS)
                 }
                 Request::IngestCanonicalEvidence(evidence) => validate_evidence(evidence),
+                Request::UpdateInstallationConfiguration(patch) => {
+                    validate_configuration_patch(patch)
+                }
                 Request::Subscribe(request) => {
                     validate_topics(&request.topics)?;
                     request
@@ -3201,6 +3243,7 @@ impl WireMessage {
                 | Request::Lifecycle(_)
                 | Request::AuthoritativeSnapshot
                 | Request::ProviderCatalog
+                | Request::InstallationConfiguration
                 | Request::RelayStatus
                 | Request::StateHealth
                 | Request::RepairState { .. }
@@ -3253,6 +3296,42 @@ fn validate_text(value: &str, maximum: usize) -> Result<(), ValueError> {
     Ok(())
 }
 
+fn validate_optional_text(value: Option<&str>, maximum: usize) -> Result<(), ValueError> {
+    value.map_or(Ok(()), |value| validate_text(value, maximum))
+}
+
+fn validate_configuration(configuration: &InstallationConfigurationDto) -> Result<(), ValueError> {
+    validate_optional_text(
+        configuration.default_provider.as_deref(),
+        PROVIDER_ID_MAX_BYTES,
+    )?;
+    validate_optional_text(
+        configuration.theme.as_deref(),
+        MAX_CONFIGURATION_THEME_BYTES,
+    )?;
+    validate_optional_text(
+        configuration.codex_model.as_deref(),
+        MAX_CONFIGURATION_MODEL_BYTES,
+    )
+}
+
+fn validate_configuration_patch(
+    patch: &InstallationConfigurationPatchDto,
+) -> Result<(), ValueError> {
+    match patch {
+        InstallationConfigurationPatchDto::DefaultProvider(value) => {
+            validate_optional_text(value.as_deref(), PROVIDER_ID_MAX_BYTES)
+        }
+        InstallationConfigurationPatchDto::Theme(value) => {
+            validate_optional_text(value.as_deref(), MAX_CONFIGURATION_THEME_BYTES)
+        }
+        InstallationConfigurationPatchDto::CodexModel(value) => {
+            validate_optional_text(value.as_deref(), MAX_CONFIGURATION_MODEL_BYTES)
+        }
+        InstallationConfigurationPatchDto::CodexYolo(_) => Ok(()),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
     match &response.response {
@@ -3268,6 +3347,9 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
         }
         Response::Success(ResponseResult::ProviderCatalog(catalog)) => {
             validate_provider_catalog(catalog)
+        }
+        Response::Success(ResponseResult::InstallationConfiguration(configuration)) => {
+            validate_configuration(configuration)
         }
         Response::Success(ResponseResult::ConversationPage(page)) => validate_page(page),
         Response::Success(ResponseResult::MailboxDrafts(drafts)) => {

@@ -166,7 +166,7 @@ identity_replacement_canonical=$(jq -Sc '.data' <<<"$identity_replacement")
   fail 'identity import unexpectedly restored local configuration'
 replacement_config=$(hq_command --state-root "$replacement_state" --output json config get) ||
   fail 'replacement configuration inspection failed'
-jq -e '.ok == true and .kind == "configuration" and .data.default_provider == null and .data.relays == []' \
+jq -e '.ok == true and .kind == "configuration" and .data.default_provider == null and (.data | has("relays") | not)' \
   <<<"$replacement_config" >/dev/null || fail 'replacement inherited excluded configuration'
 
 replacement_ready=$(hq_command --state-root "$replacement_state" --output json daemon readiness) ||

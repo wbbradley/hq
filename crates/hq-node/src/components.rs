@@ -481,6 +481,13 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
         &self.revisions
     }
 
+    /// Returns the shared daemon-owned installation configuration capability.
+    pub fn configuration_manager(&self) -> Option<crate::ConfigurationManager> {
+        self.foundation
+            .as_ref()
+            .map(NodeFoundation::configuration_manager)
+    }
+
     /// Borrows one complete application port bundle without exposing storage or signer ownership.
     pub fn application_ports(
         &self,

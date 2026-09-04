@@ -5,8 +5,8 @@
 use std::{fs, path::PathBuf};
 
 use hq_node::{
-    BackupPassword, IdentityErrorClass, LocalConfiguration, RelayEndpoint, StateDirectoryOwner,
-    StatePaths, ThemeSelection,
+    BackupPassword, IdentityErrorClass, LocalCodexConfiguration, StateDirectoryOwner, StatePaths,
+    ThemeSelection,
 };
 
 mod support;
@@ -126,10 +126,10 @@ fn configuration_rejects_noncanonical_duplicates_invalid_values_and_unsafe_modes
     let owner = StateDirectoryOwner::acquire(paths.clone()).expect("owner acquires");
 
     for malformed in [
-        br#"{"relays":[],"version":1,"default_provider":null}"#.as_slice(),
-        br#"{"version":2,"relays":[],"default_provider":null}"#.as_slice(),
-        br#"{"version":1,"relays":[],"unknown":null,"default_provider":null}"#.as_slice(),
-        br#"{"version":1,"relays":[],"default_provider":null,"theme":null}"#.as_slice(),
+        br#"{"default_provider":null,"version":1}"#.as_slice(),
+        br#"{"version":2,"default_provider":null}"#.as_slice(),
+        br#"{"version":1,"unknown":null,"default_provider":null}"#.as_slice(),
+        br#"{"version":1,"default_provider":null,"theme":null}"#.as_slice(),
     ] {
         write_private(paths.configuration_file(), malformed);
         assert_eq!(
@@ -141,38 +141,7 @@ fn configuration_rejects_noncanonical_duplicates_invalid_values_and_unsafe_modes
         );
     }
 
-    write_private(
-        paths.configuration_file(),
-        br#"{"version":1,"relays":["wss://same.example","wss://same.example"],"default_provider":null}"#,
-    );
-    assert_eq!(
-        owner
-            .load_configuration()
-            .expect_err("duplicate relay is rejected")
-            .class(),
-        IdentityErrorClass::ConfigurationInvalid
-    );
-    RelayEndpoint::new("https://not-a-relay.example".to_owned())
-        .expect_err("wrong scheme is rejected");
-    let duplicate = RelayEndpoint::new("wss://same.example".to_owned()).expect("relay is valid");
-    assert_eq!(
-        LocalConfiguration::new([duplicate.clone(), duplicate], None)
-            .expect_err("typed duplicate is rejected")
-            .class(),
-        IdentityErrorClass::ConfigurationInvalid
-    );
-    let many_relays = (0..17)
-        .map(|index| {
-            RelayEndpoint::new(format!("wss://relay-{index}.example")).expect("relay is valid")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        LocalConfiguration::new(many_relays, None)
-            .expect_err("relay collection is bounded")
-            .class(),
-        IdentityErrorClass::ConfigurationInvalid
-    );
-    RelayEndpoint::new(format!("wss://{}", "x".repeat(2_049))).expect_err("relay text is bounded");
+    assert!(LocalCodexConfiguration::new(false, Some(String::new())).is_err());
     assert!(ThemeSelection::new("gruvbox-dark-hard".to_owned()).is_ok());
     assert!(ThemeSelection::new("/tmp/hq-theme.toml".to_owned()).is_ok());
     assert!(ThemeSelection::new("/tmp/../hq-theme.toml".to_owned()).is_err());

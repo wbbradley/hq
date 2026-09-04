@@ -21,10 +21,10 @@ use crate::{
     local_transport::{BoundLocalListener, LocalTransportOwner},
 };
 use crate::{
-    IdentityErrorClass, InstallationIdentity, LocalConfiguration, NodeAdmission, NodeLifecycle,
-    NodeLifecycleError, NodeTransitionOutcome, RelayNodeComponent, RelayNodeConfig,
-    RuntimeDirectoryOwner, RuntimePathErrorClass, RuntimePaths, StartupCause, StartupComponent,
-    StartupDiagnostic, StateDirectoryOwner, StatePaths,
+    ConfigurationManager, IdentityErrorClass, InstallationIdentity, LocalConfiguration,
+    NodeAdmission, NodeLifecycle, NodeLifecycleError, NodeTransitionOutcome, RelayNodeComponent,
+    RelayNodeConfig, RuntimeDirectoryOwner, RuntimePathErrorClass, RuntimePaths, StartupCause,
+    StartupComponent, StartupDiagnostic, StateDirectoryOwner, StatePaths,
 };
 
 /// Explicit inputs for opening the node foundation.
@@ -127,7 +127,7 @@ pub struct NodeFoundation {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     local_transport: LocalTransportOwner,
     runtime: RuntimeDirectoryOwner,
-    configuration: LocalConfiguration,
+    configuration: ConfigurationManager,
     identity: InstallationIdentity,
     state: StateDirectoryOwner,
 }
@@ -155,7 +155,7 @@ impl NodeFoundation {
         let identity = state.load_identity().map_err(|error| {
             diagnostic(StartupComponent::Identity, identity_cause(error.class()))
         })?;
-        let configuration = state.load_configuration().map_err(|error| {
+        let configuration = state.configuration_manager().map_err(|error| {
             diagnostic(
                 StartupComponent::Configuration,
                 identity_cause(error.class()),
@@ -191,8 +191,13 @@ impl NodeFoundation {
     }
 
     /// Returns installation-local unsigned defaults.
-    pub const fn configuration(&self) -> &LocalConfiguration {
-        &self.configuration
+    pub fn configuration(&self) -> Result<LocalConfiguration, crate::IdentityError> {
+        self.configuration.snapshot()
+    }
+
+    /// Returns the shared daemon-owned configuration source and replacement capability.
+    pub fn configuration_manager(&self) -> ConfigurationManager {
+        self.configuration.clone()
     }
 
     /// Returns the validated runtime layout.

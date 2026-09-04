@@ -655,8 +655,6 @@ pub struct UiThemeChoice {
 /// Complete editable installation-local configuration.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UiConfiguration {
-    /// Canonical relay endpoint strings.
-    pub relays: Vec<String>,
     /// Optional preferred provider namespace.
     pub default_provider: Option<String>,
     /// Optional exact theme selector; absence means automatic.
@@ -680,17 +678,20 @@ pub enum UiConfigField {
     CodexModel,
     /// Unrestricted Codex execution toggle.
     CodexYolo,
-    /// Canonical relay endpoint set.
-    Relays,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfigurationFreshness {
+    Current,
+    ReloadNeeded,
 }
 
 impl UiConfigField {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 4] = [
         Self::Theme,
         Self::DefaultProvider,
         Self::CodexModel,
         Self::CodexYolo,
-        Self::Relays,
     ];
 }
 
@@ -2328,6 +2329,8 @@ pub enum UiEffect {
     SaveConfiguration {
         /// Identity required on the completion event.
         id: EffectId,
+        /// Exact field being replaced so another client's unrelated edits are preserved.
+        field: UiConfigField,
         /// Complete edited configuration.
         configuration: UiConfiguration,
         /// Whether the terminal theme must be resolved and replaced.
@@ -2664,6 +2667,7 @@ pub struct UiModel {
     config_field: UiConfigField,
     config_edit: Option<String>,
     pending_configuration: Option<EffectId>,
+    configuration_freshness: ConfigurationFreshness,
     home_directory: Option<String>,
     form: UiFormState,
     help_page: Option<UiHelpPage>,
@@ -2737,6 +2741,7 @@ impl UiModel {
             config_field: UiConfigField::Theme,
             config_edit: None,
             pending_configuration: None,
+            configuration_freshness: ConfigurationFreshness::Current,
             home_directory: None,
             form: UiFormState {
                 active: None,
@@ -3662,6 +3667,9 @@ impl UiModel {
         }
         self.save_section_workspace();
         self.section = next;
+        if next == UiSection::Config {
+            self.configuration_freshness = ConfigurationFreshness::ReloadNeeded;
+        }
         self.restore_section_workspace();
         self.reconcile_current_section();
         self.refresh_selected_project_summary();
@@ -4465,8 +4473,10 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         }
         UiEvent::ConfigurationFailed { effect_id, failure } => {
             if model.pending_configuration == Some(effect_id) {
-                model.pending_configuration = None;
                 model.last_failure = Some(failure);
+                let id = model.allocate_effect()?;
+                model.pending_configuration = Some(id);
+                effects.push(UiEffect::LoadConfiguration { id });
                 effects.push(UiEffect::RequestRedraw);
             }
         }
@@ -4823,7 +4833,12 @@ fn apply_input(
         return Ok(());
     }
     if matches!(input, UiInput::Refresh) {
-        model.request_snapshot(effects)?;
+        if model.section == UiSection::Config {
+            model.configuration_freshness = ConfigurationFreshness::ReloadNeeded;
+            request_configuration_if_needed(model, effects)?;
+        } else {
+            model.request_snapshot(effects)?;
+        }
         effects.push(UiEffect::RequestRedraw);
         return Ok(());
     }
@@ -4968,11 +4983,13 @@ fn request_configuration_if_needed(
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
     if model.section == UiSection::Config
-        && model.configuration.is_none()
+        && (model.configuration.is_none()
+            || model.configuration_freshness == ConfigurationFreshness::ReloadNeeded)
         && model.pending_configuration.is_none()
     {
         let id = model.allocate_effect()?;
         model.pending_configuration = Some(id);
+        model.configuration_freshness = ConfigurationFreshness::Current;
         effects.push(UiEffect::LoadConfiguration { id });
     }
     Ok(())
@@ -5466,21 +5483,9 @@ fn apply_config_input(
                     model.config_edit = Some(edit);
                     return Ok(false);
                 };
-                match model.config_field {
-                    UiConfigField::CodexModel => {
-                        let value = edit.trim();
-                        configuration.codex_model = (!value.is_empty()).then(|| value.to_owned());
-                    }
-                    UiConfigField::Relays => {
-                        configuration.relays = edit
-                            .lines()
-                            .flat_map(|line| line.split(','))
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .map(str::to_owned)
-                            .collect();
-                    }
-                    _ => {}
+                if model.config_field == UiConfigField::CodexModel {
+                    let value = edit.trim();
+                    configuration.codex_model = (!value.is_empty()).then(|| value.to_owned());
                 }
                 return save_configuration(model, configuration, false, effects);
             }
@@ -5494,9 +5499,6 @@ fn apply_config_input(
                     .take(16 * 1024_usize.saturating_sub(edit.len()))
                     .collect::<String>();
                 edit.push_str(&value);
-            }
-            UiInput::InsertNewline if model.config_field == UiConfigField::Relays => {
-                edit.push('\n');
             }
             UiInput::Backspace => {
                 edit.pop();
@@ -5578,10 +5580,6 @@ fn apply_config_input(
                     model.config_edit = Some(configuration.codex_model.unwrap_or_default());
                     Ok(true)
                 }
-                UiConfigField::Relays => {
-                    model.config_edit = Some(configuration.relays.join("\n"));
-                    Ok(true)
-                }
             }
         }
         _ => Ok(false),
@@ -5595,10 +5593,10 @@ fn save_configuration(
     effects: &mut Vec<UiEffect>,
 ) -> Result<bool, UiError> {
     let id = model.allocate_effect()?;
-    model.configuration = Some(configuration.clone());
     model.pending_configuration = Some(id);
     effects.push(UiEffect::SaveConfiguration {
         id,
+        field: model.config_field,
         configuration,
         apply_theme,
     });
@@ -11292,13 +11290,13 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        TextEdit, UiAgent, UiAgentLifecycle, UiAgentStatus, UiConfigField, UiConfiguration,
-        UiEffect, UiError, UiEvent, UiFocus, UiFormField, UiFormKind, UiFormState,
-        UiGuidedSubmission, UiHumanState, UiInput, UiInteraction, UiInteractionAnswerOutcome,
-        UiInteractionChoice, UiInteractionKind, UiInteractionModal, UiInteractionResponse,
-        UiMailboxDraftPane, UiMailboxDraftTarget, UiModel, UiNewWorkflow, UiProject,
-        UiProjectAction, UiProjectAssignment, UiProjectInteraction, UiProjectResourceCheck,
-        UiProjectThread, UiSection, UiSize, UiSnapshot, UiThemeChoice,
+        ConfigurationFreshness, TextEdit, UiAgent, UiAgentLifecycle, UiAgentStatus, UiConfigField,
+        UiConfiguration, UiEffect, UiError, UiEvent, UiFailure, UiFocus, UiFormField, UiFormKind,
+        UiFormState, UiGuidedSubmission, UiHumanState, UiInput, UiInteraction,
+        UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind, UiInteractionModal,
+        UiInteractionResponse, UiMailboxDraftPane, UiMailboxDraftTarget, UiModel, UiNewWorkflow,
+        UiProject, UiProjectAction, UiProjectAssignment, UiProjectInteraction,
+        UiProjectResourceCheck, UiProjectThread, UiSection, UiSize, UiSnapshot, UiThemeChoice,
         apply_project_interaction_input, edit_text, normalize_path_input,
         refresh_project_interaction, update,
     };
@@ -11337,12 +11335,14 @@ mod tests {
         model.change_section(UiSection::Config);
         model.focus = UiFocus::Content;
         model.configuration = Some(configuration());
+        model.configuration_freshness = ConfigurationFreshness::Current;
 
         let changed = update(model, UiEvent::Input(UiInput::Activate)).expect("theme changed");
 
         assert!(matches!(
             changed.effects.first(),
             Some(UiEffect::SaveConfiguration {
+                field: UiConfigField::Theme,
                 configuration: UiConfiguration { theme: Some(theme), .. },
                 apply_theme: true,
                 ..
@@ -11371,12 +11371,33 @@ mod tests {
     }
 
     #[test]
+    fn reentering_config_reloads_changes_from_another_client() {
+        let mut model = model();
+        model.change_section(UiSection::Config);
+        model.configuration = Some(configuration());
+        model.change_section(UiSection::Projects);
+
+        let entered =
+            update(model, UiEvent::Input(UiInput::Character('6'))).expect("reenter Config");
+
+        assert_eq!(
+            entered
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, UiEffect::LoadConfiguration { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn config_optional_model_editor_preserves_text_until_submit() {
         let mut model = model();
         model.change_section(UiSection::Config);
         model.focus = UiFocus::Content;
         model.config_field = UiConfigField::CodexModel;
         model.configuration = Some(configuration());
+        model.configuration_freshness = ConfigurationFreshness::Current;
         let editing = update(model, UiEvent::Input(UiInput::Activate)).expect("editor opens");
         let typed = update(
             editing.model,
@@ -11388,11 +11409,46 @@ mod tests {
         assert!(matches!(
             saved.effects.first(),
             Some(UiEffect::SaveConfiguration {
+                field: UiConfigField::CodexModel,
                 configuration: UiConfiguration { codex_model: Some(model), .. },
                 apply_theme: false,
                 ..
             }) if model == "gpt-5.6"
         ));
+    }
+
+    #[test]
+    fn failed_configuration_save_reloads_authoritative_daemon_state() {
+        let mut model = model();
+        model.change_section(UiSection::Config);
+        model.focus = UiFocus::Content;
+        model.configuration = Some(configuration());
+        model.configuration_freshness = ConfigurationFreshness::Current;
+        let saving = update(model, UiEvent::Input(UiInput::Activate)).expect("save starts");
+        let effect_id = saving
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::SaveConfiguration { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("save effect");
+        let failed = update(
+            saving.model,
+            UiEvent::ConfigurationFailed {
+                effect_id,
+                failure: UiFailure {
+                    code: "configuration_unavailable".to_owned(),
+                    action: "reload".to_owned(),
+                },
+            },
+        )
+        .expect("failure reloads");
+
+        assert!(failed.effects.iter().any(|effect| {
+            matches!(effect, UiEffect::LoadConfiguration { id } if *id != effect_id)
+        }));
+        assert!(failed.model.configuration_pending());
     }
 
     #[test]

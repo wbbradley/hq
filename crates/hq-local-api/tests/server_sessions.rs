@@ -33,14 +33,14 @@ use hq_local_api::protocol::v1::{
     AgentSessionRequestDto, AuthoritativeConversationViewRequestDto, AuthoritativeSnapshotDto,
     BuildMetadata, CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello,
     ConversationKeyDto, ConversationPageRequest, ConversationPageSelectionDto, EffectRequestDto,
-    Id32, InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus,
-    MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDeleteRequestDto,
-    MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MutationRequest, ProjectCommandActionDto,
-    ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto,
-    Request, RequestEnvelope, RequestId, ResourceInspectionRequestDto, ResourceLocatorDto,
-    ResourceSchemeDto, Response, ResponseResult, SessionControlDto, SubscriptionRequestDto,
-    SynchronizationRequestDto, V1, VersionRange, WireMessage, agent_session_request_digest,
-    resource_inspection_request_digest,
+    Id32, InstallationConfigurationDto, InstallationConfigurationPatchDto, InvalidationTopic,
+    LifecycleRequest, LifecycleState, LifecycleStatus, MailboxCommandActionDto,
+    MailboxCommandRequestDto, MailboxDraftDeleteRequestDto, MailboxDraftSaveRequestDto,
+    MailboxDraftTargetDto, MutationRequest, ProjectCommandActionDto, ProjectCommandRequestDto,
+    RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, Request, RequestEnvelope,
+    RequestId, ResourceInspectionRequestDto, ResourceLocatorDto, ResourceSchemeDto, Response,
+    ResponseResult, SessionControlDto, SubscriptionRequestDto, SynchronizationRequestDto, V1,
+    VersionRange, WireMessage, agent_session_request_digest, resource_inspection_request_digest,
 };
 use hq_local_api::{
     LifecycleControl, RevisionHub, ServerSession, ServerSessionError, ServerWriteDisposition,
@@ -396,6 +396,34 @@ impl LifecycleControl for Lifecycle {
     }
 }
 
+struct ConfigurationLifecycle(RefCell<InstallationConfigurationDto>);
+
+impl LifecycleControl for ConfigurationLifecycle {
+    fn lifecycle(&self, _request: LifecycleRequest) -> Result<LifecycleStatus, ApplicationError> {
+        Lifecycle.lifecycle(LifecycleRequest::Status)
+    }
+
+    fn installation_configuration(&self) -> Result<InstallationConfigurationDto, ApplicationError> {
+        Ok(self.0.borrow().clone())
+    }
+
+    fn update_installation_configuration(
+        &self,
+        patch: InstallationConfigurationPatchDto,
+    ) -> Result<InstallationConfigurationDto, ApplicationError> {
+        let mut current = self.0.borrow_mut();
+        match patch {
+            InstallationConfigurationPatchDto::DefaultProvider(value) => {
+                current.default_provider = value;
+            }
+            InstallationConfigurationPatchDto::Theme(value) => current.theme = value,
+            InstallationConfigurationPatchDto::CodexModel(value) => current.codex_model = value,
+            InstallationConfigurationPatchDto::CodexYolo(value) => current.codex_yolo = value,
+        }
+        Ok(current.clone())
+    }
+}
+
 fn build() -> BuildMetadata {
     BuildMetadata::new("hq", "0.1.0", Some("0123456789ab")).expect("bounded build")
 }
@@ -409,12 +437,20 @@ fn session(hub: RevisionHub) -> (ServerSession, Application<Ports>) {
 }
 
 fn negotiate(session: &mut ServerSession, application: &Application<Ports>) {
+    negotiate_with(session, application, &Lifecycle);
+}
+
+fn negotiate_with<L: LifecycleControl>(
+    session: &mut ServerSession,
+    application: &Application<Ports>,
+    lifecycle: &L,
+) {
     let hello = WireMessage::ClientHello(ClientHello::new(
         VersionRange::new(V1, V1).expect("v1 range"),
         build(),
     ));
     let outbound = session
-        .receive(hello, application, &Lifecycle)
+        .receive(hello, application, lifecycle)
         .expect("hello accepted");
     assert!(matches!(outbound.message(), WireMessage::ServerHello(_)));
     session
@@ -501,6 +537,61 @@ fn assert_success(outbound: &hq_local_api::OutboundMessage) {
     assert!(matches!(
         outbound.message(),
         WireMessage::Response(response) if matches!(response.response, Response::Success(_))
+    ));
+}
+
+#[test]
+fn configuration_queries_and_field_updates_route_through_node_control() {
+    let hub = RevisionHub::new(4).expect("capacity");
+    let (mut server, application) = session(hub);
+    let lifecycle = ConfigurationLifecycle(RefCell::new(InstallationConfigurationDto {
+        default_provider: None,
+        theme: None,
+        codex_model: None,
+        codex_yolo: false,
+    }));
+    negotiate_with(&mut server, &application, &lifecycle);
+
+    let update = server
+        .receive(
+            request(
+                1,
+                Request::UpdateInstallationConfiguration(
+                    InstallationConfigurationPatchDto::CodexYolo(true),
+                ),
+            ),
+            &application,
+            &lifecycle,
+        )
+        .expect("field update routes");
+    assert!(matches!(
+        update.message(),
+        WireMessage::Response(response)
+            if matches!(
+                &response.response,
+                Response::Success(ResponseResult::InstallationConfiguration(configuration))
+                    if configuration.codex_yolo && configuration.default_provider.is_none()
+            )
+    ));
+    server
+        .confirm_written(update.ticket())
+        .expect("update written");
+
+    let query = server
+        .receive(
+            request(2, Request::InstallationConfiguration),
+            &application,
+            &lifecycle,
+        )
+        .expect("configuration query routes");
+    assert!(matches!(
+        query.message(),
+        WireMessage::Response(response)
+            if matches!(
+                &response.response,
+                Response::Success(ResponseResult::InstallationConfiguration(configuration))
+                    if configuration.codex_yolo
+            )
     ));
 }
 

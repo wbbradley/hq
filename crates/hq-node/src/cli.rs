@@ -39,17 +39,17 @@ use hq_local_api::{
         AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
         CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ConversationEntryDto,
         ConversationMessageDto, ConversationPageRequest, DeviceGrantDto, EffectOutcomeDto,
-        EffectRequestDto, HealthDomainDto, Id32, LaunchEnvironmentDto, LifecycleRequest,
-        LifecycleState, MailboxCommandActionDto, MailboxCommandRequestDto, MessagePurposeDto,
-        MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
-        PeerRouteCandidateDto, PresentationKindDto, ProjectCommandOutcomeDto,
-        ProjectCommandRequestDto, ProjectCommandStageDto, ProjectExternalStateWarningDto,
-        RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request,
-        ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
-        ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto, ResponseResult,
-        RuntimeObservationDto, SessionControlDto, SnapshotItem, StateHealthDto,
-        SynchronizationRequestDto, agent_session_request_digest,
-        resource_inspection_request_digest,
+        EffectRequestDto, HealthDomainDto, Id32, InstallationConfigurationDto,
+        InstallationConfigurationPatchDto, LaunchEnvironmentDto, LifecycleRequest, LifecycleState,
+        MailboxCommandActionDto, MailboxCommandRequestDto, MessagePurposeDto, MutationAttemptDto,
+        MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
+        PresentationKindDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
+        ProjectCommandStageDto, ProjectExternalStateWarningDto, RelayAccessDto,
+        RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request, ResourceHealthDto,
+        ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
+        ResourceReleaseStateDto, ResourceSchemeDto, ResponseResult, RuntimeObservationDto,
+        SessionControlDto, SnapshotItem, StateHealthDto, SynchronizationRequestDto,
+        agent_session_request_digest, resource_inspection_request_digest,
     },
 };
 use hq_projects::{
@@ -66,13 +66,13 @@ use zeroize::Zeroizing;
 use crate::local_client::installed_local_client_config;
 use crate::pairing_file::{read_pairing_file, write_new_pairing_file};
 use crate::{
-    BackupPassword, ForegroundNodeConfig, ForegroundNodeError, IdentityError, LifecycleClient,
-    LifecycleClientConfig, LifecycleClientError, LifecycleObservation, LocalConfiguration,
-    LocalNodeClient, LocalNodeClientError, NodeClientCoordinator, NodeCoordinatorConfig,
-    NodeCoordinatorError, ProcessNodeLauncher, PublicIdentity, RelayEndpoint, RuntimePathError,
-    RuntimePaths, StateDirectoryOwner, StatePaths, ThemeSelection, TuiThemeCatalogEntry,
-    TuiThemeEnvironment, agent_guidance::AgentGuidanceTopic, list_tui_themes, resolve_tui_theme,
-    run_foreground,
+    BackupPassword, ForegroundNodeConfig, ForegroundNodeError, IdentityError, IdentityErrorClass,
+    LifecycleClient, LifecycleClientConfig, LifecycleClientError, LifecycleObservation,
+    LocalCodexConfiguration, LocalConfiguration, LocalConfigurationPatch, LocalNodeClient,
+    LocalNodeClientError, NodeClientCoordinator, NodeCoordinatorConfig, NodeCoordinatorError,
+    ProcessNodeLauncher, PublicIdentity, RelayEndpoint, RuntimePathError, RuntimePaths,
+    StateDirectoryOwner, StatePaths, ThemeSelection, TuiThemeCatalogEntry, TuiThemeEnvironment,
+    agent_guidance::AgentGuidanceTopic, list_tui_themes, resolve_tui_theme, run_foreground,
 };
 
 mod grammar;
@@ -131,11 +131,6 @@ pub enum ConfigurationCommand {
         /// Replacement provider, or `None` to clear the default.
         provider: Option<ProviderId>,
     },
-    /// Replace the complete canonical relay-default set.
-    SetRelays {
-        /// Complete replacement relay set.
-        relays: Vec<RelayEndpoint>,
-    },
     /// Discover bundled and user-defined TUI themes.
     Themes,
     /// Replace or clear the startup TUI theme.
@@ -147,6 +142,11 @@ pub enum ConfigurationCommand {
     SetCodexYolo {
         /// Whether managed Codex sessions run without approvals or sandboxing.
         enabled: bool,
+    },
+    /// Replace or clear the Codex model used by future process launches.
+    SetCodexModel {
+        /// Exact model selector, or `None` to delegate to Codex.
+        model: Option<String>,
     },
 }
 
@@ -1615,6 +1615,10 @@ pub enum CliError {
     SecretInput,
     /// Theme discovery or validation failed.
     Theme,
+    /// Installation configuration could not be read or committed through its current owner.
+    ConfigurationUnavailable,
+    /// A configuration update may have committed but its response was lost.
+    ConfigurationUncertain,
 }
 
 impl fmt::Display for CliError {
@@ -1664,6 +1668,12 @@ impl fmt::Display for CliError {
             Self::PairingArtifact => formatter.write_str("human pairing invitation is invalid"),
             Self::SecretInput => formatter.write_str("backup password input is invalid"),
             Self::Theme => formatter.write_str("TUI theme discovery or validation failed"),
+            Self::ConfigurationUnavailable => {
+                formatter.write_str("installation configuration is temporarily unavailable")
+            }
+            Self::ConfigurationUncertain => formatter.write_str(
+                "the configuration response was lost; read configuration before retrying",
+            ),
         }
     }
 }
@@ -1788,6 +1798,16 @@ impl CliError {
                 "theme.invalid",
                 "inspect available themes with `hq config themes`, or restore automatic selection with `hq config set theme none`",
                 CliExitClass::Failure,
+            ),
+            Self::ConfigurationUnavailable => (
+                "configuration.unavailable",
+                "configuration could not be confirmed; ensure the daemon is reachable and try again",
+                CliExitClass::Unavailable,
+            ),
+            Self::ConfigurationUncertain => (
+                "configuration.uncertain",
+                "the change may have committed; run `hq config get` before retrying",
+                CliExitClass::Unavailable,
             ),
         }
     }
@@ -3997,30 +4017,69 @@ fn run_configuration(
     action: &ConfigurationCommand,
     state: &StatePaths,
 ) -> Result<CliResult, CliError> {
+    if let ConfigurationCommand::SetTheme { theme: Some(theme) } = action {
+        resolve_tui_theme(Some(theme), &TuiThemeEnvironment::from_environment())
+            .map_err(|_| CliError::Theme)?;
+    }
+    let runtime =
+        RuntimePaths::new(state.root().join("runtime")).map_err(|_| CliError::RuntimePath)?;
+    let mut probe = lifecycle_client(runtime, build()?)?;
+    match probe.request(LifecycleRequest::Status) {
+        Ok(_) => run_configuration_online(action, state),
+        Err(LifecycleClientError::Absent) => match run_configuration_offline(action, state) {
+            Err(CliError::Identity(error)) if error.class() == IdentityErrorClass::AlreadyOwned => {
+                run_configuration_online(action, state)
+            }
+            result => result,
+        },
+        Err(_) => Err(CliError::ConfigurationUnavailable),
+    }
+}
+
+fn run_configuration_online(
+    action: &ConfigurationCommand,
+    state: &StatePaths,
+) -> Result<CliResult, CliError> {
+    let mut client = command_client(state).map_err(|_| CliError::ConfigurationUnavailable)?;
+    let configuration = match configuration_patch(action)? {
+        None => client
+            .configuration()
+            .map_err(|_| CliError::ConfigurationUnavailable)?,
+        Some(patch) => client
+            .update_configuration(patch)
+            .map_err(|error| match error {
+                LocalNodeClientError::Execution(
+                    hq_local_api::BlockingClientError::ResponseLost,
+                ) => CliError::ConfigurationUncertain,
+                _ => CliError::ConfigurationUnavailable,
+            })?,
+    };
+    configuration_result(action, local_configuration_from_dto(configuration)?)
+}
+
+fn run_configuration_offline(
+    action: &ConfigurationCommand,
+    state: &StatePaths,
+) -> Result<CliResult, CliError> {
     let owner = StateDirectoryOwner::acquire(state.clone())?;
-    let mut configuration = owner.load_configuration()?;
+    let manager = owner.configuration_manager()?;
+    let configuration = match local_configuration_patch(action) {
+        None => manager.snapshot()?,
+        Some(patch) => manager.replace(patch)?,
+    };
+    configuration_result(action, configuration)
+}
+
+fn configuration_result(
+    action: &ConfigurationCommand,
+    configuration: LocalConfiguration,
+) -> Result<CliResult, CliError> {
     match action {
-        ConfigurationCommand::Get => Ok(CliResult::Configuration(Box::new(configuration))),
-        ConfigurationCommand::SetDefaultProvider { provider } => {
-            configuration.default_provider.clone_from(provider);
-            let configuration = LocalConfiguration::from_parts(
-                configuration.relays,
-                configuration.default_provider,
-                configuration.theme,
-                configuration.codex,
-            )?;
-            owner.store_configuration(&configuration)?;
-            Ok(CliResult::Configuration(Box::new(configuration)))
-        }
-        ConfigurationCommand::SetRelays { relays } => {
-            configuration.relays.clone_from(relays);
-            let configuration = LocalConfiguration::from_parts(
-                configuration.relays,
-                configuration.default_provider,
-                configuration.theme,
-                configuration.codex,
-            )?;
-            owner.store_configuration(&configuration)?;
+        ConfigurationCommand::Get
+        | ConfigurationCommand::SetDefaultProvider { .. }
+        | ConfigurationCommand::SetTheme { .. }
+        | ConfigurationCommand::SetCodexYolo { .. }
+        | ConfigurationCommand::SetCodexModel { .. } => {
             Ok(CliResult::Configuration(Box::new(configuration)))
         }
         ConfigurationCommand::Themes => {
@@ -4031,32 +4090,70 @@ fn run_configuration(
             .map_err(|_| CliError::Theme)?;
             Ok(CliResult::ThemeCatalog(entries))
         }
+    }
+}
+
+fn configuration_patch(
+    action: &ConfigurationCommand,
+) -> Result<Option<InstallationConfigurationPatchDto>, CliError> {
+    Ok(match action {
+        ConfigurationCommand::Get | ConfigurationCommand::Themes => None,
+        ConfigurationCommand::SetDefaultProvider { provider } => {
+            Some(InstallationConfigurationPatchDto::DefaultProvider(
+                provider
+                    .as_ref()
+                    .map(|provider| provider.as_str().to_owned()),
+            ))
+        }
+        ConfigurationCommand::SetTheme { theme } => Some(InstallationConfigurationPatchDto::Theme(
+            theme.as_ref().map(|theme| theme.as_str().to_owned()),
+        )),
+        ConfigurationCommand::SetCodexYolo { enabled } => {
+            Some(InstallationConfigurationPatchDto::CodexYolo(*enabled))
+        }
+        ConfigurationCommand::SetCodexModel { model } => {
+            LocalCodexConfiguration::new(false, model.clone())?;
+            Some(InstallationConfigurationPatchDto::CodexModel(model.clone()))
+        }
+    })
+}
+
+fn local_configuration_patch(action: &ConfigurationCommand) -> Option<LocalConfigurationPatch> {
+    match action {
+        ConfigurationCommand::Get | ConfigurationCommand::Themes => None,
+        ConfigurationCommand::SetDefaultProvider { provider } => {
+            Some(LocalConfigurationPatch::DefaultProvider(provider.clone()))
+        }
         ConfigurationCommand::SetTheme { theme } => {
-            if let Some(selection) = theme {
-                resolve_tui_theme(Some(selection), &TuiThemeEnvironment::from_environment())
-                    .map_err(|_| CliError::Theme)?;
-            }
-            let configuration = LocalConfiguration::from_parts(
-                configuration.relays,
-                configuration.default_provider,
-                theme.clone(),
-                configuration.codex,
-            )?;
-            owner.store_configuration(&configuration)?;
-            Ok(CliResult::Configuration(Box::new(configuration)))
+            Some(LocalConfigurationPatch::Theme(theme.clone()))
         }
         ConfigurationCommand::SetCodexYolo { enabled } => {
-            configuration.codex.yolo = *enabled;
-            let configuration = LocalConfiguration::from_parts(
-                configuration.relays,
-                configuration.default_provider,
-                configuration.theme,
-                configuration.codex,
-            )?;
-            owner.store_configuration(&configuration)?;
-            Ok(CliResult::Configuration(Box::new(configuration)))
+            Some(LocalConfigurationPatch::CodexYolo(*enabled))
+        }
+        ConfigurationCommand::SetCodexModel { model } => {
+            Some(LocalConfigurationPatch::CodexModel(model.clone()))
         }
     }
+}
+
+fn local_configuration_from_dto(
+    configuration: InstallationConfigurationDto,
+) -> Result<LocalConfiguration, CliError> {
+    LocalConfiguration::from_parts(
+        configuration
+            .default_provider
+            .map(ProviderId::new)
+            .transpose()
+            .map_err(|_| CliError::ConfigurationUnavailable)?,
+        configuration
+            .theme
+            .map(ThemeSelection::new)
+            .transpose()
+            .map_err(|_| CliError::ConfigurationUnavailable)?,
+        LocalCodexConfiguration::new(configuration.codex_yolo, configuration.codex_model)
+            .map_err(|_| CliError::ConfigurationUnavailable)?,
+    )
+    .map_err(|_| CliError::ConfigurationUnavailable)
 }
 
 fn run_human(action: &HumanCommand, state: &StatePaths) -> Result<CliResult, CliError> {
@@ -7761,17 +7858,11 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             identity.fingerprint,
         )),
         (CliOutputFormat::Human, CliResult::Configuration(configuration)) => Ok(format!(
-            "default_provider={} relays={} theme={} codex.model={} codex.yolo={}\n",
+            "default_provider={} theme={} codex.model={} codex.yolo={}\n",
             configuration
                 .default_provider
                 .as_ref()
                 .map_or("none", ProviderId::as_str),
-            configuration
-                .relays
-                .iter()
-                .map(RelayEndpoint::as_str)
-                .collect::<Vec<_>>()
-                .join(","),
             configuration
                 .theme
                 .as_ref()
@@ -7811,7 +7902,6 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             "configuration",
             &serde_json::json!({
                 "default_provider": configuration.default_provider.as_ref().map(ProviderId::as_str),
-                "relays": configuration.relays.iter().map(RelayEndpoint::as_str).collect::<Vec<_>>(),
                 "theme": configuration.theme.as_ref().map(ThemeSelection::as_str),
                 "codex": {
                     "model": configuration.codex.model,
@@ -11117,7 +11207,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_accepts_only_boolean_codex_yolo_configuration() {
+    fn parser_accepts_codex_launch_configuration_and_rejects_removed_relays() {
         let codex_yolo = parse_cli([
             OsString::from("config"),
             OsString::from("set"),
@@ -11138,6 +11228,29 @@ mod tests {
                 OsString::from("set"),
                 OsString::from("codex.yolo"),
                 OsString::from("sometimes"),
+            ]),
+            Err(CliError::Arguments)
+        );
+        let model = parse_cli([
+            OsString::from("config"),
+            OsString::from("set"),
+            OsString::from("codex.model"),
+            OsString::from("gpt-test"),
+        ])
+        .expect("Codex model selection parses");
+        assert!(matches!(
+            model.command,
+            CliCommand::Configuration {
+                action: ConfigurationCommand::SetCodexModel { model: Some(ref value) },
+                ..
+            } if value == "gpt-test"
+        ));
+        assert_eq!(
+            parse_cli([
+                OsString::from("config"),
+                OsString::from("set"),
+                OsString::from("relays"),
+                OsString::from("wss://unused.example"),
             ]),
             Err(CliError::Arguments)
         );

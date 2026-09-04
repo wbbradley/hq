@@ -45,6 +45,7 @@ struct HarnessNodeInner {
     config: HarnessSupervisorConfig,
     dependencies: HarnessSupervisorDependencies,
     default_provider: Option<hq_domain::ProviderId>,
+    configuration: Option<crate::ConfigurationManager>,
     canonical: Arc<dyn AgentSessionCanonicalPort>,
     supervisor: Mutex<Option<Arc<HarnessSupervisor>>>,
     event_task: Mutex<Option<JoinHandle<Result<(), HarnessError>>>>,
@@ -119,6 +120,7 @@ impl HarnessNodeComponent {
                     diagnostics: Arc::new(DiscardHarnessDiagnostics),
                 },
                 default_provider,
+                configuration: None,
                 canonical,
                 supervisor: Mutex::new(None),
                 event_task: Mutex::new(None),
@@ -139,6 +141,15 @@ impl HarnessNodeComponent {
         if let Some(inner) = Arc::get_mut(&mut self.inner) {
             inner.dependencies.diagnostics = Arc::new(trace.clone());
             inner.trace = trace;
+        }
+        self
+    }
+
+    /// Resolves the preferred provider from the latest daemon-owned configuration snapshot.
+    #[must_use]
+    pub fn with_configuration(mut self, configuration: crate::ConfigurationManager) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.configuration = Some(configuration);
         }
         self
     }
@@ -704,6 +715,18 @@ impl ControlHarness for HarnessNodeComponent {
 
 impl QueryProviders for HarnessNodeComponent {
     fn provider_catalog(&self) -> Result<ProviderCatalog, ApplicationError> {
+        let default_provider = self
+            .inner
+            .configuration
+            .as_ref()
+            .map(|configuration| {
+                configuration
+                    .snapshot()
+                    .map(|configuration| configuration.default_provider)
+                    .map_err(|_| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))
+            })
+            .transpose()?
+            .unwrap_or_else(|| self.inner.default_provider.clone());
         let mut providers = self
             .inner
             .dependencies
@@ -716,7 +739,7 @@ impl QueryProviders for HarnessNodeComponent {
                 available: true,
             })
             .collect::<Vec<_>>();
-        if let Some(default_provider) = &self.inner.default_provider
+        if let Some(default_provider) = &default_provider
             && !providers
                 .iter()
                 .any(|candidate| candidate.provider == *default_provider)
@@ -730,7 +753,7 @@ impl QueryProviders for HarnessNodeComponent {
             });
             providers.sort_by(|left, right| left.provider.cmp(&right.provider));
         }
-        ProviderCatalog::new(providers, self.inner.default_provider.clone())
+        ProviderCatalog::new(providers, default_provider)
             .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvariantViolation))
     }
 }
@@ -1233,6 +1256,58 @@ mod tests {
         assert!(matches!(
             catalog.providers.as_slice(),
             [ProviderAvailability { provider, available: false, .. }] if provider == &stale_id
+        ));
+    }
+
+    #[test]
+    fn provider_catalog_reads_each_default_from_live_configuration() {
+        let database = TestDatabase::new();
+        let store = Store::open(&database.path, NonZeroUsize::MIN).expect("store opens");
+        let state_root = database
+            .path
+            .parent()
+            .expect("database has parent")
+            .join("state");
+        let paths = crate::StatePaths::new(state_root).expect("state paths");
+        let owner = crate::StateDirectoryOwner::acquire(paths).expect("state owner");
+        let configuration = owner
+            .configuration_manager()
+            .expect("configuration manager");
+        let component = HarnessNodeComponent::without_providers(&store)
+            .with_configuration(configuration.clone());
+        assert_eq!(
+            component
+                .provider_catalog()
+                .expect("initial catalog")
+                .default_provider,
+            None
+        );
+
+        let first = ProviderId::new("first").expect("provider");
+        configuration
+            .replace(crate::LocalConfigurationPatch::DefaultProvider(Some(
+                first.clone(),
+            )))
+            .expect("first default persists");
+        assert_eq!(
+            component
+                .provider_catalog()
+                .expect("first catalog")
+                .default_provider,
+            Some(first)
+        );
+
+        let second = ProviderId::new("second").expect("provider");
+        configuration
+            .replace(crate::LocalConfigurationPatch::DefaultProvider(Some(
+                second.clone(),
+            )))
+            .expect("second default persists");
+        let catalog = component.provider_catalog().expect("second catalog");
+        assert_eq!(catalog.default_provider, Some(second.clone()));
+        assert!(matches!(
+            catalog.providers.as_slice(),
+            [ProviderAvailability { provider, available: false, .. }] if provider == &second
         ));
     }
 

@@ -22,6 +22,7 @@ use hq_local_api::{
         CompletedItemPresentationDto, ConversationActivityDto, ConversationActivityKindDto,
         ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationMessageDto,
         ConversationPageRequest, ConversationPageSelectionDto, ConversationParticipantDto, Id32,
+        InstallationConfigurationDto, InstallationConfigurationPatchDto,
         InteractionAnswerOutcomeDto, InteractionAnswerRequestDto, InteractionKindDto,
         InteractionResponseDto, MailboxAddressDto, MailboxCommandActionDto,
         MailboxCommandRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
@@ -34,13 +35,13 @@ use hq_tui::{
     EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase,
     UiAgentAttentionReason, UiAgentLifecycle, UiAgentMailbox, UiAgentProjectAssignment,
     UiAgentSession, UiAgentStatus, UiCompletedFileChange, UiCompletedItemPresentation,
-    UiConfiguration, UiConnectionState, UiConversationActivityKind, UiConversationAuthor,
-    UiConversationEntry, UiConversationEntryPresentation, UiConversationPage, UiConversationTarget,
-    UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanIssue, UiHumanMembershipEvidence,
-    UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState, UiInteraction,
-    UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind, UiInteractionResponse,
-    UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
+    UiConfigField, UiConfiguration, UiConnectionState, UiConversationActivityKind,
+    UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
+    UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanIssue,
+    UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState,
+    UiInteraction, UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind,
+    UiInteractionResponse, UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft,
+    UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
     UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject,
     UiProjectAction, UiProjectAssignment, UiProjectConversationSetup, UiProjectExternalWarning,
     UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
@@ -52,8 +53,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     LocalCodexConfiguration, LocalConfiguration, LocalNodeClient, LocalNodeClientError,
-    LocalNodeEventClient, RelayEndpoint, StateDirectoryOwner, StatePaths, ThemeSelection,
-    TuiThemeEnvironment, UnixClientInterrupt, UnixClientWake, list_tui_themes,
+    LocalNodeEventClient, StatePaths, ThemeSelection, TuiThemeEnvironment, UnixClientInterrupt,
+    UnixClientWake, list_tui_themes,
     local_client::{
         LocalManagedSessionCommand, LocalManagedSessionOutcome, LocalNamedAgentCommand,
         LocalProject, LocalProjectCommand, LocalProjectOutcome, continue_project_command,
@@ -138,6 +139,7 @@ pub trait TuiClientPort: Send {
     /// Validates and persists one complete installation-local replacement.
     fn save_configuration(
         &mut self,
+        _field: UiConfigField,
         _configuration: UiConfiguration,
         _apply_theme: bool,
     ) -> Result<(UiConfiguration, Option<UiTheme>), UiFailure> {
@@ -1032,53 +1034,46 @@ impl TuiClientPort for LocalTuiClient {
     }
 
     fn load_configuration(&mut self) -> Result<UiConfiguration, UiFailure> {
-        let configuration = self
-            .state
-            .load_configuration()
-            .map_err(|_| configuration_failure())?;
+        let configuration = local_configuration(
+            self.client
+                .configuration()
+                .map_err(|_| configuration_unavailable())?,
+        )?;
         tui_configuration(&configuration)
     }
 
     fn save_configuration(
         &mut self,
+        field: UiConfigField,
         configuration: UiConfiguration,
         apply_theme: bool,
     ) -> Result<(UiConfiguration, Option<UiTheme>), UiFailure> {
-        let relays = configuration
-            .relays
-            .iter()
-            .cloned()
-            .map(RelayEndpoint::new)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| configuration_failure())?;
-        let provider = configuration
-            .default_provider
-            .clone()
-            .map(ProviderId::new)
-            .transpose()
-            .map_err(|_| configuration_failure())?;
-        let selection = configuration
-            .theme
-            .clone()
-            .map(ThemeSelection::new)
-            .transpose()
-            .map_err(|_| configuration_failure())?;
-        let codex = LocalCodexConfiguration::new(
-            configuration.codex_yolo,
-            configuration.codex_model.clone(),
-        )
-        .map_err(|_| configuration_failure())?;
-        let persisted = LocalConfiguration::from_parts(relays, provider, selection, codex)
-            .map_err(|_| configuration_failure())?;
+        let patch = match field {
+            UiConfigField::Theme => {
+                InstallationConfigurationPatchDto::Theme(configuration.theme.clone())
+            }
+            UiConfigField::DefaultProvider => InstallationConfigurationPatchDto::DefaultProvider(
+                configuration.default_provider.clone(),
+            ),
+            UiConfigField::CodexModel => {
+                InstallationConfigurationPatchDto::CodexModel(configuration.codex_model.clone())
+            }
+            UiConfigField::CodexYolo => {
+                InstallationConfigurationPatchDto::CodexYolo(configuration.codex_yolo)
+            }
+        };
+        if let InstallationConfigurationPatchDto::Theme(Some(selection)) = &patch {
+            ThemeSelection::new(selection.clone()).map_err(|_| configuration_failure())?;
+        }
+        let persisted = local_configuration(
+            self.client
+                .update_configuration(patch)
+                .map_err(|_| configuration_unavailable())?,
+        )?;
         let environment = TuiThemeEnvironment::from_environment();
         let theme = apply_theme
             .then(|| resolve_tui_theme(persisted.theme.as_ref(), &environment))
             .transpose()
-            .map_err(|_| configuration_failure())?;
-        let owner = StateDirectoryOwner::acquire(self.state.clone())
-            .map_err(|_| configuration_failure())?;
-        owner
-            .store_configuration(&persisted)
             .map_err(|_| configuration_failure())?;
         Ok((tui_configuration(&persisted)?, theme))
     }
@@ -1525,11 +1520,6 @@ fn tui_configuration(configuration: &LocalConfiguration) -> Result<UiConfigurati
             }),
     );
     Ok(UiConfiguration {
-        relays: configuration
-            .relays
-            .iter()
-            .map(|relay| relay.as_str().to_owned())
-            .collect(),
         default_provider: configuration
             .default_provider
             .as_ref()
@@ -1544,10 +1534,35 @@ fn tui_configuration(configuration: &LocalConfiguration) -> Result<UiConfigurati
     })
 }
 
+fn local_configuration(
+    configuration: InstallationConfigurationDto,
+) -> Result<LocalConfiguration, UiFailure> {
+    let provider = configuration
+        .default_provider
+        .map(ProviderId::new)
+        .transpose()
+        .map_err(|_| configuration_failure())?;
+    let theme = configuration
+        .theme
+        .map(ThemeSelection::new)
+        .transpose()
+        .map_err(|_| configuration_failure())?;
+    let codex = LocalCodexConfiguration::new(configuration.codex_yolo, configuration.codex_model)
+        .map_err(|_| configuration_failure())?;
+    LocalConfiguration::from_parts(provider, theme, codex).map_err(|_| configuration_failure())
+}
+
 fn configuration_failure() -> UiFailure {
     UiFailure {
         code: "configuration_invalid".to_owned(),
         action: "review the edited setting and try again".to_owned(),
+    }
+}
+
+fn configuration_unavailable() -> UiFailure {
+    UiFailure {
+        code: "configuration_unavailable".to_owned(),
+        action: "reconnect to HQ and reload Config before trying again".to_owned(),
     }
 }
 
@@ -1750,6 +1765,7 @@ enum WorkerCommand {
     },
     SaveConfiguration {
         id: EffectId,
+        field: UiConfigField,
         configuration: UiConfiguration,
         apply_theme: bool,
     },
@@ -1995,6 +2011,7 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                 }
                 UiEffect::SaveConfiguration {
                     id,
+                    field,
                     configuration,
                     apply_theme,
                 } => {
@@ -2002,6 +2019,7 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                         id,
                         WorkerCommand::SaveConfiguration {
                             id,
+                            field,
                             configuration,
                             apply_theme,
                         },
@@ -2333,10 +2351,11 @@ fn client_worker<P: TuiClientPort>(
             }
             Ok(WorkerCommand::SaveConfiguration {
                 id,
+                field,
                 configuration,
                 apply_theme,
             }) => {
-                let event = match client.save_configuration(configuration, apply_theme) {
+                let event = match client.save_configuration(field, configuration, apply_theme) {
                     Ok((configuration, theme)) => UiEvent::ConfigurationSaved {
                         effect_id: id,
                         configuration,

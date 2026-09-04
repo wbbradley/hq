@@ -2354,7 +2354,7 @@ fn identity_backup_restore_is_noninteractive_redacted_and_does_not_copy_configur
         target_config["data"]["default_provider"],
         serde_json::Value::Null
     );
-    assert_eq!(target_config["data"]["relays"], serde_json::json!([]));
+    assert!(target_config["data"].get("relays").is_none());
 }
 
 #[test]
@@ -2362,7 +2362,7 @@ fn identity_backup_restore_is_noninteractive_redacted_and_does_not_copy_configur
     clippy::too_many_lines,
     reason = "one end-to-end contract covers preservation across every configuration mutation"
 )]
-fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
+fn typed_configuration_is_canonical_live_and_persisted_across_daemon_restart() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     let _ = initialize_identity(&state_root);
@@ -2397,6 +2397,35 @@ fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
         [
             OsString::from("config"),
             OsString::from("set"),
+            OsString::from("codex.model"),
+            OsString::from("gpt-test"),
+        ],
+        None,
+    );
+    assert!(
+        codex_yolo.status.success(),
+        "Codex model stderr: {:?}",
+        codex_yolo.stderr
+    );
+
+    let paths = StatePaths::new(state_root.clone()).expect("state paths");
+    let runtime = RuntimePaths::new(paths.root().join("runtime")).expect("runtime paths");
+    let foreground = command("run", &state_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("foreground starts");
+    let mut foreground = ChildGuard(foreground);
+    let mut probe = client(runtime);
+    let _ = wait_ready(&mut probe);
+    let _already_running_tui_client = local_event_client(paths.clone());
+
+    let codex_yolo = offline_output(
+        &state_root,
+        [
+            OsString::from("config"),
+            OsString::from("set"),
             OsString::from("codex.yolo"),
             OsString::from("true"),
         ],
@@ -2407,45 +2436,6 @@ fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
         "Codex YOLO stderr: {:?}",
         codex_yolo.stderr
     );
-    let relays = offline_output(
-        &state_root,
-        [
-            OsString::from("config"),
-            OsString::from("set"),
-            OsString::from("relays"),
-            OsString::from("wss://z.example"),
-            OsString::from("wss://a.example"),
-        ],
-        None,
-    );
-    assert!(
-        relays.status.success(),
-        "relays stderr: {:?}",
-        relays.stderr
-    );
-    let relays: serde_json::Value =
-        serde_json::from_slice(&relays.stdout).expect("configuration JSON");
-    assert_eq!(relays["kind"], "configuration");
-    assert_eq!(relays["data"]["default_provider"], "codex");
-    assert_eq!(relays["data"]["theme"], "gruvbox-dark-hard");
-    assert_eq!(relays["data"]["codex"]["yolo"], true);
-    assert_eq!(
-        relays["data"]["relays"],
-        serde_json::json!(["wss://a.example", "wss://z.example"])
-    );
-
-    let duplicate = offline_output(
-        &state_root,
-        [
-            OsString::from("config"),
-            OsString::from("set"),
-            OsString::from("relays"),
-            OsString::from("wss://a.example"),
-            OsString::from("wss://a.example"),
-        ],
-        None,
-    );
-    assert!(!duplicate.status.success());
     let preserved = offline_output(
         &state_root,
         [OsString::from("config"), OsString::from("get")],
@@ -2453,7 +2443,24 @@ fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
     );
     let preserved: serde_json::Value =
         serde_json::from_slice(&preserved.stdout).expect("preserved configuration JSON");
-    assert_eq!(preserved["data"], relays["data"]);
+    assert_eq!(preserved["kind"], "configuration");
+    assert_eq!(preserved["data"]["default_provider"], "codex");
+    assert_eq!(preserved["data"]["theme"], "gruvbox-dark-hard");
+    assert_eq!(preserved["data"]["codex"]["model"], "gpt-test");
+    assert_eq!(preserved["data"]["codex"]["yolo"], true);
+    assert!(preserved["data"].get("relays").is_none());
+
+    let removed_relays = offline_output(
+        &state_root,
+        [
+            OsString::from("config"),
+            OsString::from("set"),
+            OsString::from("relays"),
+            OsString::from("wss://unused.example"),
+        ],
+        None,
+    );
+    assert!(!removed_relays.status.success());
 
     let themes = offline_output(
         &state_root,
@@ -2515,7 +2522,22 @@ fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
         serde_json::from_slice(&cleared.stdout).expect("cleared configuration JSON");
     assert_eq!(cleared["data"]["theme"], serde_json::Value::Null);
 
-    let paths = StatePaths::new(state_root.clone()).expect("state paths");
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
+    wait_child(&mut foreground.0);
+    let after_stop = offline_output(
+        &state_root,
+        [OsString::from("config"), OsString::from("get")],
+        None,
+    );
+    let after_stop: serde_json::Value =
+        serde_json::from_slice(&after_stop.stdout).expect("persisted configuration");
+    assert_eq!(after_stop["data"]["codex"]["yolo"], true);
+
     let live_owner = StateDirectoryOwner::acquire(paths).expect("test owns state");
     let refused = offline_output(
         &state_root,

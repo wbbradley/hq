@@ -15,8 +15,9 @@ use crate::conversion::{
     state_health_to_v1, state_repair_to_v1, synchronization_effect_from_v1,
 };
 use crate::protocol::v1::{
-    BuildMetadata, ErrorClass, ErrorResponse, Id32, InteractionResponderAcknowledgement,
-    LifecycleRequest, LifecycleStatus, Request, RequestEnvelope, ResponseEnvelope, ResponseResult,
+    BuildMetadata, ErrorClass, ErrorResponse, Id32, InstallationConfigurationDto,
+    InstallationConfigurationPatchDto, InteractionResponderAcknowledgement, LifecycleRequest,
+    LifecycleStatus, Request, RequestEnvelope, ResponseEnvelope, ResponseResult,
     RevisionInvalidation, ServerHello, V1, VersionRange, VersionRejected, WireMessage, negotiate,
 };
 use crate::{
@@ -30,6 +31,23 @@ use crate::{
 pub trait LifecycleControl {
     /// Executes one local lifecycle query or control operation.
     fn lifecycle(&self, request: LifecycleRequest) -> Result<LifecycleStatus, ApplicationError>;
+
+    /// Loads the current daemon-owned unsigned installation configuration.
+    fn installation_configuration(&self) -> Result<InstallationConfigurationDto, ApplicationError> {
+        Err(ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
+    /// Atomically replaces one field and returns the complete committed configuration.
+    fn update_installation_configuration(
+        &self,
+        _patch: InstallationConfigurationPatchDto,
+    ) -> Result<InstallationConfigurationDto, ApplicationError> {
+        Err(ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
 }
 
 /// Opaque identity for one response write owned by one server session.
@@ -333,6 +351,12 @@ impl ServerSession {
                     provider_catalog_to_v1(&catalog).map_err(|_| internal_conversion_error())
                 })
                 .map(ResponseResult::ProviderCatalog),
+            Request::InstallationConfiguration => lifecycle
+                .installation_configuration()
+                .map(ResponseResult::InstallationConfiguration),
+            Request::UpdateInstallationConfiguration(patch) => lifecycle
+                .update_installation_configuration(patch)
+                .map(ResponseResult::InstallationConfiguration),
             Request::ConversationPage(request) => page_request_from_v1(request)
                 .map_err(|_| invalid_request_error())
                 .and_then(|(key, limit, cursor)| {

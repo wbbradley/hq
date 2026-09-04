@@ -1384,6 +1384,7 @@ impl ReconnectingClient {
                 }
                 ResponseResult::Lifecycle(_)
                 | ResponseResult::ProviderCatalog(_)
+                | ResponseResult::InstallationConfiguration(_)
                 | ResponseResult::ConversationPage(_)
                 | ResponseResult::MailboxDrafts(_)
                 | ResponseResult::MailboxDraftSave(_)

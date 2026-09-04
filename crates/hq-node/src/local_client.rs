@@ -26,9 +26,11 @@ use hq_local_api::{
     ReconnectPolicy, ReconnectingClient,
     protocol::v1::{
         AgentRetirementRequestDto, AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
-        ConversationPageSelectionDto, EffectRequestDto, FrameDecoder, Id32, InvalidationTopic,
+        ConversationPageSelectionDto, EffectRequestDto, FrameDecoder, Id32,
+        InstallationConfigurationDto, InstallationConfigurationPatchDto, InvalidationTopic,
         MailboxCommandRequestDto, MutationRequest, ProjectCommandOutcomeDto,
-        ProjectCommandRequestDto, ProjectExternalStateWarningDto, Request, RuntimeObservationDto,
+        ProjectCommandRequestDto, ProjectExternalStateWarningDto, Request, ResponseResult,
+        RuntimeObservationDto,
     },
 };
 use nix::{
@@ -1062,6 +1064,31 @@ impl LocalNodeClient {
         self.runner
             .request(request)
             .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Loads the running daemon's complete installation configuration.
+    pub fn configuration(&mut self) -> Result<InstallationConfigurationDto, LocalNodeClientError> {
+        match self.request(Request::InstallationConfiguration)? {
+            ClientEvent::Response {
+                result: ResponseResult::InstallationConfiguration(configuration),
+                ..
+            } => Ok(configuration),
+            _ => Err(LocalNodeClientError::Client),
+        }
+    }
+
+    /// Replaces one daemon-owned configuration field and returns the committed snapshot.
+    pub fn update_configuration(
+        &mut self,
+        patch: InstallationConfigurationPatchDto,
+    ) -> Result<InstallationConfigurationDto, LocalNodeClientError> {
+        match self.request(Request::UpdateInstallationConfiguration(patch))? {
+            ClientEvent::Response {
+                result: ResponseResult::InstallationConfiguration(configuration),
+                ..
+            } => Ok(configuration),
+            _ => Err(LocalNodeClientError::Client),
+        }
     }
 
     /// Loads one fresh complete authoritative snapshot.

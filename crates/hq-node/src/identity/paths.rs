@@ -3,6 +3,7 @@
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use super::{IdentityError, IdentityErrorClass};
@@ -93,7 +94,7 @@ impl StatePaths {
 /// Exclusive same-state owner retained for the complete node lifetime.
 pub struct StateDirectoryOwner {
     pub(super) paths: StatePaths,
-    _ownership: File,
+    pub(super) ownership: Arc<File>,
 }
 
 impl StateDirectoryOwner {
@@ -111,7 +112,7 @@ impl StateDirectoryOwner {
         match ownership.try_lock() {
             Ok(()) => Ok(Self {
                 paths,
-                _ownership: ownership,
+                ownership: Arc::new(ownership),
             }),
             Err(TryLockError::WouldBlock) => {
                 Err(IdentityError::new(IdentityErrorClass::AlreadyOwned))

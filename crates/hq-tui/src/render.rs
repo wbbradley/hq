@@ -2831,20 +2831,12 @@ fn render_config(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
                 "disabled".to_owned()
             }
         }
-        UiConfigField::Relays => {
-            if configuration.relays.is_empty() {
-                "none".to_owned()
-            } else {
-                configuration.relays.join(", ")
-            }
-        }
     };
     let label = |field| match field {
         UiConfigField::Theme => "Theme",
         UiConfigField::DefaultProvider => "Default provider",
         UiConfigField::CodexModel => "Codex model",
         UiConfigField::CodexYolo => "Codex yolo",
-        UiConfigField::Relays => "Relays",
     };
     let mut lines = UiConfigField::ALL
         .into_iter()

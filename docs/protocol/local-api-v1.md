@@ -104,6 +104,8 @@ Request methods are closed and typed:
 - relay configuration and explicit synchronization effects, bounded relay/delivery status, domain
   health, and explicit repair;
 - passive provider catalog;
+- daemon-owned installation-configuration query and field-specific theme, preferred-provider,
+  Codex-model, or Codex-yolo replacement;
 - provider-neutral named-agent session control;
 - exact node-owned named-agent retirement;
 - read-only resource inspection;

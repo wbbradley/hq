@@ -359,8 +359,9 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   readiness. CLI fixtures cover complete help, build metadata, stable human/JSON records, typed exit
   classes, closed stdin, and redacted invalid input. Offline administration fixtures additionally
   cover identity initialization/inspection, encrypted backup/import and wrong passwords, explicit
-  bounded password stdin, overwrite and active-owner refusal, canonical configuration replacement,
-  public-field persistence revalidation, and exclusion of configuration from identity backup.
+  bounded password stdin, overwrite refusal, daemon-owned field-specific configuration replacement,
+  exclusive offline fallback, live CLI/TUI reads, future-process Codex policy, restart persistence,
+  and exclusion of configuration from identity backup.
 - Client subscription contracts cover per-server-session registration identities, early and
   coalesced invalidations, acknowledgement snapshots as fresh bases, repeated full refresh while a
   returned revision is behind, resubscription after acknowledgement loss, and two independent

@@ -371,7 +371,10 @@ The responsive layouts give the complete content area to the current view:
 `1` Inbox, `2` Sent, `3` Archived, `4` Agents, `5` Projects, and `6` Config switch directly from
 any modeless screen where text entry is not active. The current view is named in the header and
 repeating its shortcut is inert. Modals capture every key, and text entry receives digits rather
-than switching views. Within Inbox, Right/Enter moves from the list to the selected conversation;
+than switching views. Config reloads the daemon-owned snapshot on entry and explicit refresh;
+each save replaces only its selected field, so another client's unrelated acknowledged change is
+preserved. Relay policy is administered through `hq relay add/remove`, not a duplicate Config field.
+Within Inbox, Right/Enter moves from the list to the selected conversation;
 Left/Escape returns to the list, which is the visible root. The conversation region is always
 present and renders
 its loading, empty, unavailable, or selected state without a surrounding box. Participant-authored

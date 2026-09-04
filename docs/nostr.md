@@ -61,8 +61,9 @@ security.
 
 ## Node-owned relay sessions
 
-The node's continuous engine derives write relays from signed peer hints and read/write relays from
-local configuration. It uses one WebSocket per relay for `EVENT`, `REQ`, `CLOSE`, `OK`, `EOSE`,
+The node's continuous engine derives write relays from signed peer hints and installation relay
+policies created by `hq relay add/remove`. Those typed policies are the only local read/write and
+authentication configuration. It uses one WebSocket per relay for `EVENT`, `REQ`, `CLOSE`, `OK`, `EOSE`,
 `AUTH`, `CLOSED`, and `NOTICE`. Private inbox reads require NIP-42 unless the explicit development
 `--unsafe-no-auth` override is configured.
 

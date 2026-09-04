@@ -23,13 +23,13 @@ use hq_local_api::protocol::v1::{
     ConversationPageRequest, ConversationPageSelectionDto, ConversationParticipantDto, DecodeError,
     DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto,
     EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, FrameDecoder,
-    HealthDomainDto, Id32, InteractionAnswerOutcomeDto, InteractionAnswerRequestDto,
-    InteractionChoiceDto, InteractionKindDto, InteractionResponderAcknowledgement,
-    InteractionResponseDto, InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest,
-    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MAX_PROVIDER_CATALOG_ITEMS,
-    MailboxAddressDto, MailboxCommandActionDto, MailboxCommandRequestDto,
-    MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto, MailboxDraftDto,
-    MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+    HealthDomainDto, Id32, InstallationConfigurationDto, InstallationConfigurationPatchDto,
+    InteractionAnswerOutcomeDto, InteractionAnswerRequestDto, InteractionChoiceDto,
+    InteractionKindDto, InteractionResponderAcknowledgement, InteractionResponseDto,
+    InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest, LifecycleState, LifecycleStatus,
+    MAX_FRAME_BYTES, MAX_PROVIDER_CATALOG_ITEMS, MailboxAddressDto, MailboxCommandActionDto,
+    MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto,
+    MailboxDraftDto, MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
     MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PendingInteractionDto, PendingInteractionsRequestDto,
     PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
@@ -512,6 +512,31 @@ fn typed_lifecycle_request_round_trips_through_the_one_envelope() {
     assert_eq!(WireMessage::decode_frame(&frame).expect("decodes"), message);
 }
 
+#[test]
+fn installation_configuration_patches_are_field_specific_and_bounded() {
+    for patch in [
+        InstallationConfigurationPatchDto::DefaultProvider(Some("codex".to_owned())),
+        InstallationConfigurationPatchDto::Theme(None),
+        InstallationConfigurationPatchDto::CodexModel(Some("gpt-test".to_owned())),
+        InstallationConfigurationPatchDto::CodexYolo(true),
+    ] {
+        round_trip(&WireMessage::Request(RequestEnvelope::new(
+            RequestId::new(43).expect("request id"),
+            Request::UpdateInstallationConfiguration(patch),
+        )));
+    }
+    assert!(matches!(
+        WireMessage::Request(RequestEnvelope::new(
+            RequestId::new(44).expect("request id"),
+            Request::UpdateInstallationConfiguration(
+                InstallationConfigurationPatchDto::CodexModel(Some(String::new())),
+            ),
+        ))
+        .encode_frame(),
+        Err(EncodeError::InvalidValue(ValueError::InvalidText))
+    ));
+}
+
 fn round_trip(message: &WireMessage) {
     let frame = message.encode_frame().expect("message encodes");
     assert_eq!(
@@ -834,6 +859,10 @@ fn every_request_notification_and_negotiation_family_interoperates() {
             .expect("page request"),
         ),
         Request::ProviderCatalog,
+        Request::InstallationConfiguration,
+        Request::UpdateInstallationConfiguration(InstallationConfigurationPatchDto::CodexYolo(
+            true,
+        )),
         Request::MailboxDrafts,
         Request::SaveMailboxDraft(MailboxDraftSaveRequestDto {
             draft_id: Id32::new([0x11; 32]),
@@ -992,6 +1021,12 @@ fn every_success_and_error_response_family_interoperates() {
             )
             .expect("stale defaults remain typed evidence"),
         ),
+        ResponseResult::InstallationConfiguration(InstallationConfigurationDto {
+            default_provider: Some("codex".to_owned()),
+            theme: Some("gruvbox-dark-hard".to_owned()),
+            codex_model: Some("gpt-test".to_owned()),
+            codex_yolo: true,
+        }),
         ResponseResult::ConversationPage(
             ConversationPageDto::new(Vec::new(), None).expect("empty page"),
         ),

@@ -47,6 +47,7 @@ struct ForegroundCodexLaunchResolver<P> {
     executable: PathBuf,
     model: Option<String>,
     permissive: bool,
+    configuration: Option<crate::ConfigurationManager>,
 }
 
 impl<P: QueryDomain + Send + Sync> CodexLaunchResolver for ForegroundCodexLaunchResolver<P> {
@@ -80,12 +81,21 @@ impl<P: QueryDomain + Send + Sync> CodexLaunchResolver for ForegroundCodexLaunch
         if names.next().is_some() || agent.lifecycle != AgentLifecycle::Active {
             return Err(invalid_input());
         }
+        let (model, permissive) = self.configuration.as_ref().map_or_else(
+            || Ok((self.model.clone(), self.permissive)),
+            |configuration| {
+                configuration
+                    .snapshot()
+                    .map(|configuration| (configuration.codex.model, configuration.codex.yolo))
+                    .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))
+            },
+        )?;
         Ok(CodexLaunch {
             executable: self.executable.clone(),
             working_directory,
             developer_instructions: developer_instructions(name.as_str()),
-            model: self.model.clone(),
-            permissive: self.permissive,
+            model,
+            permissive,
         })
     }
 }
@@ -101,11 +111,55 @@ pub fn compose_codex_registry<P>(
 where
     P: QueryDomain + Send + Sync + 'static,
 {
+    compose_codex_registry_with_optional_configuration(
+        query,
+        config,
+        None,
+        starter,
+        diagnostics,
+        operational_diagnostics,
+    )
+}
+
+/// Builds the production registry with live configuration resolved at each process launch.
+pub fn compose_codex_registry_with_configuration<P>(
+    query: P,
+    config: ForegroundCodexConfig,
+    configuration: crate::ConfigurationManager,
+    starter: Arc<dyn CodexProcessStarter>,
+    diagnostics: Arc<dyn CodexDiagnosticSink>,
+    operational_diagnostics: Arc<dyn CodexOperationalDiagnosticSink>,
+) -> Result<HarnessRegistry, HarnessError>
+where
+    P: QueryDomain + Send + Sync + 'static,
+{
+    compose_codex_registry_with_optional_configuration(
+        query,
+        config,
+        Some(configuration),
+        starter,
+        diagnostics,
+        operational_diagnostics,
+    )
+}
+
+fn compose_codex_registry_with_optional_configuration<P>(
+    query: P,
+    config: ForegroundCodexConfig,
+    configuration: Option<crate::ConfigurationManager>,
+    starter: Arc<dyn CodexProcessStarter>,
+    diagnostics: Arc<dyn CodexDiagnosticSink>,
+    operational_diagnostics: Arc<dyn CodexOperationalDiagnosticSink>,
+) -> Result<HarnessRegistry, HarnessError>
+where
+    P: QueryDomain + Send + Sync + 'static,
+{
     let resolver = Arc::new(ForegroundCodexLaunchResolver {
         query,
         executable: config.executable,
         model: config.model,
         permissive: config.permissive,
+        configuration,
     });
     let factory = Arc::new(CodexFactory::new(CodexFactoryConfig {
         starter,
@@ -229,6 +283,7 @@ mod tests {
             executable: PathBuf::from("custom-codex"),
             model: Some("model-1".to_owned()),
             permissive: true,
+            configuration: None,
         };
         let launch = resolver
             .resolve(&HarnessInstanceRequest {
@@ -248,6 +303,60 @@ mod tests {
         assert!(launch.permissive);
         assert!(launch.developer_instructions.contains("build-agent"));
         assert!(!format!("{launch:?}").contains("HQ_TOKEN"));
+    }
+
+    #[test]
+    fn live_configuration_changes_only_later_codex_launch_resolutions() {
+        let agent_id = AgentId::from_bytes([7; 32]);
+        let directory = std::env::current_dir().expect("current directory");
+        let root = std::env::temp_dir().join(format!(
+            "hq-codex-live-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let paths = crate::StatePaths::new(root.clone()).expect("state paths");
+        let owner = crate::StateDirectoryOwner::acquire(paths).expect("state owner");
+        let configuration = owner
+            .configuration_manager()
+            .expect("configuration manager");
+        let resolver = ForegroundCodexLaunchResolver {
+            query: query(agent_id, AgentLifecycle::Active),
+            executable: PathBuf::from("codex"),
+            model: None,
+            permissive: false,
+            configuration: Some(configuration.clone()),
+        };
+        let request = HarnessInstanceRequest {
+            agent_id,
+            project_id: None,
+            launch_directory: Some(ResourceLocator::new(
+                ResourceScheme::WorkingTree,
+                hq_domain::BoundedText::new(directory.to_str().expect("UTF-8 test directory"))
+                    .expect("locator"),
+            )),
+            environment: HarnessEnvironment::default(),
+        };
+
+        let existing = resolver.resolve(&request).expect("initial launch");
+        configuration
+            .replace(crate::LocalConfigurationPatch::CodexModel(Some(
+                "model-live".to_owned(),
+            )))
+            .expect("model persists");
+        configuration
+            .replace(crate::LocalConfigurationPatch::CodexYolo(true))
+            .expect("policy persists");
+        let future = resolver.resolve(&request).expect("future launch");
+
+        assert_eq!(existing.model, None);
+        assert!(!existing.permissive);
+        assert_eq!(future.model.as_deref(), Some("model-live"));
+        assert!(future.permissive);
+        drop(owner);
+        std::fs::remove_dir_all(root).expect("remove exact temporary state root");
     }
 
     #[test]
@@ -279,6 +388,7 @@ mod tests {
             executable: PathBuf::from("codex"),
             model: None,
             permissive: false,
+            configuration: None,
         };
         let error = resolver
             .resolve(&HarnessInstanceRequest {

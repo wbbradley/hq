@@ -268,7 +268,6 @@ fn installed_resolution_reports_selected_file_before_terminal_composition() {
     let owner = StateDirectoryOwner::acquire(paths.clone()).expect("state owner");
     let missing = ThemeSelection::new("missing-theme".to_owned()).expect("selection");
     let configuration = LocalConfiguration::from_parts(
-        [],
         None,
         Some(missing),
         hq_node::LocalCodexConfiguration::default(),

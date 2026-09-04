@@ -1,17 +1,12 @@
 //! Typed unsigned local relay and provider defaults.
 
-use std::{
-    collections::BTreeSet,
-    path::{Component, Path},
-};
+use std::path::{Component, Path};
 
 use hq_domain::ProviderId;
-use hq_relay::RelayUrl;
 use serde::{Deserialize, Serialize};
 
 use super::{IdentityError, IdentityErrorClass};
 
-const MAX_RELAYS: usize = 16;
 const MAX_THEME_SELECTION_BYTES: usize = 1_024;
 const MAX_CODEX_MODEL_BYTES: usize = 256;
 pub(super) const MAX_CONFIGURATION_BYTES: u64 = 65_536;
@@ -58,14 +53,25 @@ fn valid_theme_name(value: &str) -> bool {
 /// Versioned unsigned installation-local defaults.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalConfiguration {
-    /// Relay endpoints in canonical order.
-    pub relays: Vec<RelayUrl>,
     /// Optional provider default.
     pub default_provider: Option<ProviderId>,
     /// Optional startup theme name or absolute file.
     pub theme: Option<ThemeSelection>,
     /// Provider-private Codex defaults.
     pub codex: LocalCodexConfiguration,
+}
+
+/// One field-specific installation-configuration replacement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LocalConfigurationPatch {
+    /// Replace or clear the preferred provider.
+    DefaultProvider(Option<ProviderId>),
+    /// Replace or clear the terminal theme selector.
+    Theme(Option<ThemeSelection>),
+    /// Replace or clear the Codex model selector.
+    CodexModel(Option<String>),
+    /// Enable or disable permissive Codex launches.
+    CodexYolo(bool),
 }
 
 /// Installation-local Codex defaults.
@@ -93,35 +99,18 @@ impl LocalCodexConfiguration {
 
 impl LocalConfiguration {
     /// Validates, sorts, and owns local defaults.
-    pub fn new(
-        relays: impl IntoIterator<Item = RelayUrl>,
-        default_provider: Option<ProviderId>,
-    ) -> Result<Self, IdentityError> {
-        Self::from_parts(
-            relays,
-            default_provider,
-            None,
-            LocalCodexConfiguration::default(),
-        )
+    pub fn new(default_provider: Option<ProviderId>) -> Result<Self, IdentityError> {
+        Self::from_parts(default_provider, None, LocalCodexConfiguration::default())
     }
 
     /// Validates and owns every installation-local default.
     pub fn from_parts(
-        relays: impl IntoIterator<Item = RelayUrl>,
         default_provider: Option<ProviderId>,
         theme: Option<ThemeSelection>,
         codex: LocalCodexConfiguration,
     ) -> Result<Self, IdentityError> {
-        let relays = relays.into_iter().collect::<Vec<_>>();
-        if relays.len() > MAX_RELAYS {
-            return Err(IdentityError::new(IdentityErrorClass::ConfigurationInvalid));
-        }
-        let unique = relays.iter().cloned().collect::<BTreeSet<_>>();
-        if unique.len() != relays.len() {
-            return Err(IdentityError::new(IdentityErrorClass::ConfigurationInvalid));
-        }
+        let codex = LocalCodexConfiguration::new(codex.yolo, codex.model)?;
         Ok(Self {
-            relays: unique.into_iter().collect(),
             default_provider,
             theme,
             codex,
@@ -147,7 +136,6 @@ impl CodexConfigurationDto {
 #[serde(deny_unknown_fields)]
 struct ConfigurationDto {
     version: u64,
-    relays: Vec<String>,
     default_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<String>,
@@ -158,11 +146,6 @@ struct ConfigurationDto {
 pub(super) fn encode(value: &LocalConfiguration) -> Result<Vec<u8>, IdentityError> {
     let dto = ConfigurationDto {
         version: 1,
-        relays: value
-            .relays
-            .iter()
-            .map(|relay| relay.as_str().to_owned())
-            .collect(),
         default_provider: value
             .default_provider
             .as_ref()
@@ -185,14 +168,6 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LocalConfiguration, IdentityError> 
             IdentityErrorClass::ConfigurationMalformed,
         ));
     }
-    let relays = dto
-        .relays
-        .into_iter()
-        .map(|value| {
-            RelayUrl::new(value)
-                .map_err(|_| IdentityError::new(IdentityErrorClass::ConfigurationInvalid))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     let provider = dto
         .default_provider
         .map(ProviderId::new)
@@ -200,7 +175,6 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LocalConfiguration, IdentityError> 
         .map_err(|_| IdentityError::new(IdentityErrorClass::ConfigurationInvalid))?;
     let theme = dto.theme.map(ThemeSelection::new).transpose()?;
     let configuration = LocalConfiguration::from_parts(
-        relays,
         provider,
         theme,
         LocalCodexConfiguration::new(dto.codex.yolo, dto.codex.model)?,

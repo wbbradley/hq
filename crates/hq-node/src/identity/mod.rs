@@ -6,14 +6,22 @@ mod config;
 mod error;
 mod paths;
 
-use std::{fmt, fs::File, io::Read, path::Path, sync::Arc};
+use std::{
+    fmt,
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use hq_domain::InstallationId;
 use hq_protocol::Bip340Signer;
 use zeroize::Zeroizing;
 
 pub use backup::BackupPassword;
-pub use config::{LocalCodexConfiguration, LocalConfiguration, ThemeSelection};
+pub use config::{
+    LocalCodexConfiguration, LocalConfiguration, LocalConfigurationPatch, ThemeSelection,
+};
 pub use error::{IdentityError, IdentityErrorClass};
 pub use hq_relay::RelayUrl as RelayEndpoint;
 pub use paths::{StateDirectoryOwner, StatePaths};
@@ -35,6 +43,67 @@ pub struct PublicIdentity {
     pub signing_public_key: [u8; 32],
     /// Short safe public-key fingerprint.
     pub fingerprint: String,
+}
+
+/// Cloneable daemon-owned source and serialized persistence capability for local settings.
+#[derive(Clone, Debug)]
+pub struct ConfigurationManager {
+    inner: Arc<Mutex<ConfigurationManagerState>>,
+}
+
+#[derive(Debug)]
+struct ConfigurationManagerState {
+    current: LocalConfiguration,
+    path: PathBuf,
+    _ownership: Arc<File>,
+}
+
+impl ConfigurationManager {
+    fn new(current: LocalConfiguration, path: PathBuf, ownership: Arc<File>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ConfigurationManagerState {
+                current,
+                path,
+                _ownership: ownership,
+            })),
+        }
+    }
+
+    /// Returns the latest configuration published after successful persistence.
+    pub fn snapshot(&self) -> Result<LocalConfiguration, IdentityError> {
+        self.inner
+            .lock()
+            .map(|state| state.current.clone())
+            .map_err(|_| IdentityError::new(IdentityErrorClass::FileSystem))
+    }
+
+    /// Atomically persists and then publishes one validated field replacement.
+    pub fn replace(
+        &self,
+        patch: LocalConfigurationPatch,
+    ) -> Result<LocalConfiguration, IdentityError> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| IdentityError::new(IdentityErrorClass::FileSystem))?;
+        let mut candidate = state.current.clone();
+        match patch {
+            LocalConfigurationPatch::DefaultProvider(value) => candidate.default_provider = value,
+            LocalConfigurationPatch::Theme(value) => candidate.theme = value,
+            LocalConfigurationPatch::CodexModel(value) => candidate.codex.model = value,
+            LocalConfigurationPatch::CodexYolo(value) => candidate.codex.yolo = value,
+        }
+        let candidate = LocalConfiguration::from_parts(
+            candidate.default_provider,
+            candidate.theme,
+            candidate.codex,
+        )?;
+        reject_symlink(&state.path)?;
+        let bytes = config::encode(&candidate)?;
+        atomic_write(&state.path, &bytes, WriteMode::Replace)?;
+        state.current = candidate.clone();
+        Ok(candidate)
+    }
 }
 
 /// Non-cloneable root identity with zeroizing secret ownership and signer access.
@@ -152,6 +221,15 @@ impl StateDirectoryOwner {
         load_configuration(self.paths.configuration_file())
     }
 
+    /// Mints one live configuration capability while this owner retains the state lock.
+    pub fn configuration_manager(&self) -> Result<ConfigurationManager, IdentityError> {
+        Ok(ConfigurationManager::new(
+            self.load_configuration()?,
+            self.paths.configuration_file().to_path_buf(),
+            Arc::clone(&self.ownership),
+        ))
+    }
+
     /// Durably and atomically replaces only unsigned local defaults.
     pub fn store_configuration(
         &self,
@@ -159,7 +237,6 @@ impl StateDirectoryOwner {
     ) -> Result<(), IdentityError> {
         reject_symlink(self.paths.configuration_file())?;
         let validated = LocalConfiguration::from_parts(
-            configuration.relays.clone(),
             configuration.default_provider.clone(),
             configuration.theme.clone(),
             configuration.codex.clone(),

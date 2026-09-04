@@ -69,7 +69,9 @@ pub use cli::{
     RelayAdminView, RelayCommand, RelayPolicyView, complete_cli_delivery, execute_cli,
     execute_cli_with_input, parse_cli, run_cli, run_cli_with_input,
 };
-pub use codex_component::{ForegroundCodexConfig, compose_codex_registry};
+pub use codex_component::{
+    ForegroundCodexConfig, compose_codex_registry, compose_codex_registry_with_configuration,
+};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use foreground::{
     ForegroundNodeConfig, ForegroundNodeError, run_foreground, run_foreground_generation_until,
@@ -90,9 +92,9 @@ pub use harness_component::HarnessNodeComponent;
 pub use harness_persistence::CanonicalHarnessPersistence;
 pub use harness_store::HarnessStoreAdapter;
 pub use identity::{
-    BackupPassword, IdentityError, IdentityErrorClass, InstallationIdentity,
-    LocalCodexConfiguration, LocalConfiguration, PublicIdentity, RelayEndpoint,
-    StateDirectoryOwner, StatePaths, ThemeSelection,
+    BackupPassword, ConfigurationManager, IdentityError, IdentityErrorClass, InstallationIdentity,
+    LocalCodexConfiguration, LocalConfiguration, LocalConfigurationPatch, PublicIdentity,
+    RelayEndpoint, StateDirectoryOwner, StatePaths, ThemeSelection,
 };
 pub use lifecycle::{
     NodeAdmission, NodeLifecycle, NodeLifecycleError, NodePhase, NodeTransitionOutcome,

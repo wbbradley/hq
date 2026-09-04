@@ -1567,7 +1567,6 @@ fn modal_and_text_entry_contexts_capture_number_shortcuts() {
         UiEvent::ConfigurationLoaded {
             effect_id: load_id,
             configuration: UiConfiguration {
-                relays: Vec::new(),
                 default_provider: None,
                 theme: None,
                 codex_model: None,

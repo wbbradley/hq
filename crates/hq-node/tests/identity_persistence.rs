@@ -9,8 +9,8 @@ use std::{
 
 use hq_domain::ProviderId;
 use hq_node::{
-    BackupPassword, IdentityErrorClass, LocalCodexConfiguration, LocalConfiguration, RelayEndpoint,
-    StateDirectoryOwner, StatePaths, ThemeSelection,
+    BackupPassword, IdentityErrorClass, LocalCodexConfiguration, LocalConfiguration,
+    LocalConfigurationPatch, StateDirectoryOwner, StatePaths, ThemeSelection,
 };
 
 mod support;
@@ -154,14 +154,9 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
         LocalConfiguration::default()
     );
 
-    let configuration = LocalConfiguration::new(
-        [
-            RelayEndpoint::new("wss://relay.example".to_owned()).expect("relay is valid"),
-            RelayEndpoint::new("ws://127.0.0.1:8080".to_owned()).expect("local relay is valid"),
-        ],
-        Some(ProviderId::new("codex").expect("provider is valid")),
-    )
-    .expect("configuration is valid");
+    let configuration =
+        LocalConfiguration::new(Some(ProviderId::new("codex").expect("provider is valid")))
+            .expect("configuration is valid");
     owner
         .store_configuration(&configuration)
         .expect("configuration stores");
@@ -172,12 +167,11 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
     assert_private_mode(paths.configuration_file(), 0o600);
     assert_eq!(
         fs::read(paths.configuration_file()).expect("configuration bytes"),
-        br#"{"version":1,"relays":["ws://127.0.0.1:8080","wss://relay.example"],"default_provider":"codex"}"#,
-        "an unset theme keeps legacy version-1 bytes unchanged"
+        br#"{"version":1,"default_provider":"codex"}"#,
+        "the current pre-release schema has one canonical representation"
     );
 
     let themed = LocalConfiguration::from_parts(
-        configuration.relays.clone(),
         configuration.default_provider.clone(),
         Some(ThemeSelection::new("gruvbox-dark-hard".to_owned()).expect("theme selector")),
         configuration.codex,
@@ -195,7 +189,6 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
     );
 
     let yolo = LocalConfiguration::from_parts(
-        themed.relays.clone(),
         themed.default_provider.clone(),
         themed.theme.clone(),
         LocalCodexConfiguration {
@@ -216,7 +209,6 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
     );
 
     let modeled = LocalConfiguration::from_parts(
-        yolo.relays.clone(),
         yolo.default_provider.clone(),
         yolo.theme.clone(),
         LocalCodexConfiguration::new(true, Some("gpt-5.6".to_owned()))
@@ -234,11 +226,7 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
         "Codex model is persisted canonically"
     );
 
-    let replacement = LocalConfiguration::new(
-        [RelayEndpoint::new("wss://other.example".to_owned()).expect("relay is valid")],
-        None,
-    )
-    .expect("replacement is valid");
+    let replacement = LocalConfiguration::new(None).expect("replacement is valid");
     owner
         .store_configuration(&replacement)
         .expect("configuration replaces atomically");
@@ -247,13 +235,13 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
         replacement
     );
 
-    let duplicate =
-        RelayEndpoint::new("wss://duplicate.example".to_owned()).expect("relay is valid");
     let invalid = LocalConfiguration {
-        relays: vec![duplicate.clone(), duplicate],
         default_provider: None,
         theme: None,
-        codex: LocalCodexConfiguration::default(),
+        codex: LocalCodexConfiguration {
+            yolo: false,
+            model: Some(String::new()),
+        },
     };
     assert_eq!(
         owner
@@ -267,5 +255,103 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
             .load_configuration()
             .expect("invalid replacement leaves prior value intact"),
         replacement
+    );
+}
+
+#[test]
+fn daemon_configuration_manager_serializes_field_replacements_after_persistence() {
+    let directory = TestDirectory::new();
+    let paths = StatePaths::new(directory.path().join("state")).expect("test path is valid");
+    let owner = StateDirectoryOwner::acquire(paths.clone()).expect("owner acquires");
+    let manager = owner.configuration_manager().expect("manager loads");
+    drop(owner);
+    assert_eq!(
+        StateDirectoryOwner::acquire(paths.clone())
+            .expect_err("manager retains exclusive persistence ownership")
+            .class(),
+        IdentityErrorClass::AlreadyOwned
+    );
+
+    let provider_writer = manager.clone();
+    let provider = std::thread::spawn(move || {
+        provider_writer
+            .replace(LocalConfigurationPatch::DefaultProvider(Some(
+                ProviderId::new("codex").expect("provider"),
+            )))
+            .expect("provider persists");
+    });
+    manager
+        .replace(LocalConfigurationPatch::CodexYolo(true))
+        .expect("yolo persists");
+    provider.join().expect("provider writer joins");
+
+    let current = manager.snapshot().expect("current snapshot");
+    assert_eq!(
+        current.default_provider.as_ref().map(ProviderId::as_str),
+        Some("codex")
+    );
+    assert!(current.codex.yolo);
+    assert_eq!(
+        paths.load_configuration().expect("persisted snapshot"),
+        current
+    );
+
+    let first_writer = manager.clone();
+    let first = std::thread::spawn(move || {
+        first_writer
+            .replace(LocalConfigurationPatch::CodexModel(Some(
+                "first-model".to_owned(),
+            )))
+            .expect("first same-field replacement persists")
+    });
+    let second_writer = manager.clone();
+    let second = std::thread::spawn(move || {
+        second_writer
+            .replace(LocalConfigurationPatch::CodexModel(Some(
+                "second-model".to_owned(),
+            )))
+            .expect("second same-field replacement persists")
+    });
+    let first_result = first.join().expect("first writer joins");
+    let second_result = second.join().expect("second writer joins");
+    let current = manager.snapshot().expect("same-field snapshot");
+    assert!(current == first_result || current == second_result);
+    assert_eq!(
+        paths
+            .load_configuration()
+            .expect("same-field persisted snapshot"),
+        current
+    );
+
+    drop(manager);
+    let _owner = StateDirectoryOwner::acquire(paths).expect("manager release unlocks state");
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_configuration_manager_does_not_publish_a_failed_replacement() {
+    use std::os::unix::fs::symlink;
+
+    let directory = TestDirectory::new();
+    let paths = StatePaths::new(directory.path().join("state")).expect("test path is valid");
+    let owner = StateDirectoryOwner::acquire(paths.clone()).expect("owner acquires");
+    let manager = owner.configuration_manager().expect("manager loads");
+    let before = manager.snapshot().expect("initial snapshot");
+    let target = directory.path().join("attacker-controlled");
+    fs::write(&target, b"unchanged").expect("target creates");
+    symlink(&target, paths.configuration_file()).expect("configuration symlink creates");
+
+    let error = manager
+        .replace(LocalConfigurationPatch::CodexYolo(true))
+        .expect_err("symlink replacement fails closed");
+
+    assert_eq!(error.class(), IdentityErrorClass::SymbolicLink);
+    assert_eq!(
+        manager.snapshot().expect("snapshot remains readable"),
+        before
+    );
+    assert_eq!(
+        fs::read(target).expect("target remains readable"),
+        b"unchanged"
     );
 }

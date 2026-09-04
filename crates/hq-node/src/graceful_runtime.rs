@@ -7,17 +7,23 @@ use hq_application::{
     ControlInteractions, ControlProjects, InspectResource, PublishWake, QueryInteractions,
     RetireAgents,
 };
+use hq_domain::ProviderId;
 use hq_local_api::{
     LifecycleControl,
-    protocol::v1::{BuildMetadata, LifecycleRequest, LifecycleState, LifecycleStatus},
+    protocol::v1::{
+        BuildMetadata, InstallationConfigurationDto, InstallationConfigurationPatchDto,
+        LifecycleRequest, LifecycleState, LifecycleStatus,
+    },
 };
 use hq_reducer::AuthorityPolicy;
 use tokio::{signal::unix::Signal, time::Instant};
 
 use crate::{
-    LocalSessionPump, LocalSessionPumpConfig, LocalSessionPumpEvent, LocalSessionPumpOpenError,
+    ConfigurationManager, LocalConfiguration, LocalConfigurationPatch, LocalSessionPump,
+    LocalSessionPumpConfig, LocalSessionPumpEvent, LocalSessionPumpOpenError,
     LocalSessionPumpShutdownReport, NodeComponent, NodeLifecycleError, NodeOwner,
     NodeShutdownReport, ReadinessRecord, ScheduleProjectReconciliation, ShutdownIntent,
+    ThemeSelection,
 };
 
 /// Explicit immutable inputs for one local node runtime generation.
@@ -149,7 +155,11 @@ where
                 .lifecycle_status(self.config.build.clone())
                 .map_err(|_| LocalNodeRuntimeError::OwnerUnavailable)?
                 .with_generation(self.generation);
-            let lifecycle = CallLifecycle::new(status);
+            let configuration = self
+                .owner
+                .configuration_manager()
+                .ok_or(LocalNodeRuntimeError::OwnerUnavailable)?;
+            let lifecycle = CallLifecycle::new(status, Some(configuration));
             let selected = {
                 let ports = self
                     .owner
@@ -209,7 +219,11 @@ where
                 .lifecycle_status(self.config.build.clone())
                 .map_err(|_| LocalNodeRuntimeError::OwnerUnavailable)?
                 .with_generation(self.generation);
-            let lifecycle = CallLifecycle::new(status);
+            let configuration = self
+                .owner
+                .configuration_manager()
+                .ok_or(LocalNodeRuntimeError::OwnerUnavailable)?;
+            let lifecycle = CallLifecycle::new(status, Some(configuration));
             let progressed = {
                 let ports = self
                     .owner
@@ -235,13 +249,15 @@ enum Selected {
 struct CallLifecycle {
     status: LifecycleStatus,
     intent: Cell<Option<ShutdownIntent>>,
+    configuration: Option<ConfigurationManager>,
 }
 
 impl CallLifecycle {
-    const fn new(status: LifecycleStatus) -> Self {
+    fn new(status: LifecycleStatus, configuration: Option<ConfigurationManager>) -> Self {
         Self {
             status,
             intent: Cell::new(None),
+            configuration,
         }
     }
 
@@ -272,6 +288,60 @@ impl LifecycleControl for CallLifecycle {
         let mut draining = self.status.clone();
         draining.state = LifecycleState::Draining;
         Ok(draining)
+    }
+
+    fn installation_configuration(&self) -> Result<InstallationConfigurationDto, ApplicationError> {
+        self.configuration
+            .as_ref()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?
+            .snapshot()
+            .map(configuration_to_dto)
+            .map_err(|_| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))
+    }
+
+    fn update_installation_configuration(
+        &self,
+        patch: InstallationConfigurationPatchDto,
+    ) -> Result<InstallationConfigurationDto, ApplicationError> {
+        let patch = match patch {
+            InstallationConfigurationPatchDto::DefaultProvider(value) => {
+                LocalConfigurationPatch::DefaultProvider(
+                    value
+                        .map(ProviderId::new)
+                        .transpose()
+                        .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvalidRequest))?,
+                )
+            }
+            InstallationConfigurationPatchDto::Theme(value) => LocalConfigurationPatch::Theme(
+                value
+                    .map(ThemeSelection::new)
+                    .transpose()
+                    .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvalidRequest))?,
+            ),
+            InstallationConfigurationPatchDto::CodexModel(value) => {
+                LocalConfigurationPatch::CodexModel(value)
+            }
+            InstallationConfigurationPatchDto::CodexYolo(value) => {
+                LocalConfigurationPatch::CodexYolo(value)
+            }
+        };
+        self.configuration
+            .as_ref()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?
+            .replace(patch)
+            .map(configuration_to_dto)
+            .map_err(|_| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))
+    }
+}
+
+fn configuration_to_dto(configuration: LocalConfiguration) -> InstallationConfigurationDto {
+    InstallationConfigurationDto {
+        default_provider: configuration
+            .default_provider
+            .map(|provider| provider.as_str().to_owned()),
+        theme: configuration.theme.map(|theme| theme.as_str().to_owned()),
+        codex_model: configuration.codex.model,
+        codex_yolo: configuration.codex.yolo,
     }
 }
 
@@ -341,13 +411,16 @@ mod tests {
     use super::{CallLifecycle, LifecycleControl, ShutdownIntent};
 
     fn lifecycle() -> CallLifecycle {
-        CallLifecycle::new(hq_local_api::protocol::v1::LifecycleStatus {
-            state: LifecycleState::Ready,
-            build: BuildMetadata::new("hq", "0.1.0", Some("test")).expect("build"),
-            revision: Some(7),
-            generation: Some(hq_local_api::protocol::v1::Id32::new([9; 32])),
-            detail: None,
-        })
+        CallLifecycle::new(
+            hq_local_api::protocol::v1::LifecycleStatus {
+                state: LifecycleState::Ready,
+                build: BuildMetadata::new("hq", "0.1.0", Some("test")).expect("build"),
+                revision: Some(7),
+                generation: Some(hq_local_api::protocol::v1::Id32::new([9; 32])),
+                detail: None,
+            },
+            None,
+        )
     }
 
     #[test]
