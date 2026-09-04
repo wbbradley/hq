@@ -3654,7 +3654,13 @@ fn render_conversation(
             render_conversation_entries(frame, model, theme, entries_area, conversation, cache);
         }
     } else if let Some(setup) = model.conversation_setup() {
-        render_project_setup(frame, setup, theme, inner);
+        render_project_setup(
+            frame,
+            setup,
+            theme,
+            inner,
+            model.focus() == UiFocus::Conversation,
+        );
     } else if let Some(row) = model
         .selected_row_data()
         .filter(|row| row.kind != UiRowKind::Conversation)
@@ -3687,32 +3693,34 @@ fn render_project_setup(
     setup: &crate::UiProjectConversationSetup,
     theme: &UiTheme,
     area: Rect,
+    focused: bool,
 ) {
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::styled(
-                format!(
-                    "Conversation with {} about {} has not started",
-                    setup.agent_name, setup.project_name
-                ),
-                theme.style(UiThemeRole::Heading),
+    let mut lines = vec![
+        Line::styled(
+            format!(
+                "Conversation with {} about {} has not started",
+                setup.agent_name, setup.project_name
             ),
-            Line::default(),
-            Line::from(format!(
-                "{} will be assigned when you send the first message.",
-                setup.agent_name
-            )),
-            Line::from(format!("Agent service: {}", setup.provider_name)),
+            theme.style(UiThemeRole::Heading),
+        ),
+        Line::default(),
+        Line::from(format!(
+            "{} will be assigned when you send the first message.",
+            setup.agent_name
+        )),
+        Line::from(format!("Agent service: {}", setup.provider_name)),
+    ];
+    if focused {
+        lines.extend([
             Line::default(),
             Line::styled(
                 "Press r or Enter to write the first message.",
                 theme.style(UiThemeRole::Accent),
             ),
             Line::from("Press c to choose a different available agent."),
-        ])
-        .wrap(Wrap { trim: false }),
-        area,
-    );
+        ]);
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 fn render_technical_inspector(

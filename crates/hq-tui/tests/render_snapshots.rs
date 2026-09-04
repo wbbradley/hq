@@ -89,6 +89,53 @@ fn project_setup_is_distinct_from_a_conversation_in_wide_and_compact_layouts() {
 }
 
 #[test]
+fn project_setup_instructions_only_render_while_conversation_is_focused() {
+    let size = UiSize {
+        width: 104,
+        height: 24,
+    };
+    let focused = project_setup_model(size);
+    let rendered = render_text(&focused);
+    assert!(rendered.contains("Press r or Enter to write the first message."));
+    assert!(rendered.contains("Press c to choose a different available agent."));
+
+    let list_focused = update(focused.clone(), UiEvent::Input(UiInput::NextFocus))
+        .expect("focus conversation list")
+        .model;
+    let rendered = render_text(&list_focused);
+    assert!(!rendered.contains("Press r or Enter to write the first message."));
+    assert!(!rendered.contains("Press c to choose a different available agent."));
+
+    let opening =
+        update(focused, UiEvent::Input(UiInput::Character('r'))).expect("open first-message draft");
+    let (effect_id, target) = opening
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::OpenDraft { id, target } => Some((*id, target.clone())),
+            _ => None,
+        })
+        .expect("draft request");
+    let composing = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id,
+            draft: UiMailboxDraft {
+                draft_id: [5; 32],
+                target,
+                content: String::new(),
+                version: 1,
+            },
+        },
+    )
+    .expect("first-message draft loaded")
+    .model;
+    let rendered = render_text(&composing);
+    assert!(!rendered.contains("Press r or Enter to write the first message."));
+    assert!(!rendered.contains("Press c to choose a different available agent."));
+}
+
+#[test]
 fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
     let summary = render_text(&ready_model(UiSize {
         width: 104,
