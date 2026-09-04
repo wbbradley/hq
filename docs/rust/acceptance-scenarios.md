@@ -306,6 +306,12 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   replaces the chosen agent without replacing the draft identity. Submission is
   correlated by its draft/message identity to the authoritative project thread, activated exactly
   once after uncertain responses or restart, and replaced by that one selected conversation row.
+- Guided existing-folder and isolated-worktree creation share one child-completion contract. A
+  worktree may report `Running` over multiple bounded polls and reconnects; every poll replays the
+  exact retained command frame, terminal completion waits for the exact derived project ID in an
+  authoritative snapshot, and the agent picker opens once for that project even when it is not the
+  first catalog row. Escape follows form -> creation choice -> retained project picker -> launcher,
+  while running Git work cannot be dismissed as cancellation and completed creation cannot reappear.
 - Sending in an open conversation immediately inserts one non-actionable local-human `Pending` row.
   Definite commit replaces it by exact canonical identity, project delivery stays queued until typed
   dispatch evidence, definite rejection restores the exact draft, and response loss never creates a

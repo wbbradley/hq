@@ -56,9 +56,9 @@ use crate::{
     TuiThemeEnvironment, UnixClientInterrupt, UnixClientWake, list_tui_themes,
     local_client::{
         LocalManagedSessionCommand, LocalManagedSessionOutcome, LocalNamedAgentCommand,
-        LocalProject, LocalProjectCommand, LocalProjectOutcome, execute_managed_session_command,
-        execute_named_agent_command, execute_project_command, tui_named_agent_catalog,
-        tui_project_catalog,
+        LocalProject, LocalProjectCommand, LocalProjectOutcome, continue_project_command,
+        execute_managed_session_command, execute_named_agent_command, execute_project_command,
+        tui_named_agent_catalog, tui_project_catalog,
     },
     resolve_tui_theme,
 };
@@ -209,6 +209,17 @@ pub trait TuiClientPort: Send {
             action: "restart HQ with support for project changes".to_owned(),
         })
     }
+
+    /// Continues one exact nonterminal project operation.
+    fn continue_project_command(
+        &mut self,
+        _operation: UiProjectResult,
+    ) -> Result<UiProjectResult, UiFailure> {
+        Err(UiFailure {
+            code: "project_operation_unavailable".to_owned(),
+            action: "keep the operation open while HQ reconnects".to_owned(),
+        })
+    }
 }
 
 fn interaction_response_command_id(
@@ -286,6 +297,7 @@ pub struct LocalTuiClient {
     client: LocalNodeClient,
     state: StatePaths,
     presentation: SharedTuiPresentation,
+    project_operations: BTreeMap<[u8; 32], crate::local_client::LocalProjectResult>,
 }
 
 /// Subscribed local-API observation adapter with no command or query authority.
@@ -505,6 +517,7 @@ impl LocalTuiClient {
                     mailbox_drafts: Vec::new(),
                 })),
             },
+            project_operations: BTreeMap::new(),
         }
     }
 
@@ -517,6 +530,7 @@ impl LocalTuiClient {
             client,
             state,
             presentation,
+            project_operations: BTreeMap::new(),
         }
     }
 }
@@ -1453,18 +1467,41 @@ impl TuiClientPort for LocalTuiClient {
         action: UiProjectAction,
     ) -> Result<UiProjectResult, UiFailure> {
         let command = local_project_command(&action);
-        let result = execute_project_command(&self.state, command)
+        let result = execute_project_command(&mut self.client, &self.state, command)
             .map_err(|error| project_failure(&error))?;
-        let outcome = ui_project_outcome(result.outcome);
-        Ok(UiProjectResult {
-            action,
-            command_id: result.command_id,
-            operation_id: result.operation_id,
-            project_id: result.project_id,
-            runtime_state: result.runtime_state,
-            runtime_code: result.runtime_code,
-            outcome,
-        })
+        if matches!(result.outcome, LocalProjectOutcome::Running { .. }) {
+            self.project_operations
+                .insert(result.command_id, result.clone());
+        }
+        Ok(ui_project_result(action, result))
+    }
+
+    fn continue_project_command(
+        &mut self,
+        operation: UiProjectResult,
+    ) -> Result<UiProjectResult, UiFailure> {
+        let current = self
+            .project_operations
+            .get(&operation.command_id)
+            .filter(|current| {
+                current.operation_id == operation.operation_id
+                    && current.project_id == operation.project_id
+                    && current.command == local_project_command(&operation.action)
+            })
+            .cloned()
+            .ok_or_else(|| UiFailure {
+                code: "project_operation_stale".to_owned(),
+                action: "keep the operation open while HQ reloads its exact status".to_owned(),
+            })?;
+        let result = continue_project_command(&mut self.client, &current)
+            .map_err(|error| project_failure(&error))?;
+        if matches!(result.outcome, LocalProjectOutcome::Running { .. }) {
+            self.project_operations
+                .insert(result.command_id, result.clone());
+        } else {
+            self.project_operations.remove(&result.command_id);
+        }
+        Ok(ui_project_result(operation.action, result))
     }
 }
 
@@ -1751,6 +1788,10 @@ enum WorkerCommand {
         id: EffectId,
         action: UiProjectAction,
     },
+    ContinueProjectCommand {
+        id: EffectId,
+        operation: UiProjectResult,
+    },
     Shutdown,
 }
 
@@ -2024,6 +2065,12 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                     self.enqueue_client_effect(
                         id,
                         WorkerCommand::SubmitProjectCommand { id, action },
+                    )?;
+                }
+                UiEffect::ContinueProjectCommand { id, operation } => {
+                    self.enqueue_client_effect(
+                        id,
+                        WorkerCommand::ContinueProjectCommand { id, operation },
                     )?;
                 }
                 UiEffect::ScheduleTimer { id, kind, after } => {
@@ -2418,6 +2465,21 @@ fn client_worker<P: TuiClientPort>(
             }
             Ok(WorkerCommand::SubmitProjectCommand { id, action }) => {
                 let event = match client.submit_project_command(action) {
+                    Ok(result) => UiEvent::ProjectCommandCompleted {
+                        effect_id: id,
+                        result,
+                    },
+                    Err(failure) => UiEvent::ProjectCommandFailed {
+                        effect_id: id,
+                        failure,
+                    },
+                };
+                if !send_tui_event(events, notifier, event) {
+                    break;
+                }
+            }
+            Ok(WorkerCommand::ContinueProjectCommand { id, operation }) => {
+                let event = match client.continue_project_command(operation) {
                     Ok(result) => UiEvent::ProjectCommandCompleted {
                         effect_id: id,
                         result,
@@ -3110,6 +3172,21 @@ fn ui_project_outcome(outcome: LocalProjectOutcome) -> UiProjectOutcome {
                 })
                 .collect(),
         },
+    }
+}
+
+fn ui_project_result(
+    action: UiProjectAction,
+    result: crate::local_client::LocalProjectResult,
+) -> UiProjectResult {
+    UiProjectResult {
+        action,
+        command_id: result.command_id,
+        operation_id: result.operation_id,
+        project_id: result.project_id,
+        runtime_state: result.runtime_state,
+        runtime_code: result.runtime_code,
+        outcome: ui_project_outcome(result.outcome),
     }
 }
 
@@ -4078,6 +4155,8 @@ const fn timer_kind_order(kind: UiTimerKind) -> u8 {
         UiTimerKind::RetrySnapshot => 0,
         UiTimerKind::AutosaveDraft => 1,
         UiTimerKind::DismissCompletion => 2,
+        UiTimerKind::ContinueProject => 3,
+        UiTimerKind::RefreshCreatedProject => 4,
     }
 }
 

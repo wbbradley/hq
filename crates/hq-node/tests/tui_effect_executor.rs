@@ -523,6 +523,7 @@ fn executor_submits_exact_project_command_and_preserves_reconciliation_evidence(
     let calls = Arc::new(Mutex::new(Vec::new()));
     let client = ProjectTuiClient {
         calls: Arc::clone(&calls),
+        continuations: Arc::new(Mutex::new(Vec::new())),
     };
     let mut executor =
         TuiEffectExecutor::spawn(client, ManualClock::default()).expect("executor starts");
@@ -570,6 +571,77 @@ fn executor_submits_exact_project_command_and_preserves_reconciliation_evidence(
 }
 
 #[test]
+fn executor_continues_the_exact_project_operation_without_resubmission() {
+    let started = update(
+        UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        }),
+        UiEvent::Started,
+    )
+    .expect("start");
+    let id = started
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::LoadSnapshot { id } => Some(*id),
+            _ => None,
+        })
+        .expect("effect identity");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let continuations = Arc::new(Mutex::new(Vec::new()));
+    let client = ProjectTuiClient {
+        calls: Arc::clone(&calls),
+        continuations: Arc::clone(&continuations),
+    };
+    let mut executor =
+        TuiEffectExecutor::spawn(client, ManualClock::default()).expect("executor starts");
+    let operation = UiProjectResult {
+        action: UiProjectAction::CreateWorktree {
+            name: "feature".to_owned(),
+            brief: None,
+            source: "/source".to_owned(),
+            destination: "/destination".to_owned(),
+            branch: "feature".to_owned(),
+            base: Some("main".to_owned()),
+        },
+        command_id: [81; 32],
+        operation_id: [82; 32],
+        project_id: [83; 32],
+        runtime_state: Some("running".to_owned()),
+        runtime_code: None,
+        outcome: UiProjectOutcome::Running {
+            stage: "creating_worktree".to_owned(),
+        },
+    };
+    executor
+        .execute([UiEffect::ContinueProjectCommand {
+            id,
+            operation: operation.clone(),
+        }])
+        .expect("continue project operation");
+    assert_eq!(
+        receive_event(&mut executor),
+        UiEvent::ProjectCommandCompleted {
+            effect_id: id,
+            result: UiProjectResult {
+                runtime_state: Some("succeeded".to_owned()),
+                outcome: UiProjectOutcome::Completed {
+                    project_head: Some([84; 32]),
+                },
+                ..operation.clone()
+            },
+        }
+    );
+    assert!(calls.lock().expect("calls lock").is_empty());
+    assert_eq!(
+        continuations.lock().expect("continuations lock").as_slice(),
+        &[operation]
+    );
+    executor.shutdown().expect("shutdown");
+}
+
+#[test]
 fn executor_preserves_exact_resource_check_target_and_typed_failure_evidence() {
     let started = update(
         UiModel::new(UiSize {
@@ -590,6 +662,7 @@ fn executor_preserves_exact_resource_check_target_and_typed_failure_evidence() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let client = ProjectTuiClient {
         calls: Arc::clone(&calls),
+        continuations: Arc::new(Mutex::new(Vec::new())),
     };
     let mut executor =
         TuiEffectExecutor::spawn(client, ManualClock::default()).expect("executor starts");
@@ -2252,6 +2325,7 @@ struct ManagedSessionTuiClient {
 
 struct ProjectTuiClient {
     calls: Arc<Mutex<Vec<UiProjectAction>>>,
+    continuations: Arc<Mutex<Vec<UiProjectResult>>>,
 }
 
 impl TuiClientPort for ProjectTuiClient {
@@ -2336,6 +2410,24 @@ impl TuiClientPort for ProjectTuiClient {
             runtime_state: (!resource_check).then(|| "uncertain".to_owned()),
             runtime_code: (!resource_check).then(|| "response_lost".to_owned()),
             outcome,
+        })
+    }
+
+    fn continue_project_command(
+        &mut self,
+        operation: UiProjectResult,
+    ) -> Result<UiProjectResult, UiFailure> {
+        self.continuations
+            .lock()
+            .expect("continuations lock")
+            .push(operation.clone());
+        Ok(UiProjectResult {
+            runtime_state: Some("succeeded".to_owned()),
+            runtime_code: None,
+            outcome: UiProjectOutcome::Completed {
+                project_head: Some([84; 32]),
+            },
+            ..operation
         })
     }
 }

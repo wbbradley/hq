@@ -358,6 +358,245 @@ fn guided_project_work_can_create_its_missing_project_and_continue() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
+fn guided_worktree_creation_reconciles_the_exact_running_operation() {
+    let mut model = loaded_projects_model_with_agents(
+        1,
+        vec![project(4, "older", "/work/older")],
+        vec![project_agent(7, [9; 32])],
+    );
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::NextItem,
+        UiInput::Activate,
+        UiInput::NextItem,
+        UiInput::Activate,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("open guided worktree form")
+            .model;
+    }
+    for (index, value) in [
+        "hq-acp",
+        "ACP Research",
+        "/src/hq",
+        "/src/hq-acp",
+        "acp",
+        "main",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if !value.is_empty() {
+            model = update(model, UiEvent::Input(UiInput::Paste(value.to_owned())))
+                .expect("enter worktree field")
+                .model;
+        }
+        if index < 5 {
+            model = update(model, UiEvent::Input(UiInput::NextFocus))
+                .expect("advance worktree field")
+                .model;
+        }
+    }
+    let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit worktree");
+    let (submit_id, action) = project_effect(&submitted.effects);
+    let running_result = UiProjectResult {
+        action: action.clone(),
+        command_id: [21; 32],
+        operation_id: [22; 32],
+        project_id: [23; 32],
+        runtime_state: Some("running".to_owned()),
+        runtime_code: None,
+        outcome: UiProjectOutcome::Running {
+            stage: "creating_worktree".to_owned(),
+        },
+    };
+    let running = update(
+        submitted.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: submit_id,
+            result: running_result.clone(),
+        },
+    )
+    .expect("retain running operation");
+    assert!(matches!(
+        running.model.project_interaction(),
+        Some(UiProjectInteraction::Outcome { result })
+            if result.command_id == [21; 32] && result.operation_id == [22; 32]
+    ));
+    assert!(
+        update(running.model.clone(), UiEvent::Input(UiInput::Escape))
+            .expect("running work cannot be cancelled")
+            .model
+            .project_interaction()
+            .is_some()
+    );
+    let (timer_id, timer_kind) = scheduled_timer(&running.effects);
+    assert_eq!(timer_kind, UiTimerKind::ContinueProject);
+    let continuing = update(
+        running.model,
+        UiEvent::TimerElapsed {
+            effect_id: timer_id,
+        },
+    )
+    .expect("continue exact operation");
+    let (continue_id, continued) = continue_project_effect(&continuing.effects);
+    assert_eq!(continued.command_id, [21; 32]);
+    assert_eq!(continued.operation_id, [22; 32]);
+    assert_eq!(continued.project_id, [23; 32]);
+    assert_eq!(continued.action, action);
+
+    let recovery = update(
+        continuing.model.clone(),
+        UiEvent::ProjectCommandCompleted {
+            effect_id: continue_id,
+            result: UiProjectResult {
+                outcome: UiProjectOutcome::Reconcilable {
+                    stage: "reconciliation_required".to_owned(),
+                    category: "external_state".to_owned(),
+                    code: "response_lost".to_owned(),
+                    warning: None,
+                },
+                ..running_result.clone()
+            },
+        },
+    )
+    .expect("retain recovery evidence");
+    let retained_form = update(recovery.model, UiEvent::Input(UiInput::Escape))
+        .expect("return to exact retained fields")
+        .model;
+    assert!(matches!(
+        retained_form.project_interaction(),
+        Some(UiProjectInteraction::CreateWorktree { name, source, destination, branch, .. })
+            if name == "hq-acp"
+                && source == "/src/hq"
+                && destination == "/src/hq-acp"
+                && branch == "acp"
+    ));
+    let unchanged = update(
+        retained_form.clone(),
+        UiEvent::Input(UiInput::Character('x')),
+    )
+    .expect("recovery fields are evidence, not a new command form")
+    .model;
+    assert_eq!(
+        unchanged.project_interaction(),
+        retained_form.project_interaction()
+    );
+    let retried = update(unchanged, UiEvent::Input(UiInput::Activate))
+        .expect("continue the retained operation");
+    let (_, retried_operation) = continue_project_effect(&retried.effects);
+    assert_eq!(retried_operation.command_id, [21; 32]);
+    assert!(
+        retried
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+
+    let completed = update(
+        continuing.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: continue_id,
+            result: UiProjectResult {
+                outcome: UiProjectOutcome::Completed {
+                    project_head: Some([24; 32]),
+                },
+                runtime_state: Some("ready".to_owned()),
+                ..running_result
+            },
+        },
+    )
+    .expect("complete exact operation");
+    let snapshot_id = snapshot_effect(&completed.effects);
+    let waiting = update(
+        completed.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: projects_snapshot(2, vec![project(4, "older", "/work/older")]),
+        },
+    )
+    .expect("exact project is not projected yet");
+    let (refresh_timer, refresh_kind) = scheduled_timer(&waiting.effects);
+    assert_eq!(refresh_kind, UiTimerKind::RefreshCreatedProject);
+    let refreshing = update(
+        waiting.model,
+        UiEvent::TimerElapsed {
+            effect_id: refresh_timer,
+        },
+    )
+    .expect("bounded exact-project refresh");
+    let snapshot_id = snapshot_effect(&refreshing.effects);
+    let resumed = update(
+        refreshing.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: projects_snapshot(
+                2,
+                vec![
+                    project(4, "older", "/work/older"),
+                    project(23, "hq-acp", "/src/hq-acp"),
+                ],
+            ),
+        },
+    )
+    .expect("created project appears authoritatively");
+    assert!(matches!(
+        resumed.model.new_modal(),
+        Some(UiNewModal::ChooseAgent { project, .. }) if project.project_id == [23; 32]
+    ));
+    let back = update(resumed.model, UiEvent::Input(UiInput::Escape))
+        .expect("return to retained project selection")
+        .model;
+    assert!(matches!(
+        back.new_modal(),
+        Some(UiNewModal::ChooseProject {
+            selected: Some(project_id),
+            create_new: false,
+            ..
+        }) if *project_id == [23; 32]
+    ));
+}
+
+#[test]
+fn guided_project_creation_has_explicit_back_destinations() {
+    let mut model = loaded_projects_model(1, vec![project(4, "older", "/work/older")]);
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::NextItem,
+        UiInput::Activate,
+        UiInput::NextItem,
+        UiInput::Activate,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("open guided worktree form")
+            .model;
+    }
+    model = update(model, UiEvent::Input(UiInput::Escape))
+        .expect("form returns to creation choice")
+        .model;
+    assert!(matches!(
+        model.project_interaction(),
+        Some(UiProjectInteraction::ChooseCreation {
+            selected: UiProjectCreationChoice::IsolatedWorktree,
+        })
+    ));
+    model = update(model, UiEvent::Input(UiInput::Escape))
+        .expect("creation choice returns to project picker")
+        .model;
+    assert!(matches!(
+        model.new_modal(),
+        Some(UiNewModal::ChooseProject {
+            selected: Some(project_id),
+            create_new: false,
+            ..
+        }) if *project_id == [4; 32]
+    ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn guided_project_work_can_create_its_missing_agent_and_continue() {
     let project = project(5, "release", "/work/release");
     let mut model = loaded_projects_model(1, vec![project.clone()]);
@@ -6362,6 +6601,26 @@ fn project_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, UiProjectAction) {
             _ => None,
         })
         .expect("project effect")
+}
+
+fn continue_project_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, UiProjectResult) {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::ContinueProjectCommand { id, operation } => Some((*id, operation.clone())),
+            _ => None,
+        })
+        .expect("project continuation effect")
+}
+
+fn scheduled_timer(effects: &[UiEffect]) -> (hq_tui::EffectId, UiTimerKind) {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::ScheduleTimer { id, kind, .. } => Some((*id, *kind)),
+            _ => None,
+        })
+        .expect("scheduled timer")
 }
 
 fn agent(byte: u8, name: &str) -> UiAgent {

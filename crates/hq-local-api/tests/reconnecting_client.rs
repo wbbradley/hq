@@ -497,6 +497,66 @@ fn lost_project_response_replays_exact_frame_and_terminal_identity_is_retained()
 }
 
 #[test]
+fn running_project_command_retains_and_replays_its_exact_frame() {
+    let mut client = client();
+    let request = project_command(87, 88);
+    let (generation, _) = only_connect(&client.start().expect("start").actions);
+    hello(&mut client, generation, 89);
+    let submitted = client
+        .submit_project_command(request.clone())
+        .expect("submit project command");
+    let (_, original) = only_write(&submitted.actions);
+    let WireMessage::Request(envelope) = WireMessage::decode_frame(&original).expect("request")
+    else {
+        panic!("expected project request")
+    };
+    let running = WireMessage::Response(ResponseEnvelope::success(
+        envelope.id,
+        ResponseResult::ProjectCommand(ProjectCommandOutcomeDto::Running {
+            operation_id: request.operation_id,
+            stage: hq_local_api::protocol::v1::ProjectCommandStageDto::CreatingWorktree,
+        }),
+    ))
+    .encode_frame()
+    .expect("running frame");
+    let progress = client
+        .receive_frame(generation, &running)
+        .expect("running outcome");
+    assert!(matches!(
+        progress.events.as_slice(),
+        [ClientEvent::ProjectCommand {
+            command_id,
+            outcome: ProjectCommandOutcomeDto::Running { .. },
+        }] if *command_id == CommandId::from_bytes([87; 32])
+    ));
+
+    let continued = client
+        .continue_project_command(CommandId::from_bytes([87; 32]))
+        .expect("continue retained command");
+    let (_, replay) = only_write(&continued.actions);
+    assert_eq!(replay, original);
+
+    let completed = WireMessage::Response(ResponseEnvelope::success(
+        envelope.id,
+        ResponseResult::ProjectCommand(ProjectCommandOutcomeDto::Completed {
+            operation_id: request.operation_id,
+            project_head: Id32::new([90; 32]),
+            runtime: None,
+        }),
+    ))
+    .encode_frame()
+    .expect("completion frame");
+    client
+        .receive_frame(generation, &completed)
+        .expect("terminal outcome");
+    assert_eq!(client.completed_identity_count(), 1);
+    assert_eq!(
+        client.continue_project_command(CommandId::from_bytes([87; 32])),
+        Err(ClientError::ProtocolOrder)
+    );
+}
+
+#[test]
 fn lost_agent_retirement_response_replays_exact_frame_and_retains_terminal_identity() {
     let mut client = client();
     let request = agent_retirement(91, 92);

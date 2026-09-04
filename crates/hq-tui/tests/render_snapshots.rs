@@ -247,7 +247,7 @@ fn guided_new_workflow_explains_each_foreign_choice_in_user_terms() {
         .model;
     let rendered = render_text(&agents);
     assert!(
-        rendered.contains("Who should work on release?"),
+        rendered.contains("Choose or create an agent for release."),
         "{rendered}"
     );
     assert!(
@@ -1395,6 +1395,7 @@ fn managed_session_switch_confirmation_is_responsive_and_explicit_about_runtime_
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
     for size in [
         UiSize {
@@ -1441,6 +1442,29 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
             })
             .expect("project effect");
         assert!(matches!(action, UiProjectAction::CreateWorktree { .. }));
+        let running = update(
+            submitted.model.clone(),
+            UiEvent::ProjectCommandCompleted {
+                effect_id,
+                result: UiProjectResult {
+                    action: action.clone(),
+                    command_id: [2; 32],
+                    operation_id: [3; 32],
+                    project_id: [4; 32],
+                    runtime_state: Some("running".to_owned()),
+                    runtime_code: None,
+                    outcome: UiProjectOutcome::Running {
+                        stage: "creating_worktree".to_owned(),
+                    },
+                },
+            },
+        )
+        .expect("running outcome")
+        .model;
+        let rendered = render_text(&running);
+        assert!(rendered.contains("Creating the feature worktree"));
+        assert!(rendered.contains("cannot be cancelled"));
+        assert!(!rendered.contains("Esc close"));
         let outcome = update(
             submitted.model,
             UiEvent::ProjectCommandCompleted {

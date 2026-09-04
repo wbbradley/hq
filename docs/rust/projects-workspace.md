@@ -270,6 +270,13 @@ and safe form state by typed identity.
 - Search is an inline query owned by the project list, not a modal.
 - Project creation is a named Projects subview. Guided creation may still be entered from `New…`,
   but its fields, progress, and outcome are not centered modal workflow state.
+- Guided creation is a typed child of the New project-work intention. Its form returns to the
+  creation choice, the choice returns to the retained project picker, and successful completion
+  consumes the child before the exact created project advances to agent choice.
+- A running worktree operation is non-cancellable. Projects retains its command, operation, and
+  derived project identities and asks the local API to continue that same request; reconnect and
+  response loss never cause a second Git command. Only a terminal outcome permits the coordinator
+  to wait for the exact project in the authoritative catalog.
 - Add/change-folder and assign/change-agent are detail subviews with full-width fields and visible
   requirements. Their data survives refresh, resize, recoverable failure, and modeless navigation.
 - Routine progress and completion replace or annotate the owning action row. They do not open an

@@ -1211,7 +1211,7 @@ fn installed_tui_provisions_a_recoverable_git_worktree_project() {
     let run = run_in_pty(
         &state_root,
         true,
-        PtyInteraction::CreateWorktreeProject {
+        PtyInteraction::CreateGuidedWorktreeProject {
             name: "tui-worktree-project",
             source: repository.to_str().expect("UTF-8 source"),
             destination: destination.to_str().expect("UTF-8 destination"),
@@ -1221,6 +1221,10 @@ fn installed_tui_provisions_a_recoverable_git_worktree_project() {
     );
     assert!(run.status.success(), "TUI worktree failed: {:?}", run.bytes);
     assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+    assert_eq!(
+        project_json(&state_root, "tui-worktree-project")["name"],
+        "tui-worktree-project"
+    );
     assert!(destination.join("tracked.txt").is_file());
     let branch = Command::new("git")
         .arg("-C")
@@ -1232,6 +1236,14 @@ fn installed_tui_provisions_a_recoverable_git_worktree_project() {
     assert_eq!(
         String::from_utf8_lossy(&branch.stdout).trim(),
         "feature/tui"
+    );
+    assert_eq!(
+        git(&["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        2,
+        "guided continuation must not issue a second Git worktree command"
     );
 }
 
@@ -1322,7 +1334,7 @@ enum PtyInteraction<'content> {
         name: &'content str,
         archived: bool,
     },
-    CreateWorktreeProject {
+    CreateGuidedWorktreeProject {
         name: &'content str,
         source: &'content str,
         destination: &'content str,
@@ -1481,7 +1493,9 @@ fn run_in_pty_with_trace(
                 | PtyInteraction::SetProjectArchived { .. } => {
                     vec![b"5"]
                 }
-                PtyInteraction::CreateWorktreeProject { .. } => vec![b"5", b"w"],
+                PtyInteraction::CreateGuidedWorktreeProject { .. } => {
+                    vec![b"n", b"\r", b"\r", b"j", b"\r"]
+                }
             };
             for key in keys {
                 master.write_all(key).expect("initial TUI key writes");
@@ -2132,7 +2146,7 @@ fn run_in_pty_with_trace(
             interaction_answer_sent = true;
             completion_offset = Some(bytes.len());
         }
-        if let PtyInteraction::CreateWorktreeProject {
+        if let PtyInteraction::CreateGuidedWorktreeProject {
             name,
             source,
             destination,
@@ -2440,14 +2454,31 @@ fn run_in_pty_with_trace(
             master.flush().expect("Ctrl-C flushes");
             exit_sent = true;
         }
-        if matches!(interaction, PtyInteraction::CreateWorktreeProject { .. })
-            && content_sent
+        if matches!(
+            interaction,
+            PtyInteraction::CreateGuidedWorktreeProject { .. }
+        ) && content_sent
+            && !managed_action_sent
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Project created".len())
-                    .any(|window| window == b"Project created")
+                    .windows(b"Create an agent".len())
+                    .any(|window| window == b"Create an agent")
             })
+        {
+            master
+                .write_all(b"\x1b")
+                .expect("agent picker Escape writes");
+            master.flush().expect("agent picker Escape flushes");
+            managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(
+            interaction,
+            PtyInteraction::CreateGuidedWorktreeProject { .. }
+        ) && managed_action_sent
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| bytes.len() > offset)
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
             master.flush().expect("Ctrl-C flushes");

@@ -287,7 +287,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, ava
             create_new,
         } => {
             let mut lines = vec![
-                Line::from(format!("Who should work on {}?", project.name)),
+                Line::from(format!("Choose or create an agent for {}.", project.name)),
                 Line::from(
                     "Unassigned agents are listed first. HQ will not silently move an agent.",
                 ),
@@ -1032,7 +1032,11 @@ fn render_project_interaction(
                 Line::from(
                     "HQ tracks folder ownership; it does not take over Git or filesystem maintenance.",
                 ),
-                Line::from("↑/↓ or j/k choose · Enter continue · Esc cancel"),
+                Line::from(if model.guided_project_creation_active() {
+                    "↑/↓ or j/k choose · Enter continue · Esc return to project choice"
+                } else {
+                    "↑/↓ or j/k choose · Enter continue · Esc cancel"
+                }),
             ],
         ),
         UiProjectInteraction::Search { query } => (
@@ -1111,6 +1115,10 @@ fn render_project_interaction(
             lines.push(Line::default());
             lines.push(Line::from(if *submitting {
                 "Creating the project safely…"
+            } else if model.guided_project_recovery_active() {
+                "Fields are retained · Enter check the same operation again · Esc recovery details"
+            } else if model.guided_project_creation_active() {
+                "Tab/Shift-Tab field · Enter create · Esc return to creation choice"
             } else {
                 "Tab/Shift-Tab field · Enter create · Esc cancel"
             }));
@@ -1210,6 +1218,10 @@ fn render_project_interaction(
             ));
             lines.push(Line::from(if *submitting {
                 "Creating the worktree; external files will be kept if setup is interrupted…"
+            } else if model.guided_project_recovery_active() {
+                "Fields are retained · Enter check the same operation again · Esc recovery details"
+            } else if model.guided_project_creation_active() {
+                "Tab/Shift-Tab field · Enter create · Esc return to creation choice"
             } else {
                 "Tab/Shift-Tab field · Enter create · Esc cancel"
             }));
@@ -1483,8 +1495,19 @@ fn render_project_interaction(
             match &result.outcome {
                 UiProjectOutcome::Completed { .. } => lines.push(Line::from("Done")),
                 UiProjectOutcome::Running { stage } => {
-                    lines.push(Line::from("HQ is still finishing this change."));
+                    lines.push(Line::from(match &result.action {
+                        UiProjectAction::CreateWorktree { name, .. } => {
+                            format!("Creating the {name} worktree…")
+                        }
+                        UiProjectAction::CreateExisting { name, .. } => {
+                            format!("Creating the {name} project…")
+                        }
+                        _ => "HQ is still finishing this change.".to_owned(),
+                    }));
                     lines.push(Line::from(format!("Current stage: {stage}")));
+                    lines.push(Line::from(
+                        "This operation cannot be cancelled while Git work is in progress.",
+                    ));
                 }
                 UiProjectOutcome::Rejected { .. } => {
                     lines.push(Line::styled(
@@ -1647,7 +1670,9 @@ fn render_project_interaction(
                 }
             }
             lines.push(Line::default());
-            lines.push(Line::from("Esc close"));
+            if !matches!(result.outcome, UiProjectOutcome::Running { .. }) {
+                lines.push(Line::from("Esc close"));
+            }
             (
                 if matches!(
                     result.action,

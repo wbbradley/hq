@@ -2067,32 +2067,39 @@ fn run_project(
 ) -> Result<CliResult, CliError> {
     let mut client = command_client(state)?;
     let snapshot = client.snapshot()?;
+    run_project_with_client(action, input, &mut client, &snapshot)
+}
+
+fn run_project_with_client(
+    action: &ProjectCliCommand,
+    input: &mut dyn Read,
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+) -> Result<CliResult, CliError> {
     match action {
         ProjectCliCommand::List | ProjectCliCommand::Show(_) => {
-            project_catalog_view(&snapshot, action)
+            project_catalog_view(snapshot, action)
                 .map(|view| CliResult::ProjectCatalog(Box::new(view)))
         }
-        ProjectCliCommand::Resource(resource) => {
-            run_project_resource(&mut client, &snapshot, resource)
-        }
+        ProjectCliCommand::Resource(resource) => run_project_resource(client, snapshot, resource),
         ProjectCliCommand::Check {
             project_id,
             resource_id,
-        } => check_project_resources(&mut client, &snapshot, *project_id, *resource_id)
+        } => check_project_resources(client, snapshot, *project_id, *resource_id)
             .map(|view| CliResult::ProjectResourceCheck(Box::new(view))),
         ProjectCliCommand::Create {
             name,
             brief,
             path,
             home,
-        } => create_project(&mut client, &snapshot, name, brief.as_ref(), path, *home),
-        ProjectCliCommand::Worktree(request) => worktree_project(&mut client, &snapshot, request),
+        } => create_project(client, snapshot, name, brief.as_ref(), path, *home),
+        ProjectCliCommand::Worktree(request) => worktree_project(client, snapshot, request),
         ProjectCliCommand::Send { project_id, body } => {
-            send_project_message(&mut client, &snapshot, *project_id, body.as_ref(), input)
+            send_project_message(client, snapshot, *project_id, body.as_ref(), input)
         }
         ProjectCliCommand::Open(project_id) => control_project(
-            &mut client,
-            &snapshot,
+            client,
+            snapshot,
             "open",
             *project_id,
             ProjectCommandAction::Open,
@@ -2105,8 +2112,8 @@ fn run_project(
             resume_thread,
             directory,
         } => activate_project(
-            &mut client,
-            &snapshot,
+            client,
+            snapshot,
             *project_id,
             agent,
             provider,
@@ -2115,8 +2122,8 @@ fn run_project(
             directory.as_deref(),
         ),
         ProjectCliCommand::Dispatch(project_id) => control_project(
-            &mut client,
-            &snapshot,
+            client,
+            snapshot,
             "dispatch",
             *project_id,
             ProjectCommandAction::DispatchPending,
@@ -2131,7 +2138,7 @@ fn run_project(
             force,
         } => {
             let action = project_handoff_action(
-                &snapshot,
+                snapshot,
                 *project_id,
                 agent,
                 provider,
@@ -2140,25 +2147,25 @@ fn run_project(
                 directory.as_deref(),
                 *force,
             )?;
-            control_project(&mut client, &snapshot, "handoff", *project_id, action)
+            control_project(client, snapshot, "handoff", *project_id, action)
         }
         ProjectCliCommand::Close { project_id, force } => control_project(
-            &mut client,
-            &snapshot,
+            client,
+            snapshot,
             "close",
             *project_id,
             ProjectCommandAction::Close { force: *force },
         ),
         ProjectCliCommand::Archive(project_id) => control_project(
-            &mut client,
-            &snapshot,
+            client,
+            snapshot,
             "archive",
             *project_id,
             ProjectCommandAction::SetArchived { archived: true },
         ),
         ProjectCliCommand::Unarchive(project_id) => control_project(
-            &mut client,
-            &snapshot,
+            client,
+            snapshot,
             "unarchive",
             *project_id,
             ProjectCommandAction::SetArchived { archived: false },
@@ -2200,9 +2207,10 @@ pub(crate) fn project_catalog_for_tui(
 
 pub(crate) fn run_project_for_tui(
     action: &ProjectCliCommand,
-    state: &StatePaths,
+    client: &mut LocalNodeClient,
 ) -> Result<ProjectTuiResult, CliError> {
-    match run_project(action, state, &mut std::io::empty())? {
+    let snapshot = client.snapshot()?;
+    match run_project_with_client(action, &mut std::io::empty(), client, &snapshot)? {
         CliResult::ProjectOperation(view) => Ok(ProjectTuiResult::Operation(Box::new(view))),
         CliResult::ProjectResourceCheck(view) => Ok(ProjectTuiResult::ResourceChecks(view)),
         CliResult::Messages(view) if view.operation == "project_send" => {
@@ -3230,7 +3238,7 @@ fn project_external_state_warning_view(
     }
 }
 
-const fn project_stage_label(stage: ProjectCommandStageDto) -> &'static str {
+pub(crate) const fn project_stage_label(stage: ProjectCommandStageDto) -> &'static str {
     match stage {
         ProjectCommandStageDto::Accepted => "accepted",
         ProjectCommandStageDto::AwaitingHome => "awaiting_home",

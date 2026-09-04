@@ -743,6 +743,29 @@ impl ReconnectingClient {
         })
     }
 
+    /// Replays the retained frame for one exact nonterminal project command.
+    pub fn continue_project_command(
+        &mut self,
+        command_id: CommandId,
+    ) -> Result<ClientTransition, ClientError> {
+        let pending = self
+            .pending_project_commands
+            .get(&command_id)
+            .ok_or(ClientError::ProtocolOrder)?;
+        let actions = self
+            .active_generation()
+            .map_or_else(Vec::new, |generation| {
+                vec![ClientAction::Write {
+                    generation,
+                    frame: pending.frame.clone(),
+                }]
+            });
+        Ok(ClientTransition {
+            actions,
+            events: Vec::new(),
+        })
+    }
+
     /// Queues or sends one exact named-agent retirement and retains its frame across response loss.
     pub fn submit_agent_retirement(
         &mut self,
@@ -1290,12 +1313,14 @@ impl ReconnectingClient {
                     let Some(command_id) = project_command else {
                         return Err(ClientError::ProtocolOrder);
                     };
-                    let pending = self
-                        .pending_project_commands
-                        .remove(&command_id)
-                        .ok_or(ClientError::ProtocolOrder)?;
                     if project_outcome_is_terminal(&outcome) {
+                        let pending = self
+                            .pending_project_commands
+                            .remove(&command_id)
+                            .ok_or(ClientError::ProtocolOrder)?;
                         self.remember_completed(command_id, pending.digest);
+                    } else if !self.pending_project_commands.contains_key(&command_id) {
+                        return Err(ClientError::ProtocolOrder);
                     }
                     Ok(ClientTransition {
                         actions: Vec::new(),
@@ -1871,6 +1896,52 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
         let transition = self
             .client
             .submit_project_command(request)
+            .map_err(BlockingClientError::Client)?;
+        self.enqueue(transition)?;
+        self.ensure_started()?;
+        loop {
+            match self.step(deadline)? {
+                Some(
+                    event @ ClientEvent::ProjectCommand {
+                        command_id: completed,
+                        ..
+                    },
+                ) if completed == command_id => return Ok(event),
+                Some(
+                    event @ ClientEvent::Error {
+                        operation: ClientOperation::Project(failed),
+                        ..
+                    },
+                ) if failed == command_id => return Ok(event),
+                Some(ClientEvent::IncompatibleVersion) => {
+                    return Err(BlockingClientError::Incompatible);
+                }
+                Some(
+                    ClientEvent::Snapshot(_)
+                    | ClientEvent::AuthoritativeConversationView(_)
+                    | ClientEvent::Mutation(_)
+                    | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::AgentRetirement { .. }
+                    | ClientEvent::AgentSession { .. }
+                    | ClientEvent::Response { .. }
+                    | ClientEvent::RequestLost(_)
+                    | ClientEvent::Error { .. },
+                )
+                | None => {}
+            }
+        }
+    }
+
+    /// Continues one exact retained nonterminal project command.
+    pub fn continue_project(
+        &mut self,
+        command_id: CommandId,
+    ) -> Result<ClientEvent, BlockingClientError> {
+        let deadline = self.execution_deadline();
+        self.begin_execution();
+        let transition = self
+            .client
+            .continue_project_command(command_id)
             .map_err(BlockingClientError::Client)?;
         self.enqueue(transition)?;
         self.ensure_started()?;

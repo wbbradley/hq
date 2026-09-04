@@ -117,6 +117,22 @@ names the competing project and links to its explicit project handoff controls. 
 agent creation, resource ownership, direct sessions, notes, and direct messages remain usable
 without this coordinator.
 
+The coordinator owns navigation but not every surface. Project and agent pickers are true dialogs
+and capture input; delegated Projects or Agents work is modeless and solely owns input while it is
+visible. The coordinator retains stable selections and a typed return destination rather than a
+stack of cloned screens. In guided project creation, Escape moves from a folder/worktree form to
+the creation choice, from that choice to the project picker, and from the picker to the launcher.
+After creation, Escape from the agent picker returns to the project picker with that exact project
+selected. Completing a child consumes it, so Back cannot reveal its old form or outcome.
+
+Worktree creation retains the exact command, operation, derived project, and action identities
+returned by the daemon. A `Running` result becomes a non-cancellable progress surface. Bounded
+polls replay the byte-identical retained local-API request, including after transport reconnect,
+until the operation is completed, rejected, or requires reconciliation; they never rebuild a
+command from form text. Completion then waits for an authoritative snapshot containing exactly the
+derived project ID before opening “Choose or create an agent for <project>.” A same-named project,
+arrival order, or current list position is never completion evidence.
+
 A runnable current assignment skips setup and opens the ordinary Inbox draft pane for that project.
 A compatible historical project thread resumes its exact provider, session, and thread without a
 routine provider confirmation. A target without history creates one installation-local
@@ -158,8 +174,8 @@ and handoff. Refresh failure or reconnect retains the exact project, agent, prov
 message, and thread correlation and never authors the first instruction again.
 
 A transport failure, rejection, response loss, reconcilable result, or reconnect retains every
-setup selection. Decision-bearing and recovery outcomes remain modal; Escape returns from their
-evidence to the retained review instead of restarting the wizard.
+setup selection. Recovery stays with the delegated child and retains the exact operation evidence;
+it does not recreate an earlier dialog or restart the wizard.
 
 Project path fields share one lexical input boundary. Exact `~` and `~/...` forms expand using the
 current operating-system user's home directory, then `.` and `..` components normalize into the

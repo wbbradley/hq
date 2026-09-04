@@ -17,8 +17,8 @@ use std::{
 };
 
 use hq_domain::{
-    AgentId, ContentText, InstallationId, ProjectId, ProviderId, ProviderSessionId, ShortText,
-    ThreadId,
+    AgentId, CommandId, ContentText, InstallationId, ProjectId, ProviderId, ProviderSessionId,
+    ShortText, ThreadId,
 };
 use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientConnectionState,
@@ -27,7 +27,8 @@ use hq_local_api::{
     protocol::v1::{
         AgentRetirementRequestDto, AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
         ConversationPageSelectionDto, EffectRequestDto, FrameDecoder, Id32, InvalidationTopic,
-        MailboxCommandRequestDto, MutationRequest, ProjectCommandRequestDto, Request,
+        MailboxCommandRequestDto, MutationRequest, ProjectCommandOutcomeDto,
+        ProjectCommandRequestDto, ProjectExternalStateWarningDto, Request, RuntimeObservationDto,
     },
 };
 use nix::{
@@ -43,8 +44,8 @@ use crate::{
         CliError, HarnessCommand, NamedAgentCommand, NamedAgentSelector, NamedAgentView,
         ProjectCliCommand, ProjectResourceCliCommand, ProjectTuiResult, WorktreeCliRequest,
         named_agent_catalog_view, preview_project_creation_resource_for_tui,
-        preview_project_resource_for_tui, project_catalog_for_tui, run_harness_for_tui,
-        run_named_agent_for_tui, run_project_for_tui,
+        preview_project_resource_for_tui, project_catalog_for_tui, project_stage_label,
+        run_harness_for_tui, run_named_agent_for_tui, run_project_for_tui,
     },
     unix_frame,
 };
@@ -477,6 +478,7 @@ pub(crate) struct LocalProjectResult {
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn execute_project_command(
+    client: &mut LocalNodeClient,
     state: &StatePaths,
     command: LocalProjectCommand,
 ) -> Result<LocalProjectResult, CliError> {
@@ -630,7 +632,123 @@ pub(crate) fn execute_project_command(
             unreachable!("preview commands return before command conversion")
         }
     };
-    project_result(command, run_project_for_tui(&action, state)?)
+    project_result(command, run_project_for_tui(&action, client)?)
+}
+
+pub(crate) fn continue_project_command(
+    client: &mut LocalNodeClient,
+    current: &LocalProjectResult,
+) -> Result<LocalProjectResult, CliError> {
+    let command_id = CommandId::from_bytes(current.command_id);
+    let ClientEvent::ProjectCommand {
+        command_id: completed,
+        outcome,
+    } = client.continue_project(command_id)?
+    else {
+        return Err(CliError::ProjectState);
+    };
+    if completed != command_id {
+        return Err(CliError::ProjectState);
+    }
+    let (operation_id, outcome, runtime_state, runtime_code) = match outcome {
+        ProjectCommandOutcomeDto::Accepted {
+            operation_id,
+            stage,
+        }
+        | ProjectCommandOutcomeDto::Running {
+            operation_id,
+            stage,
+        } => (
+            operation_id.bytes(),
+            LocalProjectOutcome::Running {
+                stage: project_stage_label(stage).to_owned(),
+            },
+            Some("running".to_owned()),
+            None,
+        ),
+        ProjectCommandOutcomeDto::Completed {
+            operation_id,
+            project_head,
+            runtime,
+        } => {
+            let (runtime_state, runtime_code) = local_runtime(runtime);
+            (
+                operation_id.bytes(),
+                LocalProjectOutcome::Completed {
+                    project_head: Some(project_head.bytes()),
+                },
+                runtime_state,
+                runtime_code,
+            )
+        }
+        ProjectCommandOutcomeDto::Rejected {
+            operation_id,
+            error,
+            runtime,
+            external_state_warning: _,
+        } => {
+            let (runtime_state, runtime_code) = local_runtime(runtime);
+            (
+                operation_id.bytes(),
+                LocalProjectOutcome::Rejected {
+                    category: error.category,
+                    code: error.code,
+                },
+                runtime_state,
+                runtime_code,
+            )
+        }
+        ProjectCommandOutcomeDto::Reconcilable {
+            operation_id,
+            stage,
+            error,
+            external_state_warning,
+        } => (
+            operation_id.bytes(),
+            LocalProjectOutcome::Reconcilable {
+                stage: project_stage_label(stage).to_owned(),
+                category: error.category,
+                code: error.code,
+                warning: external_state_warning.map(local_external_warning),
+            },
+            Some("uncertain".to_owned()),
+            None,
+        ),
+    };
+    if operation_id != current.operation_id {
+        return Err(CliError::ProjectState);
+    }
+    Ok(LocalProjectResult {
+        command: current.command.clone(),
+        command_id: current.command_id,
+        operation_id,
+        project_id: current.project_id,
+        runtime_state,
+        runtime_code,
+        outcome,
+    })
+}
+
+fn local_runtime(runtime: Option<RuntimeObservationDto>) -> (Option<String>, Option<String>) {
+    match runtime {
+        None => (None, None),
+        Some(RuntimeObservationDto::Succeeded) => (Some("succeeded".to_owned()), None),
+        Some(RuntimeObservationDto::Failed(code)) => (Some("failed".to_owned()), Some(code)),
+        Some(RuntimeObservationDto::Uncertain(code)) => (Some("uncertain".to_owned()), Some(code)),
+    }
+}
+
+fn local_external_warning(warning: ProjectExternalStateWarningDto) -> LocalProjectExternalWarning {
+    match warning {
+        ProjectExternalStateWarningDto::WorktreeMayExist {
+            destination,
+            branch,
+        } => LocalProjectExternalWarning {
+            kind: "worktree_may_exist".to_owned(),
+            destination: destination.value,
+            branch,
+        },
+    }
 }
 
 fn execute_project_preview(
@@ -980,6 +1098,16 @@ impl LocalNodeClient {
     ) -> Result<ClientEvent, LocalNodeClientError> {
         self.runner
             .project(request)
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Continues one exact retry-safe durable project command retained by this client.
+    pub fn continue_project(
+        &mut self,
+        command_id: CommandId,
+    ) -> Result<ClientEvent, LocalNodeClientError> {
+        self.runner
+            .continue_project(command_id)
             .map_err(LocalNodeClientError::Execution)
     }
 

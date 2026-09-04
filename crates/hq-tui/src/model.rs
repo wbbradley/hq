@@ -2070,9 +2070,19 @@ struct UiGuidedSubmission {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum UiGuidedPending {
-    ProjectCreation,
+enum UiNewWorkflow {
+    ChoosingProject {
+        selected: Option<[u8; 32]>,
+    },
+    ProjectCreation {
+        return_project: Option<[u8; 32]>,
+        operation: Option<Box<UiProjectResult>>,
+    },
     ProjectSnapshot {
+        project_id: [u8; 32],
+        remaining_refreshes: u8,
+    },
+    ChooseAgent {
         project_id: [u8; 32],
     },
     AgentCreation {
@@ -2096,6 +2106,10 @@ pub enum UiTimerKind {
     AutosaveDraft,
     /// Bounded routine-completion confirmation.
     DismissCompletion,
+    /// Bounded poll of one exact retained project operation.
+    ContinueProject,
+    /// Bounded refresh while an exact completed project reaches the catalog.
+    RefreshCreatedProject,
 }
 
 /// Closed event vocabulary accepted by the pure UI model.
@@ -2386,6 +2400,13 @@ pub enum UiEffect {
         /// Exact typed command selected by the model.
         action: UiProjectAction,
     },
+    /// Continue one exact nonterminal project operation without authoring a new command.
+    ContinueProjectCommand {
+        /// Identity required on the completion event.
+        id: EffectId,
+        /// Exact operation evidence returned by the initial submission.
+        operation: UiProjectResult,
+    },
     /// Schedule one bounded timer through the shell clock.
     ScheduleTimer {
         /// Identity required on the completion event.
@@ -2522,6 +2543,7 @@ impl UiSectionWorkspaces {
 struct PendingProject {
     id: EffectId,
     action: UiProjectAction,
+    operation: Option<UiProjectResult>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2658,12 +2680,13 @@ pub struct UiModel {
     retry_timer: Option<EffectId>,
     autosave_timer: Option<EffectId>,
     completion_timer: Option<EffectId>,
+    project_timer: Option<EffectId>,
     next_effect_id: Option<NonZeroU64>,
     last_failure: Option<UiFailure>,
     transient_help: Option<UiTransientHelp>,
     completion_notice: Option<UiCompletionNotice>,
     completion_context: Option<UiPendingCompletion>,
-    guided_pending: Option<UiGuidedPending>,
+    new_workflow: Option<UiNewWorkflow>,
     started: bool,
     should_exit: bool,
 }
@@ -2742,12 +2765,13 @@ impl UiModel {
             retry_timer: None,
             autosave_timer: None,
             completion_timer: None,
+            project_timer: None,
             next_effect_id: NonZeroU64::new(1),
             last_failure: None,
             transient_help: None,
             completion_notice: None,
             completion_context: None,
-            guided_pending: None,
+            new_workflow: None,
             started: false,
             should_exit: false,
         }
@@ -3100,8 +3124,8 @@ impl UiModel {
                     .find(|thread| thread.thread_id == thread_id)?
                     .agent_id
             }
-            None => match &self.guided_pending {
-                Some(UiGuidedPending::Instruction(submission))
+            None => match &self.new_workflow {
+                Some(UiNewWorkflow::Instruction(submission))
                     if submission.project_id == project_id =>
                 {
                     submission.agent_id
@@ -3198,6 +3222,23 @@ impl UiModel {
     /// Borrows the current project interaction.
     pub const fn project_interaction(&self) -> Option<&UiProjectInteraction> {
         self.project_interaction.as_ref()
+    }
+
+    pub(crate) const fn guided_project_creation_active(&self) -> bool {
+        matches!(
+            self.new_workflow,
+            Some(UiNewWorkflow::ProjectCreation { .. })
+        )
+    }
+
+    pub(crate) const fn guided_project_recovery_active(&self) -> bool {
+        matches!(
+            &self.new_workflow,
+            Some(UiNewWorkflow::ProjectCreation {
+                operation: Some(operation),
+                ..
+            }) if matches!(operation.outcome, UiProjectOutcome::Reconcilable { .. })
+        )
     }
 
     /// Borrows the selected project's decoupled authoritative workspace summary.
@@ -3526,9 +3567,9 @@ impl UiModel {
             return Ok(());
         }
         if let (
-            Some(UiGuidedPending::AgentCreation { expected_name, .. }),
+            Some(UiNewWorkflow::AgentCreation { expected_name, .. }),
             UiAgentAction::Create { name },
-        ) = (&mut self.guided_pending, &action)
+        ) = (&mut self.new_workflow, &action)
         {
             *expected_name = Some(name.clone());
         }
@@ -3564,6 +3605,7 @@ impl UiModel {
         self.pending_project = Some(PendingProject {
             id,
             action: action.clone(),
+            operation: None,
         });
         effects.push(UiEffect::SubmitProjectCommand { id, action });
         Ok(())
@@ -3636,6 +3678,9 @@ impl UiModel {
             UiTimerKind::RetrySnapshot => self.retry_timer = Some(id),
             UiTimerKind::AutosaveDraft => self.autosave_timer = Some(id),
             UiTimerKind::DismissCompletion => self.completion_timer = Some(id),
+            UiTimerKind::ContinueProject | UiTimerKind::RefreshCreatedProject => {
+                self.project_timer = Some(id);
+            }
         }
         effects.push(UiEffect::ScheduleTimer { id, kind, after });
         Ok(())
@@ -3942,7 +3987,7 @@ impl UiModel {
     }
 
     fn apply_snapshot(&mut self, snapshot: UiSnapshot) {
-        if self.guided_pending.is_none()
+        if self.new_workflow.is_none()
             && let Some((setup, message_id)) = snapshot.project_setups.iter().find_map(|setup| {
                 let UiMailboxDraftTarget::ProjectSetup {
                     project_id,
@@ -3967,7 +4012,7 @@ impl UiModel {
                 ref provider,
             } = setup.draft.target
         {
-            self.guided_pending = Some(UiGuidedPending::InputSnapshot {
+            self.new_workflow = Some(UiNewWorkflow::InputSnapshot {
                 submission: UiGuidedSubmission {
                     project_id,
                     agent_id,
@@ -4479,7 +4524,7 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
             project_command_completed(&mut model, effect_id, result, &mut effects)?;
         }
         UiEvent::ProjectCommandFailed { effect_id, failure } => {
-            project_command_failed(&mut model, effect_id, failure, &mut effects);
+            project_command_failed(&mut model, effect_id, failure, &mut effects)?;
         }
         UiEvent::Invalidated { revision } => invalidated(&mut model, revision, &mut effects)?,
         UiEvent::ConnectionObserved {
@@ -5750,11 +5795,19 @@ fn apply_new_modal_input(
     if matches!(input, UiInput::Escape) {
         model.new_modal = match interaction {
             UiNewModal::Launcher { .. } | UiNewModal::ChangeSetupAgent { .. } => None,
-            UiNewModal::ChooseProject { .. } => Some(UiNewModal::Launcher {
-                selected: UiNewChoice::ProjectWork,
-            }),
-            UiNewModal::ChooseAgent { .. } | UiNewModal::ProjectUnavailable { .. } => {
-                Some(guided_project_picker(model))
+            UiNewModal::ChooseProject { .. } => {
+                model.new_workflow = None;
+                Some(UiNewModal::Launcher {
+                    selected: UiNewChoice::ProjectWork,
+                })
+            }
+            UiNewModal::ChooseAgent { ref project, .. }
+            | UiNewModal::ProjectUnavailable { ref project, .. } => {
+                let picker = guided_project_picker_selecting(model, Some(project.project_id));
+                model.new_workflow = Some(UiNewWorkflow::ChoosingProject {
+                    selected: Some(project.project_id),
+                });
+                Some(picker)
             }
             UiNewModal::ChooseProvider { project, .. }
             | UiNewModal::AgentUnavailable { project, .. } => {
@@ -5783,7 +5836,13 @@ fn apply_new_modal_input(
                 model.new_modal = None;
                 match selected {
                     UiNewChoice::ProjectWork => {
-                        model.new_modal = Some(guided_project_picker(model));
+                        let picker = guided_project_picker(model);
+                        let selected = match &picker {
+                            UiNewModal::ChooseProject { selected, .. } => *selected,
+                            _ => None,
+                        };
+                        model.new_workflow = Some(UiNewWorkflow::ChoosingProject { selected });
+                        model.new_modal = Some(picker);
                     }
                     UiNewChoice::DirectMessage => open_direct_target_picker(model),
                     UiNewChoice::PersonalNote => {
@@ -5812,11 +5871,23 @@ fn apply_new_modal_input(
                     selected,
                     create_new,
                 });
+                if let Some(project_id) = selected {
+                    model.new_workflow = Some(UiNewWorkflow::ChoosingProject {
+                        selected: Some(project_id),
+                    });
+                }
                 Ok(true)
             }
             UiInput::Activate if create_new => {
+                let return_project = match model.new_workflow {
+                    Some(UiNewWorkflow::ChoosingProject { selected }) => selected,
+                    _ => selected,
+                };
                 model.new_modal = None;
-                model.guided_pending = Some(UiGuidedPending::ProjectCreation);
+                model.new_workflow = Some(UiNewWorkflow::ProjectCreation {
+                    return_project,
+                    operation: None,
+                });
                 model.change_section(UiSection::Projects);
                 model.focus = UiFocus::Content;
                 model.project_interaction = Some(UiProjectInteraction::ChooseCreation {
@@ -5833,6 +5904,9 @@ fn apply_new_modal_input(
                 }) else {
                     return Ok(false);
                 };
+                model.new_workflow = Some(UiNewWorkflow::ChooseAgent {
+                    project_id: project.project_id,
+                });
                 open_guided_project(model, project, effects)?;
                 Ok(true)
             }
@@ -5862,7 +5936,7 @@ fn apply_new_modal_input(
             }
             UiInput::Activate if create_new => {
                 model.new_modal = None;
-                model.guided_pending = Some(UiGuidedPending::AgentCreation {
+                model.new_workflow = Some(UiNewWorkflow::AgentCreation {
                     project_id: project.project_id,
                     expected_name: None,
                 });
@@ -6041,6 +6115,10 @@ fn cycle_identity_choice<T>(
 }
 
 fn guided_project_picker(model: &UiModel) -> UiNewModal {
+    guided_project_picker_selecting(model, None)
+}
+
+fn guided_project_picker_selecting(model: &UiModel, preferred: Option<[u8; 32]>) -> UiNewModal {
     let projects = model.snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
         snapshot
             .projects
@@ -6049,8 +6127,15 @@ fn guided_project_picker(model: &UiModel) -> UiNewModal {
             .cloned()
             .collect::<Vec<_>>()
     });
+    let selected = preferred
+        .filter(|preferred| {
+            projects
+                .iter()
+                .any(|project| project.project_id == *preferred)
+        })
+        .or_else(|| projects.first().map(|project| project.project_id));
     UiNewModal::ChooseProject {
-        selected: projects.first().map(|project| project.project_id),
+        selected,
         create_new: projects.is_empty(),
         projects,
     }
@@ -6115,6 +6200,9 @@ fn open_guided_project(
         open_project_inbox_draft(model, &project, effects)?;
         return Ok(());
     }
+    model.new_workflow = Some(UiNewWorkflow::ChooseAgent {
+        project_id: project.project_id,
+    });
     model.new_modal = Some(guided_agent_picker(model, project));
     Ok(())
 }
@@ -6129,7 +6217,7 @@ fn open_project_inbox_draft(
         .as_ref()
         .filter(|assignment| assignment.runnable)
         .and_then(|assignment| assignment.thread_id);
-    model.guided_pending = None;
+    model.new_workflow = None;
     model.new_modal = None;
     model.project_interaction = None;
     if let Some(thread_id) = thread_id {
@@ -6279,7 +6367,7 @@ fn open_guided_instruction(
     provider: String,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
-    model.guided_pending = Some(UiGuidedPending::Instruction(UiGuidedSubmission {
+    model.new_workflow = Some(UiNewWorkflow::Instruction(UiGuidedSubmission {
         project_id: project.project_id,
         agent_id: agent.agent_id,
         provider,
@@ -6291,10 +6379,10 @@ fn open_guided_instruction(
             project_id: project.project_id,
             agent_id: agent.agent_id,
             provider: model
-                .guided_pending
+                .new_workflow
                 .as_ref()
                 .and_then(|pending| match pending {
-                    UiGuidedPending::Instruction(submission) => Some(submission.provider.clone()),
+                    UiNewWorkflow::Instruction(submission) => Some(submission.provider.clone()),
                     _ => None,
                 })
                 .unwrap_or_default(),
@@ -6510,7 +6598,7 @@ fn submit_guided_project(
             launch_directory: directory,
         }
     };
-    model.guided_pending = Some(UiGuidedPending::Activation(submission));
+    model.new_workflow = Some(UiNewWorkflow::Activation(submission));
     model.new_modal = Some(UiNewModal::Working {
         project: project.name,
         agent: agent_name,
@@ -6781,6 +6869,92 @@ fn apply_project_interaction_input(
     }
     if matches!(input, UiInput::Escape) {
         if model.pending_project.is_none() {
+            if let Some(UiNewWorkflow::ProjectCreation {
+                operation: Some(operation),
+                ..
+            }) = &model.new_workflow
+                && matches!(operation.outcome, UiProjectOutcome::Running { .. })
+            {
+                return Ok(false);
+            }
+            if let Some(UiNewWorkflow::ProjectCreation {
+                return_project,
+                operation: Some(operation),
+            }) = model.new_workflow.clone()
+            {
+                match (&model.project_interaction, &operation.outcome) {
+                    (
+                        Some(UiProjectInteraction::Outcome { .. }),
+                        UiProjectOutcome::Rejected { .. },
+                    ) => {
+                        model.new_workflow = Some(UiNewWorkflow::ProjectCreation {
+                            return_project,
+                            operation: None,
+                        });
+                        model.project_interaction = project_creation_form(&operation.action);
+                        model.last_failure = None;
+                        return Ok(true);
+                    }
+                    (
+                        Some(UiProjectInteraction::Outcome { .. }),
+                        UiProjectOutcome::Reconcilable { .. },
+                    ) => {
+                        model.project_interaction = project_creation_form(&operation.action);
+                        model.last_failure = None;
+                        return Ok(true);
+                    }
+                    (
+                        Some(
+                            UiProjectInteraction::CreateExisting { .. }
+                            | UiProjectInteraction::CreateWorktree { .. },
+                        ),
+                        UiProjectOutcome::Reconcilable { .. },
+                    ) => {
+                        model.project_interaction =
+                            Some(UiProjectInteraction::Outcome { result: *operation });
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
+            if matches!(
+                model.new_workflow,
+                Some(UiNewWorkflow::ProjectCreation {
+                    operation: None,
+                    ..
+                })
+            ) {
+                match model.project_interaction.as_ref() {
+                    Some(UiProjectInteraction::CreateExisting { .. }) => {
+                        model.project_interaction = Some(UiProjectInteraction::ChooseCreation {
+                            selected: UiProjectCreationChoice::ExistingFolder,
+                        });
+                        model.last_failure = None;
+                        return Ok(true);
+                    }
+                    Some(UiProjectInteraction::CreateWorktree { .. }) => {
+                        model.project_interaction = Some(UiProjectInteraction::ChooseCreation {
+                            selected: UiProjectCreationChoice::IsolatedWorktree,
+                        });
+                        model.last_failure = None;
+                        return Ok(true);
+                    }
+                    Some(UiProjectInteraction::ChooseCreation { .. }) => {
+                        let selected = match &model.new_workflow {
+                            Some(UiNewWorkflow::ProjectCreation { return_project, .. }) => {
+                                *return_project
+                            }
+                            _ => None,
+                        };
+                        model.new_workflow = Some(UiNewWorkflow::ChoosingProject { selected });
+                        model.project_interaction = None;
+                        model.new_modal = Some(guided_project_picker_selecting(model, selected));
+                        model.last_failure = None;
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
             if let Some(UiProjectInteraction::Outcome {
                 result:
                     UiProjectResult {
@@ -6803,13 +6977,36 @@ fn apply_project_interaction_input(
             if let Some(UiProjectInteraction::Search { query }) = &model.project_interaction {
                 model.project_search.clone_from(query);
             }
-            if matches!(model.guided_pending, Some(UiGuidedPending::ProjectCreation)) {
-                model.guided_pending = None;
-                model.new_modal = Some(UiNewModal::Launcher {
-                    selected: UiNewChoice::ProjectWork,
-                });
-            }
             model.project_interaction = None;
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+
+    if let Some(UiNewWorkflow::ProjectCreation {
+        operation: Some(operation),
+        ..
+    }) = model.new_workflow.clone()
+        && matches!(operation.outcome, UiProjectOutcome::Reconcilable { .. })
+        && matches!(
+            model.project_interaction,
+            Some(
+                UiProjectInteraction::CreateExisting { .. }
+                    | UiProjectInteraction::CreateWorktree { .. }
+            )
+        )
+    {
+        if matches!(input, UiInput::Activate) && model.pending_project.is_none() {
+            let id = model.allocate_effect()?;
+            model.pending_project = Some(PendingProject {
+                id,
+                action: operation.action.clone(),
+                operation: Some(operation.as_ref().clone()),
+            });
+            effects.push(UiEffect::ContinueProjectCommand {
+                id,
+                operation: *operation,
+            });
             return Ok(true);
         }
         return Ok(false);
@@ -7124,14 +7321,46 @@ fn apply_project_interaction_input(
     }
 }
 
+fn project_creation_form(action: &UiProjectAction) -> Option<UiProjectInteraction> {
+    match action {
+        UiProjectAction::CreateExisting { name, brief, path } => {
+            Some(UiProjectInteraction::CreateExisting {
+                name: name.clone(),
+                brief: brief.clone().unwrap_or_default(),
+                path: path.clone(),
+                field: UiProjectFormField::Path,
+                submitting: false,
+            })
+        }
+        UiProjectAction::CreateWorktree {
+            name,
+            brief,
+            source,
+            destination,
+            branch,
+            base,
+        } => Some(UiProjectInteraction::CreateWorktree {
+            name: name.clone(),
+            brief: brief.clone().unwrap_or_default(),
+            source: source.clone(),
+            destination: destination.clone(),
+            branch: branch.clone(),
+            base: base.clone().unwrap_or_default(),
+            field: UiProjectFormField::Name,
+            submitting: false,
+        }),
+        _ => None,
+    }
+}
+
 fn stop_guided_activation(model: &mut UiModel) -> bool {
-    let Some(project_id) = (match &model.guided_pending {
-        Some(UiGuidedPending::Activation(submission)) => Some(submission.project_id),
+    let Some(project_id) = (match &model.new_workflow {
+        Some(UiNewWorkflow::Activation(submission)) => Some(submission.project_id),
         _ => None,
     }) else {
         return false;
     };
-    model.guided_pending = None;
+    model.new_workflow = None;
     model.new_modal = None;
     if model.project_interaction.is_none()
         && model.snapshot.as_ref().is_some_and(|snapshot| {
@@ -8260,8 +8489,8 @@ fn apply_agent_modal_input(
             if let Some(UiAgentModal::Search { query }) = &model.agent_modal {
                 model.agent_search.clone_from(query);
             }
-            if let Some(UiGuidedPending::AgentCreation { project_id, .. }) =
-                model.guided_pending.clone()
+            if let Some(UiNewWorkflow::AgentCreation { project_id, .. }) =
+                model.new_workflow.clone()
                 && let Some(project) = model.snapshot.as_ref().and_then(|snapshot| {
                     snapshot
                         .projects
@@ -8270,7 +8499,7 @@ fn apply_agent_modal_input(
                         .cloned()
                 })
             {
-                model.guided_pending = None;
+                model.new_workflow = None;
                 model.new_modal = Some(guided_agent_picker(model, project));
             }
             model.agent_modal = None;
@@ -9350,6 +9579,29 @@ fn timer_elapsed(
         model.completion_timer = None;
         model.completion_notice = None;
         effects.push(UiEffect::RequestRedraw);
+    } else if model.project_timer == Some(effect_id) {
+        model.project_timer = None;
+        let operation = match &model.new_workflow {
+            Some(UiNewWorkflow::ProjectCreation {
+                operation: Some(operation),
+                ..
+            }) => Some(operation.as_ref().clone()),
+            Some(UiNewWorkflow::ProjectSnapshot { .. }) => None,
+            _ => return Ok(()),
+        };
+        match operation {
+            Some(operation) if model.pending_project.is_none() => {
+                let id = model.allocate_effect()?;
+                model.pending_project = Some(PendingProject {
+                    id,
+                    action: operation.action.clone(),
+                    operation: Some(operation.clone()),
+                });
+                effects.push(UiEffect::ContinueProjectCommand { id, operation });
+            }
+            None => model.request_snapshot(effects)?,
+            Some(_) => {}
+        }
     }
     Ok(())
 }
@@ -9915,13 +10167,13 @@ fn mailbox_command_committed(
         );
     }
     if let (Some(submission), Some(message_id)) = (
-        setup_submission.or_else(|| match model.guided_pending.clone() {
-            Some(UiGuidedPending::Instruction(submission)) => Some(submission),
+        setup_submission.or_else(|| match model.new_workflow.clone() {
+            Some(UiNewWorkflow::Instruction(submission)) => Some(submission),
             _ => None,
         }),
         message_id,
     ) {
-        model.guided_pending = Some(UiGuidedPending::InputSnapshot {
+        model.new_workflow = Some(UiNewWorkflow::InputSnapshot {
             submission,
             message_id,
         });
@@ -10390,11 +10642,14 @@ fn apply_completion_context(model: &mut UiModel) {
 
 #[allow(clippy::too_many_lines)]
 fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<(), UiError> {
-    let Some(pending) = model.guided_pending.clone() else {
+    let Some(pending) = model.new_workflow.clone() else {
         return Ok(());
     };
     match pending {
-        UiGuidedPending::ProjectSnapshot { project_id } => {
+        UiNewWorkflow::ProjectSnapshot {
+            project_id,
+            remaining_refreshes,
+        } => {
             let Some(project) = model.snapshot.as_ref().and_then(|snapshot| {
                 snapshot
                     .projects
@@ -10402,12 +10657,29 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
                     .find(|project| project.project_id == project_id)
                     .cloned()
             }) else {
+                if remaining_refreshes == 0 {
+                    model.last_failure = Some(UiFailure {
+                        code: "created_project_not_visible".to_owned(),
+                        action: "keep this setup open and refresh after HQ finishes synchronizing"
+                            .to_owned(),
+                    });
+                } else if model.project_timer.is_none() {
+                    model.new_workflow = Some(UiNewWorkflow::ProjectSnapshot {
+                        project_id,
+                        remaining_refreshes: remaining_refreshes - 1,
+                    });
+                    model.schedule_timer(
+                        UiTimerKind::RefreshCreatedProject,
+                        RETRY_DELAY,
+                        effects,
+                    )?;
+                }
                 return Ok(());
             };
-            model.guided_pending = None;
+            model.new_workflow = None;
             open_guided_project(model, project, effects)?;
         }
-        UiGuidedPending::AgentCreation {
+        UiNewWorkflow::AgentCreation {
             project_id,
             expected_name: Some(expected_name),
         } => {
@@ -10435,10 +10707,10 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
                 return Ok(());
             };
             let agent = agent.clone();
-            model.guided_pending = None;
+            model.new_workflow = None;
             open_guided_agent(model, project, agent, effects)?;
         }
-        UiGuidedPending::InputSnapshot {
+        UiNewWorkflow::InputSnapshot {
             submission,
             message_id,
         } => {
@@ -10465,7 +10737,7 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
                     .as_ref()
                     .and_then(|assignment| assignment.thread_id)
                 {
-                    model.guided_pending = None;
+                    model.new_workflow = None;
                     model.new_modal = None;
                     select_project_conversation(model, project.project_id, thread_id);
                     model.request_inbox_preview(effects);
@@ -10493,7 +10765,7 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
             )?;
             model.new_modal = None;
         }
-        UiGuidedPending::Activation(submission) => {
+        UiNewWorkflow::Activation(submission) => {
             let Some(project) = model
                 .snapshot
                 .as_ref()
@@ -10514,15 +10786,17 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
                 .as_ref()
                 .and_then(|assignment| assignment.thread_id)
             {
-                model.guided_pending = None;
+                model.new_workflow = None;
                 model.new_modal = None;
                 select_project_conversation(model, project.project_id, thread_id);
                 model.request_inbox_preview(effects);
             }
         }
-        UiGuidedPending::ProjectCreation
-        | UiGuidedPending::Instruction(_)
-        | UiGuidedPending::AgentCreation {
+        UiNewWorkflow::ChoosingProject { .. }
+        | UiNewWorkflow::ProjectCreation { .. }
+        | UiNewWorkflow::ChooseAgent { .. }
+        | UiNewWorkflow::Instruction(_)
+        | UiNewWorkflow::AgentCreation {
             expected_name: None,
             ..
         } => {}
@@ -10661,17 +10935,39 @@ fn project_command_completed(
     };
     if pending.action != result.action {
         model.pending_project = None;
-        stop_guided_activation(model);
         model.last_failure = Some(UiFailure {
             code: "project_response_mismatch".to_owned(),
-            action: "reload and reselect the exact project operation target".to_owned(),
+            action: "keep the current operation open while HQ reloads its exact status".to_owned(),
         });
+        if pending.operation.is_some() && model.project_timer.is_none() {
+            model.schedule_timer(UiTimerKind::ContinueProject, RETRY_DELAY, effects)?;
+        } else {
+            stop_guided_activation(model);
+        }
+        effects.push(UiEffect::RequestRedraw);
+        return Ok(());
+    }
+    if let Some(expected) = &pending.operation
+        && (expected.command_id != result.command_id
+            || expected.operation_id != result.operation_id
+            || expected.project_id != result.project_id)
+    {
+        model.pending_project = None;
+        model.last_failure = Some(UiFailure {
+            code: "project_operation_mismatch".to_owned(),
+            action: "keep the current operation open while HQ reloads its exact status".to_owned(),
+        });
+        if model.project_timer.is_none() {
+            model.schedule_timer(UiTimerKind::ContinueProject, RETRY_DELAY, effects)?;
+        }
         effects.push(UiEffect::RequestRedraw);
         return Ok(());
     }
     model.pending_project = None;
     if guided_project_completed(model, &result, effects)? {
-        model.request_snapshot(effects)?;
+        if !matches!(result.outcome, UiProjectOutcome::Running { .. }) {
+            model.request_snapshot(effects)?;
+        }
         effects.push(UiEffect::RequestRedraw);
         return Ok(());
     }
@@ -10724,14 +11020,16 @@ fn guided_project_completed(
     result: &UiProjectResult,
     effects: &mut Vec<UiEffect>,
 ) -> Result<bool, UiError> {
-    match (&model.guided_pending, &result.action, &result.outcome) {
+    match (&model.new_workflow, &result.action, &result.outcome) {
         (
-            Some(UiGuidedPending::ProjectCreation),
+            Some(UiNewWorkflow::ProjectCreation { .. }),
             UiProjectAction::CreateExisting { .. } | UiProjectAction::CreateWorktree { .. },
             UiProjectOutcome::Completed { .. },
         ) => {
-            model.guided_pending = Some(UiGuidedPending::ProjectSnapshot {
+            model.project_timer = None;
+            model.new_workflow = Some(UiNewWorkflow::ProjectSnapshot {
                 project_id: result.project_id,
+                remaining_refreshes: 2,
             });
             model.project_interaction = None;
             model.new_modal = Some(UiNewModal::Working {
@@ -10744,7 +11042,54 @@ fn guided_project_completed(
             Ok(true)
         }
         (
-            Some(UiGuidedPending::Activation(_)),
+            Some(UiNewWorkflow::ProjectCreation { .. }),
+            UiProjectAction::CreateExisting { .. } | UiProjectAction::CreateWorktree { .. },
+            UiProjectOutcome::Running { .. },
+        ) => {
+            let return_project = match &model.new_workflow {
+                Some(UiNewWorkflow::ProjectCreation { return_project, .. }) => *return_project,
+                _ => None,
+            };
+            model.new_workflow = Some(UiNewWorkflow::ProjectCreation {
+                return_project,
+                operation: Some(Box::new(result.clone())),
+            });
+            model.new_modal = None;
+            model.project_interaction = Some(UiProjectInteraction::Outcome {
+                result: result.clone(),
+            });
+            model.last_failure = None;
+            if model.project_timer.is_none() {
+                model.schedule_timer(UiTimerKind::ContinueProject, RETRY_DELAY, effects)?;
+            }
+            Ok(true)
+        }
+        (
+            Some(UiNewWorkflow::ProjectCreation { .. }),
+            UiProjectAction::CreateExisting { .. } | UiProjectAction::CreateWorktree { .. },
+            UiProjectOutcome::Rejected { code, .. } | UiProjectOutcome::Reconcilable { code, .. },
+        ) => {
+            let return_project = match &model.new_workflow {
+                Some(UiNewWorkflow::ProjectCreation { return_project, .. }) => *return_project,
+                _ => None,
+            };
+            model.project_timer = None;
+            model.new_workflow = Some(UiNewWorkflow::ProjectCreation {
+                return_project,
+                operation: Some(Box::new(result.clone())),
+            });
+            model.new_modal = None;
+            model.project_interaction = Some(UiProjectInteraction::Outcome {
+                result: result.clone(),
+            });
+            model.last_failure = Some(UiFailure {
+                code: code.clone(),
+                action: "inspect this retained project operation before returning".to_owned(),
+            });
+            Ok(true)
+        }
+        (
+            Some(UiNewWorkflow::Activation(_)),
             UiProjectAction::Activate { .. } | UiProjectAction::Handoff { .. },
             UiProjectOutcome::Completed { .. },
         ) => {
@@ -10753,11 +11098,11 @@ fn guided_project_completed(
             Ok(true)
         }
         (
-            Some(UiGuidedPending::Activation(_)),
+            Some(UiNewWorkflow::Activation(_)),
             UiProjectAction::Activate { .. } | UiProjectAction::Handoff { .. },
             UiProjectOutcome::Rejected { code, .. },
         ) => {
-            model.guided_pending = None;
+            model.new_workflow = None;
             model.new_modal = None;
             model.last_failure = Some(UiFailure {
                 code: code.clone(),
@@ -10769,11 +11114,11 @@ fn guided_project_completed(
             Ok(true)
         }
         (
-            Some(UiGuidedPending::Activation(_)),
+            Some(UiNewWorkflow::Activation(_)),
             UiProjectAction::Activate { .. } | UiProjectAction::Handoff { .. },
             UiProjectOutcome::Reconcilable { code, .. },
         ) => {
-            model.guided_pending = None;
+            model.new_workflow = None;
             model.new_modal = None;
             model.last_failure = Some(UiFailure {
                 code: code.clone(),
@@ -10785,7 +11130,7 @@ fn guided_project_completed(
             Ok(true)
         }
         (
-            Some(UiGuidedPending::Activation(_)),
+            Some(UiNewWorkflow::Activation(_)),
             UiProjectAction::Activate { .. } | UiProjectAction::Handoff { .. },
             UiProjectOutcome::Running { .. },
         ) => {
@@ -10824,11 +11169,23 @@ fn project_command_failed(
     effect_id: EffectId,
     failure: UiFailure,
     effects: &mut Vec<UiEffect>,
-) {
-    if model.pending_project.as_ref().map(|pending| pending.id) != Some(effect_id) {
-        return;
-    }
+) -> Result<(), UiError> {
+    let Some(pending) = model
+        .pending_project
+        .clone()
+        .filter(|pending| pending.id == effect_id)
+    else {
+        return Ok(());
+    };
     model.pending_project = None;
+    if pending.operation.is_some() {
+        model.last_failure = Some(failure);
+        if model.project_timer.is_none() {
+            model.schedule_timer(UiTimerKind::ContinueProject, RETRY_DELAY, effects)?;
+        }
+        effects.push(UiEffect::RequestRedraw);
+        return Ok(());
+    }
     stop_guided_activation(model);
     if let Some(
         UiProjectInteraction::CreateExisting { submitting, .. }
@@ -10846,6 +11203,7 @@ fn project_command_failed(
     }
     model.last_failure = Some(failure);
     effects.push(UiEffect::RequestRedraw);
+    Ok(())
 }
 
 fn snapshot_failed(
@@ -10935,13 +11293,14 @@ mod tests {
 
     use super::{
         TextEdit, UiAgent, UiAgentLifecycle, UiAgentStatus, UiConfigField, UiConfiguration,
-        UiEffect, UiError, UiEvent, UiFocus, UiFormField, UiFormKind, UiFormState, UiGuidedPending,
+        UiEffect, UiError, UiEvent, UiFocus, UiFormField, UiFormKind, UiFormState,
         UiGuidedSubmission, UiHumanState, UiInput, UiInteraction, UiInteractionAnswerOutcome,
         UiInteractionChoice, UiInteractionKind, UiInteractionModal, UiInteractionResponse,
-        UiMailboxDraftPane, UiMailboxDraftTarget, UiModel, UiProject, UiProjectAction,
-        UiProjectAssignment, UiProjectInteraction, UiProjectResourceCheck, UiProjectThread,
-        UiSection, UiSize, UiSnapshot, UiThemeChoice, apply_project_interaction_input, edit_text,
-        normalize_path_input, refresh_project_interaction, update,
+        UiMailboxDraftPane, UiMailboxDraftTarget, UiModel, UiNewWorkflow, UiProject,
+        UiProjectAction, UiProjectAssignment, UiProjectInteraction, UiProjectResourceCheck,
+        UiProjectThread, UiSection, UiSize, UiSnapshot, UiThemeChoice,
+        apply_project_interaction_input, edit_text, normalize_path_input,
+        refresh_project_interaction, update,
     };
 
     #[test]
@@ -11274,7 +11633,7 @@ mod tests {
             projects: vec![project("release")],
             project_setups: Vec::new(),
         });
-        model.guided_pending = Some(UiGuidedPending::Instruction(UiGuidedSubmission {
+        model.new_workflow = Some(UiNewWorkflow::Instruction(UiGuidedSubmission {
             project_id: [1; 32],
             agent_id: [7; 32],
             provider: "codex".to_owned(),
