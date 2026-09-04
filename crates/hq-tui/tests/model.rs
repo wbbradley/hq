@@ -19,10 +19,10 @@ use hq_tui::{
     UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject, UiProjectAction,
     UiProjectAssignment, UiProjectConversationSetup, UiProjectCreationChoice,
     UiProjectFolderAction, UiProjectFormField, UiProjectInteraction, UiProjectManagementAction,
-    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
-    UiProjectResult, UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider,
-    UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind,
-    update,
+    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceCondition,
+    UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus, UiProjectThread,
+    UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
+    UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -313,12 +313,34 @@ fn guided_project_work_can_create_its_missing_project_and_continue() {
             .expect("creation step")
             .model;
     }
-    let creating = update(model, UiEvent::Input(UiInput::Activate)).expect("create");
-    let (create_id, create_action) = project_effect(&creating.effects);
+    let previewing = update(model, UiEvent::Input(UiInput::Activate)).expect("preview");
+    let (preview_id, preview_action) = project_effect(&previewing.effects);
     assert!(matches!(
-        create_action,
-        UiProjectAction::CreateExisting { ref path, .. } if path == "/work/new-project"
+        preview_action,
+        UiProjectAction::PreviewCreateExisting { ref path, .. } if path == "/work/new-project"
     ));
+    let creating = update(
+        previewing.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: preview_id,
+            result: UiProjectResult {
+                action: preview_action,
+                command_id: [20; 32],
+                operation_id: [21; 32],
+                project_id: [5; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::ResourcePreview {
+                    display_path: "/work/new-project".to_owned(),
+                    canonical_path: "/work/new-project".to_owned(),
+                    condition: UiProjectResourceCondition::Healthy,
+                    conflicts: Vec::new(),
+                },
+            },
+        },
+    )
+    .expect("healthy preview continues creation");
+    let (create_id, create_action) = project_effect(&creating.effects);
     let completed = update(
         creating.model,
         UiEvent::ProjectCommandCompleted {
@@ -5642,7 +5664,7 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
     let (existing_id, existing_action) = project_effect(&submitted.effects);
     assert_eq!(
         existing_action,
-        UiProjectAction::CreateExisting {
+        UiProjectAction::PreviewCreateExisting {
             name: "existing".to_owned(),
             brief: Some("brief".to_owned()),
             path: "/repo/existing".to_owned(),
@@ -5677,13 +5699,13 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
     let (create_id, create_action) = project_effect(&committed.effects);
     assert_eq!(
         create_action,
-        UiProjectAction::CreateExisting {
+        UiProjectAction::PreviewCreateExisting {
             name: "existing".to_owned(),
             brief: Some("brief".to_owned()),
             path: "/repo/existing".to_owned(),
         }
     );
-    let created = update(
+    let previewed = update(
         committed.model,
         UiEvent::ProjectCommandCompleted {
             effect_id: create_id,
@@ -5691,6 +5713,32 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
                 action: create_action.clone(),
                 command_id: [37; 32],
                 operation_id: [38; 32],
+                project_id: [36; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::ResourcePreview {
+                    display_path: "/repo/existing".to_owned(),
+                    canonical_path: "/repo/existing".to_owned(),
+                    condition: UiProjectResourceCondition::Healthy,
+                    conflicts: Vec::new(),
+                },
+            },
+        },
+    )
+    .expect("preview completion");
+    let (create_id, create_action) = project_effect(&previewed.effects);
+    assert!(matches!(
+        create_action,
+        UiProjectAction::CreateExisting { .. }
+    ));
+    let created = update(
+        previewed.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: create_id,
+            result: UiProjectResult {
+                action: create_action,
+                command_id: [40; 32],
+                operation_id: [41; 32],
                 project_id: [36; 32],
                 runtime_state: None,
                 runtime_code: None,
@@ -5800,11 +5848,69 @@ fn existing_folder_creation_defaults_the_name_when_submitted_from_the_path_field
         update(model, UiEvent::Input(UiInput::Activate)).expect("submit from path field");
     assert_eq!(
         project_effect(&submitted.effects).1,
-        UiProjectAction::CreateExisting {
+        UiProjectAction::PreviewCreateExisting {
             name: "direct-submit".to_owned(),
             brief: None,
             path: "/repo/direct-submit".to_owned(),
         }
+    );
+}
+
+#[test]
+fn missing_existing_folder_returns_to_the_path_field_without_mutating() {
+    let mut model = loaded_projects_model(1, Vec::new());
+    model = update(model, UiEvent::Input(UiInput::Character('c')))
+        .expect("creation chooser")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("existing folder form")
+        .model;
+    model = update(
+        model,
+        UiEvent::Input(UiInput::Paste("/repo/typo".to_owned())),
+    )
+    .expect("folder path")
+    .model;
+    let previewing = update(model, UiEvent::Input(UiInput::Activate)).expect("preview path");
+    let (effect_id, action) = project_effect(&previewing.effects);
+    let rejected = update(
+        previewing.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id,
+            result: UiProjectResult {
+                action,
+                command_id: [51; 32],
+                operation_id: [52; 32],
+                project_id: [53; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::ResourcePreview {
+                    display_path: "/repo/typo".to_owned(),
+                    canonical_path: "/repo/typo".to_owned(),
+                    condition: UiProjectResourceCondition::Missing,
+                    conflicts: Vec::new(),
+                },
+            },
+        },
+    )
+    .expect("typed missing-folder observation");
+
+    assert!(matches!(
+        rejected.model.project_interaction(),
+        Some(UiProjectInteraction::CreateExisting {
+            name,
+            path,
+            field: UiProjectFormField::Path,
+            submitting: false,
+            ..
+        }) if name == "typo" && path == "/repo/typo"
+    ));
+    assert!(rejected.model.last_failure().is_none());
+    assert!(
+        rejected
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
     );
 }
 
@@ -5891,7 +5997,7 @@ fn forms_use_tab_unicode_safe_cursor_editing_and_current_user_path_expansion() {
     let (_, action) = project_effect(&submitted.effects);
     assert_eq!(
         action,
-        UiProjectAction::CreateExisting {
+        UiProjectAction::PreviewCreateExisting {
             name: "xé".to_owned(),
             brief: None,
             path: "/Users/example/repo".to_owned(),
@@ -5941,6 +6047,7 @@ fn resource_add_previews_authoritative_conflicts_before_mutation() {
                 outcome: UiProjectOutcome::ResourcePreview {
                     display_path: "/shared".to_owned(),
                     canonical_path: "/canonical/shared".to_owned(),
+                    condition: UiProjectResourceCondition::Healthy,
                     conflicts: vec![UiProjectResourceConflict {
                         project_id: [2; 32],
                         resource_id: [3; 32],
@@ -6434,6 +6541,7 @@ fn resource_add_retains_input_across_reload_and_preview_failure() {
                 runtime_state: None,
                 runtime_code: None,
                 outcome: UiProjectOutcome::ResourcePreview {
+                    condition: UiProjectResourceCondition::Healthy,
                     display_path: "/added".to_owned(),
                     canonical_path: "/canonical/added".to_owned(),
                     conflicts: Vec::new(),

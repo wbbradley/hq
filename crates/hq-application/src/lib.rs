@@ -73,9 +73,9 @@ pub use ports::{
     MAX_PROVIDER_CATALOG_ITEMS, MAX_RELAY_STATUS_POLICIES, MAX_SUBSCRIPTION_TOPICS,
     ObserveRevisions, ProviderAvailability, ProviderCatalog, PublishWake, QueryDomain,
     QueryProviders, RelayAccess, RelayAuthentication, RelayConfiguration, RelayPolicyStatus,
-    RelayStatus, ResourceInspectionRequest, ResourceInspectionResult, ResourceReleaseState,
-    SessionControl, StateHealth, StateRepairReport, SubscriptionRequest, SubscriptionTopic,
-    SynchronizationRequest, WakeDisposition,
+    RelayStatus, ResourceCondition, ResourceInspectionRequest, ResourceInspectionResult,
+    ResourceReleaseState, SessionControl, StateHealth, StateRepairReport, SubscriptionRequest,
+    SubscriptionTopic, SynchronizationRequest, WakeDisposition,
 };
 pub use project::{
     AgentRetirementOutcome, AgentRetirementRequest, ControlProjects, ProjectCommandAction,

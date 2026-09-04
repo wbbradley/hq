@@ -36,13 +36,14 @@ use hq_local_api::protocol::v1::{
     ProjectCommandRequestDto, ProjectCreationRequestDto, ProjectExternalStateWarningDto,
     ProviderAvailabilityDto, ProviderCatalogDto, RelayAccessDto, RelayAuthenticationDto,
     RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto, Request,
-    RequestEnvelope, RequestId, ResourceHealthDto, ResourceInspectionRequestDto,
-    ResourceInspectionResultDto, ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto,
-    ResponseEnvelope, ResponseResult, RevisionInvalidation, SelectedConversationPageDto,
-    ServerHello, SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
-    SubscriptionAcknowledgement, SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError,
-    VersionRange, VersionRejected, WireMessage, WorktreeProvisioningRequestDto,
-    agent_session_request_digest, negotiate, resource_inspection_request_digest,
+    RequestEnvelope, RequestId, ResourceConditionDto, ResourceHealthDto,
+    ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
+    ResourceReleaseStateDto, ResourceSchemeDto, ResponseEnvelope, ResponseResult,
+    RevisionInvalidation, SelectedConversationPageDto, ServerHello, SessionControlDto,
+    SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionAcknowledgement,
+    SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError, VersionRange,
+    VersionRejected, WireMessage, WorktreeProvisioningRequestDto, agent_session_request_digest,
+    negotiate, resource_inspection_request_digest,
 };
 use hq_local_api::{project_command_from_v1, project_command_request_to_v1, snapshot_to_v1};
 
@@ -748,12 +749,12 @@ fn launch_environment_is_binary_safe_redacted_and_bound_into_session_identity() 
 }
 
 #[test]
-fn resource_inspection_digest_binds_stable_identity_and_both_locators() {
+fn resource_inspection_digest_binds_stable_identity_and_optional_canonical_expectation() {
     let body = ResourceInspectionRequestDto {
         project_id: Id32::new([5; 32]),
         resource_id: Id32::new([6; 32]),
         display_locator: locator(),
-        canonical_locator: locator(),
+        canonical_locator: Some(locator()),
     };
     let request = EffectRequestDto::new(
         Id32::new([7; 32]),
@@ -771,11 +772,17 @@ fn resource_inspection_digest_binds_stable_identity_and_both_locators() {
     );
 
     let mut changed = request;
-    changed.body.canonical_locator =
+    changed.body.canonical_locator = Some(
         ResourceLocatorDto::new(ResourceSchemeDto::WorkingTree, "/work/other".to_owned())
-            .expect("changed locator");
+            .expect("changed locator"),
+    );
     assert_ne!(
         resource_inspection_request_digest(&changed).expect("changed digest"),
+        digest
+    );
+    changed.body.canonical_locator = None;
+    assert_ne!(
+        resource_inspection_request_digest(&changed).expect("discovery digest"),
         digest
     );
 }
@@ -924,7 +931,7 @@ fn every_request_notification_and_negotiation_family_interoperates() {
             project_id: Id32::new([5; 32]),
             resource_id: Id32::new([6; 32]),
             display_locator: locator(),
-            canonical_locator: locator(),
+            canonical_locator: Some(locator()),
         })),
         Request::ControlProject(Box::new(ProjectCommandRequestDto {
             command_id: Id32::new([40; 32]),
@@ -1074,6 +1081,7 @@ fn every_success_and_error_response_family_interoperates() {
         ))),
         ResponseResult::ResourceInspection(EffectOutcomeDto::Accepted(
             ResourceInspectionResultDto::new(
+                ResourceConditionDto::Healthy,
                 ResourceHealthDto::Healthy,
                 Some(locator()),
                 ResourceReleaseStateDto::Clean,

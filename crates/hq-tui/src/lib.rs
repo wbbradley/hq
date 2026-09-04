@@ -32,11 +32,12 @@ pub use model::{
     UiProjectExternalWarning, UiProjectFolderAction, UiProjectFolderOwnership,
     UiProjectFolderSummary, UiProjectFormField, UiProjectInboxFilter, UiProjectInteraction,
     UiProjectLifecycle, UiProjectManagementAction, UiProjectOutcome, UiProjectRecoverySummary,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectSummary, UiProjectSummaryFocus, UiProjectTechnicalEvidence, UiProjectThread,
-    UiProjectWorkspaceLevel, UiProvider, UiReconnectCause, UiReconnectFailureKind,
-    UiReconnectOperation, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, UiThemeChoice, UiTimerKind, UiTransition, update,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceCondition,
+    UiProjectResourceConflict, UiProjectResult, UiProjectSummary, UiProjectSummaryFocus,
+    UiProjectTechnicalEvidence, UiProjectThread, UiProjectWorkspaceLevel, UiProvider,
+    UiReconnectCause, UiReconnectFailureKind, UiReconnectOperation, UiRow, UiRowKind, UiRowState,
+    UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiThemeChoice, UiTimerKind, UiTransition,
+    update,
 };
 pub use render::{UiRenderCache, render, render_with_cache};
 pub use theme::{Base16Palette, UiTheme, UiThemeRole};

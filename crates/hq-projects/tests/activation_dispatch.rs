@@ -461,6 +461,7 @@ impl ProjectResourcePort for HealthyResources {
 enum ResourceBehavior {
     UncertainResources,
     ChangedResource,
+    UnavailableResource,
     UncertainLaunch,
     RejectLaunch,
     DirtyRelease,
@@ -506,6 +507,14 @@ impl ProjectResourcePort for ScriptedResources {
                 display_locator: locator("/observed/elsewhere"),
                 canonical_locator: locator("/observed/elsewhere"),
                 health: ResourceHealth::Healthy,
+            }));
+        }
+        if matches!(self.behavior, ResourceBehavior::UnavailableResource) {
+            return Ok(EffectOutcome::Accepted(ProjectResource {
+                resource_id: request.body.resource_id,
+                display_locator: request.body.destination.clone(),
+                canonical_locator: request.body.destination.clone(),
+                health: ResourceHealth::Unavailable,
             }));
         }
         HealthyResources.identify_resource(request)
@@ -561,6 +570,7 @@ impl ProjectResourcePort for ScriptedResources {
                 }
                 ResourceBehavior::UncertainResources
                 | ResourceBehavior::ChangedResource
+                | ResourceBehavior::UnavailableResource
                 | ResourceBehavior::UncertainLaunch
                 | ResourceBehavior::RejectLaunch
                 | ResourceBehavior::RejectRelease
@@ -1546,6 +1556,30 @@ fn changed_resource_identity_rejects_before_canonical_mutation() {
         panic!("expected rejection, got {outcome:?}");
     };
     assert_eq!(error.code().as_str(), "project_resource_identity_changed");
+    assert!(canonical.mutations().is_empty());
+}
+
+#[test]
+fn unavailable_resource_is_invalid_input_not_an_identity_conflict() {
+    let canonical = ScriptedCanonical::new(snapshot(CanonicalProjectLifecycle::Open));
+    let outcome = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        ScriptedRuntime::default(),
+        ScriptedResources::new(ResourceBehavior::UnavailableResource),
+    )
+    .control(request_for(ProjectCommandAction::AddResource {
+        resource_id: ResourceId::from_bytes([32; 32]),
+        resource: locator("/work/missing"),
+        make_primary: false,
+    }))
+    .expect("unavailable resource rejection");
+
+    let ProjectCommandOutcome::Rejected { error, .. } = outcome else {
+        panic!("expected rejection, got {outcome:?}");
+    };
+    assert_eq!(error.category(), ErrorCategory::InvalidInput);
+    assert_eq!(error.code().as_str(), "project_resource_unavailable");
     assert!(canonical.mutations().is_empty());
 }
 

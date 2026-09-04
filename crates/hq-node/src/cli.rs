@@ -45,11 +45,12 @@ use hq_local_api::{
         MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
         PresentationKindDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
         ProjectCommandStageDto, ProjectExternalStateWarningDto, RelayAccessDto,
-        RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request, ResourceHealthDto,
-        ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
-        ResourceReleaseStateDto, ResourceSchemeDto, ResponseResult, RuntimeObservationDto,
-        SessionControlDto, SnapshotItem, StateHealthDto, SynchronizationRequestDto,
-        agent_session_request_digest, resource_inspection_request_digest,
+        RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request,
+        ResourceConditionDto, ResourceHealthDto, ResourceInspectionRequestDto,
+        ResourceInspectionResultDto, ResourceLocatorDto, ResourceReleaseStateDto,
+        ResourceSchemeDto, ResponseResult, RuntimeObservationDto, SessionControlDto, SnapshotItem,
+        StateHealthDto, SynchronizationRequestDto, agent_session_request_digest,
+        resource_inspection_request_digest,
     },
 };
 use hq_projects::{
@@ -2216,6 +2217,7 @@ pub(crate) struct ProjectResourcePreviewView {
     pub operation_id: OperationId,
     pub display_path: String,
     pub canonical_path: String,
+    pub condition: ResourceConditionDto,
     pub conflicts: Vec<ProjectResourceConflictPreviewView>,
 }
 
@@ -2297,6 +2299,7 @@ fn preview_project_path_for_tui(
     let request = resource_inspection_request(
         project_id,
         &request_resource,
+        None,
         operation_id,
         current_unix_millis()?,
     )?;
@@ -2307,8 +2310,12 @@ fn preview_project_path_for_tui(
     else {
         return Err(CliError::ResourceState);
     };
-    let canonical_dto = observed.observed_canonical.ok_or(CliError::ResourceState)?;
-    let canonical = locator_from_v1(&canonical_dto)?;
+    let canonical = observed
+        .observed_canonical
+        .as_ref()
+        .map(locator_from_v1)
+        .transpose()?
+        .unwrap_or_else(|| display.clone());
     let requested_resource = ProjectResource {
         resource_id,
         display_locator: display,
@@ -2316,36 +2323,38 @@ fn preview_project_path_for_tui(
         health: ResourceHealth::Unknown,
     };
     let mut conflicts = Vec::new();
-    for candidate in &catalog.projects {
-        for resource in &candidate.resources {
-            if !resource.active_claim {
-                continue;
-            }
-            let candidate_resource = ProjectResource {
-                resource_id: resource.resource_id,
-                display_locator: locator_from_v1(&resource.display_locator)?,
-                canonical_locator: locator_from_v1(&resource.canonical_locator)?,
-                health: ResourceHealth::Unknown,
-            };
-            if let Some(conflict) = desired_resource_conflict(
-                project_id,
-                home,
-                &requested_resource,
-                candidate.project_id,
-                candidate.home,
-                &candidate_resource,
-            ) {
-                conflicts.push(ProjectResourceConflictPreviewView {
-                    project_id: conflict.project_id,
-                    resource_id: conflict.resource_id,
-                    display_path: conflict.display_locator.value().to_owned(),
-                    canonical_path: conflict.canonical_locator.value().to_owned(),
-                    relationship: match conflict.relationship {
-                        ProjectResourceRelationship::Equal => "equal",
-                        ProjectResourceRelationship::Ancestor => "ancestor",
-                        ProjectResourceRelationship::Descendant => "descendant",
-                    },
-                });
+    if observed.condition == ResourceConditionDto::Healthy {
+        for candidate in &catalog.projects {
+            for resource in &candidate.resources {
+                if !resource.active_claim {
+                    continue;
+                }
+                let candidate_resource = ProjectResource {
+                    resource_id: resource.resource_id,
+                    display_locator: locator_from_v1(&resource.display_locator)?,
+                    canonical_locator: locator_from_v1(&resource.canonical_locator)?,
+                    health: ResourceHealth::Unknown,
+                };
+                if let Some(conflict) = desired_resource_conflict(
+                    project_id,
+                    home,
+                    &requested_resource,
+                    candidate.project_id,
+                    candidate.home,
+                    &candidate_resource,
+                ) {
+                    conflicts.push(ProjectResourceConflictPreviewView {
+                        project_id: conflict.project_id,
+                        resource_id: conflict.resource_id,
+                        display_path: conflict.display_locator.value().to_owned(),
+                        canonical_path: conflict.canonical_locator.value().to_owned(),
+                        relationship: match conflict.relationship {
+                            ProjectResourceRelationship::Equal => "equal",
+                            ProjectResourceRelationship::Ancestor => "ancestor",
+                            ProjectResourceRelationship::Descendant => "descendant",
+                        },
+                    });
+                }
             }
         }
     }
@@ -2355,6 +2364,7 @@ fn preview_project_path_for_tui(
         operation_id,
         display_path: requested_resource.display_locator.value().to_owned(),
         canonical_path: requested_resource.canonical_locator.value().to_owned(),
+        condition: observed.condition,
         conflicts,
     })
 }
@@ -2496,6 +2506,7 @@ fn check_project_resources(
         let request = resource_inspection_request(
             project_id,
             &resource,
+            Some(resource.canonical_locator.clone()),
             operation_id,
             issued_at_unix_millis,
         )?;
@@ -2548,6 +2559,7 @@ fn ensure_resource_check_home(
 fn resource_inspection_request(
     project_id: ProjectId,
     resource: &ProjectResourceView,
+    canonical_locator: Option<ResourceLocatorDto>,
     operation_id: OperationId,
     issued_at_unix_millis: i64,
 ) -> Result<EffectRequestDto<ResourceInspectionRequestDto>, CliError> {
@@ -2555,7 +2567,7 @@ fn resource_inspection_request(
         project_id: Id32::new(*project_id.as_bytes()),
         resource_id: Id32::new(*resource.resource_id.as_bytes()),
         display_locator: resource.display_locator.clone(),
-        canonical_locator: resource.canonical_locator.clone(),
+        canonical_locator,
     };
     let mut request = EffectRequestDto::new(
         Id32::new(*operation_id.as_bytes()),
@@ -9800,6 +9812,7 @@ mod tests {
         let request = resource_inspection_request(
             project_id,
             &listed.resources[0],
+            Some(listed.resources[0].canonical_locator.clone()),
             operation_id,
             1_700_000_000_000,
         )
@@ -9809,6 +9822,7 @@ mod tests {
         let repeated = resource_inspection_request(
             project_id,
             &listed.resources[0],
+            Some(listed.resources[0].canonical_locator.clone()),
             operation_id,
             1_700_000_000_000,
         )

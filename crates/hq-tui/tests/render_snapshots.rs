@@ -11,10 +11,10 @@ use hq_tui::{
     UiMailboxDraftTarget, UiMaterializedConversationView, UiMessageDelivery, UiMessageState,
     UiModel, UiProject, UiProjectAction, UiProjectAssignment, UiProjectConversationSetup,
     UiProjectExternalWarning, UiProjectFolderAction, UiProjectManagementAction, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectSummaryFocus, UiProjectThread, UiProvider, UiRenderCache, UiRow, UiRowKind,
-    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTheme, UiThemeRole, render,
-    render_with_cache, update,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceCondition,
+    UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus, UiProjectThread, UiProvider,
+    UiRenderCache, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection,
+    UiTheme, UiThemeRole, render, render_with_cache, update,
 };
 use ratatui::{
     Terminal,
@@ -1816,6 +1816,7 @@ fn project_resource_forms_and_conflict_preview_are_responsive() {
                     outcome: UiProjectOutcome::ResourcePreview {
                         display_path: "/shared".to_owned(),
                         canonical_path: "/canonical/shared".to_owned(),
+                        condition: UiProjectResourceCondition::Healthy,
                         conflicts: vec![UiProjectResourceConflict {
                             project_id: [1; 32],
                             resource_id: [8; 32],
@@ -1835,6 +1836,62 @@ fn project_resource_forms_and_conflict_preview_are_responsive() {
         assert!(rendered.contains("Another project already owns this path"));
         assert!(rendered.contains("project ‘release’ owns /other"));
     }
+}
+
+#[test]
+fn missing_project_folder_is_explained_inline_without_a_technical_outcome() {
+    let mut model = project_model(UiSize {
+        width: 100,
+        height: 24,
+    });
+    model = update(model, UiEvent::Input(UiInput::Character('c')))
+        .expect("creation chooser")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("existing folder form")
+        .model;
+    model = update(
+        model,
+        UiEvent::Input(UiInput::Paste("/repo/typo".to_owned())),
+    )
+    .expect("folder path")
+    .model;
+    let previewing = update(model, UiEvent::Input(UiInput::Activate)).expect("preview path");
+    let (effect_id, action) = previewing
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitProjectCommand { id, action } => Some((*id, action.clone())),
+            _ => None,
+        })
+        .expect("preview effect");
+    let recovered = update(
+        previewing.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id,
+            result: UiProjectResult {
+                action,
+                command_id: [61; 32],
+                operation_id: [62; 32],
+                project_id: [63; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::ResourcePreview {
+                    display_path: "/repo/typo".to_owned(),
+                    canonical_path: "/repo/typo".to_owned(),
+                    condition: UiProjectResourceCondition::Missing,
+                    conflicts: Vec::new(),
+                },
+            },
+        },
+    )
+    .expect("missing folder recovery")
+    .model;
+
+    let rendered = render_text(&recovered);
+    assert!(rendered.contains("This folder does not exist. Check the path and try again."));
+    assert!(!rendered.contains("project_resource_identity_changed"));
+    assert!(!rendered.contains("Technical reason"));
 }
 
 #[test]

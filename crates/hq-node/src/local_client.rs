@@ -460,11 +460,23 @@ pub(crate) enum LocalProjectOutcome {
     ResourcePreview {
         display_path: String,
         canonical_path: String,
+        condition: LocalProjectResourceCondition,
         conflicts: Vec<LocalProjectResourceConflict>,
     },
     ResourceChecks {
         checks: Vec<LocalProjectResourceCheck>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalProjectResourceCondition {
+    Healthy,
+    Missing,
+    Inaccessible,
+    Malformed,
+    NotDirectory,
+    IdentityChanged,
+    Unknown,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -793,6 +805,29 @@ fn local_project_preview_result(
         outcome: LocalProjectOutcome::ResourcePreview {
             display_path: preview.display_path,
             canonical_path: preview.canonical_path,
+            condition: match preview.condition {
+                hq_local_api::protocol::v1::ResourceConditionDto::Healthy => {
+                    LocalProjectResourceCondition::Healthy
+                }
+                hq_local_api::protocol::v1::ResourceConditionDto::Missing => {
+                    LocalProjectResourceCondition::Missing
+                }
+                hq_local_api::protocol::v1::ResourceConditionDto::Inaccessible => {
+                    LocalProjectResourceCondition::Inaccessible
+                }
+                hq_local_api::protocol::v1::ResourceConditionDto::Malformed => {
+                    LocalProjectResourceCondition::Malformed
+                }
+                hq_local_api::protocol::v1::ResourceConditionDto::NotDirectory => {
+                    LocalProjectResourceCondition::NotDirectory
+                }
+                hq_local_api::protocol::v1::ResourceConditionDto::IdentityChanged => {
+                    LocalProjectResourceCondition::IdentityChanged
+                }
+                hq_local_api::protocol::v1::ResourceConditionDto::Unknown => {
+                    LocalProjectResourceCondition::Unknown
+                }
+            },
             conflicts: preview
                 .conflicts
                 .into_iter()

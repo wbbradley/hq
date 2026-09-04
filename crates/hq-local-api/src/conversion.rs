@@ -18,11 +18,11 @@ use crate::protocol::v1::{
     ProjectCommandRequestDto, ProjectCommandStageDto, ProjectExternalStateWarningDto,
     ProviderAvailabilityDto, ProviderCatalogDto, RelayAccessDto, RelayAuthenticationDto,
     RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto,
-    RemoteCommandResultDto, RepositoryContextDto, ResourceHealthDto, ResourceInspectionRequestDto,
-    ResourceInspectionResultDto, ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto,
-    RuntimeObservationDto, SelectedConversationPageDto, SessionControlDto, SnapshotItem,
-    StateHealthDto, StateRepairReportDto, SubscriptionRequestDto, SynchronizationRequestDto,
-    ValueError,
+    RemoteCommandResultDto, RepositoryContextDto, ResourceConditionDto, ResourceHealthDto,
+    ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
+    ResourceReleaseStateDto, ResourceSchemeDto, RuntimeObservationDto, SelectedConversationPageDto,
+    SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionRequestDto,
+    SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
     AgentLaunchContext, AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest,
@@ -39,8 +39,8 @@ use hq_application::{
     MutationOutcome, MutationReceipt, PendingInteraction, ProjectCommandAction,
     ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest,
     ProviderCatalog, RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus,
-    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, StateHealth,
-    StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
+    ResourceCondition, ResourceInspectionRequest, ResourceInspectionResult, SessionControl,
+    StateHealth, StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
     WorktreeProvisioningRequest,
 };
 
@@ -1335,7 +1335,12 @@ pub(crate) fn resource_effect_from_v1(
         project_id: ProjectId::from_bytes(request.body.project_id.bytes()),
         resource_id: ResourceId::from_bytes(request.body.resource_id.bytes()),
         display_locator: locator_from_v1(request.body.display_locator.clone())?,
-        canonical_locator: locator_from_v1(request.body.canonical_locator.clone())?,
+        canonical_locator: request
+            .body
+            .canonical_locator
+            .clone()
+            .map(locator_from_v1)
+            .transpose()?,
     };
     Ok(effect_from_v1(request, body))
 }
@@ -1359,6 +1364,15 @@ pub(crate) fn resource_effect_to_v1(
     outcome: &EffectOutcome<ResourceInspectionResult>,
 ) -> EffectOutcomeDto<ResourceInspectionResultDto> {
     effect_to_v1(outcome, |result| ResourceInspectionResultDto {
+        condition: match result.condition {
+            ResourceCondition::Healthy => ResourceConditionDto::Healthy,
+            ResourceCondition::Missing => ResourceConditionDto::Missing,
+            ResourceCondition::Inaccessible => ResourceConditionDto::Inaccessible,
+            ResourceCondition::Malformed => ResourceConditionDto::Malformed,
+            ResourceCondition::NotDirectory => ResourceConditionDto::NotDirectory,
+            ResourceCondition::IdentityChanged => ResourceConditionDto::IdentityChanged,
+            ResourceCondition::Unknown => ResourceConditionDto::Unknown,
+        },
         health: resource_health_to_v1(result.health),
         observed_canonical: result.observed_canonical.as_ref().map(locator_to_v1),
         release: match result.release {

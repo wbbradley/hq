@@ -238,8 +238,9 @@ impl InspectResource for FakeResources {
         request: &EffectRequest<ResourceInspectionRequest>,
     ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
         Ok(EffectOutcome::Accepted(ResourceInspectionResult {
+            condition: hq_application::ResourceCondition::Healthy,
             health: hq_domain::ResourceHealth::Healthy,
-            observed_canonical: Some(request.body.canonical_locator.clone()),
+            observed_canonical: request.body.canonical_locator.clone(),
             release: ResourceReleaseState::Clean,
             details: None,
             checked_at: request.issued_at,

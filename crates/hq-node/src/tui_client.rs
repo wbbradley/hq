@@ -45,10 +45,10 @@ use hq_tui::{
     UiManagedSessionOutcome, UiManagedSessionResult, UiMaterializedConversationView,
     UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject, UiProjectAction,
     UiProjectAssignment, UiProjectConversationSetup, UiProjectExternalWarning, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiProvider, UiReconnectCause, UiReconnectFailureKind, UiReconnectOperation,
-    UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTheme,
-    UiThemeChoice, UiTimerKind,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceCondition,
+    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiProvider, UiReconnectCause,
+    UiReconnectFailureKind, UiReconnectOperation, UiRow, UiRowKind, UiRowState, UiSection,
+    UiSnapshot, UiTechnicalSection, UiTheme, UiThemeChoice, UiTimerKind,
 };
 use sha2::{Digest, Sha256};
 
@@ -3329,10 +3329,34 @@ fn ui_project_outcome(outcome: LocalProjectOutcome) -> UiProjectOutcome {
         LocalProjectOutcome::ResourcePreview {
             display_path,
             canonical_path,
+            condition,
             conflicts,
         } => UiProjectOutcome::ResourcePreview {
             display_path,
             canonical_path,
+            condition: match condition {
+                crate::local_client::LocalProjectResourceCondition::Healthy => {
+                    UiProjectResourceCondition::Healthy
+                }
+                crate::local_client::LocalProjectResourceCondition::Missing => {
+                    UiProjectResourceCondition::Missing
+                }
+                crate::local_client::LocalProjectResourceCondition::Inaccessible => {
+                    UiProjectResourceCondition::Inaccessible
+                }
+                crate::local_client::LocalProjectResourceCondition::Malformed => {
+                    UiProjectResourceCondition::Malformed
+                }
+                crate::local_client::LocalProjectResourceCondition::NotDirectory => {
+                    UiProjectResourceCondition::NotDirectory
+                }
+                crate::local_client::LocalProjectResourceCondition::IdentityChanged => {
+                    UiProjectResourceCondition::IdentityChanged
+                }
+                crate::local_client::LocalProjectResourceCondition::Unknown => {
+                    UiProjectResourceCondition::Unknown
+                }
+            },
             conflicts: conflicts
                 .into_iter()
                 .map(|conflict| UiProjectResourceConflict {
@@ -4365,6 +4389,7 @@ mod tests {
     };
     use hq_tui::{
         UiInteractionTarget, UiInteractionTargetIssue, UiProjectAction, UiProjectOutcome,
+        UiProjectResourceCondition,
     };
 
     fn pending_command(project_id: Option<Id32>) -> PendingInteractionDto {
@@ -4772,6 +4797,7 @@ mod tests {
             ui_project_outcome(LocalProjectOutcome::ResourcePreview {
                 display_path: "/display".to_owned(),
                 canonical_path: "/canonical".to_owned(),
+                condition: crate::local_client::LocalProjectResourceCondition::Missing,
                 conflicts: vec![LocalProjectResourceConflict {
                     project_id: [3; 32],
                     resource_id: [4; 32],
@@ -4783,6 +4809,7 @@ mod tests {
             UiProjectOutcome::ResourcePreview {
                 display_path: "/display".to_owned(),
                 canonical_path: "/canonical".to_owned(),
+                condition: UiProjectResourceCondition::Missing,
                 conflicts: vec![hq_tui::UiProjectResourceConflict {
                     project_id: [3; 32],
                     resource_id: [4; 32],

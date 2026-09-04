@@ -601,13 +601,15 @@ pub struct ResourceInspectionRequest {
     pub resource_id: ResourceId,
     /// Normalized human-selected spelling to re-resolve.
     pub display_locator: ResourceLocator,
-    /// Immutable canonical identity expected after re-resolution.
-    pub canonical_locator: ResourceLocator,
+    /// Immutable canonical identity expected for revalidation, absent during discovery.
+    pub canonical_locator: Option<ResourceLocator>,
 }
 
 /// Typed resource observation suitable for a later canonical health fact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourceInspectionResult {
+    /// Exact adapter-neutral condition supporting user-facing recovery.
+    pub condition: ResourceCondition,
     /// Typed health classification.
     pub health: ResourceHealth,
     /// Current canonical identity when it could be observed.
@@ -618,6 +620,25 @@ pub struct ResourceInspectionResult {
     pub details: Option<ContentText>,
     /// Explicit observation time.
     pub checked_at: Timestamp,
+}
+
+/// Closed resource condition independent of adapter implementation details.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceCondition {
+    /// The resource exists as the expected directory identity.
+    Healthy,
+    /// One or more selected path components do not exist.
+    Missing,
+    /// The resource cannot be inspected with current process authority.
+    Inaccessible,
+    /// The selected locator could not be resolved safely.
+    Malformed,
+    /// The selected entry exists but is not a directory.
+    NotDirectory,
+    /// The observed identity differs from the expected identity.
+    IdentityChanged,
+    /// Inspection failed without a more precise safe classification.
+    Unknown,
 }
 
 /// Closed resource-release classification independent of adapter details.

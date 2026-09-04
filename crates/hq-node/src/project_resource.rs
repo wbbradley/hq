@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use hq_application::{
-    ApplicationError, EffectOutcome, EffectRequest, InspectResource, ResourceInspectionRequest,
-    ResourceInspectionResult, ResourceReleaseState,
+    ApplicationError, EffectOutcome, EffectRequest, InspectResource, ResourceCondition,
+    ResourceInspectionRequest, ResourceInspectionResult, ResourceReleaseState,
 };
 use hq_domain::{
     DomainError, ErrorCategory, ErrorCode, InstallationId, ProjectResource, RepositoryContext,
@@ -140,25 +140,48 @@ impl InspectResource for ProjectResourceAdapter {
         &self,
         request: &EffectRequest<ResourceInspectionRequest>,
     ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
-        let inspection = self.paths.inspect(
-            self.home,
-            &ProjectResource {
-                resource_id: request.body.resource_id,
-                display_locator: request.body.display_locator.clone(),
-                canonical_locator: request.body.canonical_locator.clone(),
-                health: ResourceHealth::Unknown,
-            },
-        );
+        let inspection = if let Some(canonical_locator) = &request.body.canonical_locator {
+            self.paths.inspect(
+                self.home,
+                &ProjectResource {
+                    resource_id: request.body.resource_id,
+                    display_locator: request.body.display_locator.clone(),
+                    canonical_locator: canonical_locator.clone(),
+                    health: ResourceHealth::Unknown,
+                },
+            )
+        } else {
+            self.paths.discover(
+                self.home,
+                request.body.resource_id,
+                PathBuf::from(request.body.display_locator.value()),
+            )
+        };
+        let release_canonical = request
+            .body
+            .canonical_locator
+            .clone()
+            .or_else(|| inspection.observed_canonical.clone())
+            .unwrap_or_else(|| request.body.display_locator.clone());
         let release = self.paths.assess_release(
             self.home,
             &ProjectResource {
                 resource_id: request.body.resource_id,
                 display_locator: request.body.display_locator.clone(),
-                canonical_locator: request.body.canonical_locator.clone(),
+                canonical_locator: release_canonical,
                 health: inspection.health,
             },
         );
         Ok(EffectOutcome::Accepted(ResourceInspectionResult {
+            condition: match inspection.condition {
+                hq_resources::PathCondition::Healthy => ResourceCondition::Healthy,
+                hq_resources::PathCondition::Missing => ResourceCondition::Missing,
+                hq_resources::PathCondition::Inaccessible => ResourceCondition::Inaccessible,
+                hq_resources::PathCondition::Malformed => ResourceCondition::Malformed,
+                hq_resources::PathCondition::NotDirectory => ResourceCondition::NotDirectory,
+                hq_resources::PathCondition::IdentityChanged => ResourceCondition::IdentityChanged,
+                hq_resources::PathCondition::Unknown => ResourceCondition::Unknown,
+            },
             health: inspection.health,
             observed_canonical: inspection.observed_canonical,
             release: match release.state {
@@ -194,4 +217,43 @@ fn resource_error(category: ErrorCategory, code: &'static str) -> DomainError {
         category,
         ErrorCode::new(code).expect("static resource error code"),
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use hq_domain::{
+        BoundedText, CommandDigest, OperationId, ResourceId, ResourceLocator, ResourceScheme,
+        Timestamp,
+    };
+
+    #[test]
+    fn missing_path_is_reported_as_a_typed_condition() {
+        let missing = std::env::temp_dir().join("hq-resource-condition-test-does-not-exist");
+        let locator = ResourceLocator::new(
+            ResourceScheme::WorkingTree,
+            BoundedText::new(missing.to_string_lossy().into_owned()).expect("bounded test locator"),
+        );
+        let request = EffectRequest::new(
+            OperationId::from_bytes([1; 32]),
+            CommandDigest::from_bytes([2; 32]),
+            Timestamp::from_unix_millis(3),
+            ResourceInspectionRequest {
+                project_id: hq_domain::ProjectId::from_bytes([4; 32]),
+                resource_id: ResourceId::from_bytes([5; 32]),
+                display_locator: locator.clone(),
+                canonical_locator: None,
+            },
+        );
+
+        let outcome = ProjectResourceAdapter::system(InstallationId::from_bytes([6; 32]))
+            .inspect_resource(&request)
+            .expect("read-only inspection");
+        let EffectOutcome::Accepted(observation) = outcome else {
+            panic!("expected accepted observation");
+        };
+        assert_eq!(observation.condition, ResourceCondition::Missing);
+        assert_eq!(observation.health, ResourceHealth::Unavailable);
+    }
 }

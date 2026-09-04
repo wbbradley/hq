@@ -845,6 +845,16 @@ where
                     Some(existing_creation_mutation(record, request, resource));
                 checkpoint(&self.store, record, ProjectCommandStage::CreatingProject)
             }
+            EffectOutcome::Accepted(resource)
+                if resource.resource_id == request.resource_id
+                    && resource.display_locator == request.resource =>
+            {
+                reject(
+                    &self.store,
+                    record,
+                    error(ErrorCategory::InvalidInput, "project_resource_unavailable"),
+                )
+            }
             EffectOutcome::Accepted(_) => reject(
                 &self.store,
                 record,
@@ -1032,6 +1042,16 @@ where
                 record.pending_canonical_mutation =
                     Some(provisioning_creation_mutation(record, request, resource));
                 checkpoint(&self.store, record, ProjectCommandStage::CreatingProject)
+            }
+            EffectOutcome::Accepted(resource)
+                if resource.resource_id == resource_id
+                    && resource.display_locator == request.destination =>
+            {
+                reject(
+                    &self.store,
+                    record,
+                    error(ErrorCategory::InvalidInput, "project_resource_unavailable"),
+                )
             }
             EffectOutcome::Accepted(_) => reject(
                 &self.store,
@@ -2150,6 +2170,16 @@ where
                         EffectKind::None,
                     ),
                 }
+            }
+            EffectOutcome::Accepted(resource)
+                if resource.resource_id == resource_id
+                    && resource.display_locator == destination =>
+            {
+                reject(
+                    &self.store,
+                    record,
+                    error(ErrorCategory::InvalidInput, "project_resource_unavailable"),
+                )
             }
             EffectOutcome::Accepted(_) => reject(
                 &self.store,

@@ -1266,8 +1266,8 @@ pub struct ResourceInspectionRequestDto {
     pub resource_id: Id32,
     /// Normalized human-selected spelling to re-resolve.
     pub display_locator: ResourceLocatorDto,
-    /// Immutable canonical identity expected after re-resolution.
-    pub canonical_locator: ResourceLocatorDto,
+    /// Immutable canonical identity expected for revalidation, absent during discovery.
+    pub canonical_locator: Option<ResourceLocatorDto>,
 }
 
 /// Derives the exact digest for one read-only resource inspection request.
@@ -1275,9 +1275,11 @@ pub fn resource_inspection_request_digest(
     request: &EffectRequestDto<ResourceInspectionRequestDto>,
 ) -> Result<CommandDigest, ValueError> {
     validate_locator(&request.body.display_locator)?;
-    validate_locator(&request.body.canonical_locator)?;
-    if request.body.display_locator.scheme != request.body.canonical_locator.scheme {
-        return Err(ValueError::InvalidValueCombination);
+    if let Some(canonical) = &request.body.canonical_locator {
+        validate_locator(canonical)?;
+        if request.body.display_locator.scheme != canonical.scheme {
+            return Err(ValueError::InvalidValueCombination);
+        }
     }
     let mut digest = Sha256::new();
     digest.update(RESOURCE_INSPECTION_DIGEST_DOMAIN);
@@ -1285,17 +1287,26 @@ pub fn resource_inspection_request_digest(
     digest.update(request.issued_at_unix_millis.to_be_bytes());
     digest.update(request.body.project_id.bytes());
     digest.update(request.body.resource_id.bytes());
-    for locator in [
-        &request.body.display_locator,
-        &request.body.canonical_locator,
-    ] {
-        digest.update([match locator.scheme {
-            ResourceSchemeDto::GitRepository => 0,
-            ResourceSchemeDto::WorkingTree => 1,
-            ResourceSchemeDto::Container => 2,
-            ResourceSchemeDto::Opaque => 3,
-        }]);
-        update_sized(&mut digest, locator.value.as_bytes())?;
+    let display = &request.body.display_locator;
+    digest.update([match display.scheme {
+        ResourceSchemeDto::GitRepository => 0,
+        ResourceSchemeDto::WorkingTree => 1,
+        ResourceSchemeDto::Container => 2,
+        ResourceSchemeDto::Opaque => 3,
+    }]);
+    update_sized(&mut digest, display.value.as_bytes())?;
+    match &request.body.canonical_locator {
+        Some(locator) => {
+            digest.update([1]);
+            digest.update([match locator.scheme {
+                ResourceSchemeDto::GitRepository => 0,
+                ResourceSchemeDto::WorkingTree => 1,
+                ResourceSchemeDto::Container => 2,
+                ResourceSchemeDto::Opaque => 3,
+            }]);
+            update_sized(&mut digest, locator.value.as_bytes())?;
+        }
+        None => digest.update([0]),
     }
     Ok(CommandDigest::from_bytes(digest.finalize().into()))
 }
@@ -2840,10 +2851,32 @@ pub enum ResourceHealthDto {
     Unavailable,
 }
 
+/// Exact resource condition supporting typed recovery without adapter vocabulary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceConditionDto {
+    /// The resource exists as expected.
+    Healthy,
+    /// One or more selected path components do not exist.
+    Missing,
+    /// The resource cannot be inspected with current authority.
+    Inaccessible,
+    /// The locator could not be resolved safely.
+    Malformed,
+    /// The selected entry is not a directory.
+    NotDirectory,
+    /// The observed identity differs from the expected identity.
+    IdentityChanged,
+    /// No more precise safe classification is available.
+    Unknown,
+}
+
 /// Typed inert project-resource observation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceInspectionResultDto {
+    /// Exact adapter-neutral condition.
+    pub condition: ResourceConditionDto,
     /// Typed resource health.
     pub health: ResourceHealthDto,
     /// Current canonical identity when it could be observed.
@@ -2873,6 +2906,7 @@ pub enum ResourceReleaseStateDto {
 impl ResourceInspectionResultDto {
     /// Constructs a bounded inert resource observation.
     pub fn new(
+        condition: ResourceConditionDto,
         health: ResourceHealthDto,
         observed_canonical: Option<ResourceLocatorDto>,
         release: ResourceReleaseStateDto,
@@ -2883,6 +2917,7 @@ impl ResourceInspectionResultDto {
             validate_text(details, CONTENT_MAX_BYTES)?;
         }
         Ok(Self {
+            condition,
             health,
             observed_canonical,
             release,
@@ -3230,10 +3265,11 @@ impl WireMessage {
                 }
                 Request::InspectResource(request) => {
                     validate_locator(&request.body.display_locator)?;
-                    validate_locator(&request.body.canonical_locator)?;
-                    if request.body.display_locator.scheme != request.body.canonical_locator.scheme
-                    {
-                        return Err(ValueError::InvalidValueCombination);
+                    if let Some(canonical) = &request.body.canonical_locator {
+                        validate_locator(canonical)?;
+                        if request.body.display_locator.scheme != canonical.scheme {
+                            return Err(ValueError::InvalidValueCombination);
+                        }
                     }
                     Ok(())
                 }

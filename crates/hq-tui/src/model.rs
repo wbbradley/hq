@@ -1384,6 +1384,25 @@ pub struct UiProjectResourceConflict {
     pub relationship: String,
 }
 
+/// Exact resource condition used to select ordinary recovery guidance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiProjectResourceCondition {
+    /// The folder exists as expected.
+    Healthy,
+    /// One or more selected path components do not exist.
+    Missing,
+    /// The folder cannot be inspected with current authority.
+    Inaccessible,
+    /// The path could not be resolved safely.
+    Malformed,
+    /// The selected entry is not a folder.
+    NotDirectory,
+    /// The observed identity differs from the expected identity.
+    IdentityChanged,
+    /// No more precise safe classification is available.
+    Unknown,
+}
+
 /// Passive fresh resource-inspection result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiProjectResourceCheck {
@@ -1430,6 +1449,7 @@ pub enum UiProjectOutcome {
     ResourcePreview {
         display_path: String,
         canonical_path: String,
+        condition: UiProjectResourceCondition,
         conflicts: Vec<UiProjectResourceConflict>,
     },
     ResourceChecks {
@@ -7657,7 +7677,8 @@ fn apply_project_interaction_input(
 
 fn project_creation_form(action: &UiProjectAction) -> Option<UiProjectInteraction> {
     match action {
-        UiProjectAction::CreateExisting { name, brief, path } => {
+        UiProjectAction::CreateExisting { name, brief, path }
+        | UiProjectAction::PreviewCreateExisting { name, brief, path } => {
             Some(UiProjectInteraction::CreateExisting {
                 name: name.clone(),
                 brief: brief.clone().unwrap_or_default(),
@@ -8515,7 +8536,7 @@ fn submit_project_interaction(
                 reject(model, UiProjectFormField::Name, "Enter a project name");
                 return Ok(true);
             }
-            UiProjectAction::CreateExisting {
+            UiProjectAction::PreviewCreateExisting {
                 name,
                 brief: (!brief.is_empty()).then_some(brief),
                 path,
@@ -11305,6 +11326,10 @@ fn project_command_completed(
         return Ok(());
     }
     model.pending_project = None;
+    if handle_existing_project_creation_result(model, &result, effects)? {
+        effects.push(UiEffect::RequestRedraw);
+        return Ok(());
+    }
     if guided_project_completed(model, &result, effects)? {
         if !matches!(result.outcome, UiProjectOutcome::Running { .. }) {
             model.request_snapshot(effects)?;
@@ -11353,6 +11378,97 @@ fn project_command_completed(
     model.request_snapshot(effects)?;
     effects.push(UiEffect::RequestRedraw);
     Ok(())
+}
+
+fn handle_existing_project_creation_result(
+    model: &mut UiModel,
+    result: &UiProjectResult,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    if let (
+        UiProjectAction::CreateExisting { name, brief, path },
+        UiProjectOutcome::Rejected { code, .. },
+    ) = (&result.action, &result.outcome)
+        && code == "project_resource_unavailable"
+    {
+        restore_existing_project_form(
+            model,
+            name,
+            brief.as_deref(),
+            path,
+            "This folder is no longer available. Check the path and try again.",
+        );
+        return Ok(true);
+    }
+    let UiProjectAction::PreviewCreateExisting { name, brief, path } = &result.action else {
+        return Ok(false);
+    };
+    let UiProjectOutcome::ResourcePreview {
+        condition,
+        conflicts,
+        ..
+    } = &result.outcome
+    else {
+        return Ok(false);
+    };
+    if *condition == UiProjectResourceCondition::Healthy && conflicts.is_empty() {
+        model.submit_project(
+            UiProjectAction::CreateExisting {
+                name: name.clone(),
+                brief: brief.clone(),
+                path: path.clone(),
+            },
+            effects,
+        )?;
+        return Ok(true);
+    }
+    if *condition == UiProjectResourceCondition::Healthy {
+        return Ok(false);
+    }
+    let message = match condition {
+        UiProjectResourceCondition::Missing => {
+            "This folder does not exist. Check the path and try again."
+        }
+        UiProjectResourceCondition::NotDirectory => {
+            "This path is not a folder. Choose a folder and try again."
+        }
+        UiProjectResourceCondition::Inaccessible => {
+            "HQ cannot access this folder. Check its permissions and try again."
+        }
+        UiProjectResourceCondition::Malformed => {
+            "HQ could not safely resolve this folder. Check the path and try again."
+        }
+        UiProjectResourceCondition::IdentityChanged => {
+            "This folder now points somewhere else. Review the path and try again."
+        }
+        UiProjectResourceCondition::Unknown => {
+            "HQ could not verify this folder. Check that it exists and is accessible."
+        }
+        UiProjectResourceCondition::Healthy => unreachable!(),
+    };
+    restore_existing_project_form(model, name, brief.as_deref(), path, message);
+    Ok(true)
+}
+
+fn restore_existing_project_form(
+    model: &mut UiModel,
+    name: &str,
+    brief: Option<&str>,
+    path: &str,
+    message: &str,
+) {
+    model.project_interaction = Some(UiProjectInteraction::CreateExisting {
+        name: name.to_owned(),
+        brief: brief.unwrap_or_default().to_owned(),
+        path: path.to_owned(),
+        field: UiProjectFormField::Path,
+        submitting: false,
+    });
+    model.form.errors.insert(
+        UiFormField::Project(UiProjectFormField::Path),
+        message.to_owned(),
+    );
+    model.last_failure = None;
 }
 
 #[allow(clippy::too_many_lines)]

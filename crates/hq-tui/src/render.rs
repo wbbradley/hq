@@ -1543,6 +1543,7 @@ fn render_project_interaction(
                     display_path,
                     canonical_path,
                     conflicts,
+                    ..
                 } => {
                     lines.push(Line::from(format!("Requested path: {display_path}")));
                     lines.push(Line::from(format!("Resolved path: {canonical_path}")));

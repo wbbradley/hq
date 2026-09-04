@@ -262,6 +262,7 @@ impl InspectResource for Ports {
     ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
         self.trace.borrow_mut().push("resource");
         Ok(EffectOutcome::Accepted(ResourceInspectionResult {
+            condition: hq_application::ResourceCondition::Healthy,
             health: ResourceHealth::Healthy,
             observed_canonical: None,
             release: ResourceReleaseState::Clean,
@@ -936,7 +937,7 @@ fn every_typed_request_family_routes_without_storage_types() {
             project_id: Id32::new([14; 32]),
             resource_id: Id32::new([15; 32]),
             display_locator: locator(),
-            canonical_locator: locator(),
+            canonical_locator: Some(locator()),
         })),
         Request::ControlProject(Box::new(ProjectCommandRequestDto {
             command_id: Id32::new([16; 32]),
@@ -991,7 +992,7 @@ fn resource_inspection_rejects_a_digest_that_does_not_bind_its_body() {
         project_id: Id32::new([14; 32]),
         resource_id: Id32::new([15; 32]),
         display_locator: locator(),
-        canonical_locator: locator(),
+        canonical_locator: Some(locator()),
     });
     let outbound = server
         .receive(

@@ -144,46 +144,59 @@ impl<F: PathSystem, G: GitRunner> PathResourceAdapter<F, G> {
         resolve_path(&self.filesystem, request)
     }
 
-    /// Revalidates a display spelling without mutating the recorded identity.
-    pub fn inspect(
+    /// Discovers the current identity and exact condition of a selected path.
+    pub fn discover(
         &self,
         home: InstallationId,
-        resource: &ProjectResource,
+        resource_id: ResourceId,
+        display_path: PathBuf,
     ) -> PathResourceInspection {
-        let display_path = PathBuf::from(resource.display_locator.value());
-        let observed = resolve_path(
+        match resolve_path(
             &self.filesystem,
             &PathIdentityRequest {
                 home,
-                resource_id: resource.resource_id,
+                resource_id,
                 display_path,
             },
-        );
-        match observed {
-            Ok(observed) if observed.resource.canonical_locator != resource.canonical_locator => {
-                PathResourceInspection {
-                    home,
-                    resource_id: resource.resource_id,
-                    health: ResourceHealth::Degraded,
-                    condition: PathCondition::IdentityChanged,
-                    observed_canonical: Some(observed.resource.canonical_locator),
-                }
-            }
+        ) {
             Ok(observed) => PathResourceInspection {
                 home,
-                resource_id: resource.resource_id,
+                resource_id,
                 health: observed.resource.health,
                 condition: observed.condition,
                 observed_canonical: Some(observed.resource.canonical_locator),
             },
             Err(_) => PathResourceInspection {
                 home,
-                resource_id: resource.resource_id,
+                resource_id,
                 health: ResourceHealth::Unknown,
                 condition: PathCondition::Unknown,
                 observed_canonical: None,
             },
         }
+    }
+
+    /// Revalidates a display spelling without mutating the recorded identity.
+    pub fn inspect(
+        &self,
+        home: InstallationId,
+        resource: &ProjectResource,
+    ) -> PathResourceInspection {
+        let observed = self.discover(
+            home,
+            resource.resource_id,
+            PathBuf::from(resource.display_locator.value()),
+        );
+        if observed.observed_canonical.is_some()
+            && observed.observed_canonical.as_ref() != Some(&resource.canonical_locator)
+        {
+            return PathResourceInspection {
+                health: ResourceHealth::Degraded,
+                condition: PathCondition::IdentityChanged,
+                ..observed
+            };
+        }
+        observed
     }
 
     /// Validates an explicit launch directory without substituting a claimed path.
