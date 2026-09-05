@@ -12961,3 +12961,76 @@ through `n`; archived history stays intact; and Enter on an agent with no conver
 same deterministic project-binding and conversation-start flow used by global New.
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-05 — Ordered local-session responses
+
+Local session I/O now admits exactly one request turn at a time and returns that bounded turn only
+after the complete tracked response and its exact `Written` event have entered the registry's sole
+FIFO event queue. A later decoded request therefore cannot overtake response confirmation and
+trigger `ServerSessionError::WritePending`; unsolicited invalidations remain outside the gate, and
+the existing close watch still cancels partial writes, saturated queues, and held turns promptly.
+
+Deterministic Unix I/O and registry tests cover coalesced frames and a peer that submits its next
+request immediately after reading the preceding response, without sleeps or wall-clock retries.
+Real subscribed-client, startup, reconnect, installed-TUI, strict Clippy, and full workspace
+qualification pass. Full-suite verification also exposed and fixed a parent-branch Inbox bug: when
+Enter opened an exact selected conversation while its preview was loading, installing that page now
+preserves conversation focus, and the PTY harness synchronizes on the visible preview-ready cue.
+
+### Original plan entry
+
+### Serialize local-session request intake with response confirmation
+
+The local daemon can reject a healthy sequential client with
+`ServerSessionError::WritePending`. `session_io` reads requests and writes responses in independent
+tasks that publish `LocalSessionEvent::Message` and `LocalSessionEvent::Written` into the same
+bounded channel. After a response reaches the Unix socket, the peer may send its next request before
+the registry has reduced the corresponding `Written` event. If that `Message` wins the scheduling
+race, `LocalSessionRegistry` calls `ServerSession::receive` while the preceding write ticket is
+still pending and closes the session as a protocol violation. The TUI then flashes between
+Connected and Reconnecting, repeatedly drops and recreates its responder lease, publishes
+same-revision invalidations, and can exhaust its connection attempts so a subsequent `hq` exits
+with `tui.client_failed` even though `hq daemon status` remains ready.
+
+Make the per-session I/O/registry boundary preserve protocol order explicitly:
+
+- Coordinate request delivery with response-write acknowledgement so the registry cannot receive
+  the next decoded request until it has confirmed the exact preceding write ticket. Keep
+  `ServerSession`'s one-request-at-a-time invariant; do not mask the race with retries, timing
+  assumptions, unbounded request buffering, or by allowing arbitrary pipelining.
+- Preserve the existing post-write contract: subscription and interaction-responder activation may
+  occur only after the complete response frame was successfully written and its matching typed
+  ticket was confirmed. A partial or failed write must not activate either capability or release a
+  later request for handling.
+- Keep flow control bounded and session-local. Closing the peer, requesting daemon shutdown, a
+  failed writer, or a closed registry receiver while request intake is gated must terminate cleanly
+  without a deadlock, leaked task, retained session, or cross-session blockage.
+- Ensure responder leases are not dropped and recreated during an otherwise healthy negotiation,
+  subscription, and responder-registration sequence. Invalidations remain body-free authoritative
+  reread hints and must not be emitted merely because internal event scheduling reordered a write
+  confirmation and the next request.
+- Retain actionable, privacy-safe boundary evidence for genuine disconnects so startup failures can
+  be distinguished from daemon unavailability and protocol-order defects without recording message
+  content.
+
+Work primarily in `crates/hq-node/src/session_io.rs` and
+`crates/hq-node/src/session_registry.rs`, adjusting the `hq-local-api` session contract only if the
+coordination primitive requires it. Extend the Unix session-I/O and registry integration tests, and
+exercise the real `LocalNodeEventClient` setup path that configures both an all-topics subscription
+and the interaction responder.
+
+Add a deterministic regression test that uses channels, barriers, or equivalent synchronization to
+force this order: the peer reads the complete first response and submits its next request while the
+registry has not yet consumed the first response's `Written` acknowledgement. Prove the connection
+stays open, acknowledgements and requests are reduced in protocol order, and the second response is
+delivered. Add deterministic coverage for write failure/partial write, shutdown while intake is
+gated, and independence between concurrent sessions. Do not synchronize tests with sleeps or
+wall-clock retry windows.
+
+Completion is observable when a freshly started TUI can register its subscription and responder,
+remain Connected while idle and while receiving invalidations/interactions, quit, and reconnect on
+the first attempt without generation churn or same-revision invalidation spam; the daemon remains
+ready throughout. Formatting, strict linting, the relevant local API/node tests, and the full suite
+must pass.
+
+<!-- End of archived plan entry. -->
