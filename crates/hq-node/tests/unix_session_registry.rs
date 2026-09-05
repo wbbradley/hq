@@ -216,6 +216,82 @@ async fn decoded_messages_route_through_call_scoped_capabilities_and_exact_write
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn completed_response_write_precedes_the_next_sequential_request() {
+    let directory = TestDirectory::new();
+    let (foundation, runtime) = foundation(&directory);
+    let hub = RevisionHub::new(2).expect("hub capacity");
+    let application = unavailable_application(hub.clone());
+    let mut registry = LocalSessionRegistry::new(
+        LocalSessionRegistryConfig {
+            session_capacity: NonZeroUsize::new(1).expect("session capacity"),
+            event_capacity: NonZeroUsize::new(2).expect("event capacity"),
+            write_capacity: NonZeroUsize::new(1).expect("write capacity"),
+        },
+        hub,
+        build(),
+    );
+    let session_id = Id32::new([113; 32]);
+    let (stream, client) = accepted(&foundation, &runtime);
+    registry
+        .admit(session_id, stream)
+        .expect("session admitted");
+    let mut client = tokio::net::UnixStream::from_std(client).expect("Tokio client");
+
+    client
+        .write_all(&hello().encode_frame().expect("hello frame"))
+        .await
+        .expect("hello writes");
+    assert_eq!(
+        registry
+            .dispatch_next(&application, &UnavailableLifecycle)
+            .await,
+        Some(LocalSessionDispatch::MessageHandled { session_id })
+    );
+    assert!(matches!(
+        read_message(&mut client).await,
+        WireMessage::ServerHello(_)
+    ));
+
+    let request = WireMessage::Request(RequestEnvelope::new(
+        RequestId::new(1).expect("request id"),
+        Request::AuthoritativeSnapshot,
+    ));
+    client
+        .write_all(&request.encode_frame().expect("request frame"))
+        .await
+        .expect("request writes after reading the hello response");
+
+    assert_eq!(
+        registry
+            .dispatch_next(&application, &UnavailableLifecycle)
+            .await,
+        Some(LocalSessionDispatch::WriteConfirmed { session_id }),
+        "the exact completed write must be reduced before the next request"
+    );
+    assert_eq!(
+        registry
+            .dispatch_next(&application, &UnavailableLifecycle)
+            .await,
+        Some(LocalSessionDispatch::MessageHandled { session_id })
+    );
+    assert!(matches!(
+        read_message(&mut client).await,
+        WireMessage::Response(response) if matches!(response.response, Response::Error(_))
+    ));
+    assert_eq!(
+        registry
+            .dispatch_next(&application, &UnavailableLifecycle)
+            .await,
+        Some(LocalSessionDispatch::WriteConfirmed { session_id })
+    );
+
+    let report = registry.shutdown().await;
+    assert_eq!(report.closed_sessions, 1);
+    assert_eq!(report.joined_tasks, 1);
+    foundation.shutdown().expect("foundation cleanup");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn closing_request_intake_preserves_an_accepted_response_until_exact_write_confirmation() {
     let directory = TestDirectory::new();
     let (foundation, runtime) = foundation(&directory);

@@ -29,6 +29,8 @@ pub enum LocalSessionClose {
     EventReceiverClosed,
     /// Every encoded-write producer was dropped.
     WriteQueueClosed,
+    /// The private request/response ordering channel became inconsistent.
+    RequestCoordination,
 }
 
 /// One bounded event emitted to the sole node session loop.
@@ -157,9 +159,21 @@ pub fn prepare_local_session_io(
     let stream = UnixStream::from_std(accepted.into_inner())
         .map_err(|_| LocalSessionStartError::RuntimeUnavailable)?;
     let (writes, write_rx) = mpsc::channel(write_capacity.get());
+    let (request_turns, request_turn_rx) = mpsc::channel(1);
+    request_turns
+        .try_send(())
+        .map_err(|_| LocalSessionStartError::RuntimeUnavailable)?;
     let (close, close_rx) = watch::channel(false);
     let handle = LocalSessionHandle { writes, close };
-    let driver = drive_session(stream, session_id, write_rx, events, close_rx);
+    let driver = drive_session(
+        stream,
+        session_id,
+        write_rx,
+        events,
+        request_turns,
+        request_turn_rx,
+        close_rx,
+    );
     Ok((handle, driver))
 }
 
@@ -168,12 +182,27 @@ async fn drive_session(
     session_id: Id32,
     outbound: mpsc::Receiver<QueuedFrame>,
     events: mpsc::Sender<LocalSessionEvent>,
+    request_turns: mpsc::Sender<()>,
+    request_turn_rx: mpsc::Receiver<()>,
     close: watch::Receiver<bool>,
 ) -> LocalSessionClose {
     let (read_half, write_half) = stream.into_split();
     let cause = {
-        let read = read_loop(read_half, session_id, events.clone(), close.clone());
-        let write = write_loop(write_half, session_id, outbound, events.clone(), close);
+        let read = read_loop(
+            read_half,
+            session_id,
+            events.clone(),
+            request_turn_rx,
+            close.clone(),
+        );
+        let write = write_loop(
+            write_half,
+            session_id,
+            outbound,
+            events.clone(),
+            request_turns.clone(),
+            close,
+        );
         tokio::pin!(read, write);
         tokio::select! {
             cause = &mut read => cause,
@@ -190,6 +219,7 @@ async fn read_loop(
     mut reader: tokio::net::unix::OwnedReadHalf,
     session_id: Id32,
     events: mpsc::Sender<LocalSessionEvent>,
+    mut request_turns: mpsc::Receiver<()>,
     mut close: watch::Receiver<bool>,
 ) -> LocalSessionClose {
     let mut decoder = FrameDecoder::new();
@@ -213,6 +243,14 @@ async fn read_loop(
                 Ok(None) => break,
                 Err(_) => return LocalSessionClose::Protocol,
             };
+            let request_turn = tokio::select! {
+                biased;
+                () = close_requested(&mut close) => return LocalSessionClose::Requested,
+                request_turn = request_turns.recv() => request_turn,
+            };
+            if request_turn.is_none() {
+                return LocalSessionClose::RequestCoordination;
+            }
             let sent = tokio::select! {
                 biased;
                 () = close_requested(&mut close) => return LocalSessionClose::Requested,
@@ -234,6 +272,7 @@ async fn write_loop<W>(
     session_id: Id32,
     mut outbound: mpsc::Receiver<QueuedFrame>,
     events: mpsc::Sender<LocalSessionEvent>,
+    request_turns: mpsc::Sender<()>,
     mut close: watch::Receiver<bool>,
 ) -> LocalSessionClose
 where
@@ -264,6 +303,11 @@ where
             };
             if sent.is_err() {
                 return LocalSessionClose::EventReceiverClosed;
+            }
+            // The registry has one FIFO receiver. Publishing `Written` before returning this
+            // bounded turn therefore makes its state transition precede the next `Message`.
+            if request_turns.try_send(()).is_err() {
+                return LocalSessionClose::RequestCoordination;
             }
         }
     }
@@ -298,12 +342,14 @@ mod tests {
             .await
             .expect("queued frame");
         let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(1);
+        let (request_turns, _request_turn_rx) = tokio::sync::mpsc::channel(1);
         let (close_tx, close_rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(write_loop(
             writer,
             Id32::new([91; 32]),
             outbound_rx,
             events_tx,
+            request_turns,
             close_rx,
         ));
 

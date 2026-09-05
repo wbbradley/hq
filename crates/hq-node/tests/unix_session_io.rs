@@ -62,7 +62,7 @@ fn connect_and_accept(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn partial_and_multiple_frames_are_decoded_in_order_and_close_exactly_once() {
+async fn a_second_decoded_frame_waits_for_the_first_response_write() {
     let directory = TestDirectory::new();
     let (mut foundation, runtime) = foundation(&directory);
     foundation.bind_local_listener().expect("listener binds");
@@ -97,6 +97,44 @@ async fn partial_and_multiple_frames_are_decoded_in_order_and_close_exactly_once
             message: Box::new(hello("first")),
         })
     );
+    assert_eq!(
+        events_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty),
+        "the next decoded frame must wait for the preceding response write"
+    );
+
+    let hub = RevisionHub::new(1).expect("hub capacity");
+    let application = unavailable_application(hub.clone());
+    let mut server = ServerSession::new(hub, build_for_server(), session_id);
+    let outbound = server
+        .receive(hello("first"), &application, &UnavailableLifecycle)
+        .expect("server hello prepared");
+    let ticket = outbound.ticket();
+    handle
+        .try_send_response(outbound)
+        .expect("response enters bounded queue");
+
+    let mut prefix = [0_u8; 4];
+    client.read_exact(&mut prefix).await.expect("length prefix");
+    let length = usize::try_from(u32::from_be_bytes(prefix)).expect("frame length");
+    let mut response = prefix.to_vec();
+    response.resize(length + prefix.len(), 0);
+    client
+        .read_exact(&mut response[prefix.len()..])
+        .await
+        .expect("complete response frame");
+    assert!(matches!(
+        WireMessage::decode_frame(&response),
+        Ok(WireMessage::ServerHello(_))
+    ));
+    assert_eq!(
+        events_rx.recv().await,
+        Some(LocalSessionEvent::Written { session_id, ticket })
+    );
+    server
+        .confirm_written(ticket)
+        .expect("exact ticket confirms after complete write");
+
     assert_eq!(
         events_rx.recv().await,
         Some(LocalSessionEvent::Message {
@@ -248,6 +286,17 @@ async fn tracked_ticket_is_emitted_only_after_the_exact_complete_frame_is_readab
     let hub = RevisionHub::new(1).expect("hub capacity");
     let application = unavailable_application(hub.clone());
     let mut server = ServerSession::new(hub, build_for_server(), session_id);
+    client
+        .write_all(&hello("server-write").encode_frame().expect("hello frame"))
+        .await
+        .expect("hello writes");
+    assert_eq!(
+        events_rx.recv().await,
+        Some(LocalSessionEvent::Message {
+            session_id,
+            message: Box::new(hello("server-write")),
+        })
+    );
     let outbound = server
         .receive(hello("server-write"), &application, &UnavailableLifecycle)
         .expect("server hello prepared");
