@@ -237,7 +237,7 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
         width: 104,
         height: 18,
     }));
-    assert!(summary.contains("Enter open · n New… · d message · N note · ? help · q quit"));
+    assert!(summary.contains("Enter open · n New… · d archive · ? help · q quit"));
     assert!(!summary.contains("archive/restore"));
     assert!(!summary.contains("a/u state"));
 
@@ -245,7 +245,7 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
         width: 104,
         height: 18,
     }));
-    assert!(conversation.contains("a archive"));
+    assert!(conversation.contains("d archive conversation"));
     assert!(!conversation.contains("u restore"));
     assert!(!conversation.contains("a/u state"));
 
@@ -256,26 +256,21 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
         },
         UiMessageState::Archived,
     ));
-    assert!(archived.contains("u restore"));
-    assert!(!archived.contains("a archive"));
-    assert!(
-        archived.contains("u restore · t/Enter info · ← Inbox · ? help"),
-        "{archived}"
-    );
-
+    assert!(archived.contains("d archive conversation"));
+    assert!(!archived.contains("u restore"));
     let confirmation = update(
         conversation_model(UiSize {
             width: 104,
             height: 18,
         }),
-        UiEvent::Input(UiInput::Character('a')),
+        UiEvent::Input(UiInput::Character('d')),
     )
     .expect("archive confirmation")
     .model;
     let confirmation = render_text(&confirmation);
-    assert!(confirmation.contains("Archive the selected message?"));
-    assert!(confirmation.contains("Only this message changes state"));
-    assert!(confirmation.contains("conversation history stays intact"));
+    assert!(confirmation.contains("Archive this conversation?"));
+    assert!(confirmation.contains("stop active work first"));
+    assert!(confirmation.contains("whole conversation"));
 }
 
 #[test]
@@ -593,7 +588,7 @@ fn fresh_workspace_uses_the_ordinary_empty_inbox_without_an_onboarding_checklist
 
     let empty = render_text(&loaded_snapshot_model(size, empty_render_snapshot(1)));
     assert!(
-        contains_visible_words_in_order(&empty, "No conversations need your attention."),
+        contains_visible_words_in_order(&empty, "No agents are available yet."),
         "{empty}"
     );
     assert!(empty.contains("Press n New…"), "{empty}");
@@ -806,7 +801,7 @@ fn empty_sections_and_recipient_chooser_explain_exact_next_actions() {
         for (section, explanation, action) in [
             (
                 UiSection::Inbox,
-                "No conversations need your attention.",
+                "No agents are available yet.",
                 "n New… for project work, a message, or a personal note",
             ),
             (
@@ -848,7 +843,13 @@ fn empty_sections_and_recipient_chooser_explain_exact_next_actions() {
         }
 
         let empty_inbox = empty_section_model(size, UiSection::Inbox);
-        let chooser = update(empty_inbox, UiEvent::Input(UiInput::Character('d')))
+        let launcher = update(empty_inbox, UiEvent::Input(UiInput::Character('n')))
+            .expect("open New")
+            .model;
+        let direct = update(launcher, UiEvent::Input(UiInput::NextItem))
+            .expect("select Direct Message")
+            .model;
+        let chooser = update(direct, UiEvent::Input(UiInput::Activate))
             .expect("open empty recipient chooser")
             .model;
         let rendered = render_text(&chooser);
@@ -2559,7 +2560,7 @@ const fn section_shortcut(section: UiSection) -> char {
 
 const fn section_help_phrase(section: UiSection) -> &'static str {
     match section {
-        UiSection::Inbox => "Inbox contains messages",
+        UiSection::Inbox => "Inbox lists every available agent",
         UiSection::Sent => "Sent contains conversations",
         UiSection::Archived => "Archived contains conversations",
         UiSection::Agents => "Agents are named workers",
@@ -2575,17 +2576,23 @@ fn ready_transition(size: UiSize) -> hq_tui::UiTransition {
 }
 
 fn ready_snapshot() -> UiSnapshot {
+    let mut deploy = row(
+        "deploy-9",
+        "Deploy production",
+        "waiting for approval",
+        UiRowState::Waiting,
+    );
+    deploy.conversation_target = Some(hq_tui::UiConversationTarget::Thread {
+        counterparty_installation: [7; 32],
+        counterparty_mailbox: [8; 32],
+        thread_id: [9; 32],
+    });
     UiSnapshot {
         revision: 42,
         human_state: UiHumanState::Ready,
         inbox_rows: vec![
             row("build-17", "Build release", "agent-1", UiRowState::Open),
-            row(
-                "deploy-9",
-                "Deploy production",
-                "waiting for approval",
-                UiRowState::Waiting,
-            ),
+            deploy,
             row(
                 "incident-4",
                 "Investigate timeout",

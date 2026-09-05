@@ -54,19 +54,15 @@ edited text, direct target identity, or pending submission.
 
 ## Mailbox composition and actions
 
-The pure model owns reply, direct-message, self-note, archive, and restore interaction state. Inbox
+The pure model owns reply, new-work composition, and whole-conversation archive interaction state. Inbox
 selection replaces a latest-value subscription interest while retaining the previous coherent
 conversation; the matching materialized view changes list highlight and detail together. Enter or
 `l`/Right moves focus into that already visible conversation so the operator can select an exact message. `r` opens an
-applicable reply draft only for a typed message target whose purpose permits replies; `d` selects
-one unconflicted named-agent mailbox by stable installation/mailbox identity; `N` opens a self-note;
-`a` opens archive confirmation for an open message; and `u` opens restore confirmation for an
-archived message. Archive changes only that message's reversible state; it does not delete the
-thread or any message history. Using either state shortcut on a conversation summary shows a
-transient help hint that is dismissed by the next input, rather than recording a persistent
-failure. Activity
-entries carry no `UiMessageTarget`, so no key sequence can turn activity into a reply or reversible
-state target. Escape cancels selectors and confirmations without a canonical mutation.
+applicable reply draft only for a typed message target whose purpose permits replies. `n` opens the
+shared New launcher for project work, direct messages, and personal notes. `d` confirms permanent
+archive of the selected whole conversation; it never targets an individual message. The executor
+first stops typed agent work and archives only after a definite stop. Activity entries carry no
+reply authority. Escape cancels selectors and confirmations without a canonical mutation.
 
 Draft editing accepts Unicode characters, bounded paste, and Unicode-safe Left, Right, Home, End,
 Backspace, and Delete operations up to the ordinary content bound. A coalesced 250 ms timer
@@ -541,8 +537,8 @@ details, or details beside an open draft, use a secondary pane. `h`/Left/Escape 
 before leaving the selected anchor, and another `h`/Left returns to the Inbox list. The inspector
 shows exact routing, semantics, evidence, activity state, and raw detail without inserting records
 into the transcript. The conversation footer spells out the
-applicable `a archive` or `u restore` control for the selected exact message; contextual help carries
-the wider reply, direct-message, note, navigation, and quit reference. Stable failures replace the
+applicable `d archive conversation` control in Inbox; contextual help carries the wider reply,
+New, navigation, and quit reference. Stable failures replace the
 ordinary footer with a plain failure statement and recovery action; their stable code remains in
 technical help. The Agents and Projects footers expose their
 

@@ -940,12 +940,6 @@ pub fn mailbox_command_from_v1(
                 thread_id: thread_id.map(|id| hq_domain::ThreadId::from_bytes(id.bytes())),
                 message_id: hq_domain::MessageId::from_bytes(message_id.bytes()),
             },
-            MailboxCommandActionDto::Archive { target_message } => MailboxCommandAction::Archive {
-                target_message: hq_domain::MessageId::from_bytes(target_message.bytes()),
-            },
-            MailboxCommandActionDto::Restore { target_message } => MailboxCommandAction::Restore {
-                target_message: hq_domain::MessageId::from_bytes(target_message.bytes()),
-            },
             MailboxCommandActionDto::ArchiveConversation { conversation } => {
                 MailboxCommandAction::ArchiveConversation {
                     conversation: conversation_key_from_v1(conversation)?,
@@ -992,12 +986,6 @@ pub fn mailbox_command_request_to_v1(request: &MailboxCommandRequest) -> Mailbox
                 project_id: Id32::new(*project_id.as_bytes()),
                 thread_id: thread_id.map(|id| Id32::new(*id.as_bytes())),
                 message_id: Id32::new(*message_id.as_bytes()),
-            },
-            MailboxCommandAction::Archive { target_message } => MailboxCommandActionDto::Archive {
-                target_message: Id32::new(*target_message.as_bytes()),
-            },
-            MailboxCommandAction::Restore { target_message } => MailboxCommandActionDto::Restore {
-                target_message: Id32::new(*target_message.as_bytes()),
             },
             MailboxCommandAction::ArchiveConversation { ref conversation } => {
                 MailboxCommandActionDto::ArchiveConversation {

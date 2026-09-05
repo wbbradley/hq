@@ -339,7 +339,7 @@ pub enum UiRowKind {
 }
 
 /// Typed conversation destination retained with an Inbox summary row.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiConversationTarget {
     /// One independently initiated project exchange.
     Project {
@@ -349,6 +349,26 @@ pub enum UiConversationTarget {
         thread_id: [u8; 32],
         /// Stable initiating message used to recover a newly created row.
         root_message: [u8; 32],
+    },
+    /// One causal direct exchange with an exact counterparty.
+    Thread {
+        /// Counterparty installation identity.
+        counterparty_installation: [u8; 32],
+        /// Counterparty mailbox identity.
+        counterparty_mailbox: [u8; 32],
+        /// Stable causal thread identity.
+        thread_id: [u8; 32],
+    },
+    /// One durable provider session with an exact counterparty.
+    ProviderSession {
+        /// Counterparty installation identity.
+        counterparty_installation: [u8; 32],
+        /// Counterparty mailbox identity.
+        counterparty_mailbox: [u8; 32],
+        /// Neutral provider namespace.
+        provider: String,
+        /// Provider-scoped durable session.
+        session: String,
     },
 }
 
@@ -1933,10 +1953,8 @@ pub enum UiMailboxAction {
         project_id: [u8; 32],
         thread_id: Option<[u8; 32]>,
     },
-    /// Archive one exact message.
-    Archive { target_message: [u8; 32] },
-    /// Restore one exact message.
-    Restore { target_message: [u8; 32] },
+    /// Permanently archive one whole conversation.
+    ArchiveConversation { conversation: UiConversationTarget },
 }
 
 /// Current mailbox modal presentation borrowed by the renderer.
@@ -1950,7 +1968,7 @@ pub enum UiMailboxModal {
         /// Stable selected mailbox identity.
         selected: Option<([u8; 32], [u8; 32])>,
     },
-    /// Confirm a reversible canonical state command.
+    /// Confirm a canonical state command.
     Confirm { action: UiMailboxAction },
 }
 
@@ -2074,10 +2092,10 @@ impl UiTransientHelp {
     const fn text(self) -> &'static str {
         match self {
             Self::OpenConversationMessage => {
-                "open the conversation with Enter, then select a message to reply, archive, or restore"
+                "open the conversation with Enter, then select a message to reply"
             }
             Self::SelectConversationMessage => {
-                "select a message; activity updates cannot be replied to, archived, or restored"
+                "select a message; activity updates cannot be replied to"
             }
         }
     }
@@ -2768,6 +2786,7 @@ pub struct UiModel {
     completion_notice: Option<UiCompletionNotice>,
     completion_context: Option<UiPendingCompletion>,
     new_workflow: Option<UiNewWorkflow>,
+    preferred_new_agent: Option<[u8; 32]>,
     started: bool,
     should_exit: bool,
 }
@@ -2856,6 +2875,7 @@ impl UiModel {
             completion_notice: None,
             completion_context: None,
             new_workflow: None,
+            preferred_new_agent: None,
             started: false,
             should_exit: false,
         }
@@ -3237,8 +3257,11 @@ impl UiModel {
             project_id: selected_project,
             thread_id: selected_thread,
             ..
-        } = selected.conversation_target?;
-        if selected_project != project_id || Some(selected_thread) != thread_id {
+        } = selected.conversation_target.as_ref()?
+        else {
+            return None;
+        };
+        if *selected_project != project_id || Some(*selected_thread) != thread_id {
             return None;
         }
         self.conversation
@@ -3263,9 +3286,13 @@ impl UiModel {
             UiMailboxDraftTarget::Project { project_id, .. }
             | UiMailboxDraftTarget::ProjectSetup { project_id, .. } => *project_id,
             UiMailboxDraftTarget::Reply { .. } => {
-                match self.selected_row_data()?.conversation_target {
-                    Some(UiConversationTarget::Project { project_id, .. }) => project_id,
-                    None => return None,
+                match self.selected_row_data()?.conversation_target.as_ref() {
+                    Some(UiConversationTarget::Project { project_id, .. }) => *project_id,
+                    Some(
+                        UiConversationTarget::Thread { .. }
+                        | UiConversationTarget::ProviderSession { .. },
+                    )
+                    | None => return None,
                 }
             }
             UiMailboxDraftTarget::Direct { .. } | UiMailboxDraftTarget::SelfNote => return None,
@@ -6587,12 +6614,13 @@ fn open_project_inbox_draft(
 }
 
 fn guided_agent_picker(model: &UiModel, project: UiProject) -> UiNewModal {
-    guided_agent_picker_from_snapshot(model.snapshot.as_ref(), project)
+    guided_agent_picker_from_snapshot(model.snapshot.as_ref(), project, model.preferred_new_agent)
 }
 
 fn guided_agent_picker_from_snapshot(
     snapshot: Option<&UiSnapshot>,
     project: UiProject,
+    preferred: Option<[u8; 32]>,
 ) -> UiNewModal {
     let mut agents = snapshot.map_or_else(Vec::new, |snapshot| {
         snapshot
@@ -6615,8 +6643,10 @@ fn guided_agent_picker_from_snapshot(
             agent.agent_id,
         )
     });
+    let preferred =
+        preferred.filter(|preferred| agents.iter().any(|agent| agent.agent_id == *preferred));
     UiNewModal::ChooseAgent {
-        selected: agents.first().map(|agent| agent.agent_id),
+        selected: preferred.or_else(|| agents.first().map(|agent| agent.agent_id)),
         create_new: agents.is_empty(),
         project,
         agents,
@@ -6629,6 +6659,7 @@ fn open_guided_agent(
     agent: UiAgent,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
+    model.preferred_new_agent = None;
     let competing = match &agent.status {
         UiAgentStatus::Assigned(assignment) if assignment.project_id != project.project_id => {
             Some((assignment.project_id, assignment.project_name.clone()))
@@ -9672,7 +9703,15 @@ fn mailbox_shortcut(
             Ok(true)
         }
         'd' => {
-            open_direct_target_picker(model);
+            if model.section != UiSection::Inbox {
+                return Ok(false);
+            }
+            let Some(conversation) = selected_conversation_target(model) else {
+                return Ok(false);
+            };
+            model.mailbox_modal = Some(UiMailboxModal::Confirm {
+                action: UiMailboxAction::ArchiveConversation { conversation },
+            });
             Ok(true)
         }
         'n' => {
@@ -9681,8 +9720,6 @@ fn mailbox_shortcut(
             });
             Ok(true)
         }
-        'a' if model.section != UiSection::Agents => Ok(confirm_message_state(model, false)),
-        'u' if model.section != UiSection::Agents => Ok(confirm_message_state(model, true)),
         '/' if model.section == UiSection::Agents => {
             model.agent_modal = Some(UiAgentModal::Search {
                 query: model.agent_search.clone(),
@@ -9754,7 +9791,7 @@ fn mailbox_shortcut(
 fn selected_conversation_target(model: &UiModel) -> Option<UiConversationTarget> {
     model
         .selected_row_data()
-        .and_then(|row| row.conversation_target)
+        .and_then(|row| row.conversation_target.clone())
 }
 
 fn selected_message_target(model: &UiModel) -> Option<UiMessageTarget> {
@@ -9766,39 +9803,6 @@ fn selected_message_target(model: &UiModel) -> Option<UiMessageTarget> {
         .iter()
         .find(|entry| entry.id == anchor)?
         .message_target
-}
-
-fn confirm_message_state(model: &mut UiModel, restore: bool) -> bool {
-    let Some(target) = selected_message_target(model) else {
-        return show_select_message_help(model);
-    };
-    let state = model
-        .conversation
-        .as_ref()
-        .and_then(|conversation| {
-            conversation
-                .entries
-                .iter()
-                .find(|entry| entry.message_target == Some(target))
-        })
-        .and_then(|entry| entry.message_state);
-    if (restore && state != Some(UiMessageState::Archived))
-        || (!restore && state != Some(UiMessageState::Open))
-    {
-        return false;
-    }
-    model.mailbox_modal = Some(UiMailboxModal::Confirm {
-        action: if restore {
-            UiMailboxAction::Restore {
-                target_message: target.message_id,
-            }
-        } else {
-            UiMailboxAction::Archive {
-                target_message: target.message_id,
-            }
-        },
-    });
-    true
 }
 
 fn show_select_message_help(model: &mut UiModel) -> bool {
@@ -9867,6 +9871,24 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
     }
     if model.section == UiSection::Projects {
         return open_selected_project_conversations(model, effects);
+    }
+    if model.section == UiSection::Inbox
+        && model
+            .selected_row_data()
+            .is_some_and(|row| row.kind == UiRowKind::Agent)
+    {
+        let Some(agent_id) = selected_agent(model).map(|agent| agent.agent_id) else {
+            return Ok(false);
+        };
+        model.preferred_new_agent = Some(agent_id);
+        let picker = guided_project_picker(model);
+        let selected = match &picker {
+            UiNewModal::ChooseProject { selected, .. } => *selected,
+            _ => None,
+        };
+        model.new_workflow = Some(UiNewWorkflow::ChoosingProject { selected });
+        model.new_modal = Some(picker);
+        return Ok(true);
     }
     if let Some(setup) = model.selected_setup().cloned() {
         model.open_draft(setup.draft.target, effects)?;
@@ -10186,7 +10208,10 @@ fn open_automatic_followup_draft(
             project_id,
             thread_id: Some(thread_id),
         }),
-        None => model.conversation.as_ref().and_then(|conversation| {
+        Some(
+            UiConversationTarget::Thread { .. } | UiConversationTarget::ProviderSession { .. },
+        )
+        | None => model.conversation.as_ref().and_then(|conversation| {
             conversation.entries.iter().rev().find_map(|entry| {
                 entry
                     .message_target
@@ -11197,7 +11222,7 @@ fn refresh_new_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
             ..
         }) => {
             let project = refreshed_project(snapshot, project);
-            let picker = guided_agent_picker_from_snapshot(Some(snapshot), project);
+            let picker = guided_agent_picker_from_snapshot(Some(snapshot), project, None);
             let UiNewModal::ChooseAgent {
                 project,
                 agents,

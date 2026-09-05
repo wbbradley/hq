@@ -886,7 +886,7 @@ const fn human_issue_code(issue: &UiHumanIssue) -> &'static str {
 
 const fn section_help_text(section: UiSection) -> &'static str {
     match section {
-        UiSection::Inbox => "Inbox contains messages and updates that need your attention.",
+        UiSection::Inbox => "Inbox lists every available agent and their latest conversation.",
         UiSection::Sent => "Sent contains conversations you have started or replied to.",
         UiSection::Archived => "Archived contains conversations you have put away.",
         UiSection::Agents => "Agents are named workers you can assign and contact.",
@@ -914,14 +914,12 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
                     "↑/↓ or j/k — select message · Enter — details · Esc — close conversation",
                 ));
                 actions.push(Line::from(
-                    "r — reply · a — archive · u — restore · PgDn — load more",
+                    "r — reply · d — archive conversation · PgDn — load more",
                 ));
             } else if model.selected_row_data().is_some() {
                 actions.push(Line::from("Enter — open selected conversation"));
             }
-            actions.push(Line::from(
-                "n — New… · d — direct message · N — personal note",
-            ));
+            actions.push(Line::from("n — New… · d — archive conversation"));
         }
         UiSection::Agents => {
             actions.push(Line::from(if model.selected_row_data().is_some() {
@@ -2658,15 +2656,9 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
         }
         UiMailboxModal::Confirm { action } => {
             let (label, explanation) = match action {
-                UiMailboxAction::Archive { .. } => (
-                    "Archive the selected message?",
-                    Some("Only this message changes state. The conversation history stays intact."),
-                ),
-                UiMailboxAction::Restore { .. } => (
-                    "Restore the selected message?",
-                    Some(
-                        "Only this message returns to open views; the rest of the conversation is unchanged.",
-                    ),
+                UiMailboxAction::ArchiveConversation { .. } => (
+                    "Archive this conversation?",
+                    Some("HQ will stop active work first, then put away the whole conversation."),
                 ),
                 UiMailboxAction::Reply { .. }
                 | UiMailboxAction::Direct { .. }
@@ -3712,7 +3704,7 @@ fn empty_section_lines(section: UiSection, theme: &UiTheme) -> Vec<Line<'static>
     let heading = theme.style(UiThemeRole::Heading);
     match section {
         UiSection::Inbox => vec![
-            Line::styled(" No conversations need your attention.", heading),
+            Line::styled(" No agents are available yet.", heading),
             Line::from(" Press n New… for project work, a message, or a personal note."),
         ],
         UiSection::Sent => vec![
@@ -4834,9 +4826,9 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     } else if model.focus() == UiFocus::Conversation {
         conversation_footer(model)
     } else if model.selected_row_data().is_none() {
-        " n New… · d message · N note · ? help · q quit".to_owned()
+        " n New… · ? help · q quit".to_owned()
     } else if model.viewport().width >= WIDE_WIDTH {
-        " Enter open · n New… · d message · N note · ? help · q quit".to_owned()
+        " Enter open · n New… · d archive · ? help · q quit".to_owned()
     } else {
         " Enter open · ? help · q quit".to_owned()
     };
@@ -4886,7 +4878,7 @@ fn conversation_footer(model: &UiModel) -> String {
     if matches!(
         model
             .selected_row_data()
-            .and_then(|row| row.conversation_target),
+            .and_then(|row| row.conversation_target.as_ref()),
         Some(crate::model::UiConversationTarget::Project { .. })
     ) {
         controls.push("r continue");
@@ -4897,10 +4889,8 @@ fn conversation_footer(model: &UiModel) -> String {
     {
         controls.push("r reply");
     }
-    match selected.and_then(|entry| entry.message_target.zip(entry.message_state)) {
-        Some((_, UiMessageState::Open)) => controls.push("a archive"),
-        Some((_, UiMessageState::Archived)) => controls.push("u restore"),
-        Some((_, UiMessageState::Rejected)) | None => {}
+    if model.section() == UiSection::Inbox {
+        controls.push("d archive conversation");
     }
     controls.push(if model.viewport().width >= WIDE_WIDTH {
         "t/Enter details"

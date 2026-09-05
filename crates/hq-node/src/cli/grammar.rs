@@ -113,8 +113,6 @@ fn command() -> Command {
             human_list_command(),
             human_message_command("answer"),
             human_message_command("cancel"),
-            human_message_command("archive"),
-            human_message_command("restore"),
             Command::new("mailboxes")
                 .about("Discover repository-aware session mailboxes")
                 .long_about("List durable provider sessions joined with typed directory, repository, worktree, and branch context. Discovery never claims or merges mailboxes.")
@@ -373,13 +371,11 @@ fn human_message_command(name: &'static str) -> Command {
     let about = match name {
         "answer" => "Answer one question as the human",
         "cancel" => "Cancel one human-authored question",
-        "archive" => "Archive one message",
-        "restore" => "Restore one archived message",
         _ => "Manage one human mailbox message",
     };
     let command = Command::new(name)
         .about(about)
-        .long_about("Message content may be supplied as one argument or bounded UTF-8 stdin where supported. Dependency-incomplete records are inert and cannot authorize answer, cancel, archive, or restore operations.")
+        .long_about("Message content may be supplied as one argument or bounded UTF-8 stdin where supported. Dependency-incomplete records are inert and cannot authorize answer or cancel operations.")
         .arg(id_arg("message", "MESSAGE_ID"));
     if name == "answer" {
         command.arg(Arg::new("response").value_name("RESPONSE"))
@@ -673,7 +669,7 @@ fn map_invocation(matches: &ArgMatches) -> Result<CliInvocation, CliError> {
             directory: args.get_one::<PathBuf>("directory").cloned(),
             state: state()?,
         },
-        "list" | "answer" | "cancel" | "archive" | "restore" => CliCommand::HumanMessage {
+        "list" | "answer" | "cancel" => CliCommand::HumanMessage {
             action: map_human_message(name, args)?,
             state: state()?,
         },
@@ -956,12 +952,6 @@ fn map_human_message(name: &str, args: &ArgMatches) -> Result<HumanMessageComman
             body: optional_content(args, "response")?,
         },
         "cancel" => HumanMessageCommand::Cancel {
-            message_id: MessageId::from_bytes(hex(args, "message")?),
-        },
-        "archive" => HumanMessageCommand::Archive {
-            message_id: MessageId::from_bytes(hex(args, "message")?),
-        },
-        "restore" => HumanMessageCommand::Restore {
             message_id: MessageId::from_bytes(hex(args, "message")?),
         },
         _ => return Err(CliError::Arguments),

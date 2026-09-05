@@ -15,9 +15,9 @@ use hq_reducer::{
 
 use crate::{
     ContinueProjectMessageRequest, ConversationArchiveRequest, DomainSnapshot, LocalFactInputs,
-    MessageAuthoringAuthority, MessageStateRequest, MutationDecision, NewMessageRequest,
-    ReplyRequest, plan_asynchronous_message, plan_conversation_archive, plan_message_archive,
-    plan_message_restore, plan_project_message_continuation, plan_reply,
+    MessageAuthoringAuthority, MutationDecision, NewMessageRequest, ReplyRequest,
+    plan_asynchronous_message, plan_conversation_archive, plan_project_message_continuation,
+    plan_reply,
 };
 
 /// Maximum installation-local drafts retained at once.
@@ -114,12 +114,6 @@ pub enum MailboxCommandAction {
         project_id: ProjectId,
         thread_id: Option<ThreadId>,
         message_id: MessageId,
-    },
-    Archive {
-        target_message: MessageId,
-    },
-    Restore {
-        target_message: MessageId,
     },
     ArchiveConversation {
         conversation: ConversationId,
@@ -320,26 +314,6 @@ pub fn plan_mailbox_command(
                     .map_err(|_| invalid_command())
                 }
             })
-        }
-        MailboxCommandAction::Archive { target_message }
-        | MailboxCommandAction::Restore { target_message } => {
-            if request.draft_id.is_some() || request.content.is_some() || draft.is_some() {
-                Err(invalid_command())
-            } else {
-                message(snapshot, *target_message).and_then(|message| {
-                    let state = MessageStateRequest {
-                        message_id: *target_message,
-                        target_fact: message.fact_id,
-                        state_frontier: message.state_frontier.clone(),
-                    };
-                    if matches!(request.action, MailboxCommandAction::Archive { .. }) {
-                        plan_message_archive(authority, inputs, state)
-                    } else {
-                        plan_message_restore(authority, inputs, state)
-                    }
-                    .map_err(|_| invalid_command())
-                })
-            }
         }
         MailboxCommandAction::ArchiveConversation { conversation } => {
             if request.draft_id.is_some() || request.content.is_some() || draft.is_some() {

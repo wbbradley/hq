@@ -183,6 +183,14 @@ pub trait TuiClientPort: Send {
         action: UiMailboxAction,
     ) -> Result<UiMailboxCommandResult, UiFailure>;
 
+    /// Stops any bound work and archives one exact whole conversation.
+    fn archive_conversation(
+        &mut self,
+        conversation: UiConversationTarget,
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
+        self.submit_mailbox_command(None, UiMailboxAction::ArchiveConversation { conversation })
+    }
+
     /// Executes or reconciles one stable named-agent administration command.
     fn submit_agent_command(&mut self, _action: UiAgentAction) -> Result<u64, UiFailure> {
         Err(UiFailure {
@@ -406,6 +414,63 @@ impl SharedTuiPresentation {
                 _ => None,
             })
             .collect();
+        let active_agents = snapshot
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SnapshotItem::Agent {
+                    agent_id,
+                    lifecycle,
+                    retirements,
+                    ..
+                } if lifecycle == "active" && retirements.is_empty() => Some(agent_id.bytes()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let mut current = BTreeMap::<[u8; 32], (u64, String, ConversationKeyDto)>::new();
+        for item in &snapshot.items {
+            let SnapshotItem::Conversation {
+                key,
+                context,
+                archived: false,
+                presentation_rank,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            let Some(agent_id) =
+                conversation_agent_id(context).filter(|agent_id| active_agents.contains(agent_id))
+            else {
+                continue;
+            };
+            let candidate = (
+                presentation_rank.unwrap_or(0),
+                conversation_identity(key.clone()),
+                key.clone(),
+            );
+            if current
+                .get(&agent_id)
+                .is_none_or(|existing| (candidate.0, &candidate.1) > (existing.0, &existing.1))
+            {
+                current.insert(agent_id, candidate);
+            }
+        }
+        for (agent_id, (_, _, key)) in current {
+            let conversation_id = conversation_identity(key.clone());
+            let Some(context) = presentation
+                .conversation_presentations
+                .get(&conversation_id)
+                .cloned()
+            else {
+                continue;
+            };
+            let row_id = full_id(Id32::new(agent_id));
+            presentation.conversation_keys.insert(row_id.clone(), key);
+            presentation
+                .conversation_presentations
+                .insert(row_id, context);
+        }
         presentation.agent_names = snapshot
             .items
             .iter()
@@ -509,6 +574,27 @@ impl SharedTuiPresentation {
             presentation.conversation_keys.get(row_id)?.clone(),
             presentation.conversation_presentations.get(row_id)?.clone(),
         ))
+    }
+
+    fn conversation_agent(&self, target: &UiConversationTarget) -> Option<[u8; 32]> {
+        let key = conversation_key(target);
+        let presentation = self.inner.lock().ok()?;
+        presentation
+            .conversation_keys
+            .iter()
+            .find(|(_, candidate)| **candidate == key)
+            .and_then(|(row_id, _)| presentation.conversation_presentations.get(row_id))
+            .and_then(|context| match &context.context {
+                ConversationContextDto::Direct { participant }
+                | ConversationContextDto::Project {
+                    participant: Some(participant),
+                    ..
+                } => participant.agent.map(Id32::bytes),
+                ConversationContextDto::Personal
+                | ConversationContextDto::Project {
+                    participant: None, ..
+                } => None,
+            })
     }
 
     fn agent_name(&self, agent_id: [u8; 32]) -> String {
@@ -1457,12 +1543,11 @@ impl TuiClientPort for LocalTuiClient {
                 thread_id: thread_id.map(Id32::new),
                 message_id,
             },
-            UiMailboxAction::Archive { target_message } => MailboxCommandActionDto::Archive {
-                target_message: Id32::new(target_message),
-            },
-            UiMailboxAction::Restore { target_message } => MailboxCommandActionDto::Restore {
-                target_message: Id32::new(target_message),
-            },
+            UiMailboxAction::ArchiveConversation { conversation } => {
+                MailboxCommandActionDto::ArchiveConversation {
+                    conversation: conversation_key(&conversation),
+                }
+            }
         };
         let authored_at_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1513,6 +1598,90 @@ impl TuiClientPort for LocalTuiClient {
                 action: "keep this draft open while HQ checks whether it was sent".to_owned(),
             }),
         }
+    }
+
+    fn archive_conversation(
+        &mut self,
+        conversation: UiConversationTarget,
+    ) -> Result<UiMailboxCommandResult, UiFailure> {
+        let snapshot = self
+            .client
+            .snapshot()
+            .map_err(|error| client_failure(&error))?;
+        self.presentation.replace_snapshot(&snapshot);
+        let projects =
+            tui_projects(tui_project_catalog(&snapshot).map_err(|error| project_failure(&error))?);
+        let agent_id = self.presentation.conversation_agent(&conversation);
+        let project_id = match &conversation {
+            UiConversationTarget::Project { project_id, .. } => Some(*project_id),
+            UiConversationTarget::Thread { .. } | UiConversationTarget::ProviderSession { .. } => {
+                agent_id.and_then(|agent_id| {
+                    let mut assigned = projects.iter().filter(|project| {
+                        project.assignment.as_ref().is_some_and(|assignment| {
+                            assignment.agent_id == agent_id && !assignment.cardinality_conflicted
+                        })
+                    });
+                    let project = assigned.next()?;
+                    assigned.next().is_none().then_some(project.project_id)
+                })
+            }
+        };
+        if let Some(project_id) = project_id
+            && projects
+                .iter()
+                .any(|project| project.project_id == project_id && project.lifecycle == "open")
+        {
+            let action = UiProjectAction::Close {
+                project_id,
+                force: false,
+            };
+            let mut result = self.submit_project_command(action)?;
+            for _ in 0..64 {
+                match &result.outcome {
+                    UiProjectOutcome::Completed { .. } => break,
+                    UiProjectOutcome::Running { .. } => {
+                        result = self.continue_project_command(result)?;
+                    }
+                    UiProjectOutcome::Rejected { code, .. }
+                    | UiProjectOutcome::Reconcilable { code, .. } => {
+                        return Err(UiFailure {
+                            code: code.clone(),
+                            action: "resolve the project stop issue, then archive the conversation again"
+                                .to_owned(),
+                        });
+                    }
+                    UiProjectOutcome::ResourcePreview { .. }
+                    | UiProjectOutcome::ResourceChecks { .. } => {
+                        return Err(UiFailure {
+                            code: "conversation_stop_response_invalid".to_owned(),
+                            action: "reload the Inbox and try archiving again".to_owned(),
+                        });
+                    }
+                }
+            }
+            if !matches!(result.outcome, UiProjectOutcome::Completed { .. }) {
+                return Err(UiFailure {
+                    code: "conversation_stop_pending".to_owned(),
+                    action: "wait for the agent to stop, then archive the conversation again"
+                        .to_owned(),
+                });
+            }
+        } else if let (Some(agent_id), UiConversationTarget::ProviderSession { provider, .. }) =
+            (agent_id, &conversation)
+        {
+            let result = self.submit_managed_session(UiManagedSessionAction::Stop {
+                agent_id,
+                provider: provider.clone(),
+            })?;
+            if !matches!(result.outcome, UiManagedSessionOutcome::Stopped) {
+                return Err(UiFailure {
+                    code: "conversation_stop_uncertain".to_owned(),
+                    action: "check the agent status, then archive the conversation again"
+                        .to_owned(),
+                });
+            }
+        }
+        self.submit_mailbox_command(None, UiMailboxAction::ArchiveConversation { conversation })
     }
 
     fn submit_agent_command(&mut self, action: UiAgentAction) -> Result<u64, UiFailure> {
@@ -1662,6 +1831,39 @@ impl TuiClientPort for LocalTuiClient {
             self.project_operations.remove(&result.command_id);
         }
         Ok(ui_project_result(operation.action, result))
+    }
+}
+
+fn conversation_key(target: &UiConversationTarget) -> ConversationKeyDto {
+    match target {
+        UiConversationTarget::Project {
+            project_id,
+            thread_id,
+            ..
+        } => ConversationKeyDto::ProjectThread {
+            project: Id32::new(*project_id),
+            thread: Id32::new(*thread_id),
+        },
+        UiConversationTarget::Thread {
+            counterparty_installation,
+            counterparty_mailbox,
+            thread_id,
+        } => ConversationKeyDto::Thread {
+            counterparty_installation: Id32::new(*counterparty_installation),
+            counterparty_mailbox: Id32::new(*counterparty_mailbox),
+            thread: Id32::new(*thread_id),
+        },
+        UiConversationTarget::ProviderSession {
+            counterparty_installation,
+            counterparty_mailbox,
+            provider,
+            session,
+        } => ConversationKeyDto::ProviderSession {
+            counterparty_installation: Id32::new(*counterparty_installation),
+            counterparty_mailbox: Id32::new(*counterparty_mailbox),
+            provider: provider.clone(),
+            session: session.clone(),
+        },
     }
 }
 
@@ -2605,7 +2807,13 @@ fn client_worker<P: TuiClientPort>(
                 }
             }
             Ok(WorkerCommand::SubmitMailboxCommand { id, draft, action }) => {
-                let event = match client.submit_mailbox_command(draft, action) {
+                let result = match action {
+                    UiMailboxAction::ArchiveConversation { conversation } if draft.is_none() => {
+                        client.archive_conversation(conversation)
+                    }
+                    action => client.submit_mailbox_command(draft, action),
+                };
+                let event = match result {
                     Ok(result) => UiEvent::MailboxCommandCommitted {
                         effect_id: id,
                         revision: result.revision,
@@ -2908,10 +3116,16 @@ fn tui_snapshot_with_projects_and_drafts(
             .collect()
     };
     let providers = tui_providers(provider_catalog);
-    let mut inbox_rows: Vec<UiRow> = rows(UiSection::Inbox);
+    let raw_inbox_rows: Vec<UiRow> = rows(UiSection::Inbox);
     let project_setups = tui_project_setups(drafts, &projects, &agents, &providers);
-    let setup_rows = tui_project_setup_rows(&project_setups, &inbox_rows);
-    inbox_rows.extend(setup_rows);
+    let setup_rows = tui_project_setup_rows(&project_setups, &raw_inbox_rows);
+    let inbox_rows = agent_inbox_rows(
+        snapshot,
+        &agents,
+        &raw_inbox_rows,
+        &project_setups,
+        &setup_rows,
+    );
     UiSnapshot {
         revision: snapshot.revision,
         human_state,
@@ -2928,6 +3142,118 @@ fn tui_snapshot_with_projects_and_drafts(
     }
 }
 
+fn agent_inbox_rows(
+    snapshot: &AuthoritativeSnapshotDto,
+    agents: &[UiAgent],
+    conversation_rows: &[UiRow],
+    setups: &[UiProjectConversationSetup],
+    setup_rows: &[UiRow],
+) -> Vec<UiRow> {
+    let mut rows = agents
+        .iter()
+        .filter(|agent| agent.lifecycle == UiAgentLifecycle::Active)
+        .map(|agent| {
+            let recent = snapshot
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    SnapshotItem::Conversation {
+                        key,
+                        context,
+                        archived: false,
+                        presentation_rank,
+                        ..
+                    } if conversation_agent_id(context) == Some(agent.agent_id) => Some((
+                        presentation_rank.unwrap_or(0),
+                        conversation_identity(key.clone()),
+                    )),
+                    _ => None,
+                })
+                .max_by(|left, right| left.cmp(right));
+            if let Some((rank, row_id)) = recent
+                && let Some(row) = conversation_rows.iter().find(|row| row.id == row_id)
+            {
+                let mut row = row.clone();
+                if !matches!(
+                    row.conversation_target.as_ref(),
+                    Some(UiConversationTarget::Project { .. })
+                ) && let UiAgentStatus::Assigned(assignment) = &agent.status
+                {
+                    row.detail = format!("{} · {}", assignment.project_name, row.detail);
+                }
+                let conversation_id = row.id.clone();
+                row.id = full_id(Id32::new(agent.agent_id));
+                return (Some(rank), row, Some(conversation_id));
+            }
+            if let Some(setup) = setups.iter().find(|setup| {
+                matches!(
+                    setup.draft.target,
+                    UiMailboxDraftTarget::ProjectSetup { agent_id, .. }
+                        if agent_id == agent.agent_id
+                )
+            }) && let Some(row) = setup_rows.iter().find(|row| {
+                row.id == format!("project-setup:{}", full_id(Id32::new(setup.draft.draft_id)))
+            }) {
+                return (Some(0), row.clone(), None);
+            }
+            (None, agent_row(agent), None)
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|(left_rank, left, _), (right_rank, right, _)| {
+        right_rank
+            .cmp(left_rank)
+            .then_with(|| left.title.cmp(&right.title))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let selected = rows
+        .iter()
+        .filter_map(|(_, _, conversation)| conversation.clone())
+        .collect::<BTreeSet<_>>();
+    let mut result = rows.into_iter().map(|(_, row, _)| row).collect::<Vec<_>>();
+    let mut alternatives = conversation_rows
+        .iter()
+        .filter(|row| row.kind == UiRowKind::Conversation && !selected.contains(&row.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    alternatives.sort_by(|left, right| {
+        let rank = |row: &UiRow| {
+            snapshot.items.iter().find_map(|item| match item {
+                SnapshotItem::Conversation {
+                    key,
+                    presentation_rank,
+                    ..
+                } if conversation_identity(key.clone()) == row.id => *presentation_rank,
+                _ => None,
+            })
+        };
+        rank(right)
+            .cmp(&rank(left))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    result.extend(alternatives);
+    result.extend(
+        conversation_rows
+            .iter()
+            .filter(|row| row.kind == UiRowKind::Diagnostic)
+            .cloned(),
+    );
+    result
+}
+
+fn conversation_agent_id(context: &ConversationContextDto) -> Option<[u8; 32]> {
+    match context {
+        ConversationContextDto::Direct { participant }
+        | ConversationContextDto::Project {
+            participant: Some(participant),
+            ..
+        } => participant.agent.map(Id32::bytes),
+        ConversationContextDto::Personal
+        | ConversationContextDto::Project {
+            participant: None, ..
+        } => None,
+    }
+}
+
 fn tui_project_setup_rows(
     setups: &[UiProjectConversationSetup],
     authoritative_rows: &[UiRow],
@@ -2937,7 +3263,7 @@ fn tui_project_setup_rows(
         .filter(|setup| {
             !authoritative_rows.iter().any(|row| {
                 matches!(
-                    (&setup.draft.target, row.conversation_target),
+                    (&setup.draft.target, row.conversation_target.as_ref()),
                     (
                         UiMailboxDraftTarget::ProjectSetup { project_id, .. },
                         Some(UiConversationTarget::Project {
@@ -2945,7 +3271,7 @@ fn tui_project_setup_rows(
                             root_message,
                             ..
                         })
-                    ) if *project_id == candidate_project && setup.draft.draft_id == root_message
+                    ) if project_id == candidate_project && &setup.draft.draft_id == root_message
                 )
             })
         })
@@ -3474,14 +3800,14 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
                 root_message,
                 preview,
                 open_messages,
-                archived_messages,
                 sent_messages,
+                archived,
                 ..
             },
         ) if match section {
-            UiSection::Inbox => *open_messages > 0,
-            UiSection::Sent => *sent_messages > 0,
-            UiSection::Archived => *archived_messages > 0,
+            UiSection::Inbox => !*archived,
+            UiSection::Sent => !*archived && *sent_messages > 0,
+            UiSection::Archived => *archived,
             UiSection::Agents | UiSection::Projects | UiSection::Config => false,
         } =>
         {
@@ -3494,7 +3820,6 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
                 ConversationCounts {
                     open: *open_messages,
                     sent: *sent_messages,
-                    archived: *archived_messages,
                 },
             )
         }
@@ -3681,20 +4006,37 @@ fn conversation_row(
     counts: ConversationCounts,
 ) -> Option<UiRow> {
     let conversation_target = match &key {
-        ConversationKeyDto::ProjectThread { project, thread } => {
-            Some(UiConversationTarget::Project {
-                project_id: project.bytes(),
-                thread_id: thread.bytes(),
-                root_message: root_message?.bytes(),
-            })
-        }
-        ConversationKeyDto::Thread { .. } | ConversationKeyDto::ProviderSession { .. } => None,
+        ConversationKeyDto::ProjectThread { project, thread } => UiConversationTarget::Project {
+            project_id: project.bytes(),
+            thread_id: thread.bytes(),
+            root_message: root_message?.bytes(),
+        },
+        ConversationKeyDto::Thread {
+            counterparty_installation,
+            counterparty_mailbox,
+            thread,
+        } => UiConversationTarget::Thread {
+            counterparty_installation: counterparty_installation.bytes(),
+            counterparty_mailbox: counterparty_mailbox.bytes(),
+            thread_id: thread.bytes(),
+        },
+        ConversationKeyDto::ProviderSession {
+            counterparty_installation,
+            counterparty_mailbox,
+            provider,
+            session,
+        } => UiConversationTarget::ProviderSession {
+            counterparty_installation: counterparty_installation.bytes(),
+            counterparty_mailbox: counterparty_mailbox.bytes(),
+            provider: provider.clone(),
+            session: session.clone(),
+        },
     };
     let id = conversation_identity(key);
     let (count, label, state) = match section {
         UiSection::Inbox => (counts.open, "open messages", UiRowState::Open),
         UiSection::Sent => (counts.sent, "sent messages", UiRowState::Waiting),
-        UiSection::Archived => (counts.archived, "archived messages", UiRowState::Archived),
+        UiSection::Archived => (1, "saved conversation", UiRowState::Archived),
         UiSection::Agents | UiSection::Projects | UiSection::Config => return None,
     };
     let fallback = format!("{count} {label}");
@@ -3704,7 +4046,7 @@ fn conversation_row(
         detail: conversation_list_detail(context, preview, &fallback),
         state,
         kind: UiRowKind::Conversation,
-        conversation_target,
+        conversation_target: Some(conversation_target),
     })
 }
 
@@ -3712,7 +4054,6 @@ fn conversation_row(
 struct ConversationCounts {
     open: u32,
     sent: u32,
-    archived: u32,
 }
 
 /// Maps one bounded reducer-ordered local-API page into passive TUI presentation.

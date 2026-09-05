@@ -296,9 +296,10 @@ reply or mailbox targets retain their text for recovery and reselection.
 
 `control_mailbox` carries a stable command ID, an exact digest over the typed action, optional
 draft ID or inline content, authored time, and signing randomness. The closed actions are reply,
-direct message, self-note, archive, and restore. Clients never supply root facts or reversible-state
-frontiers. The node resolves the local human authority, target mailbox or message, question root,
-and current state frontier from the transaction snapshot. A draft-backed committed fact, its
+direct message, self-note, project message, and whole-conversation archive. Clients never supply
+root facts or archive support. The node resolves the local human authority, target mailbox or
+conversation, question root, and current causal support from the transaction snapshot. A
+draft-backed committed fact, its
 receipt, and draft deletion share one SQLite transaction. Rejection preserves the draft; exact
 response-loss replay returns the retained receipt without replanning; changed command input under
 one identity conflicts before another effect. The reconnecting client retains and replays the

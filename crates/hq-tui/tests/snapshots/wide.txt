@@ -15,4 +15,4 @@ relay needs attention           │
                                 │
                                 │
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
- Enter open · n New… · d message · N note · ? help · q quit · 1–6 views
+ Enter open · n New… · d archive · ? help · q quit · 1–6 views

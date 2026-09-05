@@ -3299,19 +3299,16 @@ fn activity_never_becomes_a_reply_or_state_action_target() {
     ]);
     let activity =
         update(opened, UiEvent::Input(UiInput::Character('j'))).expect("select activity");
-    for shortcut in ['r', 'a', 'u'] {
-        let guided = update(
-            activity.model.clone(),
-            UiEvent::Input(UiInput::Character(shortcut)),
-        )
-        .expect("activity shortcut explains its prerequisite");
-        assert!(guided.model.mailbox_modal().is_none());
-        assert_eq!(
-            guided.model.transient_help(),
-            Some("select a message; activity updates cannot be replied to, archived, or restored")
-        );
-        assert_eq!(redraw_count(&guided.effects), 1);
-    }
+    let guided = update(
+        activity.model.clone(),
+        UiEvent::Input(UiInput::Character('r')),
+    )
+    .expect("activity reply explains its prerequisite");
+    assert!(guided.model.mailbox_modal().is_none());
+    assert_eq!(
+        guided.model.transient_help(),
+        Some("select a message; activity updates cannot be replied to")
+    );
 
     let message =
         update(activity.model, UiEvent::Input(UiInput::Character('k'))).expect("select message");
@@ -3324,45 +3321,19 @@ fn activity_never_becomes_a_reply_or_state_action_target() {
         open_draft_effect(&reply.effects).1,
         UiMailboxDraftTarget::Reply { message_id } if *message_id == [1; 32]
     ));
-    let confirm = update(message.model, UiEvent::Input(UiInput::Character('a')))
-        .expect("archive requires confirmation");
-    assert!(matches!(
-        confirm.model.mailbox_modal(),
-        Some(UiMailboxModal::Confirm { action: UiMailboxAction::Archive { target_message } })
-            if *target_message == [1; 32]
-    ));
-    let cancelled =
-        update(confirm.model, UiEvent::Input(UiInput::Escape)).expect("cancel confirmation");
-    assert!(cancelled.model.mailbox_modal().is_none());
-    assert!(
-        !cancelled
-            .effects
-            .iter()
-            .any(|effect| matches!(effect, UiEffect::SubmitMailboxCommand { .. }))
-    );
 }
 
 #[test]
-fn summary_state_shortcuts_explain_that_an_exact_message_must_be_selected() {
+fn message_level_archive_and_restore_shortcuts_are_inert() {
     let loaded = loaded_model(snapshot(1, &["thread-a"]));
 
     for shortcut in ['a', 'u'] {
         let attempted = update(loaded.clone(), UiEvent::Input(UiInput::Character(shortcut)))
-            .expect("summary state shortcut provides guidance");
+            .expect("removed shortcut is inert");
         assert!(attempted.model.last_failure().is_none());
-        assert_eq!(
-            attempted.model.transient_help(),
-            Some(
-                "open the conversation with Enter, then select a message to reply, archive, or restore"
-            )
-        );
-        assert_eq!(redraw_count(&attempted.effects), 1);
+        assert!(attempted.model.transient_help().is_none());
+        assert!(attempted.effects.is_empty());
         assert!(attempted.model.mailbox_modal().is_none());
-
-        let dismissed = update(attempted.model, UiEvent::Input(UiInput::NextItem))
-            .expect("the next input dismisses transient guidance");
-        assert!(dismissed.model.transient_help().is_none());
-        assert_eq!(redraw_count(&dismissed.effects), 1);
     }
 }
 
@@ -4556,8 +4527,11 @@ fn direct_target_reselection_survives_authoritative_reorder() {
     let mut initial = snapshot(1, &["thread-a"]);
     initial.direct_targets = vec![direct_target("alpha", 1), direct_target("beta", 2)];
     let loaded = loaded_model(initial);
+    let launcher = update(loaded, UiEvent::Input(UiInput::Character('n'))).expect("new launcher");
+    let direct =
+        update(launcher.model, UiEvent::Input(UiInput::NextItem)).expect("select direct message");
     let selecting =
-        update(loaded, UiEvent::Input(UiInput::Character('d'))).expect("open target selector");
+        update(direct.model, UiEvent::Input(UiInput::Activate)).expect("open target selector");
     let selected = update(selecting.model, UiEvent::Input(UiInput::NextItem)).expect("choose beta");
     let invalidated = update(selected.model, UiEvent::Invalidated { revision: 2 })
         .expect("reload while selecting");
@@ -4589,8 +4563,11 @@ fn direct_target_reselection_survives_authoritative_reorder() {
 #[test]
 fn empty_direct_recipient_selection_is_inert_and_cancelable() {
     let loaded = loaded_model(snapshot(1, &[]));
+    let launcher = update(loaded, UiEvent::Input(UiInput::Character('n'))).expect("new launcher");
+    let direct =
+        update(launcher.model, UiEvent::Input(UiInput::NextItem)).expect("select direct message");
     let opened =
-        update(loaded, UiEvent::Input(UiInput::Character('d'))).expect("open recipient chooser");
+        update(direct.model, UiEvent::Input(UiInput::Activate)).expect("open recipient chooser");
     assert!(matches!(
         opened.model.mailbox_modal(),
         Some(UiMailboxModal::SelectDirect { targets, selected: None }) if targets.is_empty()
@@ -4610,11 +4587,15 @@ fn empty_direct_recipient_selection_is_inert_and_cancelable() {
 }
 
 #[test]
-fn direct_archive_and_restore_emit_only_their_typed_commands() {
+fn new_launcher_owns_direct_message_and_d_archives_the_conversation() {
     let mut source = snapshot(1, &["thread-a"]);
     source.direct_targets = vec![direct_target("builder", 5)];
     let loaded = loaded_model(source);
-    let selecting = update(loaded, UiEvent::Input(UiInput::Character('d'))).expect("direct");
+    let launcher = update(loaded, UiEvent::Input(UiInput::Character('n'))).expect("new launcher");
+    let direct_choice =
+        update(launcher.model, UiEvent::Input(UiInput::NextItem)).expect("select direct message");
+    let selecting = update(direct_choice.model, UiEvent::Input(UiInput::Activate))
+        .expect("open direct target picker");
     let opening = update(selecting.model, UiEvent::Input(UiInput::Activate)).expect("target");
     let (open_id, target) = open_draft_effect(&opening.effects);
     let draft = UiMailboxDraft {
@@ -4646,35 +4627,61 @@ fn direct_archive_and_restore_emit_only_their_typed_commands() {
             && *recipient_mailbox == [15; 32]
     )));
 
-    let open_message = opened_conversation(vec![actionable_entry("open", [8; 32])]);
-    let archive_confirm =
-        update(open_message, UiEvent::Input(UiInput::Character('a'))).expect("archive confirm");
+    let mut archive_source = snapshot(1, &["thread-a"]);
+    archive_source.inbox_rows[0].conversation_target = Some(UiConversationTarget::Thread {
+        counterparty_installation: [5; 32],
+        counterparty_mailbox: [15; 32],
+        thread_id: [8; 32],
+    });
+    let archive_confirm = update(
+        loaded_model(archive_source),
+        UiEvent::Input(UiInput::Character('d')),
+    )
+    .expect("archive confirm");
     let archive =
         update(archive_confirm.model, UiEvent::Input(UiInput::Activate)).expect("archive submit");
     assert!(archive.effects.iter().any(|effect| matches!(
         effect,
         UiEffect::SubmitMailboxCommand {
             draft: None,
-            action: UiMailboxAction::Archive { target_message },
+            action: UiMailboxAction::ArchiveConversation {
+                conversation: UiConversationTarget::Thread { thread_id, .. }
+            },
             ..
-        } if *target_message == [8; 32]
+        } if *thread_id == [8; 32]
     )));
+}
 
-    let mut archived = actionable_entry("archived", [9; 32]);
-    archived.message_state = Some(UiMessageState::Archived);
-    let archived_message = opened_conversation(vec![archived]);
-    let restore_confirm =
-        update(archived_message, UiEvent::Input(UiInput::Character('u'))).expect("restore confirm");
-    let restore =
-        update(restore_confirm.model, UiEvent::Input(UiInput::Activate)).expect("restore submit");
-    assert!(restore.effects.iter().any(|effect| matches!(
-        effect,
-        UiEffect::SubmitMailboxCommand {
-            draft: None,
-            action: UiMailboxAction::Restore { target_message },
-            ..
-        } if *target_message == [9; 32]
-    )));
+#[test]
+fn entering_an_unbound_inbox_agent_joins_project_setup_with_that_agent_selected() {
+    let preferred = project_agent(7, [9; 32]);
+    let other = project_agent(3, [9; 32]);
+    let mut source = projects_snapshot(1, vec![project(5, "release", "/release")]);
+    source.agents = vec![other.clone(), preferred.clone()];
+    source.agent_rows = vec![UiRow {
+        id: agent_row_id(7),
+        title: "agent-7".to_owned(),
+        detail: "unassigned".to_owned(),
+        state: UiRowState::Open,
+        kind: UiRowKind::Agent,
+        conversation_target: None,
+    }];
+    source.inbox_rows = source.agent_rows.clone();
+
+    let choosing_project = update(loaded_model(source), UiEvent::Input(UiInput::Activate))
+        .expect("agent row opens project choice");
+    assert!(matches!(
+        choosing_project.model.new_modal(),
+        Some(UiNewModal::ChooseProject { selected: Some(project_id), .. })
+            if *project_id == [5; 32]
+    ));
+    let choosing_agent = update(choosing_project.model, UiEvent::Input(UiInput::Activate))
+        .expect("project choice joins shared agent step");
+    assert!(matches!(
+        choosing_agent.model.new_modal(),
+        Some(UiNewModal::ChooseAgent { selected: Some(agent_id), .. })
+            if *agent_id == preferred.agent_id
+    ));
 }
 
 #[test]

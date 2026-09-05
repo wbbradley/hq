@@ -1028,52 +1028,70 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
     assert_eq!(snapshot.projects[0].pending_inputs[0].thread_id, [23; 32]);
     assert_eq!(snapshot.projects[0].pending_inputs[0].sequence, 2);
     assert_eq!(snapshot.sent_rows.len(), 1);
-    assert_eq!(snapshot.archived_rows.len(), 1);
-    assert_eq!(snapshot.archived_rows[0].detail, "Can we ship?");
+    assert!(snapshot.archived_rows.is_empty());
 }
 
 #[test]
 fn authoritative_snapshot_preserves_project_thread_conversation_identity() {
     let source = AuthoritativeSnapshotDto::new(
         1,
-        vec![SnapshotItem::Conversation {
-            key: ConversationKeyDto::ProjectThread {
-                project: Id32::new([0x31; 32]),
-                thread: Id32::new([0x42; 32]),
+        vec![
+            SnapshotItem::Conversation {
+                key: ConversationKeyDto::ProjectThread {
+                    project: Id32::new([0x31; 32]),
+                    thread: Id32::new([0x42; 32]),
+                },
+                context: ConversationContextDto::Project {
+                    project: Id32::new([0x31; 32]),
+                    name: Some("release".to_owned()),
+                    participant: Some(ConversationParticipantDto {
+                        agent: Some(Id32::new([0x21; 32])),
+                        installation: Some(Id32::new([0x22; 32])),
+                        mailbox: Some(Id32::new([0x23; 32])),
+                        name: Some("alice".to_owned()),
+                    }),
+                },
+                local_human: MailboxAddressDto {
+                    installation_id: Id32::new([0x24; 32]),
+                    mailbox_id: Id32::new([0x25; 32]),
+                },
+                root_message: Some(Id32::new([0x54; 32])),
+                preview: Some("Let's have a conversation.".to_owned()),
+                latest_fact: Some(Id32::new([0x53; 32])),
+                archived: false,
+                presentation_rank: Some(7),
+                open_messages: 1,
+                archived_messages: 0,
+                sent_messages: 1,
             },
-            context: ConversationContextDto::Project {
-                project: Id32::new([0x31; 32]),
-                name: Some("release".to_owned()),
-                participant: Some(ConversationParticipantDto {
-                    agent: Some(Id32::new([0x21; 32])),
-                    installation: Some(Id32::new([0x22; 32])),
-                    mailbox: Some(Id32::new([0x23; 32])),
-                    name: Some("alice".to_owned()),
-                }),
+            SnapshotItem::Agent {
+                agent_id: Id32::new([0x21; 32]),
+                claims: vec![Id32::new([0x26; 32])],
+                names: vec!["alice".to_owned()],
+                mailboxes: vec![MailboxAddressDto {
+                    installation_id: Id32::new([0x22; 32]),
+                    mailbox_id: Id32::new([0x23; 32]),
+                }],
+                retirements: Vec::new(),
+                lifecycle: "active".to_owned(),
+                runnable: true,
             },
-            local_human: MailboxAddressDto {
-                installation_id: Id32::new([0x24; 32]),
-                mailbox_id: Id32::new([0x25; 32]),
-            },
-            root_message: Some(Id32::new([0x54; 32])),
-            preview: Some("Let's have a conversation.".to_owned()),
-            latest_fact: Some(Id32::new([0x53; 32])),
-            archived: false,
-            presentation_rank: Some(7),
-            open_messages: 1,
-            archived_messages: 0,
-            sent_messages: 1,
-        }],
+        ],
     )
     .expect("authoritative snapshot");
 
     let snapshot = tui_snapshot([0x64; 32], &source);
     assert_eq!(snapshot.inbox_rows.len(), 1);
-    assert_eq!(
-        snapshot.inbox_rows[0].id,
-        format!("project:{}:{}", "31".repeat(32), "42".repeat(32))
-    );
+    assert_eq!(snapshot.inbox_rows[0].id, "21".repeat(32));
     assert_eq!(snapshot.inbox_rows[0].title, "alice");
+    assert!(matches!(
+        snapshot.inbox_rows[0].conversation_target,
+        Some(hq_tui::UiConversationTarget::Project {
+            project_id,
+            thread_id,
+            ..
+        }) if project_id == [0x31; 32] && thread_id == [0x42; 32]
+    ));
     assert_eq!(
         snapshot.inbox_rows[0].detail,
         "release · Let's have a conversation."
@@ -1131,6 +1149,32 @@ fn authoritative_snapshot_maps_a_new_agent_as_unassigned() {
     assert_eq!(snapshot.agent_rows.len(), 1);
     assert_eq!(snapshot.agent_rows[0].detail, "unassigned");
     assert_eq!(snapshot.agent_rows[0].state, hq_tui::UiRowState::Open);
+}
+
+#[test]
+fn authoritative_inbox_keeps_more_than_ten_agents_reachable_without_name_merging() {
+    let items = (1_u8..=12)
+        .map(|byte| agent_snapshot_item(byte, "same name", "active", false, false))
+        .collect();
+    let source = AuthoritativeSnapshotDto::new(1, items).expect("agent roster snapshot");
+
+    let snapshot = tui_snapshot([99; 32], &source);
+    assert_eq!(snapshot.inbox_rows.len(), 12);
+    assert_eq!(
+        snapshot
+            .inbox_rows
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        12
+    );
+    assert!(
+        snapshot
+            .inbox_rows
+            .iter()
+            .all(|row| row.kind == hq_tui::UiRowKind::Agent)
+    );
 }
 
 #[test]

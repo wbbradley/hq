@@ -28,7 +28,7 @@ The installed commands currently include `help`, `version`, `agents`, `identity`
 `agent list|show|create|current|select|rename|retire`, and
 `harness start|resume|stop`, the complete `project` catalog/resource/creation/assignment/lifecycle
 tree, the agent-side
-`ask|send|wait|poll`, human-side `get|list|answer|cancel|archive|restore`, `mailboxes`, and
+`ask|send|wait|poll`, human-side `get|list|answer|cancel`, `mailboxes`, and
 `daemon run|status|readiness|stop|restart`. `daemon run` is the
 internal foreground ownership role used by
 autostart and service managers. `daemon status` never starts a process; `readiness` may start one
@@ -37,16 +37,17 @@ The foreground role closes every non-standard inherited descriptor before runtim
 autostart caller never remains coupled to the long-lived daemon by an unrelated pipe or socket.
 These commands never inspect terminal state or prompt.
 
-Human `answer`, `archive`, and `restore` submit through the ordinary retry-safe mailbox-command
-endpoint. The node, not the CLI snapshot, resolves the current question root, target fact, state
-frontier, and local human authority inside the canonical transaction. This preserves exact replay
+Human `answer` submits through the ordinary retry-safe mailbox-command endpoint. The node, not the
+CLI snapshot, resolves the current question root and local human authority inside the canonical
+transaction. This preserves exact replay
 after response loss and prevents a stale client from supplying obsolete causal facts. `cancel`
 retains its separate question-owner cancellation planner. The same endpoint also supports direct
 agent messages and self-notes for the interactive client, while durable draft autosave/load/delete
 remain local operational state rather than canonical facts.
 
-The installed `hq tui` uses that same endpoint for `r` reply, `d` direct message, `n` self-note,
-and confirmed `a` archive / `u` restore actions. Its local draft editor autosaves after bounded
+The installed `hq tui` uses that same endpoint for `r` reply and whole-conversation archive.
+Direct messages and personal notes live under the `n` New launcher, while `d` stops agent work and
+archives the selected conversation. Its local draft editor autosaves after bounded
 input, saves the latest text before close or submit, retains stale targets for recovery, and keeps
 modal/focus/selection state across authoritative reload, reconnect, and resize. The TUI never
 recomputes CLI or node authority. Installed pseudoterminal coverage submits a self-note, verifies it

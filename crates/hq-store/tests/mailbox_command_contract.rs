@@ -7,7 +7,8 @@ use std::{collections::BTreeSet, sync::Arc};
 use hq_application::{
     ControlMailbox, LocalFactInputs, MailboxCommandAction, MailboxCommandRequest,
     MailboxDraftSaveOutcome, MailboxDraftSaveRequest, MailboxDraftTarget,
-    MessageAuthoringAuthority, MutationAttempt, MutationOutcome, NewMessageRequest, plan_question,
+    MessageAuthoringAuthority, MutationAttempt, MutationOutcome, NewMessageRequest, QueryDomain,
+    plan_question,
 };
 use hq_domain::{
     AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, CommandDigest, CommandId,
@@ -183,6 +184,45 @@ fn direct_and_reply_targets_are_resolved_from_transaction_state() {
         .expect("direct command resolves");
     assert!(
         matches!(direct, MutationAttempt::Completed(receipt) if receipt.outcome() == &MutationOutcome::Committed)
+    );
+    let conversation = gateway
+        .authoritative_snapshot()
+        .expect("conversation snapshot loads")
+        .conversations()
+        .iter()
+        .find(|conversation| {
+            matches!(
+                conversation.context,
+                hq_application::ConversationContext::Direct { .. }
+            )
+        })
+        .expect("direct conversation is indexed")
+        .clone();
+    let archive = gateway
+        .control_mailbox(MailboxCommandRequest {
+            command_id: CommandId::from_bytes([0xc6; 32]),
+            request_digest: CommandDigest::from_bytes([0xc7; 32]),
+            draft_id: None,
+            action: MailboxCommandAction::ArchiveConversation {
+                conversation: conversation.key,
+            },
+            content: None,
+            authored_at: Timestamp::from_unix_millis(4),
+            auxiliary_randomness: [0xc8; 32],
+        })
+        .expect("whole-conversation archive commits");
+    assert!(matches!(
+        archive,
+        MutationAttempt::Completed(receipt)
+            if receipt.outcome() == &MutationOutcome::Committed
+    ));
+    assert!(
+        gateway
+            .authoritative_snapshot()
+            .expect("archived snapshot loads")
+            .conversations()
+            .iter()
+            .any(|candidate| candidate.archived)
     );
 
     let root_id = FactId::from_bytes(verified_fact().verified_event().event_id());

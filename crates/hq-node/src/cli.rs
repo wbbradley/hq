@@ -1030,16 +1030,6 @@ pub enum HumanMessageCommand {
         /// Stable root public message identity.
         message_id: hq_domain::MessageId,
     },
-    /// Archive one exact message.
-    Archive {
-        /// Stable public message identity.
-        message_id: hq_domain::MessageId,
-    },
-    /// Restore one exact archived message.
-    Restore {
-        /// Stable public message identity.
-        message_id: hq_domain::MessageId,
-    },
 }
 
 /// Passive message presentation used by both human and machine renderers.
@@ -1627,7 +1617,7 @@ impl fmt::Display for CliError {
         match self {
             Self::Arguments => formatter.write_str(
                 "usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] \
-                 <help|version|tui|agents|agent|harness|project|ask|send|wait|poll|get|list|answer|cancel|archive|restore|mailboxes|identity|config|human|peer|mailbox|relay|daemon>",
+                 <help|version|tui|agents|agent|harness|project|ask|send|wait|poll|get|list|answer|cancel|mailboxes|identity|config|human|peer|mailbox|relay|daemon>",
             ),
             Self::TerminalRequired => {
                 formatter.write_str("the TUI requires terminal input and output")
@@ -5405,36 +5395,6 @@ fn run_human_message(
             submit_message_plan(&mut client, plan)?;
             Ok(human_message_result(
                 "cancel",
-                human,
-                Some(*message_id),
-                Vec::new(),
-                &snapshot,
-            ))
-        }
-        HumanMessageCommand::Archive { message_id }
-        | HumanMessageCommand::Restore { message_id } => {
-            let target = exact_message(all, *message_id)?;
-            if target.incomplete {
-                return Err(CliError::MessagingState);
-            }
-            let (operation, command) = if matches!(action, HumanMessageCommand::Archive { .. }) {
-                (
-                    "archive",
-                    MailboxCommandActionDto::Archive {
-                        target_message: Id32::new(*message_id.as_bytes()),
-                    },
-                )
-            } else {
-                (
-                    "restore",
-                    MailboxCommandActionDto::Restore {
-                        target_message: Id32::new(*message_id.as_bytes()),
-                    },
-                )
-            };
-            submit_mailbox_command(&mut client, command, None)?;
-            Ok(human_message_result(
-                operation,
                 human,
                 Some(*message_id),
                 Vec::new(),
@@ -11747,13 +11707,16 @@ mod tests {
                 ..
             }
         ));
-        for action in ["answer", "cancel", "archive", "restore"] {
+        for action in ["answer", "cancel"] {
             assert!(matches!(
                 parse_cli([OsString::from(action), OsString::from(&id)])
                     .expect("human action parses")
                     .command,
                 CliCommand::HumanMessage { .. }
             ));
+        }
+        for removed in ["archive", "restore"] {
+            assert!(parse_cli([OsString::from(removed), OsString::from(&id)]).is_err());
         }
     }
 
@@ -12039,8 +12002,6 @@ mod tests {
             "list",
             "answer",
             "cancel",
-            "archive",
-            "restore",
             "mailboxes",
             "identity",
             "config",

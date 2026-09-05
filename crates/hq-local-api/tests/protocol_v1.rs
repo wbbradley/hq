@@ -505,6 +505,34 @@ fn mailbox_command_digest_binds_content_target_and_draft_source() {
         project_root.request_digest,
         project_continuation.request_digest
     );
+
+    let archive = MailboxCommandRequestDto::new(
+        Id32::new([0x21; 32]),
+        None,
+        MailboxCommandActionDto::ArchiveConversation {
+            conversation: ConversationKeyDto::ProjectThread {
+                project: Id32::new([0x25; 32]),
+                thread: Id32::new([0x26; 32]),
+            },
+        },
+        None,
+        7,
+        [0x23; 32],
+    );
+    let other_archive = MailboxCommandRequestDto::new(
+        Id32::new([0x21; 32]),
+        None,
+        MailboxCommandActionDto::ArchiveConversation {
+            conversation: ConversationKeyDto::ProjectThread {
+                project: Id32::new([0x25; 32]),
+                thread: Id32::new([0x27; 32]),
+            },
+        },
+        None,
+        7,
+        [0x23; 32],
+    );
+    assert_ne!(archive.request_digest, other_archive.request_digest);
 }
 
 #[test]

@@ -335,9 +335,9 @@ questions and permissions whose scope is not one conversation remain true modal 
 - Focus uses a full-width semantic selection surface. It does not add `›`, indentation, a border,
   or any other glyph that reflows body text. The no-color theme uses reverse plus weight; explicit
   author and footer text preserve meaning without style inspection.
-- Reply/archive/restore controls appear in the footer only when valid for the exact selected
-  message. The normal `open` state is not repeated in the transcript. Activity exposes technical
-  inspection but never reply or reversible-state actions.
+- Reply appears only for an exact replyable message. Whole-conversation archive appears as `d` in
+  Inbox and is independent of transcript message selection. Activity exposes technical inspection
+  but never reply or archive authority.
 - Rendering measures each item's actual wrapped display-cell height at the current pane width,
   including preserved paragraph breaks, author line, status line when present, and selection
   inspector. The viewport starts at a stable entry identity plus row offset and paints every

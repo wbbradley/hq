@@ -451,12 +451,6 @@ pub enum MailboxCommandActionDto {
         thread_id: Option<Id32>,
         message_id: Id32,
     },
-    Archive {
-        target_message: Id32,
-    },
-    Restore {
-        target_message: Id32,
-    },
     ArchiveConversation {
         conversation: ConversationKeyDto,
     },
@@ -528,6 +522,9 @@ impl MailboxCommandRequestDto {
         if message_action != (self.draft_id.is_some() ^ self.content.is_some()) {
             return Err(ValueError::InvalidCanonicalPlan);
         }
+        if let MailboxCommandActionDto::ArchiveConversation { conversation } = &self.action {
+            validate_conversation_key(conversation)?;
+        }
         Ok(())
     }
 }
@@ -558,20 +555,12 @@ fn mailbox_command_digest(request: &MailboxCommandRequestDto) -> CommandDigest {
             hasher.update([3]);
             hasher.update(message_id.bytes());
         }
-        MailboxCommandActionDto::Archive { target_message } => {
-            hasher.update([4]);
-            hasher.update(target_message.bytes());
-        }
-        MailboxCommandActionDto::Restore { target_message } => {
-            hasher.update([5]);
-            hasher.update(target_message.bytes());
-        }
         MailboxCommandActionDto::Project {
             project_id,
             thread_id,
             message_id,
         } => {
-            hasher.update([6]);
+            hasher.update([4]);
             hasher.update(project_id.bytes());
             match thread_id {
                 Some(thread_id) => {
@@ -583,7 +572,7 @@ fn mailbox_command_digest(request: &MailboxCommandRequestDto) -> CommandDigest {
             hasher.update(message_id.bytes());
         }
         MailboxCommandActionDto::ArchiveConversation { conversation } => {
-            hasher.update([7]);
+            hasher.update([5]);
             put_conversation_key(&mut hasher, conversation);
         }
     }
