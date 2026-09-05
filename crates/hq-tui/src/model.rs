@@ -4820,6 +4820,9 @@ fn materialized_view_observed(
         .conversation
         .as_ref()
         .is_some_and(|page| agent_turn_just_finished(model.conversation.as_ref(), page));
+    let focused_conversation_row = (model.focus == UiFocus::Conversation)
+        .then(|| model.selected_row.clone())
+        .flatten();
 
     model.pending_snapshot = None;
     model.retry_timer = None;
@@ -4835,6 +4838,9 @@ fn materialized_view_observed(
         model.desired_conversation = None;
         model.requested_conversation = Some(row_id.clone());
         let _ = model.install_retained_conversation(&row_id);
+        if focused_conversation_row.as_deref() == Some(&row_id) {
+            model.focus = UiFocus::Conversation;
+        }
     } else if model
         .snapshot
         .as_ref()

@@ -1765,21 +1765,36 @@ fn run_in_pty_with_trace(
                 .iter()
                 .filter(|position| **position < marker_positions[2])
                 .count();
-            let mut keys = Vec::new();
-            keys.extend(std::iter::repeat_n(b'j', oversized_rank));
-            keys.push(b'\r');
+            let keys = std::iter::repeat_n(b'j', oversized_rank).collect::<Vec<_>>();
             oversized_to_before_keys = navigation_keys(oversized_rank, before_rank);
             before_to_after_keys = navigation_keys(before_rank, after_rank);
             master
                 .write_all(&keys)
-                .expect("oversized conversation entry keys write");
-            master.flush().expect("oversized entry keys flush");
+                .expect("oversized conversation selection keys write");
+            master.flush().expect("oversized selection keys flush");
             content_sent = true;
             oversized_phase = 1;
             completion_offset = Some(bytes.len());
         }
+        if matches!(
+            interaction,
+            PtyInteraction::ScrollOversizedConversation { .. }
+        ) && oversized_phase == 1
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows("↑".len())
+                    .any(|window| window == "↑".as_bytes())
+            })
+        {
+            master
+                .write_all(b"\r")
+                .expect("oversized conversation open key writes");
+            master.flush().expect("oversized open key flushes");
+            oversized_phase = 2;
+            completion_offset = Some(bytes.len());
+        }
         if let PtyInteraction::ScrollOversizedConversation { last, .. } = interaction
-            && oversized_phase == 1
+            && oversized_phase == 2
             && completion_offset.is_some_and(|offset| {
                 let output = &bytes[offset..];
                 text_without_csi_sequences(output).contains("archive conversation")
@@ -1790,11 +1805,11 @@ fn run_in_pty_with_trace(
         {
             master.write_all(b"\x1b[H").expect("Home key writes");
             master.flush().expect("Home key flushes");
-            oversized_phase = 2;
+            oversized_phase = 3;
             completion_offset = Some(bytes.len());
         }
         if let PtyInteraction::ScrollOversizedConversation { first, .. } = interaction
-            && oversized_phase == 2
+            && oversized_phase == 3
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
                     .windows(first.len())
@@ -1806,11 +1821,11 @@ fn run_in_pty_with_trace(
             }
             master.flush().expect("row-down keys flush");
             managed_action_sent = true;
-            oversized_phase = 3;
+            oversized_phase = 4;
             completion_offset = Some(bytes.len());
         }
         if let PtyInteraction::ScrollOversizedConversation { middle, .. } = interaction
-            && oversized_phase == 3
+            && oversized_phase == 4
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
                     .windows(middle.len())
@@ -1822,11 +1837,11 @@ fn run_in_pty_with_trace(
             }
             master.flush().expect("remaining row-down keys flush");
             managed_provider_sent = true;
-            oversized_phase = 4;
+            oversized_phase = 5;
             completion_offset = Some(bytes.len());
         }
         if let PtyInteraction::ScrollOversizedConversation { last, .. } = interaction
-            && oversized_phase == 4
+            && oversized_phase == 5
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
                     .windows(last.len())
@@ -1836,13 +1851,13 @@ fn run_in_pty_with_trace(
             master.write_all(b"\x1b[D").expect("Inbox back key writes");
             master.flush().expect("Inbox back key flushes");
             resource_commit_sent = true;
-            oversized_phase = 5;
+            oversized_phase = 6;
             completion_offset = Some(bytes.len());
         }
         if matches!(
             interaction,
             PtyInteraction::ScrollOversizedConversation { .. }
-        ) && oversized_phase == 5
+        ) && oversized_phase == 6
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
                     .windows(b"Enter".len())
@@ -1856,11 +1871,11 @@ fn run_in_pty_with_trace(
                 .expect("open preceding conversation entry");
             master.flush().expect("preceding entry keys flush");
             interaction_answer_sent = true;
-            oversized_phase = 6;
+            oversized_phase = 7;
             completion_offset = Some(bytes.len());
         }
         if let PtyInteraction::ScrollOversizedConversation { before, .. } = interaction
-            && oversized_phase == 6
+            && oversized_phase == 7
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
                     .windows(before.len())
@@ -1871,13 +1886,13 @@ fn run_in_pty_with_trace(
                 .write_all(b"\x1b[D")
                 .expect("second Inbox back key writes");
             master.flush().expect("second Inbox back key flushes");
-            oversized_phase = 7;
+            oversized_phase = 8;
             completion_offset = Some(bytes.len());
         }
         if matches!(
             interaction,
             PtyInteraction::ScrollOversizedConversation { .. }
-        ) && oversized_phase == 7
+        ) && oversized_phase == 8
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
                     .windows(b"Enter".len())
@@ -1890,11 +1905,11 @@ fn run_in_pty_with_trace(
                 .write_all(&keys)
                 .expect("open following conversation entry");
             master.flush().expect("following entry keys flush");
-            oversized_phase = 8;
+            oversized_phase = 9;
             completion_offset = Some(bytes.len());
         }
         if let PtyInteraction::ScrollOversizedConversation { after, .. } = interaction
-            && oversized_phase == 8
+            && oversized_phase == 9
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 let after_probe = after.split_once('-').map_or(after, |(prefix, _)| prefix);
@@ -1906,7 +1921,7 @@ fn run_in_pty_with_trace(
             master.write_all(&[0x03]).expect("Ctrl-C writes");
             master.flush().expect("Ctrl-C flushes");
             exit_sent = true;
-            oversized_phase = 9;
+            oversized_phase = 10;
         }
         if let PtyInteraction::ReplyToProjectConversation { name, initial, .. } = interaction
             && initial_key_sent

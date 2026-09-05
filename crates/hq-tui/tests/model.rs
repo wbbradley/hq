@@ -2979,6 +2979,45 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
 }
 
 #[test]
+fn opening_a_selected_preview_while_it_loads_preserves_conversation_focus() {
+    let loaded = materialized_transition(
+        snapshot(1, &["thread-a", "thread-b"]),
+        UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
+            row_id: "thread-a".to_owned(),
+            entries: vec![entry("first-message", false)],
+            next_cursor: None,
+        },
+    );
+    let moved = update(loaded.model, UiEvent::Input(UiInput::NextItem)).expect("move selection");
+    let opening = update(moved.model, UiEvent::Input(UiInput::Activate))
+        .expect("open the selected loading preview");
+    assert_eq!(opening.model.focus(), UiFocus::Conversation);
+
+    let opened = update(
+        opening.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(1, &["thread-a", "thread-b"]),
+                conversation: Some(UiConversationPage {
+                    title: "Bob".to_owned(),
+                    context: None,
+                    row_id: "thread-b".to_owned(),
+                    entries: vec![entry("right-message", false)],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("selected preview arrives");
+
+    assert_eq!(opened.model.selected_row(), Some("thread-b"));
+    assert_eq!(opened.model.focus(), UiFocus::Conversation);
+    assert_eq!(opened.model.conversation_anchor(), Some("right-message"));
+}
+
+#[test]
 fn inbox_selection_immediately_reaches_a_not_yet_started_agent_conversation() {
     let mut source = snapshot(1, &["thread-a"]);
     source.inbox_rows.push(UiRow {
