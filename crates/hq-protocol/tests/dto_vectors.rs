@@ -33,14 +33,14 @@ fn published_contents_advance_to_owned_verified_dtos_and_reencode_exactly() {
 #[test]
 fn every_normative_family_body_has_one_executable_exact_dto() {
     for (family, body) in valid_bodies() {
-        let namespace = if family <= 45 {
+        let namespace = if family <= 45 || family == 49 {
             ProtocolNamespace::Canonical
         } else {
             ProtocolNamespace::Control
         };
         let scope = match family {
             7..=9 => format!(r#"["peer","{A}","{B}"]"#),
-            12..=14 | 27..=45 => format!(r#"["account","{C}"]"#),
+            12..=14 | 27..=45 | 49 => format!(r#"["account","{C}"]"#),
             46..=48 => format!(r#"["control","{C}","{A}"]"#),
             _ => format!(r#"["local","{A}"]"#),
         };

@@ -9,7 +9,7 @@ Version: `1` in an independent version space
 Catalog families: `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `10`, `11`, `12`, `13`,
 `14`, `15`, `16`, `17`, `18`, `19`, `20`, `21`, `22`, `23`, `24`, `25`, `26`, `27`, `28`,
 `29`, `30`, `31`, `32`, `33`, `34`, `35`, `36`, `37`, `38`, `39`, `40`, `41`, `42`, `43`,
-`44`, and `45`.
+`44`, `45`, and `49`.
 
 This specification defines the only canonical fact v1 byte representation. It does not reuse a
 Rust domain struct, the frozen Go schema, a relay envelope, or a database representation. Exact
@@ -53,7 +53,7 @@ The event content is one UTF-8 JSON object with exactly these members in this or
 
 - `p` is exactly `"hq/canonical"`.
 - `v` is exactly integer `1`.
-- `f` is one registered integer from 1 through 45 and selects exactly one body DTO.
+- `f` is one registered canonical family (`1` through `45`, or `49`) and selects exactly one body DTO.
 - `author` is the author's installation ID as fixed-width hex.
 - `time` is a nonnegative signed-64-bit Unix millisecond integer.
 - `scope`, `parents`, and `auth` are the signed routing and causal envelope below.
@@ -196,11 +196,11 @@ the protocol layer owns all representations.
 
 After outer cryptographic verification, dispatch examines only bounded top-level prefix fields.
 
-- Exact discriminator `hq/canonical`, version 1, and family 1 through 45 continue to strict DTO
+- Exact discriminator `hq/canonical`, version 1, and a registered canonical family continue to strict DTO
   parsing and canonical-byte equality.
 - A syntactically inspectable `hq/canonical` record with another nonnegative integer version is a
   verified unsupported version.
-- Version 1 with a positive integer family outside 1 through 45 is a verified unsupported family.
+- Version 1 with a positive integer outside the registered canonical families is a verified unsupported family.
 - Another well-formed discriminator is a verified unsupported protocol when permitted by local
   retention policy.
 - A non-integer/negative discriminator field, a canonical/control family-range mismatch, or an

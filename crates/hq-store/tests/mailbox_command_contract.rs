@@ -152,11 +152,11 @@ fn stale_target_rejection_preserves_recoverable_text() {
 }
 
 #[test]
-fn direct_and_reply_targets_are_resolved_from_transaction_state() {
+fn direct_target_and_conversation_archive_are_resolved_from_transaction_state() {
     let directory = TestDirectory::new();
     let store = open_store(&directory.database_path());
     seed_human_authority(&store);
-    let (agent, agent_fact) = seed_agent_mailbox(&store);
+    let (agent, _) = seed_agent_mailbox(&store);
     let gateway = StoreGateway::new(&store, authority_policy(), Arc::new(signer(1)));
 
     let direct_draft = OperationId::from_bytes([0xc1; 32]);
@@ -224,6 +224,15 @@ fn direct_and_reply_targets_are_resolved_from_transaction_state() {
             .iter()
             .any(|candidate| candidate.archived)
     );
+}
+
+#[test]
+fn reply_target_is_resolved_from_transaction_state() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    seed_human_authority(&store);
+    let (agent, agent_fact) = seed_agent_mailbox(&store);
+    let gateway = StoreGateway::new(&store, authority_policy(), Arc::new(signer(1)));
 
     let root_id = FactId::from_bytes(verified_fact().verified_event().event_id());
     let human = MailboxAddress::new(

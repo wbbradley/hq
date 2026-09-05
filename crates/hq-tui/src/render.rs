@@ -913,13 +913,19 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
                 actions.push(Line::from(
                     "↑/↓ or j/k — select message · Enter — details · Esc — close conversation",
                 ));
-                actions.push(Line::from(
-                    "r — reply · d — archive conversation · PgDn — load more",
-                ));
+                actions.push(Line::from(if model.section() == UiSection::Inbox {
+                    "r — reply · d — archive conversation · PgDn — load more"
+                } else {
+                    "r — reply · PgDn — load more"
+                }));
             } else if model.selected_row_data().is_some() {
                 actions.push(Line::from("Enter — open selected conversation"));
             }
-            actions.push(Line::from("n — New… · d — archive conversation"));
+            actions.push(Line::from(if model.section() == UiSection::Inbox {
+                "n — New… · d — archive conversation"
+            } else {
+                "n — New…"
+            }));
         }
         UiSection::Agents => {
             actions.push(Line::from(if model.selected_row_data().is_some() {
@@ -4828,7 +4834,11 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     } else if model.selected_row_data().is_none() {
         " n New… · ? help · q quit".to_owned()
     } else if model.viewport().width >= WIDE_WIDTH {
-        " Enter open · n New… · d archive · ? help · q quit".to_owned()
+        if model.section() == UiSection::Inbox {
+            " Enter open · n New… · d archive conversation · ? help · q quit".to_owned()
+        } else {
+            " Enter open · n New… · ? help · q quit".to_owned()
+        }
     } else {
         " Enter open · ? help · q quit".to_owned()
     };

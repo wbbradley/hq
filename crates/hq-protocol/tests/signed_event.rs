@@ -192,7 +192,7 @@ fn verified_prefix_dispatch_is_closed_and_keeps_unsupported_disjoint() {
             Ok(UnsupportedReason::Version),
         ),
         (
-            CANONICAL_CONTENT.replacen("\"f\":1", "\"f\":49", 1),
+            CANONICAL_CONTENT.replacen("\"f\":1", "\"f\":50", 1),
             Ok(UnsupportedReason::Family),
         ),
         (

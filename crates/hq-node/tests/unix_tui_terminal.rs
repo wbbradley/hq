@@ -352,7 +352,7 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
         "installed inbox",
         "https://example.test/preview",
         "You",
-        "a archive",
+        "d archive conversation",
         "Enter open",
     ] {
         assert!(
@@ -486,7 +486,7 @@ fn installed_markdown_content_is_inert_and_resource_free() {
         "CODE_MARKER",
         "nested",
         "continuation",
-        "a archive",
+        "d archive conversation",
     ] {
         assert!(
             rendered.contains(phrase),
@@ -1413,7 +1413,7 @@ fn run_in_pty_with_trace(
     let mut managed_provider_sent = false;
     let mut resource_commit_sent = false;
     let mut interaction_answer_sent = false;
-    let mut approval_navigation_phase = 0_u8;
+    let mut approval_focus_requested = false;
     let mut exit_sent = false;
     let mut oversized_to_before_keys = Vec::new();
     let mut before_to_after_keys = Vec::new();
@@ -1576,8 +1576,8 @@ fn run_in_pty_with_trace(
             && !content_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"No conversations need your attention.".len())
-                    .any(|window| window == b"No conversations need your attention.")
+                    .windows(b"No agents are available yet.".len())
+                    .any(|window| window == b"No agents are available yet.")
             })
         {
             let restarted = hq_output(state_root, &["daemon", "restart"]);
@@ -1681,9 +1681,7 @@ fn run_in_pty_with_trace(
             && content_sent
             && !managed_action_sent
             && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows("a archive".len())
-                    .any(|window| window == "a archive".as_bytes())
+                text_without_csi_sequences(&bytes[offset..]).contains("archive conversation")
             })
         {
             let keys = if visit_bounds {
@@ -1783,11 +1781,9 @@ fn run_in_pty_with_trace(
         if let PtyInteraction::ScrollOversizedConversation { last, .. } = interaction
             && oversized_phase == 1
             && completion_offset.is_some_and(|offset| {
-                let rendered = &bytes[offset..];
-                rendered
-                    .windows("a archive".len())
-                    .any(|window| window == "a archive".as_bytes())
-                    && rendered
+                let output = &bytes[offset..];
+                text_without_csi_sequences(output).contains("archive conversation")
+                    && output
                         .windows(last.len())
                         .any(|window| window == last.as_bytes())
             })
@@ -1938,8 +1934,8 @@ fn run_in_pty_with_trace(
             && !managed_action_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows("← Inbox".len())
-                    .any(|window| window == "← Inbox".as_bytes())
+                    .windows("d archive conversation".len())
+                    .any(|window| window == "d archive conversation".as_bytes())
             })
         {
             master.write_all(b"r").expect("project reply key writes");
@@ -2136,45 +2132,32 @@ fn run_in_pty_with_trace(
         if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
             && resource_commit_sent
             && !interaction_answer_sent
-            && approval_navigation_phase == 0
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Command for approval-agent".len())
-                    .any(|window| window == b"Command for approval-agent")
-            })
+            && !approval_focus_requested
+            && {
+                let rendered = text_without_csi_sequences(&bytes);
+                let prompt = "Command for approval-agent";
+                rendered.find(prompt).is_some_and(|position| {
+                    rendered[position + prompt.len()..].contains("approval-agent")
+                })
+            }
         {
-            master.write_all(b"4").expect("Agents shortcut writes");
-            master.flush().expect("approval choice flushes");
-            approval_navigation_phase = 1;
+            master.write_all(b"\t").expect("approval focus write");
+            master.flush().expect("approval focus flushes");
+            approval_focus_requested = true;
             completion_offset = Some(bytes.len());
         }
         if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
-            && approval_navigation_phase == 1
+            && approval_focus_requested
+            && !interaction_answer_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Agents".len())
-                    .any(|window| window == b"Agents")
+                    .windows("› Allow once".len())
+                    .any(|window| window == "› Allow once".as_bytes())
             })
         {
-            master.write_all(b"1").expect("Inbox shortcut writes");
-            master.flush().expect("Inbox shortcut flushes");
-            approval_navigation_phase = 2;
-            completion_offset = Some(bytes.len());
-        }
-        if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
-            && approval_navigation_phase == 2
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Inbox".len())
-                    .any(|window| window == b"Inbox")
-            })
-        {
-            master
-                .write_all(b"\t\r")
-                .expect("approval focus and choice write");
+            master.write_all(b"\r").expect("approval choice write");
             master.flush().expect("approval choice flushes");
             interaction_answer_sent = true;
-            approval_navigation_phase = 3;
             completion_offset = Some(bytes.len());
         }
         if let PtyInteraction::CreateGuidedWorktreeProject {
@@ -2444,7 +2427,7 @@ fn run_in_pty_with_trace(
         }
         if let PtyInteraction::CreateGuidedProjectWork { name, approval, .. } = interaction
             && resource_commit_sent
-            && (!approval || interaction_answer_sent)
+            && !approval
             && !exit_sent
             && Instant::now() >= next_state_probe_at
             && completion_offset.is_some_and(|offset| {

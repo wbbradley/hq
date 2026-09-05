@@ -110,14 +110,14 @@ fn verified_record_with_references(
     parents: &str,
     authorities: &str,
 ) -> hq_protocol::VerifiedSupportedRecord {
-    let namespace = if family <= 45 {
+    let namespace = if family <= 45 || family == 49 {
         ProtocolNamespace::Canonical
     } else {
         ProtocolNamespace::Control
     };
     let scope = match family {
         7..=9 => format!(r#"["peer","{A}","{B}"]"#),
-        12..=14 | 27..=45 => format!(r#"["account","{C}"]"#),
+        12..=14 | 27..=45 | 49 => format!(r#"["account","{C}"]"#),
         46..=48 => format!(r#"["control","{C}","{A}"]"#),
         _ => format!(r#"["local","{A}"]"#),
     };

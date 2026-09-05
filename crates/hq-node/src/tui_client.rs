@@ -1,7 +1,7 @@
 //! Reconnecting local-client mapping and the single TUI effect executor.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io::{Read, Write},
     os::{fd::AsFd, unix::net::UnixStream},
     sync::{
@@ -343,6 +343,7 @@ struct TuiPresentationData {
     project_names: BTreeMap<[u8; 32], String>,
     project_threads: Vec<ProjectThreadPresentation>,
     running_operations: BTreeMap<String, Vec<RunningOperationPresentation>>,
+    active_conversation_row: Option<String>,
     mailbox_drafts: Vec<MailboxDraftDto>,
 }
 
@@ -375,6 +376,7 @@ impl Default for TuiPresentationData {
             project_names: BTreeMap::new(),
             project_threads: Vec::new(),
             running_operations: BTreeMap::new(),
+            active_conversation_row: None,
             mailbox_drafts: Vec::new(),
         }
     }
@@ -414,63 +416,7 @@ impl SharedTuiPresentation {
                 _ => None,
             })
             .collect();
-        let active_agents = snapshot
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                SnapshotItem::Agent {
-                    agent_id,
-                    lifecycle,
-                    retirements,
-                    ..
-                } if lifecycle == "active" && retirements.is_empty() => Some(agent_id.bytes()),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let mut current = BTreeMap::<[u8; 32], (u64, String, ConversationKeyDto)>::new();
-        for item in &snapshot.items {
-            let SnapshotItem::Conversation {
-                key,
-                context,
-                archived: false,
-                presentation_rank,
-                ..
-            } = item
-            else {
-                continue;
-            };
-            let Some(agent_id) =
-                conversation_agent_id(context).filter(|agent_id| active_agents.contains(agent_id))
-            else {
-                continue;
-            };
-            let candidate = (
-                presentation_rank.unwrap_or(0),
-                conversation_identity(key.clone()),
-                key.clone(),
-            );
-            if current
-                .get(&agent_id)
-                .is_none_or(|existing| (candidate.0, &candidate.1) > (existing.0, &existing.1))
-            {
-                current.insert(agent_id, candidate);
-            }
-        }
-        for (agent_id, (_, _, key)) in current {
-            let conversation_id = conversation_identity(key.clone());
-            let Some(context) = presentation
-                .conversation_presentations
-                .get(&conversation_id)
-                .cloned()
-            else {
-                continue;
-            };
-            let row_id = full_id(Id32::new(agent_id));
-            presentation.conversation_keys.insert(row_id.clone(), key);
-            presentation
-                .conversation_presentations
-                .insert(row_id, context);
-        }
+        install_current_agent_conversation_aliases(snapshot, &mut presentation);
         presentation.agent_names = snapshot
             .items
             .iter()
@@ -630,6 +576,7 @@ impl SharedTuiPresentation {
             })
             .collect();
         if let Ok(mut presentation) = self.inner.lock() {
+            presentation.active_conversation_row = Some(row_id.clone());
             presentation.running_operations.insert(row_id, operations);
         }
     }
@@ -640,45 +587,11 @@ impl SharedTuiPresentation {
                 reason: UiInteractionTargetIssue::Missing,
             };
         };
-        let mut candidates = BTreeSet::new();
-        if let Some(project_id) = interaction.project_id.map(Id32::bytes) {
-            for thread in &presentation.project_threads {
-                if thread.project_id == project_id
-                    && thread.agent_id == interaction.agent_id.bytes()
-                    && thread.provider == interaction.provider
-                    && thread.session == interaction.session
-                {
-                    let row_id = conversation_identity(ConversationKeyDto::ProjectThread {
-                        project: Id32::new(thread.project_id),
-                        thread: Id32::new(thread.thread_id),
-                    });
-                    if presentation.conversation_keys.contains_key(&row_id) {
-                        candidates.insert(row_id);
-                    }
-                }
-            }
+        let candidates = if let Some(project_id) = interaction.project_id.map(Id32::bytes) {
+            project_interaction_candidates(&presentation, interaction, project_id)
         } else {
-            for (row_id, key) in &presentation.conversation_keys {
-                let ConversationKeyDto::ProviderSession {
-                    provider, session, ..
-                } = key
-                else {
-                    continue;
-                };
-                let Some(context) = presentation.conversation_presentations.get(row_id) else {
-                    continue;
-                };
-                let ConversationContextDto::Direct { participant } = &context.context else {
-                    continue;
-                };
-                if provider == &interaction.provider
-                    && session == &interaction.session
-                    && participant.agent.map(Id32::bytes) == Some(interaction.agent_id.bytes())
-                {
-                    candidates.insert(row_id.clone());
-                }
-            }
-        }
+            direct_interaction_candidates(&presentation, interaction)
+        };
         let mut candidates = candidates.into_iter();
         let Some(row_id) = candidates.next() else {
             return UiInteractionTarget::Unresolved {
@@ -690,7 +603,10 @@ impl SharedTuiPresentation {
                 reason: UiInteractionTargetIssue::Ambiguous,
             };
         }
-        if let Some(operations) = presentation.running_operations.get(&row_id)
+        if let Some(operations) = presentation
+            .running_operations
+            .get(&row_id)
+            .filter(|operations| !operations.is_empty())
             && !operations.iter().any(|operation| {
                 operation.provider == interaction.provider
                     && operation.session == interaction.session
@@ -702,6 +618,175 @@ impl SharedTuiPresentation {
             };
         }
         UiInteractionTarget::Conversation { row_id }
+    }
+}
+
+fn project_interaction_candidates(
+    presentation: &TuiPresentationData,
+    interaction: &PendingInteractionDto,
+    project_id: [u8; 32],
+) -> BTreeSet<String> {
+    let mut candidates = presentation
+        .project_threads
+        .iter()
+        .filter(|thread| {
+            thread.project_id == project_id
+                && thread.agent_id == interaction.agent_id.bytes()
+                && thread.provider == interaction.provider
+                && thread.session == interaction.session
+        })
+        .filter_map(|thread| {
+            preferred_conversation_row(
+                presentation,
+                &ConversationKeyDto::ProjectThread {
+                    project: Id32::new(thread.project_id),
+                    thread: Id32::new(thread.thread_id),
+                },
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if !candidates.is_empty() {
+        return candidates;
+    }
+    let keys = presentation
+        .conversation_keys
+        .iter()
+        .filter_map(|(row_id, key)| {
+            let context = presentation.conversation_presentations.get(row_id)?;
+            let ConversationContextDto::Project {
+                project,
+                participant,
+                ..
+            } = &context.context
+            else {
+                return None;
+            };
+            (project.bytes() == project_id
+                && participant.as_ref().is_none_or(|participant| {
+                    participant.agent.is_none()
+                        || participant.agent.map(Id32::bytes) == Some(interaction.agent_id.bytes())
+                }))
+            .then(|| key.clone())
+        });
+    candidates.extend(preferred_rows_for_unique_keys(presentation, keys));
+    candidates
+}
+
+fn direct_interaction_candidates(
+    presentation: &TuiPresentationData,
+    interaction: &PendingInteractionDto,
+) -> BTreeSet<String> {
+    let keys = presentation
+        .conversation_keys
+        .iter()
+        .filter_map(|(row_id, key)| {
+            let ConversationKeyDto::ProviderSession {
+                provider, session, ..
+            } = key
+            else {
+                return None;
+            };
+            let context = presentation.conversation_presentations.get(row_id)?;
+            let ConversationContextDto::Direct { participant } = &context.context else {
+                return None;
+            };
+            (provider == &interaction.provider
+                && session == &interaction.session
+                && participant.agent.map(Id32::bytes) == Some(interaction.agent_id.bytes()))
+            .then(|| key.clone())
+        });
+    preferred_rows_for_unique_keys(presentation, keys)
+}
+
+fn preferred_rows_for_unique_keys(
+    presentation: &TuiPresentationData,
+    keys: impl Iterator<Item = ConversationKeyDto>,
+) -> BTreeSet<String> {
+    keys.map(|key| (conversation_identity(key.clone()), key))
+        .collect::<BTreeMap<_, _>>()
+        .values()
+        .filter_map(|key| preferred_conversation_row(presentation, key))
+        .collect()
+}
+
+fn preferred_conversation_row(
+    presentation: &TuiPresentationData,
+    key: &ConversationKeyDto,
+) -> Option<String> {
+    if let Some(active) = &presentation.active_conversation_row
+        && presentation.conversation_keys.get(active) == Some(key)
+    {
+        return Some(active.clone());
+    }
+    presentation
+        .conversation_keys
+        .iter()
+        .filter(|(_, candidate)| *candidate == key)
+        .map(|(row_id, _)| row_id)
+        .min_by_key(|row_id| (row_id.contains(':'), *row_id))
+        .cloned()
+}
+
+fn install_current_agent_conversation_aliases(
+    snapshot: &AuthoritativeSnapshotDto,
+    presentation: &mut TuiPresentationData,
+) {
+    let active_agents = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Agent {
+                agent_id,
+                lifecycle,
+                retirements,
+                ..
+            } if lifecycle == "active" && retirements.is_empty() => Some(agent_id.bytes()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut current = BTreeMap::<[u8; 32], (u64, String, ConversationKeyDto)>::new();
+    for item in &snapshot.items {
+        let SnapshotItem::Conversation {
+            key,
+            context,
+            archived: false,
+            presentation_rank,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        let Some(agent_id) = conversation_agent_id(snapshot, key, context)
+            .filter(|agent_id| active_agents.contains(agent_id))
+        else {
+            continue;
+        };
+        let candidate = (
+            presentation_rank.unwrap_or(0),
+            conversation_identity(key.clone()),
+            key.clone(),
+        );
+        if current
+            .get(&agent_id)
+            .is_none_or(|existing| (candidate.0, &candidate.1) > (existing.0, &existing.1))
+        {
+            current.insert(agent_id, candidate);
+        }
+    }
+    for (agent_id, (_, _, key)) in current {
+        let conversation_id = conversation_identity(key.clone());
+        let Some(context) = presentation
+            .conversation_presentations
+            .get(&conversation_id)
+            .cloned()
+        else {
+            continue;
+        };
+        let row_id = full_id(Id32::new(agent_id));
+        presentation.conversation_keys.insert(row_id.clone(), key);
+        presentation
+            .conversation_presentations
+            .insert(row_id, context);
     }
 }
 
@@ -745,6 +830,7 @@ impl LocalTuiClient {
                     project_names: BTreeMap::new(),
                     project_threads: Vec::new(),
                     running_operations: BTreeMap::new(),
+                    active_conversation_row: None,
                     mailbox_drafts: Vec::new(),
                 })),
             },
@@ -913,32 +999,62 @@ impl LocalTuiObserver {
         observations: &mut Vec<TuiClientObservation>,
     ) {
         let local_installation = *self.client.installation_id().as_bytes();
-        let next_rows = view
-            .snapshot
-            .items
-            .iter()
-            .filter_map(|item| snapshot_row(UiSection::Inbox, item).map(|row| row.id))
-            .collect::<Vec<_>>();
         self.presentation.replace_snapshot(&view.snapshot);
+        let mut materialized = match tui_materialized_conversation_view(
+            local_installation,
+            view,
+            &self.presentation,
+            self.desired_row.as_deref(),
+        ) {
+            Ok(view) => view,
+            Err(failure) => {
+                observations.push(TuiClientObservation::Failure {
+                    generation: connection_generation(state),
+                    failure,
+                });
+                return;
+            }
+        };
+        let next_rows = materialized
+            .snapshot
+            .inbox_rows
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
         if let Some(desired) = self.desired_row.clone()
             && !next_rows.iter().any(|row_id| row_id == &desired)
             && !next_rows.is_empty()
         {
-            self.select_successor_after_removal(&desired, next_rows, state, observations);
-            self.remap_pending_interactions(observations);
-            return;
+            let selected_key = materialized
+                .conversation
+                .as_ref()
+                .and_then(|conversation| self.presentation.conversation(&conversation.row_id))
+                .map(|(key, _)| key);
+            let alias = selected_key.and_then(|selected_key| {
+                next_rows.iter().find(|row_id| {
+                    self.presentation
+                        .conversation(row_id)
+                        .is_some_and(|(key, _)| key == selected_key)
+                })
+            });
+            if let Some(alias) = alias {
+                if let Some(conversation) = &mut materialized.conversation {
+                    conversation.row_id.clone_from(alias);
+                }
+                self.desired_row = Some(alias.clone());
+            } else {
+                self.select_successor_after_removal(&desired, next_rows, state, observations);
+                self.remap_pending_interactions(observations);
+                return;
+            }
         }
         if next_rows.is_empty() {
             self.desired_row = None;
         }
         self.prior_inbox_rows = next_rows;
-        match tui_materialized_conversation_view(local_installation, view, &self.presentation) {
-            Ok(view) => observations.push(TuiClientObservation::MaterializedView(Box::new(view))),
-            Err(failure) => observations.push(TuiClientObservation::Failure {
-                generation: connection_generation(state),
-                failure,
-            }),
-        }
+        observations.push(TuiClientObservation::MaterializedView(Box::new(
+            materialized,
+        )));
         self.remap_pending_interactions(observations);
     }
 
@@ -1075,8 +1191,12 @@ fn activate_initial_tui_view(
                 .map_err(|error| client_failure(&error))?
             {
                 Some(ClientEvent::AuthoritativeConversationView(view)) => {
-                    let materialized =
-                        tui_materialized_conversation_view(local_installation, view, presentation)?;
+                    let materialized = tui_materialized_conversation_view(
+                        local_installation,
+                        view,
+                        presentation,
+                        desired_row.as_deref(),
+                    )?;
                     if materialized
                         .conversation
                         .as_ref()
@@ -2620,6 +2740,7 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             | UiEvent::ConversationViewportObserved { .. }
             | UiEvent::TimerElapsed { .. }
             | UiEvent::MaterializedViewObserved { .. }
+            | UiEvent::MaterializedViewReconciled { .. }
             | UiEvent::InteractionsObserved { .. }
             | UiEvent::Invalidated { .. }
             | UiEvent::ConnectionObserved { .. }
@@ -2904,8 +3025,25 @@ fn observation_worker<O: TuiObservationPort>(
         if cancellation.load(Ordering::SeqCst) {
             break;
         }
-        for observation in observations {
+        let mut observations = VecDeque::from(observations);
+        while let Some(observation) = observations.pop_front() {
             let event = match observation {
+                TuiClientObservation::MaterializedView(view)
+                    if matches!(
+                        observations.front(),
+                        Some(TuiClientObservation::Interactions(_))
+                    ) =>
+                {
+                    let Some(TuiClientObservation::Interactions(interactions)) =
+                        observations.pop_front()
+                    else {
+                        unreachable!("matched the interaction observation at the queue front")
+                    };
+                    UiEvent::MaterializedViewReconciled {
+                        view: *view,
+                        interactions,
+                    }
+                }
                 TuiClientObservation::MaterializedView(view) => {
                     UiEvent::MaterializedViewObserved { view: *view }
                 }
@@ -2976,6 +3114,7 @@ fn tui_materialized_conversation_view(
     local_installation: [u8; 32],
     view: AuthoritativeConversationViewDto,
     presentation: &SharedTuiPresentation,
+    desired_row: Option<&str>,
 ) -> Result<UiMaterializedConversationView, UiFailure> {
     presentation.replace_snapshot(&view.snapshot);
     let providers = presentation.providers();
@@ -2991,7 +3130,23 @@ fn tui_materialized_conversation_view(
     let conversation = view
         .conversation
         .map(|selected| {
-            let row_id = conversation_identity(selected.key.clone());
+            let row_id = desired_row
+                .filter(|row_id| {
+                    snapshot.inbox_rows.iter().any(|row| row.id == *row_id)
+                        && presentation
+                            .conversation(row_id)
+                            .is_some_and(|(key, _)| key == selected.key)
+                })
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    snapshot.inbox_rows.iter().find_map(|row| {
+                        presentation
+                            .conversation(&row.id)
+                            .is_some_and(|(key, _)| key == selected.key)
+                            .then(|| row.id.clone())
+                    })
+                })
+                .unwrap_or_else(|| conversation_identity(selected.key.clone()));
             presentation.replace_running_operations(row_id.clone(), &selected.page.items);
             let (_, context) = presentation
                 .conversation(&row_id)
@@ -3163,13 +3318,15 @@ fn agent_inbox_rows(
                         archived: false,
                         presentation_rank,
                         ..
-                    } if conversation_agent_id(context) == Some(agent.agent_id) => Some((
-                        presentation_rank.unwrap_or(0),
-                        conversation_identity(key.clone()),
-                    )),
+                    } if conversation_agent_id(snapshot, key, context) == Some(agent.agent_id) => {
+                        Some((
+                            presentation_rank.unwrap_or(0),
+                            conversation_identity(key.clone()),
+                        ))
+                    }
                     _ => None,
                 })
-                .max_by(|left, right| left.cmp(right));
+                .max_by(Ord::cmp);
             if let Some((rank, row_id)) = recent
                 && let Some(row) = conversation_rows.iter().find(|row| row.id == row_id)
             {
@@ -3240,17 +3397,40 @@ fn agent_inbox_rows(
     result
 }
 
-fn conversation_agent_id(context: &ConversationContextDto) -> Option<[u8; 32]> {
+fn conversation_agent_id(
+    snapshot: &AuthoritativeSnapshotDto,
+    key: &ConversationKeyDto,
+    context: &ConversationContextDto,
+) -> Option<[u8; 32]> {
     match context {
         ConversationContextDto::Direct { participant }
         | ConversationContextDto::Project {
             participant: Some(participant),
             ..
         } => participant.agent.map(Id32::bytes),
-        ConversationContextDto::Personal
-        | ConversationContextDto::Project {
+        ConversationContextDto::Project {
             participant: None, ..
-        } => None,
+        } => {
+            let ConversationKeyDto::ProjectThread { project, thread } = key else {
+                return None;
+            };
+            snapshot.items.iter().find_map(|item| match item {
+                SnapshotItem::ProjectThread {
+                    project_id,
+                    agent_id,
+                    thread_id,
+                    ..
+                } if project_id == project && thread_id == thread => Some(agent_id.bytes()),
+                SnapshotItem::ProjectAssignment {
+                    project_id,
+                    agent_id,
+                    cardinality_conflicted: false,
+                    ..
+                } if project_id == project => Some(agent_id.bytes()),
+                _ => None,
+            })
+        }
+        ConversationContextDto::Personal => None,
     }
 }
 
@@ -4862,6 +5042,7 @@ mod tests {
         {
             let mut data = presentation.inner.lock().expect("presentation lock");
             data.conversation_keys.insert(row_id.clone(), key);
+            data.running_operations.insert(row_id.clone(), Vec::new());
             data.project_threads.push(ProjectThreadPresentation {
                 project_id: project.bytes(),
                 agent_id: [1; 32],

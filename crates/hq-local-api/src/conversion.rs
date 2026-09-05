@@ -989,7 +989,7 @@ pub fn mailbox_command_request_to_v1(request: &MailboxCommandRequest) -> Mailbox
             },
             MailboxCommandAction::ArchiveConversation { ref conversation } => {
                 MailboxCommandActionDto::ArchiveConversation {
-                    conversation: conversation_key_to_v1(&conversation),
+                    conversation: conversation_key_to_v1(conversation),
                 }
             }
         },

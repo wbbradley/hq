@@ -2086,6 +2086,7 @@ pub struct UiFailure {
 enum UiTransientHelp {
     OpenConversationMessage,
     SelectConversationMessage,
+    NoConversationToArchive,
 }
 
 impl UiTransientHelp {
@@ -2096,6 +2097,9 @@ impl UiTransientHelp {
             }
             Self::SelectConversationMessage => {
                 "select a message; activity updates cannot be replied to"
+            }
+            Self::NoConversationToArchive => {
+                "this row has no conversation yet; press Enter to start one"
             }
         }
     }
@@ -2263,6 +2267,13 @@ pub enum UiEvent {
     MaterializedViewObserved {
         /// Coherent passive view from one serialized daemon revision.
         view: UiMaterializedConversationView,
+    },
+    /// One materialized view and the interactions remapped to its conversation identities.
+    MaterializedViewReconciled {
+        /// Coherent passive view from one serialized daemon revision.
+        view: UiMaterializedConversationView,
+        /// Source-owner ordered pending requests resolved against that view.
+        interactions: Vec<UiInteraction>,
     },
     /// The complete bounded pending-interaction queue changed.
     InteractionsObserved {
@@ -4644,6 +4655,10 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         UiEvent::MaterializedViewObserved { view } => {
             materialized_view_observed(&mut model, view, &mut effects)?;
         }
+        UiEvent::MaterializedViewReconciled { view, interactions } => {
+            materialized_view_observed(&mut model, view, &mut effects)?;
+            interactions_observed(&mut model, interactions, &mut effects);
+        }
         UiEvent::InteractionsObserved { interactions } => {
             interactions_observed(&mut model, interactions, &mut effects);
         }
@@ -4780,6 +4795,11 @@ fn materialized_view_observed(
     if let Some(requested) = model.requested_conversation.as_deref()
         && selected_row.is_some()
         && selected_row != Some(requested)
+        && view
+            .snapshot
+            .inbox_rows
+            .iter()
+            .any(|row| row.id == requested && row.kind == UiRowKind::Conversation)
     {
         return Ok(());
     }
@@ -4922,7 +4942,14 @@ fn reconcile_command_approval_focus(model: &mut UiModel, prior_restore: Option<U
         if matches!(model.focus, UiFocus::Draft) {
             model.focus = UiFocus::Approval;
         }
-    } else if model.focus == UiFocus::Approval {
+    } else if model.focus == UiFocus::Approval
+        && !model.command_approvals.values().any(|state| {
+            matches!(
+                state.interaction.target,
+                UiInteractionTarget::Unresolved { .. }
+            )
+        })
+    {
         model.focus = if prior_restore == Some(UiFocus::Draft) && model.mailbox_draft.is_some() {
             UiFocus::Draft
         } else {
@@ -9668,7 +9695,7 @@ fn mailbox_shortcut(
             if model.current_command_approval().is_some() {
                 return Ok(false);
             }
-            if model.section == UiSection::Agents {
+            if matches!(model.section, UiSection::Agents | UiSection::Archived) {
                 return Ok(false);
             }
             if let Some(setup) = model.selected_setup().cloned() {
@@ -9707,7 +9734,8 @@ fn mailbox_shortcut(
                 return Ok(false);
             }
             let Some(conversation) = selected_conversation_target(model) else {
-                return Ok(false);
+                model.transient_help = Some(UiTransientHelp::NoConversationToArchive);
+                return Ok(true);
             };
             model.mailbox_modal = Some(UiMailboxModal::Confirm {
                 action: UiMailboxAction::ArchiveConversation { conversation },
@@ -9881,6 +9909,22 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
             return Ok(false);
         };
         model.preferred_new_agent = Some(agent_id);
+        if let Some(project_id) = selected_agent(model).and_then(|agent| match &agent.status {
+            UiAgentStatus::Assigned(assignment) => Some(assignment.project_id),
+            UiAgentStatus::Unassigned
+            | UiAgentStatus::NeedsAttention { .. }
+            | UiAgentStatus::Retired => None,
+        }) && let Some(project) = model.snapshot.as_ref().and_then(|snapshot| {
+            snapshot
+                .projects
+                .iter()
+                .find(|project| project.project_id == project_id)
+                .cloned()
+        }) {
+            model.new_workflow = Some(UiNewWorkflow::ChooseAgent { project_id });
+            open_guided_project(model, project, effects)?;
+            return Ok(true);
+        }
         let picker = guided_project_picker(model);
         let selected = match &picker {
             UiNewModal::ChooseProject { selected, .. } => *selected,
@@ -10560,6 +10604,7 @@ fn mailbox_command_committed(
         }),
         message_id,
     ) {
+        model.pending_project_conversation = Some((submission.project_id, message_id));
         model.new_workflow = Some(UiNewWorkflow::InputSnapshot {
             submission,
             message_id,

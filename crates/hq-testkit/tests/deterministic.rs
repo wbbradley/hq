@@ -73,8 +73,8 @@ fn remote_control_payloads_cannot_enter_canonical_scope() -> Result<(), Box<dyn 
     let mut values = DeterministicValues::new(91);
     let payload = FactBuilder::all_catalog_payloads(&mut values)?
         .into_iter()
-        .last()
-        .ok_or("catalog fixture is empty")?;
+        .find(|payload| payload.kind() == FactKind::RemoteProjectCommandOutcome)
+        .ok_or("remote-command outcome fixture is missing")?;
     let installation_id = InstallationId::from_bytes([1; 32]);
     let author = InstallationAddress::new(installation_id, SigningPublicKey::from_bytes([2; 32]));
 
@@ -92,7 +92,7 @@ fn remote_control_payloads_cannot_enter_canonical_scope() -> Result<(), Box<dyn 
 
     let target_home = match &payload {
         SemanticPayload::RemoteProjectCommandOutcome { .. } => installation_id,
-        _ => return Err("last catalog fixture is not remote control".into()),
+        _ => return Err("selected catalog fixture is not remote control".into()),
     };
     let remote = FactBuilder::root(
         &mut values,

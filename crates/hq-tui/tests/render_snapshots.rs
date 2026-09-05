@@ -237,7 +237,7 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
         width: 104,
         height: 18,
     }));
-    assert!(summary.contains("Enter open · n New… · d archive · ? help · q quit"));
+    assert!(summary.contains("Enter open · n New… · d archive conversation · ? help · q quit"));
     assert!(!summary.contains("archive/restore"));
     assert!(!summary.contains("a/u state"));
 

@@ -10,11 +10,11 @@ receipts, and arrival metadata remain outside this type.
 
 ## Catalog coverage
 
-`FactKind::ALL` maps every family from `FCT-001` through `FCT-048` to its exact stable name,
+`FactKind::ALL` maps every family from `FCT-001` through `FCT-049` to its exact stable name,
 protocol class, and retention class. `SemanticPayload` has one correspondingly named variant per
 family. The test suite performs three complementary checks:
 
-- it compares the code catalog to all 48 expected IDs and names in stable order;
+- it compares the code catalog to all 49 expected IDs and names in stable order;
 - it extracts the table rows from `semantic-fact-catalog.md` and requires exact bidirectional
   equality; and
 - `hq-testkit` constructs every payload variant and requires their reported kinds to equal

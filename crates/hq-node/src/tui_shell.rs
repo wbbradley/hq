@@ -688,7 +688,8 @@ where
 
 fn trace_tui_event(trace: &BoundaryTrace, kind: BoundaryKind, event: &UiEvent) {
     match event {
-        UiEvent::InteractionsObserved { interactions } => {
+        UiEvent::InteractionsObserved { interactions }
+        | UiEvent::MaterializedViewReconciled { interactions, .. } => {
             for interaction in interactions {
                 trace.record(
                     kind,

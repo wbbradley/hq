@@ -13,16 +13,16 @@ use hq_tui::{
     UiConversationTarget, UiConversationViewportObservation, UiConversationViewportPosition,
     UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput,
     UiInteraction, UiInteractionChoice, UiInteractionKind, UiInteractionResponse,
-    UiInteractionTarget, UiMailboxAction, UiMailboxDraft, UiMailboxDraftPane, UiMailboxDraftTarget,
-    UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
-    UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiMessageTarget, UiModel,
-    UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject, UiProjectAction,
-    UiProjectAssignment, UiProjectConversationSetup, UiProjectCreationChoice,
-    UiProjectFolderAction, UiProjectFormField, UiProjectInteraction, UiProjectManagementAction,
-    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceCondition,
-    UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus, UiProjectThread,
-    UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
-    UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiInteractionTarget, UiInteractionTargetIssue, UiMailboxAction, UiMailboxDraft,
+    UiMailboxDraftPane, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
+    UiManagedSessionOutcome, UiManagedSessionResult, UiMaterializedConversationView,
+    UiMessageDelivery, UiMessageState, UiMessageTarget, UiModel, UiNewChoice, UiNewModal,
+    UiPendingProjectInput, UiProject, UiProjectAction, UiProjectAssignment,
+    UiProjectConversationSetup, UiProjectCreationChoice, UiProjectFolderAction, UiProjectFormField,
+    UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome, UiProjectResource,
+    UiProjectResourceCheck, UiProjectResourceCondition, UiProjectResourceConflict, UiProjectResult,
+    UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind,
+    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -2491,6 +2491,76 @@ fn simultaneous_command_approvals_follow_only_the_selected_conversation() {
 }
 
 #[test]
+fn approval_focus_survives_a_transient_unresolved_alias_remap() {
+    let opened = opened_conversation(vec![entry("activity-a", true)]);
+    let observed = update(
+        opened,
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("approval observed");
+    let focused =
+        update(observed.model, UiEvent::Input(UiInput::NextFocus)).expect("approval focused");
+    assert_eq!(focused.model.focus(), UiFocus::Approval);
+
+    let mut unresolved = command_approval(7, "thread-a");
+    unresolved.target = UiInteractionTarget::Unresolved {
+        reason: UiInteractionTargetIssue::Missing,
+    };
+    let remapping = update(
+        focused.model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![unresolved],
+        },
+    )
+    .expect("transient remap retained");
+    assert_eq!(remapping.model.focus(), UiFocus::Approval);
+
+    let resolved = update(
+        remapping.model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("alias remap resolves");
+    assert_eq!(resolved.model.focus(), UiFocus::Approval);
+    assert!(resolved.model.current_command_approval().is_some());
+}
+
+#[test]
+fn materialized_view_and_approval_alias_reconcile_atomically() {
+    let opened = opened_conversation(vec![entry("activity-a", true)]);
+    let observed = update(
+        opened,
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("approval observed");
+
+    let reconciled = update(
+        observed.model,
+        UiEvent::MaterializedViewReconciled {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["agent-id"]),
+                conversation: Some(UiConversationPage {
+                    title: "Alice".to_owned(),
+                    context: None,
+                    row_id: "agent-id".to_owned(),
+                    entries: vec![entry("activity-a", true)],
+                    next_cursor: None,
+                }),
+            },
+            interactions: vec![command_approval(7, "agent-id")],
+        },
+    )
+    .expect("view and approval alias reconcile together");
+    assert_eq!(reconciled.model.selected_row(), Some("agent-id"));
+    assert!(reconciled.model.current_command_approval().is_some());
+}
+
+#[test]
 fn a_command_approval_does_not_block_replies_in_another_conversation() {
     let loaded = materialized_transition(
         snapshot(1, &["thread-a", "thread-b"]),
@@ -2812,6 +2882,46 @@ fn materialized_views_install_list_and_detail_atomically_without_first_page_load
             .and_then(|conversation| conversation.entries.last())
             .map(|entry| entry.id.as_str()),
         Some("b-message")
+    );
+}
+
+#[test]
+fn materialized_view_accepts_a_stable_alias_when_the_prior_row_disappears() {
+    let loaded = materialized_transition(
+        snapshot(1, &["project-thread"]),
+        UiConversationPage {
+            title: "Builder".to_owned(),
+            context: None,
+            row_id: "project-thread".to_owned(),
+            entries: vec![entry("first-message", false)],
+            next_cursor: None,
+        },
+    );
+    let aliased = update(
+        loaded.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["agent-id"]),
+                conversation: Some(UiConversationPage {
+                    title: "Builder".to_owned(),
+                    context: None,
+                    row_id: "agent-id".to_owned(),
+                    entries: vec![entry("latest-message", false)],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("typed replacement alias applies");
+
+    assert_eq!(aliased.model.selected_row(), Some("agent-id"));
+    assert_eq!(
+        aliased
+            .model
+            .conversation()
+            .and_then(|conversation| conversation.entries.last())
+            .map(|entry| entry.id.as_str()),
+        Some("latest-message")
     );
 }
 
@@ -4668,7 +4778,14 @@ fn entering_an_unbound_inbox_agent_joins_project_setup_with_that_agent_selected(
     }];
     source.inbox_rows = source.agent_rows.clone();
 
-    let choosing_project = update(loaded_model(source), UiEvent::Input(UiInput::Activate))
+    let loaded = loaded_model(source);
+    let no_archive = update(loaded, UiEvent::Input(UiInput::Character('d')))
+        .expect("agent without conversation explains archive prerequisite");
+    assert_eq!(
+        no_archive.model.transient_help(),
+        Some("this row has no conversation yet; press Enter to start one")
+    );
+    let choosing_project = update(no_archive.model, UiEvent::Input(UiInput::Activate))
         .expect("agent row opens project choice");
     assert!(matches!(
         choosing_project.model.new_modal(),
@@ -4681,6 +4798,44 @@ fn entering_an_unbound_inbox_agent_joins_project_setup_with_that_agent_selected(
         choosing_agent.model.new_modal(),
         Some(UiNewModal::ChooseAgent { selected: Some(agent_id), .. })
             if *agent_id == preferred.agent_id
+    ));
+}
+
+#[test]
+fn entering_a_bound_inbox_agent_reuses_its_project_and_agent_setup_context() {
+    let mut preferred = project_agent(7, [9; 32]);
+    preferred.status = UiAgentStatus::Assigned(UiAgentProjectAssignment {
+        project_id: [5; 32],
+        project_name: "release".to_owned(),
+        assignment_id: [6; 32],
+        provider: "codex".to_owned(),
+        session: None,
+        phase: UiAgentAssignmentPhase::Ready,
+        blocked: None,
+        cardinality_conflicted: false,
+    });
+    let mut source = projects_snapshot(1, vec![project(5, "release", "/release")]);
+    source.agents = vec![preferred.clone(), project_agent(3, [9; 32])];
+    source.agent_rows = vec![UiRow {
+        id: agent_row_id(7),
+        title: "agent-7".to_owned(),
+        detail: "release · conversation not started".to_owned(),
+        state: UiRowState::Open,
+        kind: UiRowKind::Agent,
+        conversation_target: None,
+    }];
+    source.inbox_rows = source.agent_rows.clone();
+
+    let choosing_agent = update(loaded_model(source), UiEvent::Input(UiInput::Activate))
+        .expect("bound agent row joins its project's shared agent step");
+
+    assert!(matches!(
+        choosing_agent.model.new_modal(),
+        Some(UiNewModal::ChooseAgent {
+            project,
+            selected: Some(agent_id),
+            ..
+        }) if project.project_id == [5; 32] && *agent_id == preferred.agent_id
     ));
 }
 

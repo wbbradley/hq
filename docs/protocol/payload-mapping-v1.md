@@ -119,6 +119,7 @@ semantic catalog and reducer; the protocol accepts only role names applicable to
 | FCT-046 | 46 | RemoteProjectCommandRequested | hq/control | `{"command":hex,"digest":hex,"project":hex,"target_home":hex,"expected_head":hex,"operation":operation,"body":content}` | stable command/digest, project/home/head, exact operation and inert body; target home equals control scope |
 | FCT-047 | 47 | RemoteProjectCommandReceipt | hq/control | `{"command":hex,"digest":hex,"project":hex,"received_head":hex,"received_at":milliseconds}` | fields match cited request; received head is a canonical project head; author is scoped home |
 | FCT-048 | 48 | RemoteProjectCommandOutcome | hq/control | `{"command":hex,"digest":hex,"project":hex,"result":remote-result,"runtime":optional-runtime}` | command tuple matches request; result is committed head or rejected code plus optional external-state warning; author is scoped home |
+| FCT-049 | 49 | ConversationArchived | hq/canonical | `{"conversation":conversation-id}` | exact conversation identity; scope is installation-private for direct/personal conversations or account-addressed for project conversations |
 
 ## Remote result DTO
 
@@ -162,6 +163,7 @@ particular causal situation.
 | 45 | account | `previous-state`, `project-home`, `account-membership`, `dispatch`, `assignment`, `output-binding` |
 | 46 | control | `account-membership`, `active-human`, `project-home` |
 | 47–48 | control | `project-home`, `request`; matching `account-membership`/`active-human` may preserve requesting-account context |
+| 49 | local or account | respectively `local-installation` or `account-membership` |
 
 An allowed role is not evidence that the cited fact actually confers it. The reducer checks exact
 family, subject, ancestry, active frontier, and causal relation. Extra context parents need no role
@@ -169,8 +171,8 @@ and are allowed within the parent limit when their namespace is legal.
 
 ## Completeness and evolution
 
-The registry has exactly one row for every FCT catalog family. Canonical codes are the closed range
-1 through 45; control codes are the closed range 46 through 48. The ranges are disjoint even though
+The registry has exactly one row for every FCT catalog family. Canonical codes are 1 through 45 and
+49; control codes are the closed range 46 through 48. The sets are disjoint even though
 the top-level discriminator already distinguishes them. A new family requires a semantic catalog
 entry, owned DTO, mapping row, positive vector, adverse vector, and version-compatibility decision.
 Renaming a Rust field alone does not alter this document; changing a wire property, order, enum, or

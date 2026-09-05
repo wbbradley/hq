@@ -50,7 +50,7 @@ fn every_fact_family_has_one_mapping_in_the_correct_namespace() {
         }
     }
 
-    assert_eq!(numeric_ids, (1..=48).collect());
+    assert_eq!(numeric_ids, (1..=49).collect());
 }
 
 #[test]
@@ -63,6 +63,8 @@ fn protocol_ranges_are_disjoint_and_independently_versioned() {
         assert!(CONTROL.contains(&format!("`{id}`")));
         assert!(!CANONICAL.contains(&format!("| {id} |")));
     }
+    assert!(CANONICAL.contains("`49`"));
+    assert!(!CONTROL.contains("| 49 |"));
     assert!(CANONICAL.contains("hq/canonical"));
     assert!(CONTROL.contains("hq/control"));
     assert!(CANONICAL.contains("independent version space"));

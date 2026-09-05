@@ -36,7 +36,6 @@ use hq_local_api::{
 use hq_node::{
     LifecycleClient, LifecycleClientConfig, LocalNodeClient, LocalNodeClientConfig,
     LocalNodeEventClient, ProcessNodeLauncher, RuntimePaths, StateDirectoryOwner, StatePaths,
-    execute_cli_with_input,
 };
 
 use support::TestDirectory;
@@ -1994,8 +1993,7 @@ fn mailbox_commands_survive_restart_and_preserve_delivery_state() {
     assert_eq!(ask_record["data"]["messages"][0]["root_message"], question);
     let answer_message = ask_record["data"]["messages"][0]["message_id"]
         .as_str()
-        .expect("answer identity")
-        .to_owned();
+        .expect("answer identity");
 
     let polled = offline_output(
         &state_root,
@@ -2012,35 +2010,15 @@ fn mailbox_commands_survive_restart_and_preserve_delivery_state() {
     assert!(polled.stdout.is_empty());
     assert!(polled.stderr.is_empty());
 
-    let restored_answer = message_output(&state_root, &["restore", &answer_message]);
+    let restored_answer = message_output(&state_root, &["restore", answer_message]);
     assert!(
-        restored_answer.status.success(),
-        "answer restore stderr: {:?}",
-        restored_answer.stderr
+        !restored_answer.status.success(),
+        "individual messages cannot be restored"
     );
-    let wait_arguments = vec![
-        OsString::from("--output"),
-        OsString::from("json"),
-        OsString::from("--state-root"),
-        state_root.as_os_str().to_owned(),
-        OsString::from("wait"),
-        OsString::from("--provider"),
-        OsString::from(provider.as_str()),
-        OsString::from("--session"),
-        OsString::from(session.as_str()),
-        OsString::from(&question),
-    ];
-    let first_delivery = execute_cli_with_input(wait_arguments.clone(), &mut std::io::empty());
-    let second_delivery = execute_cli_with_input(wait_arguments, &mut std::io::empty());
-    assert_eq!(first_delivery.exit_code, 0);
-    assert_eq!(first_delivery.stdout, second_delivery.stdout);
-    assert_eq!(first_delivery.completion, second_delivery.completion);
-    assert!(first_delivery.stdout.contains(&answer_message));
-    let rearchived_answer = message_output(&state_root, &["archive", &answer_message]);
+    let rearchived_answer = message_output(&state_root, &["archive", answer_message]);
     assert!(
-        rearchived_answer.status.success(),
-        "answer archive stderr: {:?}",
-        rearchived_answer.stderr
+        !rearchived_answer.status.success(),
+        "individual messages cannot be archived"
     );
 
     let sent = offline_output(
@@ -2083,27 +2061,13 @@ fn mailbox_commands_survive_restart_and_preserve_delivery_state() {
 
     let archived = message_output(&state_root, &["archive", asynchronous]);
     assert!(
-        archived.status.success(),
-        "archive stderr: {:?}",
-        archived.stderr
+        !archived.status.success(),
+        "individual messages cannot be archived"
     );
-    let archived_list = message_output(&state_root, &["list", "--archived"]);
-    assert!(archived_list.status.success());
-    let archived_list: serde_json::Value =
-        serde_json::from_slice(&archived_list.stdout).expect("archived list JSON");
-    assert!(
-        archived_list["data"]["messages"]
-            .as_array()
-            .expect("archived messages")
-            .iter()
-            .any(|message| message["message_id"] == asynchronous)
-    );
-
     let restored = message_output(&state_root, &["restore", asynchronous]);
     assert!(
-        restored.status.success(),
-        "restore stderr: {:?}",
-        restored.stderr
+        !restored.status.success(),
+        "individual messages cannot be restored"
     );
     let open_list = message_output(&state_root, &["list"]);
     assert!(open_list.status.success());
