@@ -63,6 +63,25 @@ fn passive_inbox_surfaces_never_render_first_page_loading_text() {
 }
 
 #[test]
+fn unread_conversation_has_an_explicit_inbox_marker() {
+    let mut snapshot = ready_snapshot();
+    snapshot.inbox_rows[0].title = "Alice".to_owned();
+    snapshot.inbox_rows[0].state = UiRowState::Unread;
+    let rendered = render_text(&loaded_snapshot_model(
+        UiSize {
+            width: 104,
+            height: 18,
+        },
+        snapshot,
+    ));
+
+    assert!(
+        rendered.contains("● Alice"),
+        "unread marker missing:\n{rendered}"
+    );
+}
+
+#[test]
 fn command_approval_renders_inline_without_covering_the_workspace() {
     for size in [
         UiSize {

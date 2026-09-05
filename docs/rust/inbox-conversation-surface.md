@@ -328,7 +328,10 @@ questions and permissions whose scope is not one conversation remain true modal 
 ## Focus, selection, and scrolling
 
 - List selection and transcript focus are different. Moving through Inbox rows immediately updates
-  Conversation, but the transcript shows no focused-message surface until Conversation owns focus.
+  the selected row; a loadable transcript follows from the latest observation, while a conversation
+  that has not started immediately shows its setup state. Canonical activity arriving for another
+  row adds a `●` unread marker without moving selection. The marker clears when that row is viewed.
+  The transcript shows no focused-message surface until Conversation owns focus.
 - Enter or `l`/Right enters the transcript at its stable fact anchor. Up/Down moves the viewport by
   one visual row, `j`/`k` selects the next or previous entry and reveals its beginning, and Home/End
   reveals the selected entry's beginning or end. `h`/Left returns one visible level.

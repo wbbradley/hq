@@ -963,6 +963,7 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
 const fn row_state_technical_label(state: UiRowState) -> &'static str {
     match state {
         UiRowState::Open => "open",
+        UiRowState::Unread => "unread",
         UiRowState::Waiting => "waiting",
         UiRowState::Archived => "archived",
         UiRowState::Attention => "needs attention",
@@ -4720,6 +4721,8 @@ fn render_row<'row>(
     ) {
         let title_style = if selected {
             selected_style(theme, model.focus() == UiFocus::Content)
+        } else if row.state == UiRowState::Unread {
+            theme.style(UiThemeRole::RowAttention)
         } else {
             theme.style(UiThemeRole::Text)
         };
@@ -4728,8 +4731,13 @@ fn render_row<'row>(
         } else {
             theme.style(UiThemeRole::TextMuted)
         };
+        let title = if row.state == UiRowState::Unread {
+            format!("● {}", row.title)
+        } else {
+            row.title.clone()
+        };
         return [
-            Line::styled(padded_display_text(&row.title, width), title_style),
+            Line::styled(padded_display_text(&title, width), title_style),
             Line::styled(padded_display_text(&row.detail, width), detail_style),
         ];
     }
@@ -4986,6 +4994,7 @@ const fn row_state_label(section: UiSection, state: UiRowState) -> &'static str 
     match (section, state) {
         (UiSection::Sent, UiRowState::Waiting) => "sent",
         (_, UiRowState::Open) => "open",
+        (_, UiRowState::Unread) => "unread",
         (_, UiRowState::Waiting) => "waiting",
         (_, UiRowState::Archived) => "archived",
         (_, UiRowState::Attention) => "needs attention",
@@ -5007,9 +5016,9 @@ const fn section_item_label(section: UiSection, count: usize) -> &'static str {
 fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
     theme.style(match state {
         UiRowState::Open => UiThemeRole::RowOpen,
+        UiRowState::Unread | UiRowState::Attention => UiThemeRole::RowAttention,
         UiRowState::Waiting => UiThemeRole::RowWaiting,
         UiRowState::Archived => UiThemeRole::RowArchived,
-        UiRowState::Attention => UiThemeRole::RowAttention,
     })
 }
 

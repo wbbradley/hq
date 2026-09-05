@@ -1453,7 +1453,7 @@ fn logical_selection_focus_section_resize_and_quit_are_pure_transitions() {
     assert_eq!(loaded.model.selected_row(), Some("alpha"));
 
     let down = update(loaded.model, UiEvent::Input(UiInput::NextItem)).expect("move down");
-    assert_eq!(down.model.selected_row(), Some("alpha"));
+    assert_eq!(down.model.selected_row(), Some("beta"));
     assert!(down.effects.iter().any(|effect| matches!(
         effect,
         UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == "beta"
@@ -1874,7 +1874,7 @@ fn reload_preserves_a_logical_selection_and_falls_back_when_it_disappears() {
         },
     )
     .expect("selection preserved");
-    assert_eq!(preserved.model.selected_row(), Some("gamma"));
+    assert_eq!(preserved.model.selected_row(), Some("beta"));
 
     let invalidated = update(preserved.model, UiEvent::Invalidated { revision: 3 })
         .expect("request another reload");
@@ -2847,15 +2847,10 @@ fn materialized_views_install_list_and_detail_atomically_without_first_page_load
         effect,
         UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == "thread-b"
     )));
-    assert_eq!(selecting.model.selected_row(), Some("thread-a"));
-    assert_eq!(
-        selecting
-            .model
-            .conversation()
-            .and_then(|conversation| conversation.entries.last())
-            .map(|entry| entry.id.as_str()),
-        Some("a-message"),
-        "the prior coherent pair remains visible while the new view is pending"
+    assert_eq!(selecting.model.selected_row(), Some("thread-b"));
+    assert!(
+        selecting.model.conversation().is_none(),
+        "the prior transcript must not appear under the newly selected row"
     );
 
     let selected = update(
@@ -2940,7 +2935,7 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
 
     assert_eq!(loaded.model.focus(), UiFocus::Content);
     let moved = update(loaded.model, UiEvent::Input(UiInput::NextItem)).expect("move selection");
-    assert_eq!(moved.model.selected_row(), Some("thread-a"));
+    assert_eq!(moved.model.selected_row(), Some("thread-b"));
     assert!(moved.effects.iter().any(|effect| matches!(
         effect,
         UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == "thread-b"
@@ -2962,7 +2957,7 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
         },
     )
     .expect("superseded page is inert");
-    assert_eq!(stale.model.conversation_anchor(), Some("first-message"));
+    assert_eq!(stale.model.conversation_anchor(), None);
     let previewed = update(
         stale.model,
         UiEvent::MaterializedViewObserved {
@@ -2981,6 +2976,67 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
     .expect("selected preview applies");
     assert_eq!(previewed.model.focus(), UiFocus::Content);
     assert_eq!(previewed.model.conversation_anchor(), Some("right-message"));
+}
+
+#[test]
+fn inbox_selection_immediately_reaches_a_not_yet_started_agent_conversation() {
+    let mut source = snapshot(1, &["thread-a"]);
+    source.inbox_rows.push(UiRow {
+        id: "bob-setup".to_owned(),
+        title: "Bob · release".to_owned(),
+        detail: "Conversation not started".to_owned(),
+        state: UiRowState::Open,
+        kind: UiRowKind::ConversationSetup,
+        conversation_target: None,
+    });
+    let loaded = materialized_transition(
+        source.clone(),
+        UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
+            row_id: "thread-a".to_owned(),
+            entries: vec![entry("alice-message", false)],
+            next_cursor: None,
+        },
+    );
+
+    let moved = update(loaded.model, UiEvent::Input(UiInput::NextItem))
+        .expect("select Bob's pending conversation");
+    assert_eq!(moved.model.selected_row(), Some("bob-setup"));
+    assert!(moved.model.conversation().is_none());
+    assert!(
+        moved
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::ObserveConversation { row_id: None }))
+    );
+
+    let stale = update(
+        moved.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: source,
+                conversation: Some(UiConversationPage {
+                    title: "Alice".to_owned(),
+                    context: None,
+                    row_id: "thread-a".to_owned(),
+                    entries: vec![entry("late-alice-message", false)],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("late Alice page is inert");
+    assert_eq!(stale.model.selected_row(), Some("bob-setup"));
+    assert!(stale.model.conversation().is_none());
+
+    let returned =
+        update(stale.model, UiEvent::Input(UiInput::PreviousItem)).expect("return to Alice");
+    assert_eq!(returned.model.selected_row(), Some("thread-a"));
+    assert!(returned.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == "thread-a"
+    )));
 }
 
 #[test]
@@ -3052,7 +3108,7 @@ fn materialized_first_page_retention_is_lru_bounded() {
     }
     let evicted = update(transition.model, UiEvent::Input(UiInput::PreviousItem))
         .expect("request evicted page again");
-    assert_eq!(evicted.model.selected_row(), Some(row_ids[1].as_str()));
+    assert_eq!(evicted.model.selected_row(), Some(row_ids[0].as_str()));
     assert!(evicted.effects.iter().any(|effect| matches!(
         effect,
         UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == &row_ids[0]

@@ -315,6 +315,8 @@ pub struct UiConversationViewportObservation {
 pub enum UiRowState {
     /// Actionable current work.
     Open,
+    /// New canonical conversation activity has not yet been viewed locally.
+    Unread,
     /// Work awaiting another actor or external effect.
     Waiting,
     /// Work retained outside the active view.
@@ -3642,6 +3644,7 @@ impl UiModel {
                 .any(|row| row.id == row_id && row.kind == UiRowKind::Conversation)
         });
         if !is_conversation {
+            self.desired_conversation = None;
             if self.requested_conversation.take().is_some() {
                 effects.push(UiEffect::ObserveConversation { row_id: None });
             }
@@ -3657,13 +3660,16 @@ impl UiModel {
                 row_id: Some(row_id.clone()),
             });
         }
-        if self.desired_conversation.is_some()
+        if (self.desired_conversation.is_some()
             || self
                 .conversation
                 .as_ref()
-                .is_none_or(|conversation| conversation.row_id != row_id)
+                .is_none_or(|conversation| conversation.row_id != row_id))
+            && !self.install_retained_conversation(&row_id)
         {
-            self.install_retained_conversation(&row_id);
+            let focus = self.focus;
+            self.close_conversation();
+            self.focus = focus;
         }
     }
 
@@ -3873,13 +3879,7 @@ impl UiModel {
         if rows.is_empty() {
             return false;
         }
-        let current_selection = if self.section == UiSection::Inbox {
-            self.desired_conversation
-                .as_ref()
-                .or(self.selected_row.as_ref())
-        } else {
-            self.selected_row.as_ref()
-        };
+        let current_selection = self.selected_row.as_ref();
         let current =
             current_selection.and_then(|selected| rows.iter().position(|row| &row.id == selected));
         let next = match (current, forward) {
@@ -3891,7 +3891,9 @@ impl UiModel {
         if current_selection == Some(&selected) {
             false
         } else if self.section == UiSection::Inbox {
-            self.desired_conversation = Some(selected);
+            let is_conversation = rows[next].kind == UiRowKind::Conversation;
+            self.selected_row = Some(selected.clone());
+            self.desired_conversation = is_conversation.then_some(selected);
             true
         } else {
             self.selected_row = Some(selected);
@@ -4763,7 +4765,7 @@ fn start(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<(), UiError
 
 fn materialized_view_observed(
     model: &mut UiModel,
-    view: UiMaterializedConversationView,
+    mut view: UiMaterializedConversationView,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
     let revision = view.snapshot.revision;
@@ -4773,6 +4775,17 @@ fn materialized_view_observed(
         .is_some_and(|snapshot| revision < snapshot.revision)
     {
         return Ok(());
+    }
+    let observed_row = view
+        .conversation
+        .as_ref()
+        .map(|conversation| conversation.row_id.clone());
+    if let (Some(current), Some(observed)) =
+        (model.selected_row.as_deref(), observed_row.as_deref())
+        && current != observed
+        && view.snapshot.inbox_rows.iter().any(|row| row.id == current)
+    {
+        view.conversation = None;
     }
     let selected_row = view
         .conversation

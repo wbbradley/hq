@@ -322,6 +322,8 @@ pub struct LocalTuiObserver {
     prior_inbox_rows: Vec<String>,
     desired_row: Option<String>,
     pending_interactions: Option<Vec<PendingInteractionDto>>,
+    activity_ranks: BTreeMap<String, u64>,
+    unread_rows: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -883,6 +885,8 @@ impl LocalTuiObserver {
             prior_inbox_rows,
             desired_row,
             pending_interactions: None,
+            activity_ranks: BTreeMap::new(),
+            unread_rows: BTreeSet::new(),
         }
     }
 
@@ -910,8 +914,29 @@ impl LocalTuiObserver {
         self.client
             .update_subscription_conversation(conversation)
             .map_err(|error| client_failure(&error))?;
+        if let Some(row_id) = &row_id {
+            self.unread_rows.remove(row_id);
+        }
         self.desired_row = row_id;
         Ok(())
+    }
+
+    fn observe_activity(&mut self, snapshot: &AuthoritativeSnapshotDto) {
+        let next = inbox_activity_ranks(snapshot);
+        update_unread_rows(
+            &mut self.activity_ranks,
+            &mut self.unread_rows,
+            next,
+            self.desired_row.as_deref(),
+        );
+    }
+
+    fn decorate_unread(&self, snapshot: &mut UiSnapshot) {
+        for row in &mut snapshot.inbox_rows {
+            if self.unread_rows.contains(&row.id) {
+                row.state = UiRowState::Unread;
+            }
+        }
     }
 
     fn map_observation_result(
@@ -923,6 +948,7 @@ impl LocalTuiObserver {
         match result {
             Ok(Some(ClientEvent::Snapshot(snapshot))) => {
                 let local_installation = *self.client.installation_id().as_bytes();
+                self.observe_activity(&snapshot);
                 self.presentation.replace_snapshot(&snapshot);
                 let providers = self.presentation.providers();
                 let drafts = self.presentation.mailbox_drafts();
@@ -936,17 +962,19 @@ impl LocalTuiObserver {
                         return;
                     }
                 };
+                let mut materialized = UiMaterializedConversationView {
+                    snapshot: tui_snapshot_with_projects_and_drafts(
+                        local_installation,
+                        &snapshot,
+                        projects,
+                        &providers,
+                        &drafts,
+                    ),
+                    conversation: None,
+                };
+                self.decorate_unread(&mut materialized.snapshot);
                 observations.push(TuiClientObservation::MaterializedView(Box::new(
-                    UiMaterializedConversationView {
-                        snapshot: tui_snapshot_with_projects_and_drafts(
-                            local_installation,
-                            &snapshot,
-                            projects,
-                            &providers,
-                            &drafts,
-                        ),
-                        conversation: None,
-                    },
+                    materialized,
                 )));
                 self.remap_pending_interactions(observations);
             }
@@ -999,6 +1027,7 @@ impl LocalTuiObserver {
         observations: &mut Vec<TuiClientObservation>,
     ) {
         let local_installation = *self.client.installation_id().as_bytes();
+        self.observe_activity(&view.snapshot);
         self.presentation.replace_snapshot(&view.snapshot);
         let mut materialized = match tui_materialized_conversation_view(
             local_installation,
@@ -1051,6 +1080,14 @@ impl LocalTuiObserver {
         if next_rows.is_empty() {
             self.desired_row = None;
         }
+        if let Some(row_id) = materialized
+            .conversation
+            .as_ref()
+            .map(|conversation| conversation.row_id.as_str())
+        {
+            self.unread_rows.remove(row_id);
+        }
+        self.decorate_unread(&mut materialized.snapshot);
         self.prior_inbox_rows = next_rows;
         observations.push(TuiClientObservation::MaterializedView(Box::new(
             materialized,
@@ -1148,13 +1185,14 @@ pub(crate) fn compose_tui_clients(
         initial_snapshot,
     )?;
     let client = LocalTuiClient::with_presentation(command_client, state, presentation.clone());
-    let observer = LocalTuiObserver::with_presentation(
+    let mut observer = LocalTuiObserver::with_presentation(
         event_client,
         presentation,
         Some(initial.view),
         initial.inbox_rows,
         initial.desired_row,
     );
+    observer.activity_ranks = inbox_activity_ranks(subscription_base);
     Ok((client, observer))
 }
 
@@ -3397,6 +3435,71 @@ fn agent_inbox_rows(
     result
 }
 
+fn inbox_activity_ranks(snapshot: &AuthoritativeSnapshotDto) -> BTreeMap<String, u64> {
+    let active_agents = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Agent {
+                agent_id,
+                lifecycle,
+                retirements,
+                ..
+            } if lifecycle == "active" && retirements.is_empty() => Some(agent_id.bytes()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut ranks = BTreeMap::new();
+    let mut agent_ranks = BTreeMap::<[u8; 32], u64>::new();
+    for item in &snapshot.items {
+        let SnapshotItem::Conversation {
+            key,
+            context,
+            archived: false,
+            presentation_rank: Some(rank),
+            ..
+        } = item
+        else {
+            continue;
+        };
+        ranks.insert(conversation_identity(key.clone()), *rank);
+        if let Some(agent_id) = conversation_agent_id(snapshot, key, context)
+            .filter(|agent_id| active_agents.contains(agent_id))
+        {
+            agent_ranks
+                .entry(agent_id)
+                .and_modify(|current| *current = (*current).max(*rank))
+                .or_insert(*rank);
+        }
+    }
+    ranks.extend(
+        agent_ranks
+            .into_iter()
+            .map(|(agent_id, rank)| (full_id(Id32::new(agent_id)), rank)),
+    );
+    ranks
+}
+
+fn update_unread_rows(
+    prior: &mut BTreeMap<String, u64>,
+    unread: &mut BTreeSet<String>,
+    next: BTreeMap<String, u64>,
+    selected: Option<&str>,
+) {
+    for (row_id, rank) in &next {
+        if prior.get(row_id).is_some_and(|previous| rank > previous)
+            && selected != Some(row_id.as_str())
+        {
+            unread.insert(row_id.clone());
+        }
+    }
+    unread.retain(|row_id| next.contains_key(row_id));
+    if let Some(selected) = selected {
+        unread.remove(selected);
+    }
+    *prior = next;
+}
+
 fn conversation_agent_id(
     snapshot: &AuthoritativeSnapshotDto,
     key: &ConversationKeyDto,
@@ -4897,16 +5000,18 @@ const fn timer_kind_order(kind: UiTimerKind) -> u8 {
 mod tests {
     use super::{
         ConversationPresentationContext, ProjectThreadPresentation, RunningOperationPresentation,
-        SharedTuiPresentation, conversation_identity, conversation_title, local_project_command,
-        terminal_structured_text, tui_interaction, ui_project_outcome,
+        SharedTuiPresentation, conversation_identity, conversation_title, inbox_activity_ranks,
+        local_project_command, terminal_structured_text, tui_interaction, ui_project_outcome,
+        update_unread_rows,
     };
     use crate::local_client::{
         LocalProjectCommand, LocalProjectOutcome, LocalProjectResourceCheck,
         LocalProjectResourceConflict,
     };
     use hq_local_api::protocol::v1::{
-        ConversationContextDto, ConversationKeyDto, ConversationParticipantDto, Id32,
-        InteractionChoiceDto, InteractionKindDto, MailboxAddressDto, PendingInteractionDto,
+        AuthoritativeSnapshotDto, ConversationContextDto, ConversationKeyDto,
+        ConversationParticipantDto, Id32, InteractionChoiceDto, InteractionKindDto,
+        MailboxAddressDto, PendingInteractionDto, SnapshotItem,
     };
     use hq_tui::{
         UiInteractionTarget, UiInteractionTargetIssue, UiProjectAction, UiProjectOutcome,
@@ -4929,6 +5034,91 @@ mod tests {
             }],
             allow_text: false,
         }
+    }
+
+    #[test]
+    fn unread_activity_uses_rank_growth_and_never_changes_the_selected_row() {
+        let mut prior =
+            std::collections::BTreeMap::from([("alice".to_owned(), 4), ("bob".to_owned(), 7)]);
+        let mut unread = std::collections::BTreeSet::new();
+
+        update_unread_rows(
+            &mut prior,
+            &mut unread,
+            std::collections::BTreeMap::from([("alice".to_owned(), 5), ("bob".to_owned(), 8)]),
+            Some("bob"),
+        );
+
+        assert_eq!(
+            unread,
+            std::collections::BTreeSet::from(["alice".to_owned()])
+        );
+        assert_eq!(prior["alice"], 5);
+
+        update_unread_rows(
+            &mut prior,
+            &mut unread,
+            std::collections::BTreeMap::from([("alice".to_owned(), 5), ("bob".to_owned(), 8)]),
+            Some("alice"),
+        );
+        assert!(unread.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn unread_rank_is_aliased_to_the_stable_agent_row_identity() {
+        let agent_id = Id32::new([0x21; 32]);
+        let conversation_key = ConversationKeyDto::ProviderSession {
+            counterparty_installation: Id32::new([0x22; 32]),
+            counterparty_mailbox: Id32::new([0x23; 32]),
+            provider: "codex".to_owned(),
+            session: "alice-session".to_owned(),
+        };
+        let snapshot = AuthoritativeSnapshotDto::new(
+            9,
+            vec![
+                SnapshotItem::Agent {
+                    agent_id,
+                    claims: vec![Id32::new([0x24; 32])],
+                    names: vec!["alice".to_owned()],
+                    mailboxes: vec![MailboxAddressDto {
+                        installation_id: Id32::new([0x22; 32]),
+                        mailbox_id: Id32::new([0x23; 32]),
+                    }],
+                    retirements: Vec::new(),
+                    lifecycle: "active".to_owned(),
+                    runnable: true,
+                },
+                SnapshotItem::Conversation {
+                    key: conversation_key.clone(),
+                    context: ConversationContextDto::Direct {
+                        participant: ConversationParticipantDto {
+                            agent: Some(agent_id),
+                            installation: Some(Id32::new([0x22; 32])),
+                            mailbox: Some(Id32::new([0x23; 32])),
+                            name: Some("alice".to_owned()),
+                        },
+                    },
+                    local_human: MailboxAddressDto {
+                        installation_id: Id32::new([0x25; 32]),
+                        mailbox_id: Id32::new([0x26; 32]),
+                    },
+                    root_message: None,
+                    preview: Some("Done".to_owned()),
+                    latest_fact: Some(Id32::new([0x28; 32])),
+                    archived: false,
+                    presentation_rank: Some(17),
+                    open_messages: 1,
+                    archived_messages: 0,
+                    sent_messages: 1,
+                },
+            ],
+        )
+        .expect("snapshot");
+
+        let ranks = inbox_activity_ranks(&snapshot);
+        assert_eq!(ranks[&super::full_id(agent_id)], 17);
+        assert_eq!(ranks[&conversation_identity(conversation_key)], 17);
     }
 
     fn participant() -> ConversationParticipantDto {

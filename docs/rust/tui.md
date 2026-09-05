@@ -44,8 +44,8 @@ selected fact and explicit follow-tail state, not by screen coordinate or vector
 each identity while it remains present and
 falls back to the first logical item when it disappears. The subscribed materialized view installs
 the Inbox list and selected first page from one revision in one transition. The model retains at
-most eight revision-tagged first pages by stable row identity, keeps the last coherent pair visible
-while another row is requested, ignores stale or mismatched views, and selects the row at the old
+most eight revision-tagged first pages by stable row identity, immediately clears an unrelated
+transcript when an uncached row is selected, ignores stale or mismatched views, and selects the row at the old
 index when the current row disappears. Invalidations and reconnect rely on that active observation
 stream; ordinary snapshots may repair catalogs but cannot replace a newer coherent list/detail pair.
 Resize changes dimensions only; it does not rewrite logical focus,
@@ -55,8 +55,12 @@ edited text, direct target identity, or pending submission.
 ## Mailbox composition and actions
 
 The pure model owns reply, new-work composition, and whole-conversation archive interaction state. Inbox
-selection replaces a latest-value subscription interest while retaining the previous coherent
-conversation; the matching materialized view changes list highlight and detail together. Enter or
+selection moves the list highlight immediately and replaces a latest-value subscription interest;
+the matching materialized view then replaces the transcript. A row whose conversation has advanced
+by canonical presentation rank while another row is selected shows an explicit unread marker until
+that row is viewed. Late pages may refresh the list but never replace the selected row or open its
+follow-up draft. Rows for conversations that have not started are selectable without waiting for a
+transcript page. Enter or
 `l`/Right moves focus into that already visible conversation so the operator can select an exact message. `r` opens an
 applicable reply draft only for a typed message target whose purpose permits replies. `n` opens the
 shared New launcher for project work, direct messages, and personal notes. `d` confirms permanent
