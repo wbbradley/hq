@@ -406,6 +406,8 @@ pub fn snapshot_to_v1(
                 root_message,
                 preview,
                 latest_fact,
+                archived,
+                presentation_rank,
                 open_messages,
                 archived_messages,
                 sent_messages,
@@ -419,6 +421,8 @@ pub fn snapshot_to_v1(
                 root_message: root_message.map(|message| id32(message.as_bytes())),
                 preview: preview.map(hq_domain::ShortText::into_string),
                 latest_fact: latest_fact.map(|fact| id32(fact.as_bytes())),
+                archived,
+                presentation_rank,
                 open_messages,
                 archived_messages,
                 sent_messages,
@@ -942,6 +946,11 @@ pub fn mailbox_command_from_v1(
             MailboxCommandActionDto::Restore { target_message } => MailboxCommandAction::Restore {
                 target_message: hq_domain::MessageId::from_bytes(target_message.bytes()),
             },
+            MailboxCommandActionDto::ArchiveConversation { conversation } => {
+                MailboxCommandAction::ArchiveConversation {
+                    conversation: conversation_key_from_v1(conversation)?,
+                }
+            }
         },
         content: request.content,
         authored_at: Timestamp::from_unix_millis(request.authored_at_millis),
@@ -990,6 +999,11 @@ pub fn mailbox_command_request_to_v1(request: &MailboxCommandRequest) -> Mailbox
             MailboxCommandAction::Restore { target_message } => MailboxCommandActionDto::Restore {
                 target_message: Id32::new(*target_message.as_bytes()),
             },
+            MailboxCommandAction::ArchiveConversation { ref conversation } => {
+                MailboxCommandActionDto::ArchiveConversation {
+                    conversation: conversation_key_to_v1(&conversation),
+                }
+            }
         },
         request.content.clone(),
         request.authored_at.as_unix_millis(),

@@ -48,7 +48,8 @@ impl MutationDomain {
             | FactKind::MessageArchived
             | FactKind::MessageRestored
             | FactKind::MessageRejected
-            | FactKind::HarnessActivityRecorded => Self::Conversation,
+            | FactKind::HarnessActivityRecorded
+            | FactKind::ConversationArchived => Self::Conversation,
             FactKind::AgentNameClaimed
             | FactKind::AgentRetired
             | FactKind::ProviderSessionSelected

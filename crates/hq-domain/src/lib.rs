@@ -14,6 +14,7 @@
 mod address;
 mod bounded;
 mod causal;
+mod conversation;
 mod correlation;
 mod envelope;
 mod error;
@@ -26,6 +27,7 @@ mod time;
 pub use address::{InstallationAddress, MailboxAddress};
 pub use bounded::{BoundedSet, BoundedText, BoundedVec, NonEmptyBoundedSet, ValidatedValueError};
 pub use causal::{AuthorityReference, AuthorityRole, CausalReferences};
+pub use conversation::ConversationId;
 pub use correlation::{
     OperationCorrelation, PROVIDER_ID_MAX_BYTES, PROVIDER_SESSION_ID_MAX_BYTES, ProviderId,
     ProviderSessionId,

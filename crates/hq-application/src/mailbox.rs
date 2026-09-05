@@ -3,9 +3,10 @@
 use std::collections::BTreeSet;
 
 use hq_domain::{
-    AgentId, AuthorityReference, AuthorityRole, CommandDigest, CommandId, ContentText, DomainError,
-    ErrorCategory, ErrorCode, FactScope, InstallationId, MailboxAddress, MailboxKind, MessageId,
-    OperationId, PresentationKind, ProjectId, ProviderId, ThreadId, Timestamp,
+    AgentId, AuthorityReference, AuthorityRole, CommandDigest, CommandId, ContentText,
+    ConversationId, DomainError, ErrorCategory, ErrorCode, FactId, FactScope, InstallationId,
+    MailboxAddress, MailboxKind, MessageId, OperationId, PresentationKind, ProjectId, ProviderId,
+    ThreadId, Timestamp,
 };
 use hq_reducer::{
     AuthorityProjection, AuthorityProjectionKey, ConversationProjection, ConversationProjectionKey,
@@ -13,10 +14,10 @@ use hq_reducer::{
 };
 
 use crate::{
-    ContinueProjectMessageRequest, DomainSnapshot, LocalFactInputs, MessageAuthoringAuthority,
-    MessageStateRequest, MutationDecision, NewMessageRequest, ReplyRequest,
-    plan_asynchronous_message, plan_message_archive, plan_message_restore,
-    plan_project_message_continuation, plan_reply,
+    ContinueProjectMessageRequest, ConversationArchiveRequest, DomainSnapshot, LocalFactInputs,
+    MessageAuthoringAuthority, MessageStateRequest, MutationDecision, NewMessageRequest,
+    ReplyRequest, plan_asynchronous_message, plan_conversation_archive, plan_message_archive,
+    plan_message_restore, plan_project_message_continuation, plan_reply,
 };
 
 /// Maximum installation-local drafts retained at once.
@@ -119,6 +120,9 @@ pub enum MailboxCommandAction {
     },
     Restore {
         target_message: MessageId,
+    },
+    ArchiveConversation {
+        conversation: ConversationId,
     },
 }
 
@@ -337,8 +341,110 @@ pub fn plan_mailbox_command(
                 })
             }
         }
+        MailboxCommandAction::ArchiveConversation { conversation } => {
+            if request.draft_id.is_some() || request.content.is_some() || draft.is_some() {
+                Err(invalid_command())
+            } else {
+                conversation_anchor(snapshot, conversation, local_human).and_then(|target_fact| {
+                    let archive_authority = match conversation {
+                        ConversationId::ProjectThread { project_id, .. } => {
+                            project_authority(
+                                snapshot,
+                                local_installation,
+                                local_human,
+                                *project_id,
+                            )?
+                            .1
+                        }
+                        ConversationId::Thread { .. } | ConversationId::ProviderSession { .. } => {
+                            authority
+                        }
+                    };
+                    plan_conversation_archive(
+                        archive_authority,
+                        inputs,
+                        ConversationArchiveRequest {
+                            conversation: conversation.clone(),
+                            target_fact,
+                        },
+                    )
+                    .map_err(|_| invalid_command())
+                })
+            }
+        }
     };
     planned.map_or_else(MutationDecision::reject, MutationDecision::commit)
+}
+
+fn conversation_anchor(
+    snapshot: &DomainSnapshot,
+    conversation: &ConversationId,
+    local_human: MailboxAddress,
+) -> Result<FactId, DomainError> {
+    snapshot
+        .conversation()
+        .projections()
+        .values()
+        .filter_map(|projection| match projection {
+            ConversationProjection::Message(message)
+                if message_conversation(message, local_human).as_ref() == Some(conversation) =>
+            {
+                Some(message.fact_id)
+            }
+            ConversationProjection::Activity(activity)
+                if matches!(
+                    conversation,
+                    ConversationId::ProviderSession {
+                        counterparty,
+                        provider,
+                        session,
+                    } if *counterparty == activity.source
+                        && provider == activity.correlation.provider()
+                        && session == activity.correlation.session()
+                ) =>
+            {
+                Some(activity.fact_id)
+            }
+            ConversationProjection::Thread(_)
+            | ConversationProjection::Message(_)
+            | ConversationProjection::Archive(_)
+            | ConversationProjection::ActionGroup(_)
+            | ConversationProjection::Activity(_)
+            | ConversationProjection::ActivityRetention(_) => None,
+        })
+        .min()
+        .ok_or_else(stale_target)
+}
+
+fn message_conversation(
+    message: &hq_reducer::MessageView,
+    local_human: MailboxAddress,
+) -> Option<ConversationId> {
+    if let Some(project_id) = message.content.project_id {
+        return Some(ConversationId::ProjectThread {
+            project_id,
+            thread: message.thread_id,
+        });
+    }
+    let counterparty = if message.content.sender == local_human {
+        message.content.recipient?
+    } else if message.content.recipient == Some(local_human) || message.content.recipient.is_none()
+    {
+        message.content.sender
+    } else {
+        return None;
+    };
+    Some(match &message.content.correlation {
+        Some(correlation) => ConversationId::ProviderSession {
+            counterparty,
+            provider: correlation.provider().clone(),
+            session: correlation.session().clone(),
+        },
+        None => ConversationId::Thread {
+            counterparty,
+            thread: message.thread_id,
+        },
+    })
 }
 
 fn content(

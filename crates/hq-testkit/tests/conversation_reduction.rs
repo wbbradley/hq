@@ -1,14 +1,14 @@
 //! Conversation, message-state, presentation, and activity reduction contracts.
 
-use std::{error::Error, num::NonZeroU64};
+use std::{collections::BTreeSet, error::Error, num::NonZeroU64};
 
 use hq_domain::{
     AccountId, ActivityKind, ActivityStatus, AgentId, AssignmentBinding, AssignmentId,
-    AuthorityReference, AuthorityRole, ContentText, DispatchId, Fact, FactId, FactScope, GrantId,
-    InstallationAddress, InstallationId, MailboxAddress, MailboxId, MailboxKind, MessageContent,
-    MessageId, MessagePurpose, OperationCorrelation, PresentationKind, ProjectActivityAttribution,
-    ProjectId, ProviderId, ProviderSessionId, SemanticPayload, ShortText, SigningPublicKey,
-    ThreadId, Timestamp,
+    AuthorityReference, AuthorityRole, ContentText, ConversationId, DispatchId, Fact, FactId,
+    FactScope, GrantId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
+    MailboxKind, MessageContent, MessageId, MessagePurpose, OperationCorrelation, PresentationKind,
+    ProjectActivityAttribution, ProjectId, ProviderId, ProviderSessionId, SemanticPayload,
+    ShortText, SigningPublicKey, ThreadId, Timestamp,
 };
 use hq_reducer::{
     ActivityKey, ActivitySessionKey, AuthorityPolicy, CausalRelation, ConversationKey,
@@ -1557,6 +1557,59 @@ fn message_view(
         return Err("missing message projection".into());
     };
     Ok(view)
+}
+
+#[test]
+fn conversation_archive_is_absorbing_for_racing_entries() -> Result<(), Box<dyn Error>> {
+    let mut values = DeterministicValues::new(89);
+    let world = local_world(&mut values)?;
+    let question_id = values.message_id();
+    let question = question_fact(&mut values, &world, 10, question_id)?;
+    let conversation = ConversationId::Thread {
+        counterparty: world.agent,
+        thread: ThreadId::from_bytes(*question.id().as_bytes()),
+    };
+    let archive = FactBuilder::with_causal(
+        &mut values,
+        world.installation,
+        Timestamp::from_unix_millis(20),
+        FactScope::InstallationPrivate(world.installation.installation_id()),
+        [world.installation_root.id(), question.id()],
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            world.installation_root.id(),
+        )],
+        SemanticPayload::ConversationArchived {
+            conversation: conversation.clone(),
+        },
+    )?;
+    let racing_answer_id = values.message_id();
+    let racing_answer = answer_fact(
+        &mut values,
+        &world,
+        &question,
+        21,
+        racing_answer_id,
+        [],
+        PresentationKind::Message,
+        None,
+    )?;
+    let report = reduce_complete(
+        world
+            .base_facts()
+            .into_iter()
+            .chain([question, archive.clone(), racing_answer]),
+        &world.reducer(),
+    )?;
+
+    let Some(ConversationProjection::Archive(view)) = report
+        .projections()
+        .get(&ConversationProjectionKey::Archive(conversation))
+    else {
+        return Err("missing conversation archive projection".into());
+    };
+    assert_eq!(view.archive_facts, BTreeSet::from([archive.id()]));
+    Ok(())
 }
 
 #[test]

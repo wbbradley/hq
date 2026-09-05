@@ -3,11 +3,11 @@
 use std::num::NonZeroU64;
 
 use hq_domain::{
-    ActivityKind, AssignmentBinding, BoundedText, BoundedVec, ContentText, ErrorCode,
-    InitialProjectState, InstallationAddress, MailboxAddress, MailboxKind, MessageContent,
-    MessagePurpose, OperationCorrelation, PresentationKind, ProjectResource, ProviderId,
-    ProviderSessionId, RemoteCommandResult, RepositoryContext, ResourceHealth, ResourceLocator,
-    ResourceScheme, RuntimeObservation, SemanticPayload, ShortText, Timestamp,
+    ActivityKind, AssignmentBinding, BoundedText, BoundedVec, ContentText, ConversationId,
+    ErrorCode, InitialProjectState, InstallationAddress, MailboxAddress, MailboxKind,
+    MessageContent, MessagePurpose, OperationCorrelation, PresentationKind, ProjectResource,
+    ProviderId, ProviderSessionId, RemoteCommandResult, RepositoryContext, ResourceHealth,
+    ResourceLocator, ResourceScheme, RuntimeObservation, SemanticPayload, ShortText, Timestamp,
 };
 
 use crate::{DeterministicValues, FactBuilder, FixtureError};
@@ -332,6 +332,12 @@ impl FactBuilder {
                 project_id,
                 result: RemoteCommandResult::Committed(values.fact_id()),
                 runtime: Some(RuntimeObservation::Succeeded),
+            },
+            SemanticPayload::ConversationArchived {
+                conversation: ConversationId::ProjectThread {
+                    project_id,
+                    thread: hq_domain::ThreadId::from_bytes(values.bytes()),
+                },
             },
         ])
     }

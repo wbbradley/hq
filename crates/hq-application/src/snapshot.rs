@@ -332,6 +332,7 @@ impl DomainSnapshot {
                 | ConversationProjection::Message(_)
                 | ConversationProjection::ActionGroup(_)
                 | ConversationProjection::Activity(_)
+                | ConversationProjection::Archive(_)
                 | ConversationProjection::ActivityRetention(_) => {}
             }
         }
@@ -852,6 +853,8 @@ pub enum ClientProjection {
         root_message: Option<hq_domain::MessageId>,
         preview: Option<ShortText>,
         latest_fact: Option<FactId>,
+        archived: bool,
+        presentation_rank: Option<u64>,
         open_messages: u32,
         archived_messages: u32,
         sent_messages: u32,
@@ -1138,6 +1141,8 @@ impl AuthoritativeSnapshot {
                 root_message: summary.root_message,
                 preview: summary.preview.clone(),
                 latest_fact: summary.latest_fact,
+                archived: summary.archived,
+                presentation_rank: summary.presentation_rank,
                 open_messages: summary.open_messages,
                 archived_messages: summary.archived_messages,
                 sent_messages: summary.sent_messages,
@@ -1186,6 +1191,10 @@ pub struct ConversationSummary {
     pub preview: Option<ShortText>,
     /// Canonically latest presented fact, when the conversation is nonempty.
     pub latest_fact: Option<FactId>,
+    /// Whether the whole conversation has been permanently archived.
+    pub archived: bool,
+    /// Canonical cross-conversation recency rank of the latest presented fact.
+    pub presentation_rank: Option<u64>,
     /// Number of currently open actionable messages.
     pub open_messages: u32,
     /// Number of messages outside the open view, including absorbing rejection history.

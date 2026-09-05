@@ -4,8 +4,8 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use crate::{
     AccountId, AgentId, AssignmentId, BoundedText, BoundedVec, CausalReferences, CommandDigest,
-    CommandId, DispatchId, EncryptionPublicKey, ErrorCode, FactId, FactKind, GrantId,
-    InstallationAddress, InstallationId, MailboxAddress, MailboxId, MessageId,
+    CommandId, ConversationId, DispatchId, EncryptionPublicKey, ErrorCode, FactId, FactKind,
+    GrantId, InstallationAddress, InstallationId, MailboxAddress, MailboxId, MessageId,
     OperationCorrelation, ProjectId, ProtocolClass, ProviderId, ProviderSessionId, ResourceId,
     ResourceLocator, SigningPublicKey, ThreadId, Timestamp,
 };
@@ -494,6 +494,8 @@ pub enum SemanticPayload {
     MessageArchived { message_id: MessageId },
     /// FCT-020.
     MessageRestored { message_id: MessageId },
+    /// FCT-049. Permanently archives one complete conversation transcript.
+    ConversationArchived { conversation: ConversationId },
     /// FCT-021.
     MessageRejected {
         message_id: MessageId,
@@ -709,6 +711,7 @@ impl SemanticPayload {
             Self::ThreadCancelled { .. } => FactKind::ThreadCancelled,
             Self::MessageArchived { .. } => FactKind::MessageArchived,
             Self::MessageRestored { .. } => FactKind::MessageRestored,
+            Self::ConversationArchived { .. } => FactKind::ConversationArchived,
             Self::MessageRejected { .. } => FactKind::MessageRejected,
             Self::HarnessActivityRecorded { .. } => FactKind::HarnessActivityRecorded,
             Self::AgentNameClaimed { .. } => FactKind::AgentNameClaimed,

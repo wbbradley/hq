@@ -7,14 +7,15 @@ use std::{
 
 use hq_domain::{
     AccountId, ActivityKind, ActivityStatus, BoundedVec, CompletedFileChange,
-    CompletedItemPresentation, ContentText, ErrorCode, FactId, InstallationId, MailboxAddress,
-    MailboxId, MessageContent, MessageId, MessagePurpose, OperationCorrelation, OperationId,
-    PresentationKind, ProjectId, ProviderId, ProviderSessionId, ShortText, ThreadId, Timestamp,
+    CompletedItemPresentation, ContentText, ConversationId, ErrorCode, FactId, InstallationId,
+    MailboxAddress, MailboxId, MessageContent, MessageId, MessagePurpose, OperationCorrelation,
+    OperationId, PresentationKind, ProjectId, ProviderId, ProviderSessionId, ShortText, ThreadId,
+    Timestamp,
 };
 use hq_reducer::{
     ActionGroupView, ActivityKey, ActivityRetentionView, ActivitySessionKey, ActivityView,
-    CausalRelation, ConversationAggregateKey, ConversationProjection, ConversationProjectionKey,
-    MessageView, ThreadView,
+    CausalRelation, ConversationAggregateKey, ConversationArchiveView, ConversationProjection,
+    ConversationProjectionKey, MessageView, ThreadView,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -28,11 +29,13 @@ use crate::{
 const MAXIMUM_CONVERSATION_ROWS: i64 = 64_000_000;
 const ZERO: [u8; 32] = [0; 32];
 
-const TABLES: [&str; 17] = [
+const TABLES: [&str; 19] = [
     "conversation_aggregate_keys",
     "conversation_frontiers",
     "conversation_projection_keys",
     "conversation_support",
+    "conversation_archives",
+    "conversation_archive_facts",
     "conversation_threads",
     "conversation_thread_answers",
     "conversation_thread_cancellations",
@@ -65,6 +68,8 @@ pub(super) fn clear(transaction: &Transaction<'_>) -> Result<(), StoreError> {
              DELETE FROM conversation_thread_cancellations;
              DELETE FROM conversation_thread_answers;
              DELETE FROM conversation_threads;
+             DELETE FROM conversation_archive_facts;
+             DELETE FROM conversation_archives;
              DELETE FROM conversation_support;
              DELETE FROM conversation_projection_keys;
              DELETE FROM conversation_frontiers;
@@ -347,6 +352,54 @@ impl KeyParts {
             runtime: String::new(),
         }
     }
+
+    fn conversation(kind: i64, conversation: &ConversationId) -> Self {
+        match conversation {
+            ConversationId::ProjectThread { project_id, thread } => Self {
+                kind,
+                a: *project_id.as_bytes(),
+                b: *thread.as_bytes(),
+                provider: String::new(),
+                session: String::new(),
+                operation: ZERO,
+                item: None,
+                activity_kind: 0,
+                logical_key: String::new(),
+                runtime: String::new(),
+            },
+            ConversationId::Thread {
+                counterparty,
+                thread,
+            } => Self {
+                kind: kind + 1,
+                a: *counterparty.installation_id().as_bytes(),
+                b: *counterparty.mailbox_id().as_bytes(),
+                provider: String::new(),
+                session: String::new(),
+                operation: *thread.as_bytes(),
+                item: None,
+                activity_kind: 0,
+                logical_key: String::new(),
+                runtime: String::new(),
+            },
+            ConversationId::ProviderSession {
+                counterparty,
+                provider,
+                session,
+            } => Self {
+                kind: kind + 2,
+                a: *counterparty.installation_id().as_bytes(),
+                b: *counterparty.mailbox_id().as_bytes(),
+                provider: provider.as_str().to_owned(),
+                session: session.as_str().to_owned(),
+                operation: ZERO,
+                item: None,
+                activity_kind: 0,
+                logical_key: String::new(),
+                runtime: String::new(),
+            },
+        }
+    }
 }
 
 fn aggregate_parts(key: &ConversationAggregateKey) -> KeyParts {
@@ -355,6 +408,7 @@ fn aggregate_parts(key: &ConversationAggregateKey) -> KeyParts {
         ConversationAggregateKey::Thread(value) => KeyParts::simple(2, *value.as_bytes()),
         ConversationAggregateKey::MessageState(value) => KeyParts::simple(3, *value.as_bytes()),
         ConversationAggregateKey::Activity(value) => KeyParts::activity(4, value),
+        ConversationAggregateKey::ConversationState(value) => KeyParts::conversation(5, value),
     }
 }
 
@@ -366,6 +420,7 @@ fn projection_parts(key: &ConversationProjectionKey) -> KeyParts {
         ConversationProjectionKey::Activity(value) => KeyParts::activity(4, value),
         ConversationProjectionKey::ActivityRecord(value) => KeyParts::simple(5, *value.as_bytes()),
         ConversationProjectionKey::ActivityRetention(value) => KeyParts::retention(6, value),
+        ConversationProjectionKey::Archive(value) => KeyParts::conversation(7, value),
     }
 }
 
@@ -651,6 +706,20 @@ fn insert_projection(
                 &view.retained_progress,
             )?;
         }
+        (ConversationProjectionKey::Archive(_), ConversationProjection::Archive(view)) => {
+            transaction
+                .execute(
+                    "INSERT INTO conversation_archives(key_digest) VALUES (?1)",
+                    [digest.as_slice()],
+                )
+                .map_err(database)?;
+            insert_child_set(
+                transaction,
+                "conversation_archive_facts",
+                digest,
+                &view.archive_facts,
+            )?;
+        }
         _ => return Err(corrupt()),
     }
     Ok(())
@@ -674,6 +743,9 @@ fn insert_child_set(
         }
         "conversation_message_receipts" => {
             "INSERT INTO conversation_message_receipts(key_digest, fact_id) VALUES (?1, ?2)"
+        }
+        "conversation_archive_facts" => {
+            "INSERT INTO conversation_archive_facts(key_digest, fact_id) VALUES (?1, ?2)"
         }
         _ => return Err(corrupt()),
     };
@@ -1057,6 +1129,9 @@ fn decode_aggregate_key(parts: KeyParts) -> Result<ConversationAggregateKey, Sto
         4 => Ok(ConversationAggregateKey::Activity(decode_activity_key(
             parts,
         )?)),
+        5..=7 => Ok(ConversationAggregateKey::ConversationState(
+            decode_conversation_id(parts, 5)?,
+        )),
         _ => Err(corrupt()),
     }
 }
@@ -1088,8 +1163,65 @@ fn decode_projection_key(parts: KeyParts) -> Result<ConversationProjectionKey, S
                 session: ProviderSessionId::new(parts.session).map_err(|_| corrupt())?,
             },
         )),
+        7..=9 => Ok(ConversationProjectionKey::Archive(decode_conversation_id(
+            parts, 7,
+        )?)),
         _ => Err(corrupt()),
     }
+}
+
+fn decode_conversation_id(parts: KeyParts, base: i64) -> Result<ConversationId, StoreError> {
+    match parts.kind - base {
+        0 if project_conversation_shape(&parts) => Ok(ConversationId::ProjectThread {
+            project_id: ProjectId::from_bytes(parts.a),
+            thread: ThreadId::from_bytes(parts.b),
+        }),
+        1 if thread_conversation_shape(&parts) => Ok(ConversationId::Thread {
+            counterparty: MailboxAddress::new(
+                InstallationId::from_bytes(parts.a),
+                MailboxId::from_bytes(parts.b),
+            ),
+            thread: ThreadId::from_bytes(parts.operation),
+        }),
+        2 if provider_conversation_shape(&parts) => Ok(ConversationId::ProviderSession {
+            counterparty: MailboxAddress::new(
+                InstallationId::from_bytes(parts.a),
+                MailboxId::from_bytes(parts.b),
+            ),
+            provider: ProviderId::new(parts.provider).map_err(|_| corrupt())?,
+            session: ProviderSessionId::new(parts.session).map_err(|_| corrupt())?,
+        }),
+        _ => Err(corrupt()),
+    }
+}
+
+fn project_conversation_shape(parts: &KeyParts) -> bool {
+    parts.provider.is_empty()
+        && parts.session.is_empty()
+        && parts.operation == ZERO
+        && parts.item.is_none()
+        && parts.activity_kind == 0
+        && parts.logical_key.is_empty()
+        && parts.runtime.is_empty()
+}
+
+fn thread_conversation_shape(parts: &KeyParts) -> bool {
+    parts.provider.is_empty()
+        && parts.session.is_empty()
+        && parts.item.is_none()
+        && parts.activity_kind == 0
+        && parts.logical_key.is_empty()
+        && parts.runtime.is_empty()
+}
+
+fn provider_conversation_shape(parts: &KeyParts) -> bool {
+    !parts.provider.is_empty()
+        && !parts.session.is_empty()
+        && parts.operation == ZERO
+        && parts.item.is_none()
+        && parts.activity_kind == 0
+        && parts.logical_key.is_empty()
+        && parts.runtime.is_empty()
 }
 
 fn simple_shape(parts: &KeyParts) -> bool {
@@ -1207,6 +1339,23 @@ fn load_projection(
             Ok(projection)
         }
         ConversationProjectionKey::ActivityRetention(_) => load_retention(connection, digest),
+        ConversationProjectionKey::Archive(_) => {
+            let present = connection
+                .query_row(
+                    "SELECT 1 FROM conversation_archives WHERE key_digest = ?1",
+                    [digest.as_slice()],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(database)?;
+            if present.is_none() {
+                return Err(corrupt());
+            }
+            let archive_facts = load_child_set(connection, "conversation_archive_facts", digest)?;
+            Ok(ConversationProjection::Archive(ConversationArchiveView {
+                archive_facts,
+            }))
+        }
     }
 }
 
@@ -1512,6 +1661,9 @@ fn load_child_set(
         "conversation_message_receipts" => {
             "SELECT fact_id FROM conversation_message_receipts WHERE key_digest = ?1 ORDER BY fact_id"
         }
+        "conversation_archive_facts" => {
+            "SELECT fact_id FROM conversation_archive_facts WHERE key_digest = ?1 ORDER BY fact_id"
+        }
         _ => return Err(corrupt()),
     };
     let mut statement = connection.prepare(sql).map_err(database)?;
@@ -1748,6 +1900,7 @@ impl Counts {
             "conversation_action_groups",
             "conversation_activities",
             "conversation_activity_retentions",
+            "conversation_archives",
         ]
         .into_iter()
         .try_fold(0_i64, |total, table| {
@@ -1834,6 +1987,8 @@ fn count(connection: &Connection, table: &str) -> Result<i64, StoreError> {
         "conversation_frontiers" => "SELECT count(*) FROM conversation_frontiers",
         "conversation_projection_keys" => "SELECT count(*) FROM conversation_projection_keys",
         "conversation_support" => "SELECT count(*) FROM conversation_support",
+        "conversation_archives" => "SELECT count(*) FROM conversation_archives",
+        "conversation_archive_facts" => "SELECT count(*) FROM conversation_archive_facts",
         "conversation_threads" => "SELECT count(*) FROM conversation_threads",
         "conversation_thread_answers" => "SELECT count(*) FROM conversation_thread_answers",
         "conversation_thread_cancellations" => {
@@ -1876,11 +2031,13 @@ fn length(values: impl IntoIterator<Item = usize>) -> Result<i64, StoreError> {
 }
 
 fn row_digest(connection: &Connection) -> Result<[u8; 32], StoreError> {
-    const QUERIES: [&str; 17] = [
+    const QUERIES: [&str; 19] = [
         "SELECT quote(key_digest)||char(31)||quote(key_kind)||char(31)||quote(key_a)||char(31)||quote(key_b)||char(31)||quote(provider)||char(31)||quote(session)||char(31)||quote(operation_id)||char(31)||quote(item_present)||char(31)||quote(item)||char(31)||quote(activity_kind)||char(31)||quote(logical_key)||char(31)||quote(runtime) FROM conversation_aggregate_keys ORDER BY key_digest",
         "SELECT quote(key_digest)||char(31)||quote(fact_id) FROM conversation_frontiers ORDER BY key_digest, fact_id",
         "SELECT quote(key_digest)||char(31)||quote(key_kind)||char(31)||quote(key_a)||char(31)||quote(key_b)||char(31)||quote(provider)||char(31)||quote(session)||char(31)||quote(operation_id)||char(31)||quote(item_present)||char(31)||quote(item)||char(31)||quote(activity_kind)||char(31)||quote(logical_key)||char(31)||quote(runtime) FROM conversation_projection_keys ORDER BY key_digest",
         "SELECT quote(key_digest)||char(31)||quote(fact_id) FROM conversation_support ORDER BY key_digest, fact_id",
+        "SELECT quote(key_digest) FROM conversation_archives ORDER BY key_digest",
+        "SELECT quote(key_digest)||char(31)||quote(fact_id) FROM conversation_archive_facts ORDER BY key_digest, fact_id",
         "SELECT quote(key_digest)||char(31)||quote(root_fact)||char(31)||quote(root_message)||char(31)||quote(cancelled) FROM conversation_threads ORDER BY key_digest",
         "SELECT quote(key_digest)||char(31)||quote(fact_id) FROM conversation_thread_answers ORDER BY key_digest, fact_id",
         "SELECT quote(key_digest)||char(31)||quote(fact_id) FROM conversation_thread_cancellations ORDER BY key_digest, fact_id",

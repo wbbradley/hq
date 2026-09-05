@@ -33,7 +33,7 @@ macro_rules! fact_catalog {
 
         impl FactKind {
             /// Every catalog family in stable catalog order.
-            pub const ALL: [Self; 48] = [$(Self::$kind),+];
+            pub const ALL: [Self; 49] = [$(Self::$kind),+];
 
             /// Returns the stable normative catalog ID.
             pub const fn catalog_id(self) -> &'static str {
@@ -256,5 +256,11 @@ fact_catalog!(
         "FCT-048",
         RemoteControl,
         ControlPermanent
+    ),
+    (
+        ConversationArchived,
+        "FCT-049",
+        Canonical,
+        CanonicalPermanent
     ),
 );

@@ -7,7 +7,7 @@ pub const CANONICAL_CONTENT: &str = r#"{"p":"hq/canonical","v":1,"f":1,"author":
 pub const CONTROL_CONTENT: &str = r#"{"p":"hq/control","v":1,"f":46,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":1000,"scope":["control","3333333333333333333333333333333333333333333333333333333333333333","1111111111111111111111111111111111111111111111111111111111111111"],"parents":[["c","4b63dbd21d18790058d9f0483fb06b7223594b843f235849456553f957a90022"]],"auth":[["active-human","c","4b63dbd21d18790058d9f0483fb06b7223594b843f235849456553f957a90022"]],"body":{"command":"4444444444444444444444444444444444444444444444444444444444444444","digest":"5555555555555555555555555555555555555555555555555555555555555555","project":"6666666666666666666666666666666666666666666666666666666666666666","target_home":"1111111111111111111111111111111111111111111111111111111111111111","expected_head":"4b63dbd21d18790058d9f0483fb06b7223594b843f235849456553f957a90022","operation":{"provider":"hq-control","session":"test","id":"7777777777777777777777777777777777777777777777777777777777777777"},"body":"open"}}"#;
 
 #[allow(clippy::too_many_lines)]
-pub fn valid_bodies() -> [(u64, String); 48] {
+pub fn valid_bodies() -> [(u64, String); 49] {
     let installation = format!(r#"{{"installation":"{A}","signing":"{KEY}"}}"#);
     let mailbox = format!(r#"{{"installation":"{A}","mailbox":"{B}"}}"#);
     let locator = r#"{"scheme":"worktree","value":"/repo"}"#;
@@ -207,6 +207,12 @@ pub fn valid_bodies() -> [(u64, String); 48] {
             48,
             format!(
                 r#"{{"command":"{D}","digest":"{B}","project":"{C}","result":{{"state":"committed","head":"{A}"}},"runtime":{{"state":"succeeded"}}}}"#
+            ),
+        ),
+        (
+            49,
+            format!(
+                r#"{{"conversation":{{"kind":"thread","counterparty":{mailbox},"thread":"{C}"}}}}"#
             ),
         ),
     ]

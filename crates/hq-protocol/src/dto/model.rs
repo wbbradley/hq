@@ -304,6 +304,28 @@ object!(OperationDto {
     id: Hex32,
 });
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) enum ConversationIdDto {
+    ProjectThread {
+        project: Hex32,
+        thread: Hex32,
+    },
+    Thread {
+        counterparty: MailboxAddressDto,
+        thread: Hex32,
+    },
+    ProviderSession {
+        counterparty: MailboxAddressDto,
+        provider: ProviderText,
+        session: SessionText,
+    },
+}
+
+object!(ConversationArchivedDto {
+    conversation: ConversationIdDto,
+});
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum MessagePurposeDto {
@@ -839,6 +861,7 @@ pub(super) enum BodyDto {
     RemoteProjectCommandRequested(RemoteProjectCommandRequestedDto),
     RemoteProjectCommandReceipt(RemoteProjectCommandReceiptDto),
     RemoteProjectCommandOutcome(RemoteProjectCommandOutcomeDto),
+    ConversationArchived(ConversationArchivedDto),
 }
 
 impl BodyDto {
@@ -892,6 +915,7 @@ impl BodyDto {
             Self::RemoteProjectCommandRequested(_) => 46,
             Self::RemoteProjectCommandReceipt(_) => 47,
             Self::RemoteProjectCommandOutcome(_) => 48,
+            Self::ConversationArchived(_) => 49,
         }
     }
 }
@@ -957,6 +981,7 @@ impl Serialize for BodyDto {
             RemoteProjectCommandRequested,
             RemoteProjectCommandReceipt,
             RemoteProjectCommandOutcome,
+            ConversationArchived,
         )
     }
 }

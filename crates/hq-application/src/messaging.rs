@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use hq_domain::{
-    AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, ContentText, FactId,
-    FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MailboxAddress,
+    AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, ContentText, ConversationId,
+    FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MailboxAddress,
     MessageContent, MessageId, MessagePurpose, PresentationKind, ProjectId, SemanticPayload,
     ThreadId,
 };
@@ -103,6 +103,35 @@ pub struct MessageStateRequest {
     pub target_fact: FactId,
     /// Complete causal-maximal state frontier.
     pub state_frontier: BTreeSet<FactId>,
+}
+
+/// Exact archive target resolved from an authoritative conversation snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationArchiveRequest {
+    /// Stable complete-conversation identity.
+    pub conversation: ConversationId,
+    /// One exact fact in the conversation proving the target existed at authoring time.
+    pub target_fact: FactId,
+}
+
+/// Plans one permanent whole-conversation archive fact.
+pub fn plan_conversation_archive(
+    authority: MessageAuthoringAuthority,
+    inputs: LocalFactInputs,
+    request: ConversationArchiveRequest,
+) -> Result<FactPlan, ApplicationError> {
+    validate_authority(&authority, None)?;
+    let causal = causal(&authority, [request.target_fact])?;
+    Ok(FactPlan::new(
+        authority.author,
+        inputs.authored_at,
+        authority.scope,
+        causal,
+        SemanticPayload::ConversationArchived {
+            conversation: request.conversation,
+        },
+        inputs.auxiliary_randomness,
+    ))
 }
 
 /// Plans one question root.

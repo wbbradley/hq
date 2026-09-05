@@ -53,7 +53,7 @@ use crate::{
 const APPLICATION_ID: i64 = 0x4851_5253;
 const SCHEMA_VERSION: i64 = 1;
 const SCHEMA_MARKER: &str = "hq-store-v1";
-const SCHEMA_TABLES: [&str; 118] = [
+const SCHEMA_TABLES: [&str; 120] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -96,6 +96,8 @@ const SCHEMA_TABLES: [&str; 118] = [
     "conversation_frontiers",
     "conversation_projection_keys",
     "conversation_support",
+    "conversation_archives",
+    "conversation_archive_facts",
     "conversation_threads",
     "conversation_thread_answers",
     "conversation_thread_cancellations",
@@ -191,7 +193,7 @@ CREATE TABLE canonical_facts (
     fact_id BLOB PRIMARY KEY NOT NULL CHECK(typeof(fact_id) = 'blob' AND length(fact_id) = 32),
     event_bytes BLOB NOT NULL CHECK(typeof(event_bytes) = 'blob'),
     namespace INTEGER NOT NULL CHECK(namespace IN (1, 2)),
-    family INTEGER NOT NULL CHECK(family BETWEEN 1 AND 48)
+    family INTEGER NOT NULL CHECK(family BETWEEN 1 AND 49)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE fact_parents (
@@ -519,7 +521,7 @@ CREATE TABLE conversation_state (
 
 CREATE TABLE conversation_aggregate_keys (
     key_digest BLOB PRIMARY KEY NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
-    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 4),
+    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 7),
     key_a BLOB NOT NULL CHECK(typeof(key_a) = 'blob' AND length(key_a) = 32),
     key_b BLOB NOT NULL CHECK(typeof(key_b) = 'blob' AND length(key_b) = 32),
     provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) <= 64),
@@ -540,7 +542,7 @@ CREATE TABLE conversation_frontiers (
 
 CREATE TABLE conversation_projection_keys (
     key_digest BLOB PRIMARY KEY NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
-    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 6),
+    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 9),
     key_a BLOB NOT NULL CHECK(typeof(key_a) = 'blob' AND length(key_a) = 32),
     key_b BLOB NOT NULL CHECK(typeof(key_b) = 'blob' AND length(key_b) = 32),
     provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) <= 64),
@@ -555,6 +557,16 @@ CREATE TABLE conversation_projection_keys (
 
 CREATE TABLE conversation_support (
     key_digest BLOB NOT NULL REFERENCES conversation_projection_keys(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_archives (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES conversation_projection_keys(key_digest)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_archive_facts (
+    key_digest BLOB NOT NULL REFERENCES conversation_archives(key_digest),
     fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
     PRIMARY KEY (key_digest, fact_id)
 ) STRICT, WITHOUT ROWID;
@@ -2025,6 +2037,7 @@ fn conversation_summaries(
         .filter_map(|projection| match projection {
             ConversationProjection::Message(message) => Some((message.fact_id, message.as_ref())),
             ConversationProjection::Thread(_)
+            | ConversationProjection::Archive(_)
             | ConversationProjection::ActionGroup(_)
             | ConversationProjection::Activity(_)
             | ConversationProjection::ActivityRetention(_) => None,
@@ -2036,6 +2049,16 @@ fn conversation_summaries(
         projects,
         local_human,
     };
+    let presentation_ranks = index
+        .presentation_order(ReductionDomain::Conversation)
+        .iter()
+        .enumerate()
+        .map(|(rank, fact_id)| {
+            u64::try_from(rank)
+                .map(|rank| (*fact_id, rank))
+                .map_err(|_| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
 
     index
         .conversation_orders()
@@ -2073,6 +2096,14 @@ fn conversation_summaries(
                 },
                 preview: conversation_preview(order, &messages),
                 latest_fact: order.last().copied(),
+                archived: conversation
+                    .projections()
+                    .contains_key(&hq_reducer::ConversationProjectionKey::Archive(key.clone())),
+                presentation_rank: order
+                    .iter()
+                    .filter_map(|fact_id| presentation_ranks.get(fact_id))
+                    .max()
+                    .copied(),
                 open_messages: u32::try_from(open_messages)
                     .map_err(|_| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))?,
                 archived_messages: u32::try_from(archived_messages)

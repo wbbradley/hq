@@ -3,9 +3,11 @@
 #![allow(clippy::expect_used)]
 
 use hq_domain::{
-    InstallationId, MessageId, OperationCorrelation, OperationId, ProviderId, ProviderSessionId,
-    ThreadId,
+    AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, ConversationId,
+    InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MessageId, OperationCorrelation,
+    OperationId, ProviderId, ProviderSessionId, SemanticPayload, ThreadId, Timestamp,
 };
+use hq_protocol::CanonicalEventPlan;
 use hq_reducer::{ConversationProjection, ConversationProjectionKey};
 use hq_store::StoreErrorClass;
 use rusqlite::Connection;
@@ -24,7 +26,8 @@ fn repair_persists_the_exact_typed_conversation_report_and_reopens() {
     let root = verified_fact();
     let root_id = root.verified_event().event_id();
     let question = verified_question(root_id);
-    let thread = ThreadId::from_bytes(question.verified_event().event_id());
+    let question_id = question.verified_event().event_id();
+    let thread = ThreadId::from_bytes(question_id);
     store.append_verified(root).expect("root appends");
     store.append_verified(question).expect("question appends");
 
@@ -63,7 +66,45 @@ fn repair_persists_the_exact_typed_conversation_report_and_reopens() {
             .projection(ConversationProjectionKey::ActionGroup(operation())),
         Some(ConversationProjection::ActionGroup(_))
     ));
-    let expected = repaired.conversation().clone();
+    let conversation = ConversationId::ProviderSession {
+        counterparty: hq_domain::MailboxAddress::new(
+            authority_policy().local_installation(),
+            authority_policy().local_human_mailbox(),
+        ),
+        provider: ProviderId::new("test-provider").expect("provider validates"),
+        session: ProviderSessionId::new("session-1").expect("session validates"),
+    };
+    let archive = CanonicalEventPlan::new(
+        authority_policy().local_installation(),
+        Timestamp::from_unix_millis(3_000),
+        hq_domain::FactScope::InstallationPrivate(authority_policy().local_installation()),
+        CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+            BoundedSet::new([
+                hq_domain::FactId::from_bytes(root_id),
+                hq_domain::FactId::from_bytes(question_id),
+            ])
+            .expect("archive parents validate"),
+            [AuthorityReference::new(
+                AuthorityRole::LocalInstallation,
+                hq_domain::FactId::from_bytes(root_id),
+            )],
+        )
+        .expect("archive authority validates"),
+        SemanticPayload::ConversationArchived {
+            conversation: conversation.clone(),
+        },
+    )
+    .sign(&support::signer(1), [0x91; 32])
+    .expect("archive signs");
+    store.append_verified(archive).expect("archive appends");
+    let archived = store
+        .load_conversation_snapshot()
+        .expect("archived conversation loads");
+    assert!(matches!(
+        archived.projection(ConversationProjectionKey::Archive(conversation.clone())),
+        Some(ConversationProjection::Archive(view)) if view.archive_facts.len() == 1
+    ));
+    let expected = archived;
     assert_eq!(
         store
             .repair(authority_policy())

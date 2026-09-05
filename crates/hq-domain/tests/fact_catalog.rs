@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use hq_domain::{FactKind, ProtocolClass, RetentionClass};
 
-const EXPECTED_FACTS: [(&str, &str); 48] = [
+const EXPECTED_FACTS: [(&str, &str); 49] = [
     ("FCT-001", "InstallationDeclared"),
     ("FCT-002", "MailboxCreated"),
     ("FCT-003", "MailboxSessionBound"),
@@ -53,6 +53,7 @@ const EXPECTED_FACTS: [(&str, &str); 48] = [
     ("FCT-046", "RemoteProjectCommandRequested"),
     ("FCT-047", "RemoteProjectCommandReceipt"),
     ("FCT-048", "RemoteProjectCommandOutcome"),
+    ("FCT-049", "ConversationArchived"),
 ];
 
 #[test]
@@ -91,7 +92,12 @@ fn markdown_catalog_and_code_catalog_are_bidirectionally_equal() {
 #[test]
 fn protocol_and_retention_classes_preserve_remote_control_isolation() {
     for kind in FactKind::ALL {
-        if kind.catalog_id() >= "FCT-046" {
+        if matches!(
+            kind,
+            FactKind::RemoteProjectCommandRequested
+                | FactKind::RemoteProjectCommandReceipt
+                | FactKind::RemoteProjectCommandOutcome
+        ) {
             assert_eq!(kind.protocol_class(), ProtocolClass::RemoteControl);
             assert_eq!(kind.retention_class(), RetentionClass::ControlPermanent);
         } else {

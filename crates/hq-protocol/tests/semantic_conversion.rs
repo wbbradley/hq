@@ -337,10 +337,10 @@ fn verified_record_with(
     parents: &str,
     authorities: &str,
 ) -> Result<hq_protocol::VerifiedSupportedRecord, hq_protocol::ProtocolError> {
-    let namespace = if family <= 45 {
-        ProtocolNamespace::Canonical
-    } else {
+    let namespace = if (46..=48).contains(&family) {
         ProtocolNamespace::Control
+    } else {
+        ProtocolNamespace::Canonical
     };
     let default_scope = match family {
         7..=9 => format!(r#"["peer","{A}","{B}"]"#),

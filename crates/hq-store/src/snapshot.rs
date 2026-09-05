@@ -686,6 +686,7 @@ fn conversation_reason_code(reason: &ConversationReason) -> i64 {
         ConversationReason::ActivitySourceMismatch => 2_106,
         ConversationReason::ActivitySequenceConflict => 2_107,
         ConversationReason::ActivityRuntimeConflict => 2_108,
+        ConversationReason::ConversationMismatch => 2_109,
     }
 }
 
@@ -699,6 +700,7 @@ fn decode_conversation_reason(code: i64) -> Option<ConversationReason> {
         2_106 => Some(ConversationReason::ActivitySourceMismatch),
         2_107 => Some(ConversationReason::ActivitySequenceConflict),
         2_108 => Some(ConversationReason::ActivityRuntimeConflict),
+        2_109 => Some(ConversationReason::ConversationMismatch),
         _ => None,
     }
 }

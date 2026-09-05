@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hq_domain::{
-    AccountId, ActivityKind, ActivityStatus, Fact, FactId, FactScope, MailboxAddress,
-    MessageContent, MessageId, MessagePurpose, OperationCorrelation, PresentationKind,
-    ProjectActivityAttribution, ProviderId, ProviderSessionId, SemanticPayload, ShortText,
-    ThreadId, Timestamp,
+    AccountId, ActivityKind, ActivityStatus, ConversationId, Fact, FactId, FactScope,
+    MailboxAddress, MessageContent, MessageId, MessagePurpose, OperationCorrelation,
+    PresentationKind, ProjectActivityAttribution, SemanticPayload, ShortText, ThreadId, Timestamp,
 };
 
 use crate::{
@@ -17,33 +16,8 @@ use crate::{
 /// Complete report produced by [`ConversationReducer`].
 pub type ConversationReport = DomainReductionReport<ConversationReducer>;
 
-/// Closed identity of one reducer-ordered conversation view.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum ConversationKey {
-    /// One independently initiated project exchange.
-    ProjectThread {
-        /// Stable project receiving the initiating input.
-        project_id: hq_domain::ProjectId,
-        /// Stable causal thread shared by input, output, and activity.
-        thread: ThreadId,
-    },
-    /// One uncorrelated causal thread with an exact counterparty mailbox.
-    Thread {
-        /// Installation-qualified mailbox at the other side of the local human view.
-        counterparty: MailboxAddress,
-        /// Stable causal thread identity.
-        thread: ThreadId,
-    },
-    /// One provider-scoped durable session with an exact source/counterparty mailbox.
-    ProviderSession {
-        /// Installation-qualified mailbox associated with the session.
-        counterparty: MailboxAddress,
-        /// Provider namespace.
-        provider: ProviderId,
-        /// Provider-scoped session identity.
-        session: ProviderSessionId,
-    },
-}
+/// Compatibility name for the domain-owned conversation identity.
+pub type ConversationKey = ConversationId;
 
 /// Derives exact conversation-local order with the one canonical presentation comparator.
 pub fn conversation_orders(
@@ -185,6 +159,8 @@ pub enum ConversationAggregateKey {
     Thread(ThreadId),
     /// Archive, restore, and rejection history for one message.
     MessageState(MessageId),
+    /// Permanent lifecycle state for one exact conversation.
+    ConversationState(ConversationId),
     /// Snapshot/history facts for one full activity writer namespace.
     Activity(ActivityKey),
 }
@@ -224,6 +200,8 @@ pub enum ConversationProjectionKey {
     Thread(ThreadId),
     /// One unambiguous stable public message.
     Message(MessageId),
+    /// Permanent lifecycle state for one exact conversation.
+    Archive(ConversationId),
     /// One provider operation action group.
     ActionGroup(OperationCorrelation),
     /// One selected activity writer key.
@@ -287,6 +265,13 @@ pub struct MessageView {
     pub peer_received_by: BTreeSet<FactId>,
 }
 
+/// Permanent archive evidence for one complete conversation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationArchiveView {
+    /// Every usable archive fact naming the exact conversation.
+    pub archive_facts: BTreeSet<FactId>,
+}
+
 /// Typed provider-operation grouping and final-answer selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionGroupView {
@@ -343,6 +328,8 @@ pub enum ConversationProjection {
     Thread(Box<ThreadView>),
     /// Message state.
     Message(Box<MessageView>),
+    /// Permanent whole-conversation archive state.
+    Archive(ConversationArchiveView),
     /// Provider operation group.
     ActionGroup(ActionGroupView),
     /// Selected activity value.
@@ -364,6 +351,8 @@ pub enum ConversationReason {
     TargetNotAncestor,
     /// A restore attempts to reopen a causally prior rejection.
     RejectedMessage,
+    /// An archive does not descend from any fact in the named conversation.
+    ConversationMismatch,
     /// Unequal canonical facts reuse one stable public message identity.
     MessageIdentityConflict,
     /// Activity source does not equal the full author installation/mailbox identity.
@@ -402,7 +391,7 @@ impl DomainReducer for ConversationReducer {
         if !matches!(authority, DomainDecision::Projected) {
             return map_authority_decision(authority);
         }
-        classify_conversation(fact, context)
+        classify_conversation(fact, context, self.authority)
     }
 
     fn aggregate_keys(
@@ -481,6 +470,7 @@ fn map_authority_decision(
 fn classify_conversation(
     fact: &Fact,
     context: &ReductionContext<'_, ConversationReason>,
+    authority: AuthorityPolicy,
 ) -> DomainDecision<ConversationReason> {
     let result = match fact.payload() {
         SemanticPayload::QuestionAsked(message) => {
@@ -532,6 +522,9 @@ fn classify_conversation(
         | SemanticPayload::MessageRestored { message_id }
         | SemanticPayload::MessageRejected { message_id, .. } => {
             validate_message_state(fact, *message_id, context)
+        }
+        SemanticPayload::ConversationArchived { conversation } => {
+            validate_conversation_archive(fact, conversation, context, authority)
         }
         SemanticPayload::HarnessActivityRecorded {
             project,
@@ -845,6 +838,79 @@ fn validate_message_state(
     Ok(())
 }
 
+fn validate_conversation_archive(
+    fact: &Fact,
+    conversation: &ConversationId,
+    context: &ReductionContext<'_, ConversationReason>,
+    authority: AuthorityPolicy,
+) -> Result<(), ConversationReason> {
+    let local_human = MailboxAddress::new(
+        authority.local_installation(),
+        authority.local_human_mailbox(),
+    );
+    context
+        .facts()
+        .facts()
+        .filter(|candidate| context.is_projected(candidate.id()))
+        .any(|candidate| {
+            fact_conversation_id(candidate, local_human).as_ref() == Some(conversation)
+                && context
+                    .graph()
+                    .structurally_reaches(candidate.id(), fact.id())
+                && same_scope(candidate.scope(), fact.scope())
+        })
+        .then_some(())
+        .ok_or(ConversationReason::ConversationMismatch)
+}
+
+fn fact_conversation_id(fact: &Fact, local_human: MailboxAddress) -> Option<ConversationId> {
+    if let Some(message) = message_content(fact) {
+        if let Some(project_id) = message.project_id {
+            return Some(ConversationId::ProjectThread {
+                project_id,
+                thread: thread_id(fact),
+            });
+        }
+        let counterparty = if message.sender == local_human {
+            message.recipient?
+        } else if message.recipient == Some(local_human) || message.recipient.is_none() {
+            message.sender
+        } else {
+            return None;
+        };
+        return Some(match &message.correlation {
+            Some(correlation) => ConversationId::ProviderSession {
+                counterparty,
+                provider: correlation.provider().clone(),
+                session: correlation.session().clone(),
+            },
+            None => ConversationId::Thread {
+                counterparty,
+                thread: thread_id(fact),
+            },
+        });
+    }
+    match fact.payload() {
+        SemanticPayload::HarnessActivityRecorded {
+            project,
+            source,
+            correlation,
+            ..
+        } => Some(project.as_ref().map_or_else(
+            || ConversationId::ProviderSession {
+                counterparty: *source,
+                provider: correlation.provider().clone(),
+                session: correlation.session().clone(),
+            },
+            |project| ConversationId::ProjectThread {
+                project_id: project.project_id,
+                thread: project.thread_id,
+            },
+        )),
+        _ => None,
+    }
+}
+
 fn same_scope(left: &FactScope, right: &FactScope) -> bool {
     match (left, right) {
         (FactScope::PeerAddressed(_), FactScope::PeerAddressed(_)) => true,
@@ -982,6 +1048,11 @@ fn aggregate_keys(fact: &Fact) -> Vec<ConversationAggregateKey> {
     if let Some(target) = state_target(fact) {
         keys.push(ConversationAggregateKey::MessageState(target));
     }
+    if let SemanticPayload::ConversationArchived { conversation } = fact.payload() {
+        keys.push(ConversationAggregateKey::ConversationState(
+            conversation.clone(),
+        ));
+    }
     if let Some(key) = activity_key(fact) {
         keys.push(ConversationAggregateKey::Activity(key));
     }
@@ -994,9 +1065,40 @@ fn derive_projections(
     let mut result = Vec::new();
     result.extend(thread_projections(context));
     result.extend(message_projections(context));
+    result.extend(conversation_archive_projections(context));
     result.extend(action_group_projections(context));
     result.extend(activity_projections(context));
     result
+}
+
+fn conversation_archive_projections(
+    context: &ReductionContext<'_, ConversationReason>,
+) -> Vec<ProjectionContribution<ConversationProjectionKey, ConversationProjection>> {
+    let mut archives = BTreeMap::<ConversationId, BTreeSet<FactId>>::new();
+    for fact in context
+        .facts()
+        .facts()
+        .filter(|fact| context.is_projected(fact.id()))
+    {
+        if let SemanticPayload::ConversationArchived { conversation } = fact.payload() {
+            archives
+                .entry(conversation.clone())
+                .or_default()
+                .insert(fact.id());
+        }
+    }
+    archives
+        .into_iter()
+        .map(|(conversation, archive_facts)| {
+            ProjectionContribution::new(
+                ConversationProjectionKey::Archive(conversation),
+                ConversationProjection::Archive(ConversationArchiveView {
+                    archive_facts: archive_facts.clone(),
+                }),
+                archive_facts,
+            )
+        })
+        .collect()
 }
 
 fn thread_projections(

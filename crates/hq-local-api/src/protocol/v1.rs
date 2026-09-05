@@ -457,6 +457,9 @@ pub enum MailboxCommandActionDto {
     Restore {
         target_message: Id32,
     },
+    ArchiveConversation {
+        conversation: ConversationKeyDto,
+    },
 }
 
 /// Stable retry envelope for one authoritative mailbox command.
@@ -579,6 +582,10 @@ fn mailbox_command_digest(request: &MailboxCommandRequestDto) -> CommandDigest {
             }
             hasher.update(message_id.bytes());
         }
+        MailboxCommandActionDto::ArchiveConversation { conversation } => {
+            hasher.update([7]);
+            put_conversation_key(&mut hasher, conversation);
+        }
     }
     match request.draft_id {
         Some(draft_id) => {
@@ -602,6 +609,48 @@ fn mailbox_command_digest(request: &MailboxCommandRequestDto) -> CommandDigest {
     hasher.update(request.authored_at_millis.to_be_bytes());
     hasher.update(request.auxiliary_randomness);
     CommandDigest::from_bytes(hasher.finalize().into())
+}
+
+fn put_conversation_key(hasher: &mut Sha256, conversation: &ConversationKeyDto) {
+    match conversation {
+        ConversationKeyDto::ProjectThread { project, thread } => {
+            hasher.update([1]);
+            hasher.update(project.bytes());
+            hasher.update(thread.bytes());
+        }
+        ConversationKeyDto::Thread {
+            counterparty_installation,
+            counterparty_mailbox,
+            thread,
+        } => {
+            hasher.update([2]);
+            hasher.update(counterparty_installation.bytes());
+            hasher.update(counterparty_mailbox.bytes());
+            hasher.update(thread.bytes());
+        }
+        ConversationKeyDto::ProviderSession {
+            counterparty_installation,
+            counterparty_mailbox,
+            provider,
+            session,
+        } => {
+            hasher.update([3]);
+            hasher.update(counterparty_installation.bytes());
+            hasher.update(counterparty_mailbox.bytes());
+            hasher.update(
+                u64::try_from(provider.len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            hasher.update(provider.as_bytes());
+            hasher.update(
+                u64::try_from(session.len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            hasher.update(session.as_bytes());
+        }
+    }
 }
 
 /// Conversation identity used by bounded page queries.
@@ -2010,6 +2059,10 @@ pub enum SnapshotItem {
         preview: Option<String>,
         /// Canonically latest presented fact, when nonempty.
         latest_fact: Option<Id32>,
+        /// Whether the complete conversation is permanently archived.
+        archived: bool,
+        /// Reducer-issued cross-conversation recency rank.
+        presentation_rank: Option<u64>,
         /// Number of currently open actionable messages.
         open_messages: u32,
         /// Number of messages outside the open view.

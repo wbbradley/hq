@@ -227,7 +227,9 @@ fn classify(prefix: &Prefix) -> Result<Classification, ProtocolError> {
         return Ok(Classification::Unsupported(UnsupportedReason::Version));
     }
     match namespace {
-        ProtocolNamespace::Canonical if (1..=45).contains(&prefix.family) => {
+        ProtocolNamespace::Canonical
+            if (1..=45).contains(&prefix.family) || prefix.family == 49 =>
+        {
             Ok(Classification::Supported(namespace))
         }
         ProtocolNamespace::Control if (46..=48).contains(&prefix.family) => {
@@ -236,7 +238,7 @@ fn classify(prefix: &Prefix) -> Result<Classification, ProtocolError> {
         ProtocolNamespace::Canonical if (46..=48).contains(&prefix.family) => {
             Err(ProtocolError::new(FailureClass::NamespaceConfusion))
         }
-        ProtocolNamespace::Control if (1..=45).contains(&prefix.family) => {
+        ProtocolNamespace::Control if (1..=45).contains(&prefix.family) || prefix.family == 49 => {
             Err(ProtocolError::new(FailureClass::NamespaceConfusion))
         }
         _ => Ok(Classification::Unsupported(UnsupportedReason::Family)),

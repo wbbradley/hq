@@ -321,6 +321,9 @@ fn payload(
         model::BodyDto::MessageRestored(value) => Output::MessageRestored {
             message_id: domain::MessageId::from_bytes(value.message.0),
         },
+        model::BodyDto::ConversationArchived(value) => Output::ConversationArchived {
+            conversation: conversation_id(&value.conversation)?,
+        },
         model::BodyDto::MessageRejected(value) => Output::MessageRejected {
             message_id: domain::MessageId::from_bytes(value.message.0),
             reason: error_code(&value.reason)?,
@@ -560,6 +563,35 @@ fn payload(
             project_id: project(value.project),
             result: remote_result(&value.result)?,
             runtime: optional_runtime(&value.runtime)?,
+        },
+    })
+}
+
+fn conversation_id(
+    value: &model::ConversationIdDto,
+) -> Result<domain::ConversationId, ProtocolError> {
+    Ok(match value {
+        model::ConversationIdDto::ProjectThread { project, thread } => {
+            domain::ConversationId::ProjectThread {
+                project_id: domain::ProjectId::from_bytes(project.0),
+                thread: domain::ThreadId::from_bytes(thread.0),
+            }
+        }
+        model::ConversationIdDto::Thread {
+            counterparty,
+            thread,
+        } => domain::ConversationId::Thread {
+            counterparty: mailbox_address(counterparty),
+            thread: domain::ThreadId::from_bytes(thread.0),
+        },
+        model::ConversationIdDto::ProviderSession {
+            counterparty,
+            provider,
+            session,
+        } => domain::ConversationId::ProviderSession {
+            counterparty: mailbox_address(counterparty),
+            provider: self::provider(provider)?,
+            session: self::session(session)?,
         },
     })
 }

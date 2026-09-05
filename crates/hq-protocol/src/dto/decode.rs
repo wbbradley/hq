@@ -5,19 +5,20 @@ use serde_json::value::RawValue;
 
 use super::model::{
     AgentNameClaimedDto, AgentRetiredDto, AnswerGivenDto, AsynchronousMessageSentDto, AuthorityDto,
-    BodyDto, ContentDto, HarnessActivityRecordedDto, Hex32, HumanAccountCreatedDto,
-    HumanAccountSelectedDto, HumanDeviceAcceptedDto, HumanDeviceGrantedDto, HumanDeviceRevokedDto,
-    InstallationDeclaredDto, LocatorDto, MailboxAccessGrantedDto, MailboxAccessRevokedDto,
-    MailboxActionObservedDto, MailboxContextRecordedDto, MailboxCreatedDto, MailboxSessionBoundDto,
-    MessageDto, MessagePurposeDto, MessageRejectedDto, MessageTargetDto, Milliseconds,
-    NamespaceDto, ParentDto, PeerRouteBlockedDto, PeerRouteSetDto, ProjectAssignmentBlockedDto,
-    ProjectAssignmentConfiguringDto, ProjectAssignmentEndedDto, ProjectAssignmentRunnableDto,
-    ProjectClosedDto, ProjectCreatedDto, ProjectInputAcceptedDto, ProjectInputDispatchedDto,
-    ProjectMetadataUpdatedDto, ProjectOutputRecordedDto, ProjectResourceAddedDto,
-    ProjectResourceHealthObservedDto, ProjectResourceRemovedDto, ProjectResourceReplacedDto,
-    ProjectResourceTargetDto, ProjectTargetDto, ProtocolDto, ProviderSessionRenamedDto,
-    ProviderSessionSelectedDto, RemoteProjectCommandOutcomeDto, RemoteProjectCommandReceiptDto,
-    RemoteProjectCommandRequestedDto, RoleDto, ScopeDto, ThreadCancelledDto,
+    BodyDto, ContentDto, ConversationArchivedDto, HarnessActivityRecordedDto, Hex32,
+    HumanAccountCreatedDto, HumanAccountSelectedDto, HumanDeviceAcceptedDto, HumanDeviceGrantedDto,
+    HumanDeviceRevokedDto, InstallationDeclaredDto, LocatorDto, MailboxAccessGrantedDto,
+    MailboxAccessRevokedDto, MailboxActionObservedDto, MailboxContextRecordedDto,
+    MailboxCreatedDto, MailboxSessionBoundDto, MessageDto, MessagePurposeDto, MessageRejectedDto,
+    MessageTargetDto, Milliseconds, NamespaceDto, ParentDto, PeerRouteBlockedDto, PeerRouteSetDto,
+    ProjectAssignmentBlockedDto, ProjectAssignmentConfiguringDto, ProjectAssignmentEndedDto,
+    ProjectAssignmentRunnableDto, ProjectClosedDto, ProjectCreatedDto, ProjectInputAcceptedDto,
+    ProjectInputDispatchedDto, ProjectMetadataUpdatedDto, ProjectOutputRecordedDto,
+    ProjectResourceAddedDto, ProjectResourceHealthObservedDto, ProjectResourceRemovedDto,
+    ProjectResourceReplacedDto, ProjectResourceTargetDto, ProjectTargetDto, ProtocolDto,
+    ProviderSessionRenamedDto, ProviderSessionSelectedDto, RemoteProjectCommandOutcomeDto,
+    RemoteProjectCommandReceiptDto, RemoteProjectCommandRequestedDto, RoleDto, ScopeDto,
+    ThreadCancelledDto,
 };
 use crate::{FailureClass, ProtocolError, ProtocolNamespace};
 
@@ -178,6 +179,7 @@ fn decode_body(family: u64, raw: &RawValue) -> Result<BodyDto, ProtocolError> {
         ),
         47 => body!(RemoteProjectCommandReceiptDto, RemoteProjectCommandReceipt),
         48 => body!(RemoteProjectCommandOutcomeDto, RemoteProjectCommandOutcome),
+        49 => body!(ConversationArchivedDto, ConversationArchived),
         _ => Err(malformed()),
     }
 }
@@ -219,6 +221,7 @@ fn scope_is_allowed(family: u64, scope: &ScopeDto) -> bool {
         ),
         19..=22 => matches!(scope, ScopeDto::Local(_) | ScopeDto::Account(_)),
         46..=48 => matches!(scope, ScopeDto::Control(_)),
+        49 => matches!(scope, ScopeDto::Local(_) | ScopeDto::Account(_)),
         _ => false,
     }
 }
@@ -319,6 +322,7 @@ fn role_is_allowed(family: u64, role: RoleDto) -> bool {
             role,
             ProjectHome | Request | AccountMembership | ActiveHuman
         ),
+        49 => matches!(role, LocalInstallation | AccountMembership | ActiveHuman),
         _ => false,
     }
 }

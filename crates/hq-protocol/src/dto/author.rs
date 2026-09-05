@@ -325,6 +325,11 @@ fn body(value: &domain::SemanticPayload) -> model::BodyDto {
         Input::MessageRestored { message_id } => Output::MessageRestored(model::MessageTargetDto {
             message: id(message_id),
         }),
+        Input::ConversationArchived { conversation } => {
+            Output::ConversationArchived(model::ConversationArchivedDto {
+                conversation: conversation_id_dto(conversation),
+            })
+        }
         Input::MessageRejected { message_id, reason } => {
             Output::MessageRejected(model::MessageRejectedDto {
                 message: id(message_id),
@@ -628,6 +633,33 @@ fn body(value: &domain::SemanticPayload) -> model::BodyDto {
             result: remote_result(result),
             runtime: optional_runtime(runtime.as_ref()),
         }),
+    }
+}
+
+fn conversation_id_dto(value: &domain::ConversationId) -> model::ConversationIdDto {
+    match value {
+        domain::ConversationId::ProjectThread { project_id, thread } => {
+            model::ConversationIdDto::ProjectThread {
+                project: id(project_id),
+                thread: id(thread),
+            }
+        }
+        domain::ConversationId::Thread {
+            counterparty,
+            thread,
+        } => model::ConversationIdDto::Thread {
+            counterparty: mailbox_address(*counterparty),
+            thread: id(thread),
+        },
+        domain::ConversationId::ProviderSession {
+            counterparty,
+            provider,
+            session,
+        } => model::ConversationIdDto::ProviderSession {
+            counterparty: mailbox_address(*counterparty),
+            provider: provider_text(provider),
+            session: session_text(session),
+        },
     }
 }
 
