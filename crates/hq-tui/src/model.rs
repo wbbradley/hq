@@ -4169,6 +4169,24 @@ impl UiModel {
     }
 
     fn apply_snapshot(&mut self, snapshot: UiSnapshot) {
+        let selected_row_alias = self.selected_row.as_ref().and_then(|selected| {
+            let current = self
+                .snapshot
+                .as_ref()?
+                .inbox_rows
+                .iter()
+                .find(|row| &row.id == selected)?;
+            let target = current.conversation_target.as_ref()?;
+            (!snapshot.inbox_rows.iter().any(|row| row.id == *selected))
+                .then(|| {
+                    snapshot
+                        .inbox_rows
+                        .iter()
+                        .find(|row| row.conversation_target.as_ref() == Some(target))
+                        .map(|row| (selected.clone(), row.id.clone()))
+                })
+                .flatten()
+        });
         if self.new_workflow.is_none()
             && let Some((setup, message_id)) = snapshot.project_setups.iter().find_map(|setup| {
                 let UiMailboxDraftTarget::ProjectSetup {
@@ -4222,6 +4240,9 @@ impl UiModel {
         refresh_new_modal(self, &snapshot);
         self.refresh_project_filter(&snapshot);
         self.snapshot = Some(snapshot);
+        if let Some((prior, alias)) = selected_row_alias {
+            self.reidentify_conversation_row(&prior, &alias);
+        }
         if let Some((project_id, root_message)) = self.pending_project_conversation
             && let Some(row_id) = self.snapshot.as_ref().and_then(|snapshot| {
                 snapshot
@@ -4247,6 +4268,33 @@ impl UiModel {
         self.refresh_selected_project_summary();
         select_agent_search_match(self, false);
         select_project_search_match(self, false);
+    }
+
+    fn reidentify_conversation_row(&mut self, prior: &str, alias: &str) {
+        if self.selected_row.as_deref() == Some(prior) {
+            self.selected_row = Some(alias.to_owned());
+        }
+        if self.desired_conversation.as_deref() == Some(prior) {
+            self.desired_conversation = Some(alias.to_owned());
+        }
+        if self.requested_conversation.as_deref() == Some(prior) {
+            self.requested_conversation = Some(alias.to_owned());
+        }
+        if let Some(conversation) = &mut self.conversation
+            && conversation.row_id == prior
+        {
+            alias.clone_into(&mut conversation.row_id);
+        }
+        if let Some(mut retained) = self.retained_conversations.remove(prior) {
+            alias.clone_into(&mut retained.page.row_id);
+            self.retained_conversations
+                .insert(alias.to_owned(), retained);
+        }
+        for row_id in &mut self.retained_conversation_order {
+            if row_id == prior {
+                alias.clone_into(row_id);
+            }
+        }
     }
 
     fn retain_conversation(&mut self, revision: u64, page: UiConversationPage) {
@@ -9893,12 +9941,22 @@ fn draft_action(target: &UiMailboxDraftTarget) -> UiMailboxAction {
 
 fn select_project_conversation(model: &mut UiModel, project_id: [u8; 32], thread_id: [u8; 32]) {
     model.change_section(UiSection::Inbox);
-    model.selected_row = Some(format!(
-        "project:{}:{}",
-        agent_hex(project_id),
-        agent_hex(thread_id)
-    ));
-    model.focus = UiFocus::Conversation;
+    if let Some(row_id) = model.snapshot.as_ref().and_then(|snapshot| {
+        snapshot.inbox_rows.iter().find_map(|row| {
+            matches!(
+                row.conversation_target,
+                Some(UiConversationTarget::Project {
+                    project_id: candidate_project,
+                    thread_id: candidate_thread,
+                    ..
+                }) if candidate_project == project_id && candidate_thread == thread_id
+            )
+            .then(|| row.id.clone())
+        })
+    }) {
+        model.selected_row = Some(row_id);
+        model.focus = UiFocus::Conversation;
+    }
 }
 
 fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, UiError> {
@@ -11839,15 +11897,54 @@ mod tests {
 
     use super::{
         ConfigurationFreshness, TextEdit, UiAgent, UiAgentLifecycle, UiAgentStatus, UiConfigField,
-        UiConfiguration, UiEffect, UiError, UiEvent, UiFailure, UiFocus, UiFormField, UiFormKind,
-        UiFormState, UiGuidedSubmission, UiHumanState, UiInput, UiInteraction,
-        UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind, UiInteractionModal,
-        UiInteractionResponse, UiInteractionTarget, UiMailboxDraftPane, UiMailboxDraftTarget,
-        UiModel, UiNewWorkflow, UiProject, UiProjectAction, UiProjectAssignment,
-        UiProjectInteraction, UiProjectResourceCheck, UiProjectThread, UiSection, UiSize,
-        UiSnapshot, UiThemeChoice, apply_project_interaction_input, edit_text,
-        normalize_path_input, refresh_project_interaction, update,
+        UiConfiguration, UiConversationTarget, UiEffect, UiError, UiEvent, UiFailure, UiFocus,
+        UiFormField, UiFormKind, UiFormState, UiGuidedSubmission, UiHumanState, UiInput,
+        UiInteraction, UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind,
+        UiInteractionModal, UiInteractionResponse, UiInteractionTarget, UiMailboxDraftPane,
+        UiMailboxDraftTarget, UiModel, UiNewWorkflow, UiProject, UiProjectAction,
+        UiProjectAssignment, UiProjectInteraction, UiProjectResourceCheck, UiProjectThread, UiRow,
+        UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiThemeChoice,
+        apply_project_interaction_input, edit_text, normalize_path_input,
+        refresh_project_interaction, select_project_conversation, update,
     };
+
+    #[test]
+    fn project_conversation_selection_uses_the_typed_agent_row_identity() {
+        let mut model = model();
+        let project_id = [5; 32];
+        let thread_id = [6; 32];
+        let agent_row = "alice-agent".to_owned();
+        model.snapshot = Some(UiSnapshot {
+            revision: 1,
+            human_state: UiHumanState::Ready,
+            inbox_rows: vec![UiRow {
+                id: agent_row.clone(),
+                title: "Alice".to_owned(),
+                detail: "release".to_owned(),
+                state: UiRowState::Open,
+                kind: UiRowKind::Conversation,
+                conversation_target: Some(UiConversationTarget::Project {
+                    project_id,
+                    thread_id,
+                    root_message: [7; 32],
+                }),
+            }],
+            sent_rows: Vec::new(),
+            archived_rows: Vec::new(),
+            agent_rows: Vec::new(),
+            project_rows: Vec::new(),
+            direct_targets: Vec::new(),
+            providers: Vec::new(),
+            agents: Vec::new(),
+            projects: Vec::new(),
+            project_setups: Vec::new(),
+        });
+
+        select_project_conversation(&mut model, project_id, thread_id);
+
+        assert_eq!(model.selected_row.as_deref(), Some(agent_row.as_str()));
+        assert_eq!(model.focus, UiFocus::Conversation);
+    }
 
     #[test]
     fn effect_identity_exhaustion_is_explicit() {

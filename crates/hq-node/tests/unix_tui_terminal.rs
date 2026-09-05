@@ -817,7 +817,14 @@ fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation()
     let name = "guided-project";
     let agent = "guided-agent";
     let content = "implement the guided change";
-    let run = run_in_pty(
+    let live_trace = directory.path().join("live-conversation-boundaries.jsonl");
+    let initial_completion_gate = provider_bin.join("completion-gate-1");
+    let gate = Command::new("mkfifo")
+        .arg(&initial_completion_gate)
+        .status()
+        .expect("initial completion gate command runs");
+    assert!(gate.success(), "initial completion gate is created");
+    let run = run_in_pty_with_trace(
         &state_root,
         true,
         PtyInteraction::CreateGuidedProjectWork {
@@ -827,7 +834,9 @@ fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation()
             content,
             search_path: &search_path,
             approval: false,
+            completion_gate: Some(&initial_completion_gate),
         },
+        Some(&live_trace),
     );
     assert!(run.status.success(), "guided TUI failed: {:?}", run.bytes);
     assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
@@ -854,6 +863,12 @@ fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation()
     );
 
     let follow_up = "continue with the installed follow-up";
+    let completion_gate = provider_bin.join("completion-gate-2");
+    let gate = Command::new("mkfifo")
+        .arg(&completion_gate)
+        .status()
+        .expect("completion gate command runs");
+    assert!(gate.success(), "completion gate is created");
     let reply = run_in_pty(
         &state_root,
         true,
@@ -861,6 +876,7 @@ fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation()
             name,
             initial: content,
             content: follow_up,
+            completion_gate: &completion_gate,
         },
     );
     assert!(
@@ -923,6 +939,7 @@ fn installed_fake_codex_approval_round_trips_through_the_tui() {
             content,
             search_path: &search_path,
             approval: true,
+            completion_gate: None,
         },
         Some(&boundary_trace),
     );
@@ -988,6 +1005,7 @@ fn installed_progress_flood_keeps_new_clients_responsive_and_restartable() {
                     content: "exercise the progress flood",
                     search_path: &search_path,
                     approval: false,
+                    completion_gate: None,
                 },
             )
         });
@@ -1305,6 +1323,7 @@ enum PtyInteraction<'content> {
         name: &'content str,
         initial: &'content str,
         content: &'content str,
+        completion_gate: &'content Path,
     },
     CreateAgent(&'content str),
     StartRejectedSession,
@@ -1319,6 +1338,7 @@ enum PtyInteraction<'content> {
         content: &'content str,
         search_path: &'content str,
         approval: bool,
+        completion_gate: Option<&'content Path>,
     },
     AddProjectResource {
         name: &'content str,
@@ -1412,6 +1432,7 @@ fn run_in_pty_with_trace(
     let mut managed_action_sent = false;
     let mut managed_provider_sent = false;
     let mut resource_commit_sent = false;
+    let mut provider_completion_released = false;
     let mut interaction_answer_sent = false;
     let mut approval_focus_requested = false;
     let mut exit_sent = false;
@@ -1974,10 +1995,10 @@ fn run_in_pty_with_trace(
             managed_provider_sent = true;
             completion_offset = Some(bytes.len());
         }
-        if matches!(
-            interaction,
-            PtyInteraction::ReplyToProjectConversation { .. }
-        ) && managed_provider_sent
+        if let PtyInteraction::ReplyToProjectConversation {
+            completion_gate, ..
+        } = interaction
+            && managed_provider_sent
             && !resource_commit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
@@ -1988,21 +2009,27 @@ fn run_in_pty_with_trace(
                         .any(|window| window == "You · Pending".as_bytes())
             })
         {
+            std::fs::write(completion_gate, b"complete").expect("provider completion gate opens");
             resource_commit_sent = true;
         }
-        if let PtyInteraction::ReplyToProjectConversation { name, .. } = interaction
-            && resource_commit_sent
+        if matches!(
+            interaction,
+            PtyInteraction::ReplyToProjectConversation { .. }
+        ) && resource_commit_sent
             && !exit_sent
-            && Instant::now() >= next_state_probe_at
+            && completion_offset.is_some_and(|offset| {
+                let output = &bytes[offset..];
+                output
+                    .windows(b"finished-turn-2".len())
+                    .any(|window| window == b"finished-turn-2")
+                    && output
+                        .windows(b"Agent finished".len())
+                        .any(|window| window == b"Agent finished")
+            })
         {
-            next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
-            if project_has_dispatch_count(state_root, name, 2)
-                && mailbox_contains(state_root, "finished-turn-2")
-            {
-                master.write_all(&[0x03]).expect("Ctrl-C writes");
-                master.flush().expect("Ctrl-C flushes");
-                exit_sent = true;
-            }
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
         }
         if let PtyInteraction::CreateAgent(name) = interaction
             && initial_key_sent
@@ -2143,6 +2170,22 @@ fn run_in_pty_with_trace(
             master.flush().expect("guided instruction flushes");
             resource_commit_sent = true;
             completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::CreateGuidedProjectWork {
+            completion_gate: Some(completion_gate),
+            ..
+        } = interaction
+            && resource_commit_sent
+            && !provider_completion_released
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Agent is working".len())
+                    .any(|window| window == b"Agent is working")
+            })
+        {
+            std::fs::write(completion_gate, b"complete")
+                .expect("initial provider completion gate opens");
+            provider_completion_released = true;
         }
         if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
             && resource_commit_sent
@@ -2440,19 +2483,39 @@ fn run_in_pty_with_trace(
                 exit_sent = true;
             }
         }
-        if let PtyInteraction::CreateGuidedProjectWork { name, approval, .. } = interaction
+        if let PtyInteraction::CreateGuidedProjectWork {
+            name,
+            approval,
+            completion_gate,
+            ..
+        } = interaction
             && resource_commit_sent
             && !approval
             && !exit_sent
-            && Instant::now() >= next_state_probe_at
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Project agent".len())
-                    .any(|window| window == b"Project agent")
-            })
         {
-            next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
-            if project_is_runnable_with_one_dispatch(state_root, name) {
+            let live_completion_rendered = completion_gate.is_some()
+                && provider_completion_released
+                && completion_offset.is_some_and(|offset| {
+                    let output = &bytes[offset..];
+                    output
+                        .windows(b"finished-turn-1".len())
+                        .any(|window| window == b"finished-turn-1")
+                        && output
+                            .windows(b"Agent finished".len())
+                            .any(|window| window == b"Agent finished")
+                });
+            let ordinary_setup_finished = completion_gate.is_none()
+                && Instant::now() >= next_state_probe_at
+                && completion_offset.is_some_and(|offset| {
+                    bytes[offset..]
+                        .windows(b"Project agent".len())
+                        .any(|window| window == b"Project agent")
+                })
+                && {
+                    next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
+                    project_is_runnable_with_one_dispatch(state_root, name)
+                };
+            if live_completion_rendered || ordinary_setup_finished {
                 master.write_all(&[0x03]).expect("Ctrl-C writes");
                 master.flush().expect("Ctrl-C flushes");
                 exit_sent = true;
@@ -2565,8 +2628,10 @@ fn run_in_pty_with_trace(
                 ),
                 _ => None,
             };
+            let boundary_evidence =
+                boundary_trace.and_then(|path| std::fs::read_to_string(path).ok());
             panic!(
-                "TUI process timed out for {interaction:?} (initial={initial_key_sent}, content={content_sent}, action={managed_action_sent}, provider={managed_provider_sent}, resource={resource_commit_sent}, exit={exit_sent}); provider calls: {provider_calls:?}; project: {guided_project:?}; output: {}",
+                "TUI process timed out for {interaction:?} (initial={initial_key_sent}, content={content_sent}, action={managed_action_sent}, provider={managed_provider_sent}, resource={resource_commit_sent}, exit={exit_sent}); provider calls: {provider_calls:?}; project: {guided_project:?}; boundaries: {boundary_evidence:?}; output: {}",
                 String::from_utf8_lossy(&bytes)
             );
         }
@@ -2782,12 +2847,6 @@ fn project_is_runnable_with_one_dispatch(state_root: &Path, name: &str) -> bool 
         && project["inputs"][0]["message_id"] == project["dispatches"][0]["message_id"]
 }
 
-fn project_has_dispatch_count(state_root: &Path, name: &str, expected: usize) -> bool {
-    let project = project_json(state_root, name);
-    project["inputs"].as_array().map(Vec::len) == Some(expected)
-        && project["dispatches"].as_array().map(Vec::len) == Some(expected)
-}
-
 fn wait_for_path(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while !path.exists() {
@@ -2905,7 +2964,12 @@ for line in sys.stdin:
                 answer = json.loads(answer_line)
                 if answer.get("id") == approval_id:
                     break
-        time.sleep(0.25)
+        completion_gate = os.path.join(os.path.dirname(__file__), f"completion-gate-{turn_number}")
+        if os.path.exists(completion_gate):
+            with open(completion_gate, "rb", buffering=0) as gate:
+                gate.read(1)
+        else:
+            time.sleep(0.25)
         item = {"type": "agentMessage", "id": f"answer-{turn_number}", "text": f"finished-turn-{turn_number}", "phase": "final_answer"}
         print(json.dumps({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": item}}), flush=True)
         completed = {"id": turn_id, "status": "completed", "items": [item]}

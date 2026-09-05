@@ -688,18 +688,25 @@ where
 
 fn trace_tui_event(trace: &BoundaryTrace, kind: BoundaryKind, event: &UiEvent) {
     match event {
-        UiEvent::InteractionsObserved { interactions }
-        | UiEvent::MaterializedViewReconciled { interactions, .. } => {
-            for interaction in interactions {
-                trace.record(
-                    kind,
-                    BoundaryIds {
-                        operation: Some(interaction.operation_id),
-                        provider_request: Some(interaction.request_id),
-                        ..BoundaryIds::default()
-                    },
-                );
-            }
+        UiEvent::MaterializedViewObserved { view } => trace.record(
+            kind,
+            BoundaryIds {
+                revision: Some(view.snapshot.revision),
+                ..BoundaryIds::default()
+            },
+        ),
+        UiEvent::MaterializedViewReconciled { view, interactions } => {
+            trace.record(
+                kind,
+                BoundaryIds {
+                    revision: Some(view.snapshot.revision),
+                    ..BoundaryIds::default()
+                },
+            );
+            trace_tui_interactions(trace, kind, interactions);
+        }
+        UiEvent::InteractionsObserved { interactions } => {
+            trace_tui_interactions(trace, kind, interactions);
         }
         UiEvent::Invalidated { revision } => trace.record(
             kind,
@@ -744,6 +751,23 @@ fn trace_tui_event(trace: &BoundaryTrace, kind: BoundaryKind, event: &UiEvent) {
             },
         ),
         _ => {}
+    }
+}
+
+fn trace_tui_interactions(
+    trace: &BoundaryTrace,
+    kind: BoundaryKind,
+    interactions: &[hq_tui::UiInteraction],
+) {
+    for interaction in interactions {
+        trace.record(
+            kind,
+            BoundaryIds {
+                operation: Some(interaction.operation_id),
+                provider_request: Some(interaction.request_id),
+                ..BoundaryIds::default()
+            },
+        );
     }
 }
 

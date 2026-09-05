@@ -4412,6 +4412,118 @@ fn terminal_agent_turn_automatically_opens_the_exact_project_continuation_draft(
 }
 
 #[test]
+fn terminal_turn_survives_the_project_conversation_becoming_an_agent_row() {
+    let mut running = entry("turn-running", true);
+    running.presentation = UiConversationEntryPresentation::Activity {
+        kind: UiConversationActivityKind::AgentTurn,
+        status: UiActivityStatus::Running,
+        summary: "Agent is working…".to_owned(),
+        detail: "turn running".to_owned(),
+        truncated: false,
+        completed: None,
+    };
+    let opened = materialized_transition(
+        snapshot(1, &["project-conversation"]),
+        UiConversationPage {
+            title: "Project agent".to_owned(),
+            context: Some("hq".to_owned()),
+            row_id: "project-conversation".to_owned(),
+            entries: vec![entry("question", false), running],
+            next_cursor: None,
+        },
+    );
+
+    let mut terminal = entry("turn-finished", true);
+    terminal.presentation = UiConversationEntryPresentation::Activity {
+        kind: UiConversationActivityKind::AgentTurn,
+        status: UiActivityStatus::Succeeded,
+        summary: "Agent finished".to_owned(),
+        detail: "turn completed".to_owned(),
+        truncated: false,
+        completed: None,
+    };
+    let completed = update(
+        opened.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["alice-agent"]),
+                conversation: Some(UiConversationPage {
+                    title: "Alice".to_owned(),
+                    context: Some("hq".to_owned()),
+                    row_id: "alice-agent".to_owned(),
+                    entries: vec![entry("question", false), terminal],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("terminal agent row is observed");
+
+    assert_eq!(completed.model.selected_row(), Some("alice-agent"));
+    assert!(completed.model.conversation().is_some_and(|conversation| {
+        conversation.entries.iter().any(|entry| {
+            matches!(
+                entry.presentation,
+                UiConversationEntryPresentation::Activity {
+                    kind: UiConversationActivityKind::AgentTurn,
+                    status: UiActivityStatus::Succeeded,
+                    ..
+                }
+            )
+        })
+    }));
+}
+
+#[test]
+fn snapshot_only_agent_row_handoff_keeps_the_open_project_conversation_subscribed() {
+    let target = UiConversationTarget::Project {
+        project_id: [5; 32],
+        thread_id: [6; 32],
+        root_message: [7; 32],
+    };
+    let mut initial = snapshot(1, &["project-conversation"]);
+    initial.inbox_rows[0].conversation_target = Some(target.clone());
+    let opened = materialized_transition(
+        initial,
+        UiConversationPage {
+            title: "Project agent".to_owned(),
+            context: Some("hq".to_owned()),
+            row_id: "project-conversation".to_owned(),
+            entries: vec![entry("question", false)],
+            next_cursor: None,
+        },
+    );
+
+    let mut aliased = snapshot(2, &["alice-agent"]);
+    aliased.inbox_rows[0].conversation_target = Some(target);
+    let handed_off = update(
+        opened.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: aliased,
+                conversation: None,
+            },
+        },
+    )
+    .expect("agent row handoff applies");
+
+    assert_eq!(handed_off.model.selected_row(), Some("alice-agent"));
+    assert_eq!(
+        handed_off
+            .model
+            .conversation()
+            .map(|conversation| conversation.row_id.as_str()),
+        Some("alice-agent")
+    );
+    assert!(
+        handed_off
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::ObserveConversation { row_id: None }))
+    );
+}
+
+#[test]
 fn initially_opening_an_already_finished_turn_does_not_open_a_draft() {
     let mut terminal = entry("turn-finished", true);
     terminal.presentation = UiConversationEntryPresentation::Activity {
