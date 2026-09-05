@@ -99,8 +99,137 @@ Dependencies are canonical conversation presentation ordering; exact agent/proje
 session correlation; the managed-session stop capability; retry-safe operation receipts and
 reconnect reconciliation; and the existing typed New-workflow child continuations.
 
+#### Implementation plan
+
+Work through these dependency-ordered capability units, committing each coherent boundary before
+continuing while keeping this complete task in `Next Up` until the end state is verified.
+
+##### Persist whole-conversation state
+
+- Move the reducer-owned `ConversationKey` shape to an application-independent
+  `hq_domain::ConversationId` value and re-export it as needed so facts, reducer projections,
+  application requests, protocol DTOs, storage keys, and the TUI all use the same typed identity.
+- Replace the message-state fact families and protocol bodies with one permanent
+  `ConversationArchived` fact carrying that identity. Update fact catalog/codec golden tests and
+  delete message archive/restore planning and projection behavior while retaining rejection and
+  question cancellation as their distinct semantics.
+- Extend conversation reduction with an absorbing archived projection per exact conversation.
+  Conversation summaries/pages gain a typed archived flag and a canonical presentation rank derived
+  from the reducer's global presentation traversal. Late or concurrent entries for the same identity
+  remain in its transcript and cannot reopen it.
+- Primary files: `crates/hq-domain/src/{ids.rs,lib.rs,semantic_fact.rs,fact_catalog.rs}`,
+  `crates/hq-protocol/src/dto/{model.rs,decode.rs,author.rs,semantic.rs}`,
+  `crates/hq-reducer/src/{conversation.rs,lib.rs}`,
+  `crates/hq-application/src/{messaging.rs,mailbox.rs,snapshot.rs,mutation.rs,lib.rs}`,
+  `crates/hq-store/src/{snapshot.rs,database.rs,database/conversation.rs,database/repair.rs}`,
+  `crates/hq-local-api/src/{protocol/v1.rs,conversion.rs}`, and their fact-codec, reduction,
+  snapshot, incremental-query, and protocol contract tests.
+
+##### Coordinate stop and archive durably
+
+- Add a retry-safe conversation-archive command and durable record keyed by stable command and
+  operation identities. Resolve the selected `ConversationId` against one authoritative snapshot,
+  retaining exact agent, project, provider, session, and project-head evidence rather than labels.
+- For project work, reuse the project close workflow to quiesce the runtime and release the
+  assignment, then commit `ConversationArchived` without archiving the reusable project. For direct
+  provider-session work, use the managed-session stop port before the same archive mutation; personal
+  and non-agent conversations skip runtime control. Treat idle/already-stopped as accepted, retain
+  rejected conversations as active, and checkpoint uncertain effects for exact reconciliation.
+- Extend daemon recovery so nonterminal archive records resume after reconnect/restart and prevent
+  a second command from racing the same conversation. Surface typed accepted/rejected/uncertain
+  results through the application service and local API.
+- Primary files: new capability-named workflow/store modules under `crates/hq-application`,
+  `crates/hq-store`, and `crates/hq-node`; `crates/hq-projects/src/{lib.rs,workflow.rs}` only where a
+  reusable close boundary is required; `crates/hq-local-api/src/{protocol/v1.rs,conversion.rs,
+  client.rs,server.rs}`; node component composition; database schema/actor/gateway code; and focused
+  active, idle, already-stopped, rejected, uncertain, retry, reconnect, and ordering tests.
+
+##### Project the agent-oriented Inbox
+
+- Extend the authoritative snapshot with typed agent-to-conversation candidates and current
+  selection derived by exact `AgentId`, archived state, and canonical presentation rank. Preserve
+  every older nonarchived candidate and deterministic no-communication ordering.
+- Replace message-count-gated Inbox construction in `crates/hq-node/src/tui_client.rs` with one row
+  for every active registered agent plus separate personal/future human conversations and diagnostic
+  rows. Each agent row carries its exact agent identity, optional current conversation, optional
+  assignment/project, alternatives, and technical evidence; the list is complete beyond ten rows.
+- Keep selection stable across refresh and archive: advance the same agent row to its next active
+  conversation or its no-conversation state. Add application/store/local-API projection tests and
+  TUI-client tests for zero/one/many conversations, duplicate names, project labels, canonical
+  recency, archive advancement, and more than ten agents.
+- Primary files: `crates/hq-application/src/snapshot.rs`, `crates/hq-store/src/database.rs`,
+  `crates/hq-local-api/src/{protocol/v1.rs,conversion.rs}`, `crates/hq-node/src/tui_client.rs`,
+  `crates/hq-tui/src/model.rs`, and their snapshot/protocol/presentation tests.
+
+##### Share the new-work prerequisites
+
+- Replace the fixed project-first `UiNewWorkflow`/`UiNewModal` transition chain in
+  `crates/hq-tui/src/model.rs` with a typed prerequisite state retaining optional exact agent,
+  project, provider/session, and initial-message setup. A single deterministic transition function
+  chooses the first unmet prerequisite and owns forward, Back, child project/agent creation,
+  refresh, stale-effect, and recovery behavior.
+- Seed that coordinator from global `n`, an assigned agent without a conversation, or an unassigned
+  agent. Enter opens an exact current conversation when present; otherwise it chooses/creates the
+  missing project and continues through the shared setup. Preserve explicit recovery for conflicted,
+  retired, unavailable, and multiply assigned agents.
+- Update `crates/hq-tui/src/render.rs` with plain-language prompts and add pure model/render tests for
+  each seed and every forward/Back edge, including authoritative reorder and child-flow return.
+
+##### Complete the archive interaction
+
+- Add a conversation-level confirmation and progress/result state in `crates/hq-tui/src/model.rs`.
+  `d` targets the selected row's exact current conversation from either list or transcript focus,
+  submits one stable archive operation, and refreshes back to the same agent row. Rows without an
+  archiveable conversation provide contextual help.
+- Remove TUI/local-API/CLI message-level archive and restore actions and tests. Keep Direct Message
+  only in the `n` launcher, and update `crates/hq-tui/src/render.rs`, contextual help, command
+  grammar, and user-facing documentation so the shortcuts and outcomes are unambiguous.
+- Extend installed PTY/acceptance coverage to demonstrate that an active runtime stops before the
+  whole transcript appears read-only in Archived and that the same agent can immediately begin a
+  new, distinct conversation bound to an existing or newly created project.
+
+#### Risks resolved by the design
+
+- Project closure and conversation archival are separate facts: archiving work releases the agent
+  but leaves the project reusable instead of hiding the project as a side effect.
+- Cross-conversation recency is a reducer-issued rank from canonical presentation order, never a
+  comparison of random `FactId` bytes, timestamps, storage arrival, or UI vector position.
+- Conversation archival is absorbing; there is deliberately no restore action. A later exchange
+  with the same agent must receive a new conversation identity.
+
 Completion is observable when Inbox always provides a reachable, recency-ordered row for every
 active registered agent; `d` definitely stops the exact agent runtime before archiving the selected
 complete conversation; no individual-message archive behavior remains; Direct Message is available
 through `n`; archived history stays intact; and Enter on an agent with no conversation reaches the
 same deterministic project-binding and conversation-start flow used by global New.
+
+## Post-Plan Execution Steps
+
+Execute these steps in order:
+
+### Implement
+Execute the plan above.
+
+**Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+`Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+### Verify
+
+1. Run the project's build/lint command. Fix all warnings.
+2. Run the project's test suite.
+3. If tests fail, fix them before proceeding.
+4. If test coverage for the new work is insufficient, add tests.
+
+### Commit
+
+Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+### Update the plan file
+
+Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+1. A brief summary, written now, of what was actually implemented.
+2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
