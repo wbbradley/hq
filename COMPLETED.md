@@ -13034,3 +13034,87 @@ ready throughout. Formatting, strict linting, the relevant local API/node tests,
 must pass.
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-05 — Live project conversation completion
+
+The guided project workflow now selects its conversation by the authoritative typed project/thread
+target instead of fabricating a presentation row ID. When the same conversation moves from a
+provisional project row to its stable agent row, the TUI rekeys the selection, requested
+subscription, open page, and retained page together, so no transient snapshot can unsubscribe the
+live transcript. Materialized-view boundary traces now include authoritative revisions while
+preserving interaction correlations.
+
+Deterministic model tests cover typed agent-row selection, snapshot-only row handoff, and terminal
+activity across the handoff. The installed PTY regression gates provider completion with FIFOs and
+requires the continuously open TUI to render both the final output and `Agent finished` for the
+initial and follow-up turns. Formatting, strict workspace Clippy, and the locked full workspace
+test suite pass.
+
+### Original plan entry
+
+### Keep an open conversation synchronized through turn completion
+
+An already-open project conversation can remain indefinitely on its initial message and `Agent is
+working` marker even after the provider's final answer and terminal `AgentTurn::Succeeded` fact are
+durably committed. Restarting the TUI immediately renders the completed transcript, proving that
+the canonical facts, reduction, and cold materialization are correct while the live subscribed
+view has stopped advancing.
+
+- Add an installed PTY regression to `crates/hq-node/tests/unix_tui_terminal.rs` that keeps the
+  exact guided project conversation open from first dispatch through the fake provider's final
+  answer and terminal turn. Synchronize on provider protocol, persisted revision, invalidation, and
+  rendered terminal evidence rather than sleeps or retry timing; require the live screen to replace
+  the running marker with `Agent finished` and expose the continuation draft without restarting.
+- Trace the typed revision through `crates/hq-local-api/src/client.rs`,
+  `crates/hq-node/src/{session_io.rs,session_registry.rs,local_client.rs,tui_client.rs}`, and
+  `crates/hq-tui/src/model.rs`. Fix the narrow ownership/order defect that lets an invalidation be
+  written while the subscribed conversation refresh or its model event is lost or rejected. Keep
+  request/response flow bounded and preserve exact connection generation, subscription,
+  conversation, request, and revision identities.
+- Add focused unit/integration coverage at the failing boundary, including coalesced final-output
+  and terminal-activity revisions, a selected row whose provisional project identity becomes its
+  stable agent identity, and unrelated command-client traffic. Tests must use channels, barriers,
+  protocol frames, or visible render markers—never sleeps.
+
+Primary files: `crates/hq-node/tests/unix_tui_terminal.rs`, the smallest implicated modules among
+`crates/hq-local-api/src/client.rs`, `crates/hq-node/src/{session_io.rs,session_registry.rs,
+local_client.rs,tui_client.rs}`, `crates/hq-tui/src/model.rs`, and their focused tests.
+
+Completion is observable when the original fresh-bootstrap workflow updates one continuously open
+TUI from pending, through working, to the final answer and `Agent finished`; the provider may remain
+alive for future turns, but no running projection remains. Restarting is not required, connection
+generation remains stable, and deterministic regression coverage passes without time-based
+synchronization.
+
+## Post-Plan Execution Steps
+
+Execute these steps in order:
+
+### Implement
+Execute the plan above.
+
+**Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+`Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+### Verify
+
+1. Run the project's build/lint command. Fix all warnings.
+2. Run the project's test suite.
+3. If tests fail, fix them before proceeding.
+4. If test coverage for the new work is insufficient, add tests.
+
+### Commit
+
+Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+### Update the plan file
+
+Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+1. A brief summary, written now, of what was actually implemented.
+2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+
+<!-- End of archived plan entry. -->
