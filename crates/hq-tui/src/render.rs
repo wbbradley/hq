@@ -33,19 +33,6 @@ use crate::{
 
 const MINIMUM_WIDTH: u16 = 40;
 const MINIMUM_HEIGHT: u16 = 10;
-const INBOX_LIST_MIN_WIDTH: u16 = 24;
-const INBOX_LIST_PREFERRED_WIDTH: u16 = 32;
-const INBOX_LIST_MAX_WIDTH: u16 = 36;
-const CONVERSATION_PREFERRED_MIN_WIDTH: u16 = 48;
-
-fn inbox_list_width(available: u16) -> u16 {
-    let width_preserving_conversation =
-        available.saturating_sub(CONVERSATION_PREFERRED_MIN_WIDTH + 1);
-    width_preserving_conversation
-        .clamp(INBOX_LIST_MIN_WIDTH, INBOX_LIST_PREFERRED_WIDTH)
-        .min(INBOX_LIST_MAX_WIDTH)
-}
-
 /// Reusable bounded presentation state owned by a terminal renderer.
 #[derive(Default)]
 pub struct UiRenderCache {
@@ -2915,20 +2902,12 @@ fn render_config(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
 }
 
 fn render_projects_workspace(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
-    if model.viewport().width >= WIDE_WIDTH {
-        let [projects, detail] = Layout::horizontal([
-            Constraint::Length(inbox_list_width(area.width)),
-            Constraint::Min(1),
-        ])
-        .areas(area);
-        render_summary_rows(frame, model, theme, projects);
-        render_project_workspace_detail(frame, model, theme, detail, Borders::LEFT, false);
-    } else if model.project_workspace_level() == UiProjectWorkspaceLevel::List
+    if model.project_workspace_level() == UiProjectWorkspaceLevel::List
         && !project_has_modeless_interaction(model)
     {
         render_summary_rows(frame, model, theme, area);
     } else {
-        render_project_workspace_detail(frame, model, theme, area, Borders::NONE, true);
+        render_project_workspace_detail(frame, model, theme, area, Borders::NONE, false);
     }
 }
 
@@ -2953,11 +2932,7 @@ fn render_project_workspace_detail(
         );
         return;
     };
-    let title = if compact {
-        format!("Projects / {} · ← Projects", summary.name)
-    } else {
-        format!("Project · {}", summary.name)
-    };
+    let title = format!("Project · {}", summary.name);
     let mut lines = vec![
         Line::styled(
             title,
@@ -4981,7 +4956,7 @@ mod tests {
     use super::{
         activity_preview, completed_item_detail_lines, completed_item_detail_styled,
         conversation_entry_layout, conversation_viewport_slices, conversation_viewport_tail_origin,
-        display_prefix, display_suffix, draft_context_label, inbox_list_width, inert_draft_source,
+        display_prefix, display_suffix, draft_context_label, inert_draft_source,
         interaction_supersedes_live_tail, render_conversation_entries, render_conversation_entry,
         text_field_line,
     };
@@ -5092,22 +5067,6 @@ mod tests {
             .sum::<usize>();
 
         assert_eq!(width, 10);
-    }
-
-    #[test]
-    fn inbox_list_width_is_bounded_and_gives_growth_to_conversation() {
-        assert_eq!(inbox_list_width(72), 24);
-        assert_eq!(inbox_list_width(80), 31);
-        assert_eq!(inbox_list_width(81), 32);
-        assert_eq!(inbox_list_width(120), 32);
-
-        for available in 72..=240 {
-            let list = inbox_list_width(available);
-            assert!((24..=36).contains(&list));
-            if available >= 73 {
-                assert!(available - list > 48);
-            }
-        }
     }
 
     #[test]

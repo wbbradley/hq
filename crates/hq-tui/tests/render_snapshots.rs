@@ -2266,17 +2266,13 @@ fn ordinary_surfaces_use_user_intentions_and_label_technical_evidence() {
 }
 
 #[test]
-fn projects_workspace_uses_persistent_wide_summary_and_compact_one_level_detail() {
+fn projects_workspace_uses_one_full_pane_route_at_every_width() {
     let wide = render_text(&project_model(UiSize {
         width: 120,
         height: 24,
     }));
     assert!(wide.contains("Projects · 1 project"));
-    assert!(wide.contains("Project · release"));
-    assert!(wide.contains("Start conversation"));
-    assert!(wide.contains("Agent · No agent assigned"));
-    assert!(wide.contains("Folders · 1"));
-    assert!(wide.contains("Manage project…"));
+    assert!(!wide.contains("Project · release"));
     assert!(!wide.contains("Project details"));
     assert!(!wide.contains("a add · e replace"));
 
@@ -2293,12 +2289,9 @@ fn projects_workspace_uses_persistent_wide_summary_and_compact_one_level_detail(
     let no_color_buffer = render_buffer_with_theme(&compact_detail, &UiTheme::no_color());
     let no_color = snapshot_text(&no_color_buffer);
     let compact_detail = render_text(&compact_detail);
-    assert!(compact_detail.contains("Projects / release"));
+    assert!(compact_detail.contains("Project · release"));
     assert!(no_color.contains('›'), "no-color project focus: {no_color}");
-    assert!(
-        compact_detail.contains("← Projects"),
-        "compact project detail:\n{compact_detail}"
-    );
+    assert!(compact_detail.contains("Start conversation"));
     assert!(!compact_detail.contains("Project details"));
 
     let filtered = update(

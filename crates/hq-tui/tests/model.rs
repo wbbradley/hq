@@ -5991,6 +5991,7 @@ fn project_search_and_details_preserve_stable_identity_across_reload_and_resize(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn project_workspace_summary_preserves_typed_focus_across_resize_and_reload() {
     let mut target = project(2, "beta", "/work/beta");
     target.assignment = Some(UiProjectAssignment {
@@ -6022,6 +6023,15 @@ fn project_workspace_summary_preserves_typed_focus_across_resize_and_reload() {
     model = update(model, UiEvent::Input(UiInput::MoveCursorRight))
         .expect("enter summary")
         .model;
+    assert_eq!(
+        model.navigation_path(),
+        &[
+            UiRoute::Workspace(UiWorkspace::Projects),
+            UiRoute::Project {
+                project_id: [2; 32]
+            },
+        ]
+    );
     assert_eq!(
         model.project_workspace_level(),
         UiProjectWorkspaceLevel::Summary
@@ -6068,6 +6078,15 @@ fn project_workspace_summary_preserves_typed_focus_across_resize_and_reload() {
         UiProjectWorkspaceLevel::Summary
     );
     assert_eq!(
+        loaded.model.navigation_path(),
+        &[
+            UiRoute::Workspace(UiWorkspace::Projects),
+            UiRoute::Project {
+                project_id: [2; 32]
+            },
+        ]
+    );
+    assert_eq!(
         loaded.model.project_summary_focus(),
         Some(UiProjectSummaryFocus::AssignedAgent)
     );
@@ -6078,6 +6097,58 @@ fn project_workspace_summary_preserves_typed_focus_across_resize_and_reload() {
             .map(|summary| summary.name.as_str()),
         Some("beta renamed")
     );
+}
+
+#[test]
+fn project_management_and_folders_push_one_exact_visible_level() {
+    let project_id = [4; 32];
+    let mut model = loaded_projects_model(1, vec![project(4, "routes", "/work/routes")]);
+    model = update(model, UiEvent::Input(UiInput::MoveCursorRight))
+        .expect("open project summary")
+        .model;
+    for _ in 0..5 {
+        if model.project_summary_focus() == Some(UiProjectSummaryFocus::Manage) {
+            break;
+        }
+        model = update(model, UiEvent::Input(UiInput::NextItem))
+            .expect("choose project management")
+            .model;
+    }
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("open project management")
+        .model;
+    assert_eq!(
+        model.navigation_path(),
+        &[
+            UiRoute::Workspace(UiWorkspace::Projects),
+            UiRoute::Project { project_id },
+            UiRoute::ProjectManagement { project_id },
+        ]
+    );
+
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("open project folders")
+        .model;
+    assert_eq!(
+        model.navigation_path(),
+        &[
+            UiRoute::Workspace(UiWorkspace::Projects),
+            UiRoute::Project { project_id },
+            UiRoute::ProjectManagement { project_id },
+            UiRoute::ProjectFolders { project_id },
+        ]
+    );
+    model = update(model, UiEvent::Input(UiInput::Escape))
+        .expect("return to project management")
+        .model;
+    assert!(matches!(
+        model.active_route(),
+        UiRoute::ProjectManagement { project_id: active } if *active == project_id
+    ));
+    model = update(model, UiEvent::Input(UiInput::Escape))
+        .expect("return to project summary")
+        .model;
+    assert!(matches!(model.active_route(), UiRoute::Project { .. }));
 }
 
 #[test]

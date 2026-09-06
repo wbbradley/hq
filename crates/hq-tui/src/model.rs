@@ -3314,6 +3314,7 @@ pub struct UiModel {
     pending_agent: Option<EffectId>,
     pending_managed_session: Option<EffectId>,
     pending_project: Option<PendingProject>,
+    project_route_effect: Option<EffectId>,
     pending_project_conversation: Option<([u8; 32], [u8; 32])>,
     list_selections: UiListSelections,
     retry_timer: Option<EffectId>,
@@ -3395,6 +3396,7 @@ impl UiModel {
             pending_agent: None,
             pending_managed_session: None,
             pending_project: None,
+            project_route_effect: None,
             pending_project_conversation: None,
             list_selections: UiListSelections::empty(),
             retry_timer: None,
@@ -3965,13 +3967,22 @@ impl UiModel {
     }
 
     /// Returns the current modeless Projects navigation depth.
-    pub const fn project_workspace_level(&self) -> UiProjectWorkspaceLevel {
-        self.project_workspace_level
+    pub fn project_workspace_level(&self) -> UiProjectWorkspaceLevel {
+        match self.navigation.active() {
+            UiRoute::Project { .. } | UiRoute::ProjectEvidence { .. } => {
+                UiProjectWorkspaceLevel::Summary
+            }
+            UiRoute::ProjectManagement { .. } => UiProjectWorkspaceLevel::Manage,
+            UiRoute::ProjectFolders { .. } | UiRoute::ProjectFolder { .. } => {
+                UiProjectWorkspaceLevel::Folders
+            }
+            _ => UiProjectWorkspaceLevel::List,
+        }
     }
 
     /// Returns the stable selected card within a project summary.
-    pub const fn project_summary_focus(&self) -> Option<UiProjectSummaryFocus> {
-        match self.project_workspace_level {
+    pub fn project_summary_focus(&self) -> Option<UiProjectSummaryFocus> {
+        match self.project_workspace_level() {
             UiProjectWorkspaceLevel::List => None,
             UiProjectWorkspaceLevel::Summary
             | UiProjectWorkspaceLevel::Manage
@@ -3985,8 +3996,8 @@ impl UiModel {
     }
 
     /// Returns the selected labeled folder action.
-    pub const fn project_folder_action(&self) -> Option<UiProjectFolderAction> {
-        match self.project_workspace_level {
+    pub fn project_folder_action(&self) -> Option<UiProjectFolderAction> {
+        match self.project_workspace_level() {
             UiProjectWorkspaceLevel::Folders => Some(self.project_folder_action),
             UiProjectWorkspaceLevel::List
             | UiProjectWorkspaceLevel::Summary
@@ -4331,6 +4342,7 @@ impl UiModel {
             return Ok(());
         }
         let id = self.allocate_effect()?;
+        self.project_route_effect = Some(id);
         self.pending_project = Some(PendingProject {
             id,
             action: action.clone(),
@@ -4399,6 +4411,66 @@ impl UiModel {
         self.navigation
             .push(UiRoute::Conversation { row_id })
             .is_ok()
+    }
+
+    fn enter_selected_project_route(&mut self) -> bool {
+        let Some(project_id) = selected_project(self).map(|project| project.project_id) else {
+            return false;
+        };
+        if !matches!(
+            self.navigation.active(),
+            UiRoute::Workspace(UiWorkspace::Projects)
+        ) {
+            return false;
+        }
+        if self
+            .navigation
+            .push(UiRoute::Project { project_id })
+            .is_err()
+        {
+            return false;
+        }
+        self.project_workspace_level = UiProjectWorkspaceLevel::Summary;
+        self.project_summary_focus = UiProjectSummaryFocus::Conversation;
+        true
+    }
+
+    fn install_project_route(&mut self, project_id: [u8; 32]) -> bool {
+        if !self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .projects
+                .iter()
+                .any(|project| project.project_id == project_id)
+        }) {
+            return false;
+        }
+        if self
+            .navigation
+            .install(vec![
+                UiRoute::Workspace(UiWorkspace::Projects),
+                UiRoute::Project { project_id },
+            ])
+            .is_err()
+        {
+            return false;
+        }
+        self.selected_row = Some(agent_hex(project_id));
+        self.focus = UiFocus::Content;
+        self.project_workspace_level = UiProjectWorkspaceLevel::Summary;
+        self.project_summary_focus = UiProjectSummaryFocus::Conversation;
+        self.refresh_selected_project_summary();
+        true
+    }
+
+    fn active_project_id(&self) -> Option<[u8; 32]> {
+        self.navigation.path().iter().find_map(|route| match route {
+            UiRoute::Project { project_id }
+            | UiRoute::ProjectManagement { project_id }
+            | UiRoute::ProjectFolders { project_id }
+            | UiRoute::ProjectFolder { project_id, .. }
+            | UiRoute::ProjectEvidence { project_id } => Some(*project_id),
+            _ => None,
+        })
     }
 
     fn active_conversation_row(&self) -> Option<&str> {
@@ -5003,6 +5075,19 @@ impl UiModel {
     }
 
     fn refresh_selected_project_summary(&mut self) {
+        if let Some(project_id) = self.active_project_id() {
+            if self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .projects
+                    .iter()
+                    .any(|project| project.project_id == project_id)
+            }) {
+                self.selected_row = Some(agent_hex(project_id));
+            } else {
+                self.navigation.switch_workspace(UiWorkspace::Projects);
+                self.project_workspace_level = UiProjectWorkspaceLevel::List;
+            }
+        }
         self.project_summary = self.snapshot.as_ref().and_then(|snapshot| {
             let selected = self.selected_row.as_deref()?;
             let project = snapshot
@@ -5412,7 +5497,190 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
             failure,
         } => client_failed(&mut model, generation, failure, &mut effects),
     }
+    synchronize_project_route(&mut model);
     Ok(UiTransition { model, effects })
+}
+
+#[allow(clippy::too_many_lines)]
+fn synchronize_project_route(model: &mut UiModel) {
+    if model.section() == UiSection::Projects
+        && matches!(
+            model.navigation.active(),
+            UiRoute::Workspace(UiWorkspace::Projects)
+        )
+        && model.project_workspace_level != UiProjectWorkspaceLevel::List
+    {
+        let _ = model.enter_selected_project_route();
+    }
+    let desired = model.project_interaction.as_ref().map(|interaction| {
+        let (capability, target) = match interaction {
+            UiProjectInteraction::ChooseCreation { .. }
+            | UiProjectInteraction::Search { .. }
+            | UiProjectInteraction::CreateExisting { .. }
+            | UiProjectInteraction::CreateWorktree { .. } => {
+                (UiWorkflowCapability::CreateProject, UiRouteTarget::Global)
+            }
+            UiProjectInteraction::AddResource { project, .. } => (
+                UiWorkflowCapability::EditProjectFolder,
+                UiRouteTarget::Project(project.project_id),
+            ),
+            UiProjectInteraction::ReplaceResource {
+                project,
+                resource_id,
+                ..
+            }
+            | UiProjectInteraction::ConfirmRemoveResource {
+                project,
+                resource_id,
+                ..
+            } => (
+                UiWorkflowCapability::EditProjectFolder,
+                UiRouteTarget::ProjectFolder {
+                    project_id: project.project_id,
+                    folder_id: *resource_id,
+                },
+            ),
+            UiProjectInteraction::Activate { project, .. }
+            | UiProjectInteraction::Handoff { project, .. }
+            | UiProjectInteraction::ConfirmClose { project, .. }
+            | UiProjectInteraction::ConfirmArchive { project, .. } => (
+                UiWorkflowCapability::ManageProject,
+                UiRouteTarget::Project(project.project_id),
+            ),
+            UiProjectInteraction::Outcome { result } => (
+                match result.action {
+                    UiProjectAction::CreateExisting { .. }
+                    | UiProjectAction::CreateWorktree { .. }
+                    | UiProjectAction::PreviewCreateExisting { .. } => {
+                        UiWorkflowCapability::CreateProject
+                    }
+                    UiProjectAction::AddResource { .. }
+                    | UiProjectAction::ReplaceResource { .. }
+                    | UiProjectAction::RemoveResource { .. }
+                    | UiProjectAction::SetPrimaryResource { .. }
+                    | UiProjectAction::CheckResources { .. } => {
+                        UiWorkflowCapability::EditProjectFolder
+                    }
+                    _ => UiWorkflowCapability::ManageProject,
+                },
+                UiRouteTarget::Project(result.project_id),
+            ),
+        };
+        match interaction {
+            UiProjectInteraction::ChooseCreation { .. } | UiProjectInteraction::Search { .. } => {
+                UiRoute::Choice { capability, target }
+            }
+            UiProjectInteraction::ConfirmRemoveResource { .. }
+            | UiProjectInteraction::ConfirmClose { .. }
+            | UiProjectInteraction::ConfirmArchive { .. } => {
+                UiRoute::Confirmation { capability, target }
+            }
+            UiProjectInteraction::Outcome { result } => {
+                let effect_id = model
+                    .project_route_effect
+                    .unwrap_or(EffectId(NonZeroU64::MIN));
+                match result.outcome {
+                    UiProjectOutcome::Running { .. } => UiRoute::Progress {
+                        capability,
+                        target,
+                        effect_id,
+                    },
+                    UiProjectOutcome::Rejected { .. } | UiProjectOutcome::Reconcilable { .. } => {
+                        UiRoute::Recovery { capability, target }
+                    }
+                    _ => UiRoute::Outcome {
+                        capability,
+                        target,
+                        effect_id,
+                    },
+                }
+            }
+            _ if model.pending_project.is_some() => UiRoute::Progress {
+                capability,
+                target,
+                effect_id: model
+                    .project_route_effect
+                    .unwrap_or(EffectId(NonZeroU64::MIN)),
+            },
+            _ => UiRoute::Form { capability, target },
+        }
+    });
+
+    if let Some(desired) = desired {
+        if model.navigation.active() == &desired {
+            return;
+        }
+        if matches!(
+            model.navigation.active(),
+            UiRoute::Choice {
+                capability: UiWorkflowCapability::CreateProject
+                    | UiWorkflowCapability::EditProjectFolder
+                    | UiWorkflowCapability::ManageProject,
+                ..
+            } | UiRoute::Form {
+                capability: UiWorkflowCapability::CreateProject
+                    | UiWorkflowCapability::EditProjectFolder
+                    | UiWorkflowCapability::ManageProject,
+                ..
+            } | UiRoute::Confirmation {
+                capability: UiWorkflowCapability::CreateProject
+                    | UiWorkflowCapability::EditProjectFolder
+                    | UiWorkflowCapability::ManageProject,
+                ..
+            } | UiRoute::Progress {
+                capability: UiWorkflowCapability::CreateProject
+                    | UiWorkflowCapability::EditProjectFolder
+                    | UiWorkflowCapability::ManageProject,
+                ..
+            } | UiRoute::Outcome {
+                capability: UiWorkflowCapability::CreateProject
+                    | UiWorkflowCapability::EditProjectFolder
+                    | UiWorkflowCapability::ManageProject,
+                ..
+            } | UiRoute::Recovery {
+                capability: UiWorkflowCapability::CreateProject
+                    | UiWorkflowCapability::EditProjectFolder
+                    | UiWorkflowCapability::ManageProject,
+                ..
+            }
+        ) {
+            if model.navigation.replace(desired.clone()).is_ok() {
+                return;
+            }
+            let _ = model.navigation.pop();
+        }
+        let _ = model.navigation.push(desired);
+    } else if matches!(
+        model.navigation.active(),
+        UiRoute::Choice {
+            capability: UiWorkflowCapability::CreateProject
+                | UiWorkflowCapability::EditProjectFolder
+                | UiWorkflowCapability::ManageProject,
+            ..
+        } | UiRoute::Form {
+            capability: UiWorkflowCapability::CreateProject
+                | UiWorkflowCapability::EditProjectFolder
+                | UiWorkflowCapability::ManageProject,
+            ..
+        } | UiRoute::Confirmation {
+            capability: UiWorkflowCapability::CreateProject
+                | UiWorkflowCapability::EditProjectFolder
+                | UiWorkflowCapability::ManageProject,
+            ..
+        } | UiRoute::Outcome {
+            capability: UiWorkflowCapability::CreateProject
+                | UiWorkflowCapability::EditProjectFolder
+                | UiWorkflowCapability::ManageProject,
+            ..
+        } | UiRoute::Recovery {
+            capability: UiWorkflowCapability::CreateProject
+                | UiWorkflowCapability::EditProjectFolder
+                | UiWorkflowCapability::ManageProject,
+            ..
+        }
+    ) {
+        let _ = model.navigation.pop();
+    }
 }
 
 fn configuration_completed(
@@ -5990,6 +6258,7 @@ fn request_configuration_if_needed(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn apply_project_workspace_input(
     model: &mut UiModel,
     input: &UiInput,
@@ -6006,15 +6275,13 @@ fn apply_project_workspace_input(
     if model.section() != UiSection::Projects || model.focus != UiFocus::Content {
         return Ok(None);
     }
-    match (model.project_workspace_level, input) {
+    let level = model.project_workspace_level();
+    match (level, input) {
         (UiProjectWorkspaceLevel::List, UiInput::MoveCursorRight) => {
             if model.project_summary.is_none() {
                 Ok(Some(false))
             } else {
-                model.project_workspace_level = UiProjectWorkspaceLevel::Summary;
-                model.project_summary_focus = UiProjectSummaryFocus::Conversation;
-                model.focus = UiFocus::Content;
-                Ok(Some(true))
+                Ok(Some(model.enter_selected_project_route()))
             }
         }
         (
@@ -6023,21 +6290,25 @@ fn apply_project_workspace_input(
             | UiProjectWorkspaceLevel::Folders,
             UiInput::MoveCursorLeft | UiInput::Escape,
         ) => {
-            model.project_workspace_level = match model.project_workspace_level {
+            let next = match level {
                 UiProjectWorkspaceLevel::Folders => UiProjectWorkspaceLevel::Manage,
                 UiProjectWorkspaceLevel::Manage => UiProjectWorkspaceLevel::Summary,
                 UiProjectWorkspaceLevel::Summary | UiProjectWorkspaceLevel::List => {
                     UiProjectWorkspaceLevel::List
                 }
             };
-            Ok(Some(true))
+            let changed = model.navigation.pop().unwrap_or(false);
+            if changed {
+                model.project_workspace_level = next;
+            }
+            Ok(Some(changed))
         }
         (UiProjectWorkspaceLevel::Summary, UiInput::NextItem | UiInput::PreviousItem) => {
             let forward = matches!(input, UiInput::NextItem);
             Ok(Some(move_project_summary_focus(model, forward)))
         }
         (UiProjectWorkspaceLevel::List | UiProjectWorkspaceLevel::Summary, UiInput::Activate)
-            if model.project_workspace_level == UiProjectWorkspaceLevel::List
+            if level == UiProjectWorkspaceLevel::List
                 || model.project_summary_focus == UiProjectSummaryFocus::Conversation =>
         {
             open_selected_project_conversations(model, effects).map(Some)
@@ -6045,6 +6316,16 @@ fn apply_project_workspace_input(
         (UiProjectWorkspaceLevel::Summary, UiInput::Activate)
             if model.project_summary_focus == UiProjectSummaryFocus::Manage =>
         {
+            let Some(project_id) = model.active_project_id() else {
+                return Ok(Some(false));
+            };
+            if model
+                .navigation
+                .push(UiRoute::ProjectManagement { project_id })
+                .is_err()
+            {
+                return Ok(Some(false));
+            }
             model.project_workspace_level = UiProjectWorkspaceLevel::Manage;
             model.project_management_action = selected_project(model)
                 .and_then(|project| project_management_actions(project).first().copied());
@@ -6064,6 +6345,16 @@ fn apply_project_workspace_input(
         (UiProjectWorkspaceLevel::Summary, UiInput::Activate)
             if model.project_summary_focus == UiProjectSummaryFocus::Recovery =>
         {
+            let Some(project_id) = model.active_project_id() else {
+                return Ok(Some(false));
+            };
+            if model
+                .navigation
+                .push(UiRoute::ProjectManagement { project_id })
+                .is_err()
+            {
+                return Ok(Some(false));
+            }
             model.project_workspace_level = UiProjectWorkspaceLevel::Manage;
             model.project_management_action = selected_project(model)
                 .and_then(|project| project_management_actions(project).first().copied());
@@ -6083,6 +6374,22 @@ fn apply_project_workspace_input(
                 model,
                 matches!(input, UiInput::NextFocus),
             )))
+        }
+        (UiProjectWorkspaceLevel::Folders, UiInput::MoveCursorRight) => {
+            let (Some(project_id), Some(folder_id)) =
+                (model.active_project_id(), model.project_folder_id)
+            else {
+                return Ok(Some(false));
+            };
+            Ok(Some(
+                model
+                    .navigation
+                    .push(UiRoute::ProjectFolder {
+                        project_id,
+                        folder_id,
+                    })
+                    .is_ok(),
+            ))
         }
         (UiProjectWorkspaceLevel::Folders, UiInput::Activate) => {
             activate_project_folder_action(model, effects).map(Some)
@@ -6163,13 +6470,25 @@ fn activate_project_management_action(
             });
         }
         UiProjectManagementAction::TechnicalDetails => {
-            model.help_page = Some(UiHelpPage::Technical);
+            let _ = model.navigation.push(UiRoute::ProjectEvidence {
+                project_id: project.project_id,
+            });
         }
     }
     Ok(true)
 }
 
 fn enter_project_folders(model: &mut UiModel) {
+    let Some(project_id) = model.active_project_id() else {
+        return;
+    };
+    if model
+        .navigation
+        .push(UiRoute::ProjectFolders { project_id })
+        .is_err()
+    {
+        return;
+    }
     model.project_workspace_level = UiProjectWorkspaceLevel::Folders;
     model.project_folder_id = model
         .project_summary
@@ -6373,7 +6692,16 @@ fn open_project_agent(model: &mut UiModel) -> bool {
     }) else {
         return false;
     };
-    model.change_section(UiSection::Agents);
+    if model
+        .navigation
+        .install(vec![
+            UiRoute::Workspace(UiWorkspace::Agents),
+            UiRoute::Agent { agent_id },
+        ])
+        .is_err()
+    {
+        return false;
+    }
     model.selected_row = Some(agent_hex(agent_id));
     model.agent_modal = Some(UiAgentModal::Details {
         selected_session: default_agent_session(&agent),
@@ -10395,6 +10723,14 @@ fn mailbox_shortcut(
                 effects,
             )?;
             Ok(true)
+        }
+        'p' => {
+            let Some(UiConversationTarget::Project { project_id, .. }) =
+                selected_conversation_target(model)
+            else {
+                return Ok(false);
+            };
+            Ok(model.install_project_route(project_id))
         }
         'd' => {
             if model.section() != UiSection::Inbox {

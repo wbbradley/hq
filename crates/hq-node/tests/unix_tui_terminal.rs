@@ -2299,7 +2299,11 @@ fn run_in_pty_with_trace(
         if matches!(interaction, PtyInteraction::OpenProject { .. })
             && managed_action_sent
             && !managed_provider_sent
-            && completion_offset.is_some_and(|offset| bytes.len() > offset)
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Manage project".len())
+                    .any(|window| window == b"Manage project")
+            })
         {
             master
                 .write_all(b"j\r")
