@@ -106,7 +106,8 @@ fn connect_bounded(
     let deadline = Instant::now()
         .checked_add(config.connect_timeout)
         .ok_or(RelayPortError::InvalidInput)?;
-    let mut target = url.as_str().to_owned();
+    let secure_transport_required = url.as_str().starts_with("wss://");
+    let mut target = url.clone();
     for attempt in 0..=config.max_redirects {
         let request = target
             .as_str()
@@ -147,12 +148,12 @@ fn connect_bounded(
             Err(HandshakeError::Failure(WebSocketError::Http(response)))
                 if response.status().is_redirection() && attempt < config.max_redirects =>
             {
-                response
+                let location = response
                     .headers()
                     .get(LOCATION)
                     .and_then(|location| location.to_str().ok())
-                    .ok_or(RelayPortError::Connection)?
-                    .clone_into(&mut target);
+                    .ok_or(RelayPortError::Connection)?;
+                target = resolve_redirect_target(&target, location, secure_transport_required)?;
             }
             Err(HandshakeError::Failure(_) | HandshakeError::Interrupted(_)) => {
                 return Err(RelayPortError::Connection);
@@ -160,6 +161,21 @@ fn connect_bounded(
         }
     }
     Err(RelayPortError::Connection)
+}
+
+fn resolve_redirect_target(
+    current: &RelayUrl,
+    location: &str,
+    secure_transport_required: bool,
+) -> Result<RelayUrl, RelayPortError> {
+    let current = url::Url::parse(current.as_str()).map_err(|_| RelayPortError::Connection)?;
+    let resolved = current
+        .join(location)
+        .map_err(|_| RelayPortError::Connection)?;
+    if secure_transport_required && resolved.scheme() != "wss" {
+        return Err(RelayPortError::Connection);
+    }
+    RelayUrl::new(resolved.into()).map_err(|_| RelayPortError::Connection)
 }
 
 fn connect_addresses(
@@ -408,12 +424,103 @@ const fn decode_nibble(value: u8) -> Result<u8, RelayPortError> {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::{net::TcpListener, thread, time::Instant};
+    use std::{
+        io::{Read as _, Write as _},
+        net::TcpListener,
+        thread,
+        time::Instant,
+    };
 
     use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-    use tungstenite::{Message, accept};
+    use tungstenite::{Message, accept, accept_hdr};
 
     use super::*;
+
+    #[test]
+    fn redirect_targets_resolve_against_the_current_validated_relay() {
+        let secure =
+            RelayUrl::new("wss://relay.example/a/b?old=1".to_owned()).expect("URL validates");
+        assert_eq!(
+            resolve_redirect_target(&secure, "../next?new=2", true)
+                .expect("relative redirect validates")
+                .as_str(),
+            "wss://relay.example/next?new=2"
+        );
+        assert_eq!(
+            resolve_redirect_target(&secure, "?new=2", true)
+                .expect("query redirect validates")
+                .as_str(),
+            "wss://relay.example/a/b?new=2"
+        );
+        assert_eq!(
+            resolve_redirect_target(&secure, "wss://other.example/socket", true)
+                .expect("secure redirect validates")
+                .as_str(),
+            "wss://other.example/socket"
+        );
+
+        let plaintext =
+            RelayUrl::new("ws://relay.example/start".to_owned()).expect("URL validates");
+        assert_eq!(
+            resolve_redirect_target(&plaintext, "wss://other.example/socket", false)
+                .expect("secure upgrade validates")
+                .as_str(),
+            "wss://other.example/socket"
+        );
+    }
+
+    #[test]
+    fn redirect_targets_reapply_policy_and_reject_secure_downgrade() {
+        let secure = RelayUrl::new("wss://relay.example/start".to_owned()).expect("URL validates");
+        for location in [
+            "ws://relay.example/plaintext",
+            "https://relay.example/not-websocket",
+            "/next#fragment",
+            "wss://user@relay.example/credentialed",
+        ] {
+            assert_eq!(
+                resolve_redirect_target(&secure, location, true),
+                Err(RelayPortError::Connection)
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn relative_redirect_reconnects_to_the_resolved_relay_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener binds");
+        let address = listener.local_addr().expect("address exists");
+        let server = thread::spawn(move || {
+            let mut first = listener.accept().expect("redirect request connects").0;
+            let mut request = [0_u8; 2_048];
+            let request_bytes = first.read(&mut request).expect("redirect request reads");
+            assert!(request[..request_bytes].starts_with(b"GET /start HTTP/1.1\r\n"));
+            first
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: /final?token=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("redirect response writes");
+            drop(first);
+
+            let second = listener.accept().expect("redirect target connects").0;
+            let mut socket = accept_hdr(
+                second,
+                |request: &tungstenite::http::Request<()>, response| {
+                    assert_eq!(request.uri(), "/final?token=1");
+                    Ok(response)
+                },
+            )
+            .expect("redirected handshake succeeds");
+            assert!(matches!(socket.read(), Ok(Message::Close(_))));
+        });
+
+        let url = RelayUrl::new(format!("ws://{address}/start")).expect("URL validates");
+        let mut connection = WebSocketRelayConnector::default()
+            .connect(&url)
+            .expect("relative redirect connects");
+        connection.close().expect("connection closes");
+        server.join().expect("server joins");
+    }
 
     #[test]
     fn frame_codec_preserves_embedded_json_and_rejects_non_client_frames() {
