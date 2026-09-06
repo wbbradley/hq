@@ -366,8 +366,11 @@ The indexed read filters retained `Progress` and running `AgentTurn` facts out o
 pages. On the initial page only, it derives a single presentation tail from the bounded selected
 activity rows: a fully correlated running turn is replaced by its canonically latest non-empty
 progress winner, if any. Terminal turn evidence removes that live candidate and remains ordinary
-history. Original positions continue to anchor cursors, so filtered rows cannot duplicate or omit
-durable entries at a page boundary.
+history. The tail consumes one requested page slot when the limit permits both history and live
+presentation. At the minimum limit, a durable entry takes precedence so it can anchor continued
+history; a live tail occupies that slot only when no durable entry exists. Original positions
+continue to anchor cursors, so filtered rows cannot duplicate or omit durable entries at a page
+boundary.
 
 ## Explicit repair
 

@@ -1684,8 +1684,9 @@ impl Database {
         } else {
             None
         };
-        let history_limit = if live_tail.is_some() {
-            limit.saturating_sub(1).max(1)
+        let include_live_tail_with_history = live_tail.is_some() && limit > 1;
+        let history_limit = if include_live_tail_with_history {
+            limit - 1
         } else {
             limit
         };
@@ -1733,7 +1734,9 @@ impl Database {
             .into_iter()
             .map(|(fact_id, kind)| conversation::load_entry(&self.connection, fact_id, kind))
             .collect::<Result<Vec<_>, _>>()?;
-        if let Some(live_tail) = live_tail {
+        if let Some(live_tail) = live_tail
+            && (include_live_tail_with_history || items.is_empty())
+        {
             items.push(ConversationEntry::Activity(Box::new(live_tail)));
         }
         Ok(Page::new(items, next_cursor))

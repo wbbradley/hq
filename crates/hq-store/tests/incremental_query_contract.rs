@@ -174,6 +174,106 @@ fn completed_item_output_is_history_and_running_turn_becomes_the_live_tail() {
 }
 
 #[test]
+fn minimum_page_limit_keeps_durable_history_bounded_and_cursor_reachable() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let root = verified_fact();
+    let root_id = root.verified_event().event_id();
+    let mailbox = verified_child(root_id);
+    let first = authored_durable_conversation_entry(1, false);
+    let second = authored_durable_conversation_entry(2, false);
+    let expected = [first.fact().id(), second.fact().id()];
+    for fact in [
+        root,
+        mailbox,
+        first,
+        second,
+        authored_agent_activity(
+            3,
+            hq_domain::OperationId::from_bytes([0x95; 32]),
+            None,
+            hq_domain::ActivityKind::AgentTurn,
+            "operation",
+            1,
+            hq_domain::ActivityStatus::Running,
+            "working",
+        ),
+    ] {
+        store
+            .append_verified(fact)
+            .expect("conversation fact ingests");
+    }
+    let key = ConversationKey::ProviderSession {
+        counterparty: MailboxAddress::new(
+            authority_policy().local_installation(),
+            authority_policy().local_human_mailbox(),
+        ),
+        provider: ProviderId::new("paged-provider").expect("provider validates"),
+        session: ProviderSessionId::new("paged-session").expect("session validates"),
+    };
+
+    let first_page = store
+        .load_conversation_entries(&key, 1, None)
+        .expect("minimum first page loads");
+    assert_eq!(first_page.items().len(), 1);
+    assert_eq!(first_page.items()[0].fact_id(), expected[0]);
+    let cursor = first_page
+        .next_cursor()
+        .expect("remaining durable history has a cursor");
+    let second_page = store
+        .load_conversation_entries(&key, 1, Some(cursor))
+        .expect("minimum continuation page loads");
+    assert_eq!(second_page.items().len(), 1);
+    assert_eq!(second_page.items()[0].fact_id(), expected[1]);
+    assert!(second_page.next_cursor().is_none());
+}
+
+#[test]
+fn minimum_page_limit_returns_live_tail_when_no_durable_history_exists() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let root = verified_fact();
+    let root_id = root.verified_event().event_id();
+    for fact in [
+        root,
+        verified_child(root_id),
+        authored_agent_activity(
+            1,
+            hq_domain::OperationId::from_bytes([0x96; 32]),
+            None,
+            hq_domain::ActivityKind::AgentTurn,
+            "operation",
+            1,
+            hq_domain::ActivityStatus::Running,
+            "working",
+        ),
+    ] {
+        store
+            .append_verified(fact)
+            .expect("conversation fact ingests");
+    }
+    let key = ConversationKey::ProviderSession {
+        counterparty: MailboxAddress::new(
+            authority_policy().local_installation(),
+            authority_policy().local_human_mailbox(),
+        ),
+        provider: ProviderId::new("paged-provider").expect("provider validates"),
+        session: ProviderSessionId::new("paged-session").expect("session validates"),
+    };
+
+    let page = store
+        .load_conversation_entries(&key, 1, None)
+        .expect("live-only minimum page loads");
+    assert!(matches!(
+        page.items(),
+        [ConversationEntry::Activity(activity)]
+            if activity.kind == hq_domain::ActivityKind::AgentTurn
+                && activity.content.as_str() == "working"
+    ));
+    assert!(page.next_cursor().is_none());
+}
+
+#[test]
 fn newer_human_input_hides_old_progress_until_provider_activity_advances() {
     let directory = TestDirectory::new();
     let store = open_store(&directory.database_path());
