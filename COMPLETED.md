@@ -13367,3 +13367,27 @@ results remain correlated by typed identities; deep-link Back behavior stays wit
 canonical path.
 
 <!-- End of archived plan entry. -->
+
+## Migrate Agents, Config, New, help, and global decisions
+
+Mapped agent administration, New branches, direct-recipient decisions, provider requests, Config
+editing, help, and global interaction state onto typed identity-bearing routes. Sequential screens
+replace or consume their route level, agent links retain canonical paths, operation identities stay
+attached to progress and outcomes, and every former centered dialog now paints the full content
+rectangle at compact and wide sizes.
+
+## Migrate Agents, Config, New, help, and global decisions
+
+Replace `UiAgentModal`, `UiNewModal`, global interaction modals, Config editing depth, and help
+overlay depth with full-pane routes. Cover exact agent detail, service/session choices,
+confirmations, progress/outcomes, the New launcher's distinct project/agent/direct-message/note
+branches, project-owned forms, recipient selection, help, permissions, destructive/force choices,
+and recovery. Preserve stable search/selection, provider/session correlation, conservative
+switch/retire behavior, Unicode-safe editors, durable drafts, and distinct project, agent, direct
+message, and note models.
+
+Acceptance: global decisions and forms capture all input; sequential screens are consumed; stale
+completions cannot close or replace another route; all former dialogs render in the full content
+pane; and route-family model/render tests cover compact and wide terminals.
+
+<!-- End of archived plan entry. -->
