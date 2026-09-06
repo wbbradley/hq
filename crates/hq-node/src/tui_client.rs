@@ -25,10 +25,11 @@ use hq_local_api::{
         InstallationConfigurationDto, InstallationConfigurationPatchDto,
         InteractionAnswerOutcomeDto, InteractionAnswerRequestDto, InteractionKindDto,
         InteractionResponseDto, MailboxAddressDto, MailboxCommandActionDto,
-        MailboxCommandRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
-        MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto,
-        MutationOutcomeDto, PendingInteractionDto, PresentationKindDto, ProviderCatalogDto,
-        Request, ResponseResult, SnapshotItem,
+        MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto,
+        MailboxDraftDto, MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto,
+        MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto,
+        PendingInteractionDto, PresentationKindDto, ProviderCatalogDto, Request, ResponseResult,
+        SnapshotItem,
     },
 };
 use hq_tui::{
@@ -347,6 +348,7 @@ struct TuiPresentationData {
     running_operations: BTreeMap<String, Vec<RunningOperationPresentation>>,
     active_conversation_row: Option<String>,
     mailbox_drafts: Vec<MailboxDraftDto>,
+    submitted_project_setup_drafts: BTreeSet<([u8; 32], [u8; 32])>,
 }
 
 #[derive(Clone)]
@@ -380,6 +382,7 @@ impl Default for TuiPresentationData {
             running_operations: BTreeMap::new(),
             active_conversation_row: None,
             mailbox_drafts: Vec::new(),
+            submitted_project_setup_drafts: BTreeSet::new(),
         }
     }
 }
@@ -465,6 +468,7 @@ impl SharedTuiPresentation {
                 _ => None,
             })
             .collect();
+        presentation.submitted_project_setup_drafts = submitted_project_setup_drafts(snapshot);
         let conversation_rows = presentation
             .conversation_keys
             .keys()
@@ -495,6 +499,20 @@ impl SharedTuiPresentation {
                 .retain(|candidate| candidate.draft_id != draft.draft_id);
             presentation.mailbox_drafts.push(draft);
         }
+    }
+
+    fn remove_mailbox_draft(&self, draft_id: Id32) {
+        if let Ok(mut presentation) = self.inner.lock() {
+            presentation
+                .mailbox_drafts
+                .retain(|candidate| candidate.draft_id != draft_id);
+        }
+    }
+
+    fn project_setup_draft_was_submitted(&self, draft: &MailboxDraftDto) -> bool {
+        self.inner.lock().is_ok_and(|presentation| {
+            project_setup_draft_was_submitted(draft, &presentation.submitted_project_setup_drafts)
+        })
     }
 
     fn replace_providers(&self, providers: ProviderCatalogDto) {
@@ -820,22 +838,7 @@ impl LocalTuiClient {
         Self {
             client,
             state,
-            presentation: SharedTuiPresentation {
-                inner: Arc::new(Mutex::new(TuiPresentationData {
-                    conversation_keys: BTreeMap::new(),
-                    conversation_presentations: BTreeMap::new(),
-                    providers: ProviderCatalogDto {
-                        providers: Vec::new(),
-                        default_provider: None,
-                    },
-                    agent_names: BTreeMap::new(),
-                    project_names: BTreeMap::new(),
-                    project_threads: Vec::new(),
-                    running_operations: BTreeMap::new(),
-                    active_conversation_row: None,
-                    mailbox_drafts: Vec::new(),
-                })),
-            },
+            presentation: SharedTuiPresentation::default(),
             project_operations: BTreeMap::new(),
         }
     }
@@ -1575,12 +1578,51 @@ impl TuiClientPort for LocalTuiClient {
         else {
             return Err(draft_protocol_error());
         };
-        if let Some(draft) = drafts
-            .into_iter()
-            .find(|draft| tui_draft_target(&draft.target) == target)
-        {
+        if let Some(draft) = drafts.iter().find(|draft| {
+            tui_draft_target(&draft.target) == target
+                && !self.presentation.project_setup_draft_was_submitted(draft)
+        }) {
             self.presentation.upsert_mailbox_draft(draft.clone());
-            return Ok(tui_draft(draft));
+            return Ok(tui_draft(draft.clone()));
+        }
+        for draft in drafts.iter().filter(|draft| {
+            tui_draft_target(&draft.target) == target
+                && self.presentation.project_setup_draft_was_submitted(draft)
+        }) {
+            match self
+                .client
+                .request(Request::DeleteMailboxDraft(MailboxDraftDeleteRequestDto {
+                    draft_id: draft.draft_id,
+                    expected_version: draft.version,
+                }))
+                .map_err(|error| draft_client_error(&error))?
+            {
+                ClientEvent::Response {
+                    result:
+                        ResponseResult::MailboxDraftDelete(
+                            MailboxDraftDeleteOutcomeDto::Deleted
+                            | MailboxDraftDeleteOutcomeDto::NotFound,
+                        ),
+                    ..
+                } => self.presentation.remove_mailbox_draft(draft.draft_id),
+                ClientEvent::Response {
+                    result:
+                        ResponseResult::MailboxDraftDelete(MailboxDraftDeleteOutcomeDto::Conflict(
+                            current,
+                        )),
+                    ..
+                } => {
+                    self.presentation.upsert_mailbox_draft(current);
+                    return Err(TuiDraftError {
+                        failure: UiFailure {
+                            code: "submitted_draft_cleanup_conflict".to_owned(),
+                            action: "try starting the new conversation again".to_owned(),
+                        },
+                        current: None,
+                    });
+                }
+                _ => return Err(draft_protocol_error()),
+            }
         }
         let request = MailboxDraftSaveRequestDto {
             draft_id: Id32::new(random_identity().map_err(|failure| TuiDraftError {
@@ -3310,7 +3352,14 @@ fn tui_snapshot_with_projects_and_drafts(
     };
     let providers = tui_providers(provider_catalog);
     let raw_inbox_rows: Vec<UiRow> = rows(UiSection::Inbox);
-    let project_setups = tui_project_setups(drafts, &projects, &agents, &providers);
+    let submitted_project_setup_drafts = submitted_project_setup_drafts(snapshot);
+    let project_setups = tui_project_setups(
+        drafts,
+        &submitted_project_setup_drafts,
+        &projects,
+        &agents,
+        &providers,
+    );
     let setup_rows = tui_project_setup_rows(&project_setups, &raw_inbox_rows);
     let inbox_rows = agent_inbox_rows(
         snapshot,
@@ -3571,6 +3620,7 @@ fn tui_project_setup_rows(
 
 fn tui_project_setups(
     drafts: &[MailboxDraftDto],
+    submitted_drafts: &BTreeSet<([u8; 32], [u8; 32])>,
     projects: &[UiProject],
     agents: &[UiAgent],
     providers: &[UiProvider],
@@ -3586,6 +3636,9 @@ fn tui_project_setups(
             else {
                 return None;
             };
+            if project_setup_draft_was_submitted(draft, submitted_drafts) {
+                return None;
+            }
             let project = projects
                 .iter()
                 .find(|project| project.project_id == project_id.bytes())?;
@@ -3613,6 +3666,34 @@ fn tui_project_setups(
             })
         })
         .collect()
+}
+
+fn submitted_project_setup_drafts(
+    snapshot: &AuthoritativeSnapshotDto,
+) -> BTreeSet<([u8; 32], [u8; 32])> {
+    snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Conversation {
+                key: ConversationKeyDto::ProjectThread { project, .. },
+                root_message: Some(root_message),
+                ..
+            } => Some((project.bytes(), root_message.bytes())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn project_setup_draft_was_submitted(
+    draft: &MailboxDraftDto,
+    submitted_drafts: &BTreeSet<([u8; 32], [u8; 32])>,
+) -> bool {
+    matches!(
+        &draft.target,
+        MailboxDraftTargetDto::ProjectSetup { project_id, .. }
+            if submitted_drafts.contains(&(project_id.bytes(), draft.draft_id.bytes()))
+    )
 }
 
 fn tui_providers(provider_catalog: &ProviderCatalogDto) -> Vec<UiProvider> {
@@ -5001,8 +5082,8 @@ mod tests {
     use super::{
         ConversationPresentationContext, ProjectThreadPresentation, RunningOperationPresentation,
         SharedTuiPresentation, conversation_identity, conversation_title, inbox_activity_ranks,
-        local_project_command, terminal_structured_text, tui_interaction, ui_project_outcome,
-        update_unread_rows,
+        local_project_command, project_setup_draft_was_submitted, submitted_project_setup_drafts,
+        terminal_structured_text, tui_interaction, ui_project_outcome, update_unread_rows,
     };
     use crate::local_client::{
         LocalProjectCommand, LocalProjectOutcome, LocalProjectResourceCheck,
@@ -5011,7 +5092,8 @@ mod tests {
     use hq_local_api::protocol::v1::{
         AuthoritativeSnapshotDto, ConversationContextDto, ConversationKeyDto,
         ConversationParticipantDto, Id32, InteractionChoiceDto, InteractionKindDto,
-        MailboxAddressDto, PendingInteractionDto, SnapshotItem,
+        MailboxAddressDto, MailboxDraftDto, MailboxDraftTargetDto, PendingInteractionDto,
+        SnapshotItem,
     };
     use hq_tui::{
         UiInteractionTarget, UiInteractionTargetIssue, UiProjectAction, UiProjectOutcome,
@@ -5034,6 +5116,58 @@ mod tests {
             }],
             allow_text: false,
         }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn archived_project_conversation_proves_its_setup_draft_was_submitted() {
+        let project_id = Id32::new([0x31; 32]);
+        let draft_id = Id32::new([0x32; 32]);
+        let snapshot = AuthoritativeSnapshotDto::new(
+            7,
+            vec![SnapshotItem::Conversation {
+                key: ConversationKeyDto::ProjectThread {
+                    project: project_id,
+                    thread: Id32::new([0x33; 32]),
+                },
+                context: ConversationContextDto::Project {
+                    project: project_id,
+                    name: Some("Compiler".to_owned()),
+                    participant: Some(participant()),
+                },
+                local_human: MailboxAddressDto {
+                    installation_id: Id32::new([0x34; 32]),
+                    mailbox_id: Id32::new([0x35; 32]),
+                },
+                root_message: Some(draft_id),
+                preview: Some("old first message".to_owned()),
+                latest_fact: Some(Id32::new([0x36; 32])),
+                archived: true,
+                presentation_rank: Some(4),
+                open_messages: 0,
+                archived_messages: 1,
+                sent_messages: 1,
+            }],
+        )
+        .expect("snapshot");
+        let submitted = submitted_project_setup_drafts(&snapshot);
+        let old_draft = MailboxDraftDto {
+            draft_id,
+            target: MailboxDraftTargetDto::ProjectSetup {
+                project_id,
+                agent_id: Id32::new([0x37; 32]),
+                provider: "codex".to_owned(),
+            },
+            content: "old first message".to_owned(),
+            version: 2,
+        };
+        let new_draft = MailboxDraftDto {
+            draft_id: Id32::new([0x38; 32]),
+            ..old_draft.clone()
+        };
+
+        assert!(project_setup_draft_was_submitted(&old_draft, &submitted));
+        assert!(!project_setup_draft_was_submitted(&new_draft, &submitted));
     }
 
     #[test]
