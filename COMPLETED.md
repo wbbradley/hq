@@ -13339,3 +13339,31 @@ Read the plan file at `/home/wbbradley/src/hq/PLAN.md`. **Remove** the completed
 If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
 
 <!-- End of archived plan entry. -->
+
+## Migrate Projects and cross-workspace canonical links
+
+Implemented route-owned Projects navigation with exact project, management, folders, folder,
+technical-evidence, and identity-bearing workflow paths. Projects now render one full-pane route at
+every width, project links install canonical Inbox and Agents destinations, conversation links can
+return to the exact project, stale completions remain correlated, and installed-terminal lifecycle
+coverage waits for the visible destination before advancing.
+
+## Migrate Projects and cross-workspace canonical links
+
+Move Projects onto project-list, exact summary, management, folders, agent/lifecycle, technical,
+form, confirmation, progress, outcome, and recovery routes. Sequential workflow screens replace or
+consume their level, and successful completion returns to the refreshed exact object. Preserve
+creation, ownership checks, assignment/handoff, close/archive/reopen, uncertain reconciliation,
+idempotency, and stable operation evidence.
+
+Implement canonical bidirectional links: Project to conversation installs `HQ / Inbox /
+<conversation>` and conversation to project installs `HQ / Projects / <project>`. Agent links
+likewise install the canonical Agents path. No link may parse a label, fabricate a row, or preserve
+incidental origin history.
+
+Acceptance: Projects has no master/detail split at any width; every action and completion follows
+the route contract; authoritative reorder/deletion/conflict and running/rejected/uncertain/completed
+results remain correlated by typed identities; deep-link Back behavior stays within the installed
+canonical path.
+
+<!-- End of archived plan entry. -->
