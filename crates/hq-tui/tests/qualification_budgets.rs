@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use hq_tui::{
     UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
-    UiEffect, UiEvent, UiHumanState, UiMaterializedConversationView, UiMessageState, UiModel,
-    UiRenderCache, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot, UiTheme, render_with_cache,
-    update,
+    UiEffect, UiEvent, UiHumanState, UiInput, UiMaterializedConversationView, UiMessageState,
+    UiModel, UiRenderCache, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot, UiTheme,
+    render_with_cache, update,
 };
 use ratatui::{Terminal, backend::TestBackend};
 
@@ -187,7 +187,7 @@ fn maximum_markdown_conversation(size: UiSize, body: &str) -> UiModel {
         })
         .collect::<Vec<_>>();
     assert_eq!(entries.len(), MAXIMUM_TUI_CONVERSATION_PAGE);
-    update(
+    let observed = update(
         started.model,
         UiEvent::MaterializedViewObserved {
             view: UiMaterializedConversationView {
@@ -202,8 +202,10 @@ fn maximum_markdown_conversation(size: UiSize, body: &str) -> UiModel {
             },
         },
     )
-    .expect("maximum conversation page loads")
-    .model
+    .expect("maximum conversation page loads");
+    update(observed.model, UiEvent::Input(UiInput::Activate))
+        .expect("maximum conversation route opens")
+        .model
 }
 
 fn representative_markdown_message() -> String {

@@ -317,6 +317,30 @@ fn wait_for_project_input_sequence(
     }
 }
 
+fn wait_for_project_inputs(state_root: &Path, project_id: &str, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let shown = project_json(state_root, &["show", project_id]);
+        if shown["data"]["projects"][0]["inputs"]
+            .as_array()
+            .is_some_and(|inputs| inputs.len() == expected)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "accepted project inputs did not reach the authoritative projection"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn send_project_input_and_wait(state_root: &Path, project_id: &str, content: &str) {
+    let sent = admin_output(state_root, "project", &["send", project_id, content]);
+    assert!(sent.status.success(), "send stderr: {:?}", sent.stderr);
+    wait_for_project_inputs(state_root, project_id, 1);
+}
+
 fn only_project_identity(
     snapshot: &AuthoritativeSnapshotDto,
     encoded_project_id: &str,
@@ -1639,12 +1663,7 @@ fn project_assignment_commands_execute_against_the_foreground_node_and_survive_r
         .as_str()
         .expect("project identity")
         .to_owned();
-    let sent = admin_output(
-        &state_root,
-        "project",
-        &["send", &project_id, "pending instruction"],
-    );
-    assert!(sent.status.success(), "send stderr: {:?}", sent.stderr);
+    send_project_input_and_wait(&state_root, &project_id, "pending instruction");
 
     let activation = admin_output(
         &state_root,

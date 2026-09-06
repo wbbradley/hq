@@ -1434,7 +1434,6 @@ fn run_in_pty_with_trace(
     let mut resource_commit_sent = false;
     let mut provider_completion_released = false;
     let mut interaction_answer_sent = false;
-    let mut approval_focus_requested = false;
     let mut exit_sent = false;
     let mut oversized_to_before_keys = Vec::new();
     let mut before_to_after_keys = Vec::new();
@@ -1786,7 +1785,8 @@ fn run_in_pty_with_trace(
                 .iter()
                 .filter(|position| **position < marker_positions[2])
                 .count();
-            let keys = std::iter::repeat_n(b'j', oversized_rank).collect::<Vec<_>>();
+            let mut keys = std::iter::repeat_n(b'j', oversized_rank).collect::<Vec<_>>();
+            keys.push(b'\r');
             oversized_to_before_keys = navigation_keys(oversized_rank, before_rank);
             before_to_after_keys = navigation_keys(before_rank, after_rank);
             master
@@ -1794,23 +1794,6 @@ fn run_in_pty_with_trace(
                 .expect("oversized conversation selection keys write");
             master.flush().expect("oversized selection keys flush");
             content_sent = true;
-            oversized_phase = 1;
-            completion_offset = Some(bytes.len());
-        }
-        if matches!(
-            interaction,
-            PtyInteraction::ScrollOversizedConversation { .. }
-        ) && oversized_phase == 1
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows("↑".len())
-                    .any(|window| window == "↑".as_bytes())
-            })
-        {
-            master
-                .write_all(b"\r")
-                .expect("oversized conversation open key writes");
-            master.flush().expect("oversized open key flushes");
             oversized_phase = 2;
             completion_offset = Some(bytes.len());
         }
@@ -2190,7 +2173,6 @@ fn run_in_pty_with_trace(
         if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
             && resource_commit_sent
             && !interaction_answer_sent
-            && !approval_focus_requested
             && {
                 let rendered = text_without_csi_sequences(&bytes);
                 let prompt = "Command for approval-agent";
@@ -2199,22 +2181,10 @@ fn run_in_pty_with_trace(
                 })
             }
         {
-            master.write_all(b"\t").expect("approval focus write");
+            master
+                .write_all(b"\t\r")
+                .expect("approval focus and confirmation write");
             master.flush().expect("approval focus flushes");
-            approval_focus_requested = true;
-            completion_offset = Some(bytes.len());
-        }
-        if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
-            && approval_focus_requested
-            && !interaction_answer_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows("› Allow once".len())
-                    .any(|window| window == "› Allow once".as_bytes())
-            })
-        {
-            master.write_all(b"\r").expect("approval choice write");
-            master.flush().expect("approval choice flushes");
             interaction_answer_sent = true;
             completion_offset = Some(bytes.len());
         }

@@ -8,9 +8,9 @@ agent-1
 Deploy production
 waiting for approval
 Investigate timeout
-────────────────────────────────────────────────────────────────────────
-Select a conversation to view its messages.
+relay needs attention
 
 
+
 ────────────────────────────────────────────────────────────────────────
- Enter open · ? help · q quit · 1–6 views
+ Enter open · n New… · d archive conversation · ? help · q quit · 1–6 vi

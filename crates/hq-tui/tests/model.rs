@@ -692,6 +692,10 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
         },
     )
     .expect("first-message composer loaded");
+    assert!(matches!(
+        composing.model.active_route(),
+        UiRoute::Conversation { row_id } if row_id.starts_with("project-setup:")
+    ));
 
     let refreshing = update(composing.model, UiEvent::Invalidated { revision: 3 })
         .expect("refresh while composing new project conversation");
@@ -717,18 +721,33 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
             .all(|effect| !matches!(effect, UiEffect::LoadConversation { .. }))
     );
     assert_project_setup_context(&refreshed.model, [5; 32], "release");
+    assert!(
+        matches!(
+            refreshed.model.active_route(),
+            UiRoute::Conversation { row_id } if row_id.starts_with("project-setup:")
+        ),
+        "path={:?} focus={:?} selected={:?} rows={:?}",
+        refreshed.model.navigation_path(),
+        refreshed.model.focus(),
+        refreshed.model.selected_row(),
+        refreshed.model.rows().map(|rows| rows
+            .iter()
+            .map(|row| (&row.id, row.kind))
+            .collect::<Vec<_>>())
+    );
 
     let closed = update(refreshed.model, UiEvent::Input(UiInput::Escape))
         .expect("close the first-message composer");
     assert!(closed.model.new_modal().is_none());
     assert!(closed.model.mailbox_draft().is_none());
     assert_eq!(closed.model.focus(), UiFocus::Conversation);
-    let list_focused = update(closed.model.clone(), UiEvent::Input(UiInput::NextFocus))
-        .expect("tab to Inbox list");
-    assert_eq!(list_focused.model.focus(), UiFocus::Content);
-    let detail_focused = update(list_focused.model, UiEvent::Input(UiInput::NextFocus))
-        .expect("tab back to setup detail");
-    assert_eq!(detail_focused.model.focus(), UiFocus::Conversation);
+    let unchanged = update(closed.model.clone(), UiEvent::Input(UiInput::NextFocus))
+        .expect("there is no inactive list pane to focus");
+    assert_eq!(
+        unchanged.model.navigation_path(),
+        closed.model.navigation_path()
+    );
+    assert_eq!(unchanged.model.focus(), UiFocus::Conversation);
 
     let changing = update(
         closed.model.clone(),
@@ -1810,6 +1829,99 @@ fn wide_arrow_keys_select_content_without_changing_views() {
 }
 
 #[test]
+fn sent_and_archived_open_exact_conversation_routes_on_demand() {
+    let mut source = snapshot(1, &["inbox"]);
+    source.sent_rows = snapshot_for(UiSection::Sent, 1, &["sent-a"]).sent_rows;
+    source.archived_rows = snapshot_for(UiSection::Archived, 1, &["archived-a"]).archived_rows;
+    let mut model = loaded_model(source);
+
+    for (shortcut, workspace, row_id) in [
+        ('2', UiWorkspace::Sent, "sent-a"),
+        ('3', UiWorkspace::Archived, "archived-a"),
+    ] {
+        model = update(model, UiEvent::Input(UiInput::Character(shortcut)))
+            .expect("open mailbox root")
+            .model;
+        let opened =
+            update(model, UiEvent::Input(UiInput::Activate)).expect("open selected conversation");
+        assert_eq!(
+            opened.model.navigation_path(),
+            &[
+                UiRoute::Workspace(workspace),
+                UiRoute::Conversation {
+                    row_id: row_id.to_owned(),
+                },
+            ]
+        );
+        let (_, requested_row, cursor) = conversation_effect(&opened.effects);
+        assert_eq!(requested_row, row_id);
+        assert_eq!(cursor, None);
+        model = update(opened.model, UiEvent::Input(UiInput::Escape))
+            .expect("return to mailbox root")
+            .model;
+        assert_eq!(model.navigation_path(), &[UiRoute::Workspace(workspace)]);
+    }
+}
+
+#[test]
+fn refresh_removal_and_late_page_completion_cannot_steal_the_active_route() {
+    let mut source = snapshot(1, &["thread-a"]);
+    source.sent_rows = snapshot_for(UiSection::Sent, 1, &["thread-a"]).sent_rows;
+    let sent = update(
+        loaded_model(source),
+        UiEvent::Input(UiInput::Character('2')),
+    )
+    .expect("open Sent root");
+    let opened = update(sent.model, UiEvent::Input(UiInput::Activate))
+        .expect("open conversation while its page loads");
+    let (page_id, _, _) = conversation_effect(&opened.effects);
+
+    let inbox_root = update(opened.model, UiEvent::Input(UiInput::Character('1')))
+        .expect("same-workspace shortcut returns to root");
+    assert_eq!(
+        inbox_root.model.navigation_path(),
+        &[UiRoute::Workspace(UiWorkspace::Inbox)]
+    );
+    let late = update(
+        inbox_root.model,
+        UiEvent::ConversationLoaded {
+            effect_id: page_id,
+            page: UiConversationPage {
+                title: "Alice".to_owned(),
+                context: None,
+                row_id: "thread-a".to_owned(),
+                entries: vec![entry("message", false)],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("late page is retained without navigation");
+    assert_eq!(
+        late.model.navigation_path(),
+        &[UiRoute::Workspace(UiWorkspace::Inbox)]
+    );
+
+    let reopened = update(late.model, UiEvent::Input(UiInput::Activate))
+        .expect("reopen retained conversation");
+    let invalidated = update(reopened.model, UiEvent::Invalidated { revision: 2 })
+        .expect("refresh active conversation");
+    let snapshot_id = snapshot_effect(&invalidated.effects);
+    let removed = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: snapshot(2, &["replacement"]),
+        },
+    )
+    .expect("remove active conversation authoritatively");
+    assert_eq!(
+        removed.model.navigation_path(),
+        &[UiRoute::Workspace(UiWorkspace::Inbox)]
+    );
+    assert_eq!(removed.model.selected_row(), Some("replacement"));
+}
+
+#[test]
 fn compact_navigation_keys_cannot_change_the_current_view() {
     let started = update(
         UiModel::new(UiSize {
@@ -2861,6 +2973,11 @@ fn materialized_views_install_list_and_detail_atomically_without_first_page_load
     )));
     assert_eq!(started.model.selected_row(), Some("thread-a"));
     assert_eq!(
+        started.model.navigation_path(),
+        &[UiRoute::Workspace(UiWorkspace::Inbox)],
+        "a coherently cached first page does not enter the conversation"
+    );
+    assert_eq!(
         started
             .model
             .conversation()
@@ -3022,6 +3139,15 @@ fn opening_a_selected_preview_while_it_loads_preserves_conversation_focus() {
     let opening = update(moved.model, UiEvent::Input(UiInput::Activate))
         .expect("open the selected loading preview");
     assert_eq!(opening.model.focus(), UiFocus::Conversation);
+    assert_eq!(
+        opening.model.navigation_path(),
+        &[
+            UiRoute::Workspace(UiWorkspace::Inbox),
+            UiRoute::Conversation {
+                row_id: "thread-b".to_owned(),
+            },
+        ]
+    );
 
     let opened = update(
         opening.model,
@@ -3197,9 +3323,22 @@ fn inbox_arrow_navigation_moves_one_visible_level_at_a_time() {
     let conversation = update(previewed.model, UiEvent::Input(UiInput::MoveCursorRight))
         .expect("enter conversation");
     assert_eq!(conversation.model.focus(), UiFocus::Conversation);
+    assert_eq!(
+        conversation.model.navigation_path(),
+        &[
+            UiRoute::Workspace(UiWorkspace::Inbox),
+            UiRoute::Conversation {
+                row_id: "thread-a".to_owned()
+            }
+        ]
+    );
     let back_to_list =
         update(conversation.model, UiEvent::Input(UiInput::MoveCursorLeft)).expect("back to list");
     assert_eq!(back_to_list.model.focus(), UiFocus::Content);
+    assert_eq!(
+        back_to_list.model.navigation_path(),
+        &[UiRoute::Workspace(UiWorkspace::Inbox)]
+    );
     let root = update(
         back_to_list.model.clone(),
         UiEvent::Input(UiInput::MoveCursorLeft),
@@ -3213,6 +3352,19 @@ fn inbox_back_closes_technical_details_before_leaving_the_conversation() {
     let model = opened_conversation(vec![entry("message-1", false)]);
     let details = update(model, UiEvent::Input(UiInput::Activate)).expect("open details");
     assert!(details.model.technical_visible());
+    assert_eq!(
+        details.model.navigation_path(),
+        &[
+            UiRoute::Workspace(UiWorkspace::Inbox),
+            UiRoute::Conversation {
+                row_id: "thread-a".to_owned()
+            },
+            UiRoute::ConversationEvidence {
+                row_id: "thread-a".to_owned(),
+                entry_id: "message-1".to_owned()
+            }
+        ]
+    );
 
     let closed =
         update(details.model, UiEvent::Input(UiInput::MoveCursorLeft)).expect("close details");
@@ -4384,6 +4536,8 @@ fn terminal_agent_turn_automatically_opens_the_exact_project_continuation_draft(
             next_cursor: None,
         },
     );
+    let opened = update(opened.model, UiEvent::Input(UiInput::Activate))
+        .expect("enter running project conversation");
 
     let mut terminal = entry("turn-finished", true);
     terminal.presentation = UiConversationEntryPresentation::Activity {
@@ -4598,6 +4752,8 @@ fn terminal_agent_turn_automatically_replies_to_the_latest_direct_message() {
             next_cursor: None,
         },
     );
+    let opened = update(opened.model, UiEvent::Input(UiInput::Activate))
+        .expect("enter running direct conversation");
     let finished = update(
         opened.model,
         UiEvent::MaterializedViewObserved {
@@ -4697,6 +4853,8 @@ fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
             next_cursor: None,
         },
     );
+    let opened = update(opened.model, UiEvent::Input(UiInput::Activate))
+        .expect("enter conversation with running turns");
     let one_finished = update(
         opened.model,
         UiEvent::MaterializedViewObserved {

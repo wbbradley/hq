@@ -3277,7 +3277,6 @@ pub struct UiModel {
     conversation_scroll_mode: ConversationScrollMode,
     conversation_viewport_position: Option<UiConversationViewportPosition>,
     conversation_viewport_geometry: Option<ConversationViewportGeometry>,
-    technical_visible: bool,
     technical_scroll: u16,
     mailbox_modal: Option<UiMailboxModal>,
     mailbox_draft: Option<UiMailboxDraftPane>,
@@ -3354,7 +3353,6 @@ impl UiModel {
             conversation_scroll_mode: ConversationScrollMode::Anchored,
             conversation_viewport_position: None,
             conversation_viewport_geometry: None,
-            technical_visible: false,
             technical_scroll: 0,
             mailbox_modal: None,
             mailbox_draft: None,
@@ -3586,6 +3584,11 @@ impl UiModel {
         self.navigation.path()
     }
 
+    /// Returns the active typed route.
+    pub fn active_route(&self) -> &UiRoute {
+        self.navigation.active()
+    }
+
     /// Returns the current logical focus.
     pub const fn focus(&self) -> UiFocus {
         self.focus
@@ -3687,8 +3690,11 @@ impl UiModel {
     }
 
     /// Reports whether typed technical disclosure is expanded.
-    pub const fn technical_visible(&self) -> bool {
-        self.technical_visible
+    pub fn technical_visible(&self) -> bool {
+        matches!(
+            self.navigation.active(),
+            UiRoute::ConversationEvidence { .. }
+        )
     }
 
     /// Returns the selected detail inspector's logical vertical scroll offset.
@@ -4131,13 +4137,13 @@ impl UiModel {
     fn request_conversation(
         &mut self,
         row_id: String,
-        cursor: String,
+        cursor: Option<String>,
         enter_on_load: bool,
         effects: &mut Vec<UiEffect>,
     ) -> Result<(), UiError> {
         if let Some(pending) = &mut self.pending_conversation
             && pending.row_id == row_id
-            && pending.cursor.as_ref() == Some(&cursor)
+            && pending.cursor == cursor
         {
             pending.enter_on_load |= enter_on_load;
             return Ok(());
@@ -4146,15 +4152,11 @@ impl UiModel {
         self.pending_conversation = Some(PendingConversation {
             id,
             row_id: row_id.clone(),
-            cursor: Some(cursor.clone()),
+            cursor: cursor.clone(),
             enter_on_load,
         });
         self.conversation_failure = None;
-        effects.push(UiEffect::LoadConversation {
-            id,
-            row_id,
-            cursor: Some(cursor),
-        });
+        effects.push(UiEffect::LoadConversation { id, row_id, cursor });
         Ok(())
     }
 
@@ -4183,7 +4185,14 @@ impl UiModel {
             }
             self.conversation_setup = self.selected_setup().cloned();
             let focus = self.focus;
-            self.close_conversation();
+            if self.conversation_setup.is_some()
+                && self.active_conversation_row() == Some(row_id.as_str())
+            {
+                self.clear_conversation_content();
+                self.pending_conversation = None;
+            } else {
+                self.close_conversation();
+            }
             self.focus = focus;
             return;
         }
@@ -4201,7 +4210,11 @@ impl UiModel {
             && !self.install_retained_conversation(&row_id)
         {
             let focus = self.focus;
-            self.close_conversation();
+            if self.active_conversation_row() == Some(row_id.as_str()) {
+                self.clear_conversation_content();
+            } else {
+                self.close_conversation();
+            }
             self.focus = focus;
         }
     }
@@ -4331,6 +4344,10 @@ impl UiModel {
         if self.section() == next {
             return;
         }
+        self.replace_with_workspace_root(next);
+    }
+
+    fn replace_with_workspace_root(&mut self, next: UiSection) {
         self.list_selections
             .save(self.navigation.workspace(), self.selected_row.clone());
         let next_workspace = UiWorkspace::from(next);
@@ -4346,6 +4363,55 @@ impl UiModel {
         self.conversation_failure = None;
         self.reconcile_current_section();
         self.refresh_selected_project_summary();
+    }
+
+    fn enter_conversation_route(&mut self, row_id: String) -> bool {
+        if !matches!(
+            self.navigation.active(),
+            UiRoute::Workspace(UiWorkspace::Inbox | UiWorkspace::Sent | UiWorkspace::Archived)
+        ) {
+            return false;
+        }
+        if self
+            .navigation
+            .push(UiRoute::Conversation {
+                row_id: row_id.clone(),
+            })
+            .is_err()
+        {
+            return false;
+        }
+        self.selected_row = Some(row_id);
+        self.focus = UiFocus::Conversation;
+        self.follow_conversation_tail();
+        true
+    }
+
+    fn install_inbox_conversation_route(&mut self, row_id: String) -> bool {
+        if self.section() == UiSection::Inbox {
+            self.navigation.switch_workspace(UiWorkspace::Inbox);
+            self.focus = UiFocus::Content;
+            self.close_technical_details();
+        } else {
+            self.replace_with_workspace_root(UiSection::Inbox);
+        }
+        self.selected_row = Some(row_id.clone());
+        self.navigation
+            .push(UiRoute::Conversation { row_id })
+            .is_ok()
+    }
+
+    fn active_conversation_row(&self) -> Option<&str> {
+        match self.navigation.active() {
+            UiRoute::Conversation { row_id } | UiRoute::ConversationEvidence { row_id, .. } => {
+                Some(row_id)
+            }
+            _ => None,
+        }
+    }
+
+    fn conversation_route_active(&self) -> bool {
+        matches!(self.navigation.active(), UiRoute::Conversation { .. })
     }
 
     fn schedule_timer(
@@ -4426,7 +4492,6 @@ impl UiModel {
             self.conversation_anchor = Some(selected);
             self.conversation_scroll_mode = ConversationScrollMode::Anchored;
             self.reveal_conversation_entry_start();
-            self.technical_visible = false;
             self.technical_scroll = 0;
             true
         }
@@ -4592,7 +4657,7 @@ impl UiModel {
         let changed = self.conversation_anchor != tail
             || self.conversation_scroll_mode != mode
             || self.conversation_viewport_position != position
-            || self.technical_visible
+            || self.technical_visible()
             || self.technical_scroll != 0;
         self.conversation_anchor = tail;
         self.conversation_scroll_mode = mode;
@@ -4602,21 +4667,38 @@ impl UiModel {
     }
 
     fn toggle_technical_details(&mut self) -> bool {
-        if self.focus != UiFocus::Conversation || self.conversation_anchor.is_none() {
+        if self.technical_visible() {
+            let popped = self.navigation.pop().unwrap_or(false);
+            self.technical_scroll = 0;
+            return popped;
+        }
+        let (Some(row_id), Some(entry_id)) = (
+            self.active_conversation_row().map(str::to_owned),
+            self.conversation_anchor.clone(),
+        ) else {
+            return false;
+        };
+        if !self.conversation_route_active()
+            || self
+                .navigation
+                .push(UiRoute::ConversationEvidence { row_id, entry_id })
+                .is_err()
+        {
             return false;
         }
-        self.technical_visible = !self.technical_visible;
         self.technical_scroll = 0;
         true
     }
 
     fn close_technical_details(&mut self) {
-        self.technical_visible = false;
+        if self.technical_visible() {
+            let _ = self.navigation.pop();
+        }
         self.technical_scroll = 0;
     }
 
     fn scroll_technical_details(&mut self, forward: bool) -> bool {
-        if !self.technical_visible {
+        if !self.technical_visible() {
             return false;
         }
         let next = if forward {
@@ -4651,6 +4733,14 @@ impl UiModel {
     }
 
     fn close_conversation(&mut self) {
+        if self.active_conversation_row().is_some() {
+            let workspace = self.navigation.workspace();
+            self.navigation.switch_workspace(workspace);
+        }
+        self.clear_conversation_content();
+    }
+
+    fn clear_conversation_content(&mut self) {
         self.conversation = None;
         self.conversation_anchor = None;
         self.conversation_scroll_mode = ConversationScrollMode::Anchored;
@@ -4766,6 +4856,28 @@ impl UiModel {
     }
 
     fn reidentify_conversation_row(&mut self, prior: &str, alias: &str) {
+        let aliased_path = match self.navigation.active() {
+            UiRoute::Conversation { row_id } if row_id == prior => Some(vec![
+                UiRoute::Workspace(self.navigation.workspace()),
+                UiRoute::Conversation {
+                    row_id: alias.to_owned(),
+                },
+            ]),
+            UiRoute::ConversationEvidence { row_id, entry_id } if row_id == prior => Some(vec![
+                UiRoute::Workspace(self.navigation.workspace()),
+                UiRoute::Conversation {
+                    row_id: alias.to_owned(),
+                },
+                UiRoute::ConversationEvidence {
+                    row_id: alias.to_owned(),
+                    entry_id: entry_id.clone(),
+                },
+            ]),
+            _ => None,
+        };
+        if let Some(path) = aliased_path {
+            let _ = self.navigation.install(path);
+        }
         if self.selected_row.as_deref() == Some(prior) {
             self.selected_row = Some(alias.to_owned());
         }
@@ -4939,13 +5051,20 @@ impl UiModel {
                 .map(|(row_id, _)| row_id.clone())
         });
         self.selected_row = keep.or_else(|| rows.first().map(|(row_id, _)| row_id.clone()));
-        let conversation_survives = self.conversation.as_ref().is_some_and(|conversation| {
+        let active_context_survives = self.active_conversation_row().is_some_and(|active_row| {
+            self.selected_row.as_deref() == Some(active_row)
+                && rows.iter().any(|(row_id, kind)| {
+                    row_id == active_row
+                        && matches!(kind, UiRowKind::Conversation | UiRowKind::ConversationSetup)
+                })
+        });
+        let cached_conversation_survives = self.conversation.as_ref().is_some_and(|conversation| {
             self.selected_row.as_ref() == Some(&conversation.row_id)
                 && rows.iter().any(|(row_id, kind)| {
                     *row_id == conversation.row_id && *kind == UiRowKind::Conversation
                 })
         });
-        if !conversation_survives {
+        if !active_context_survives && !cached_conversation_survives {
             self.close_conversation();
         }
         self.conversation_setup = self.selected_setup().cloned();
@@ -5098,7 +5217,7 @@ fn project_conversation_row_ids(rows: &[UiRow], project_id: [u8; 32]) -> Vec<Str
 
 fn project_conversation_rows(snapshot: &UiSnapshot, project_id: [u8; 32]) -> Vec<UiRow> {
     let mut seen = BTreeSet::new();
-    snapshot
+    let mut rows = snapshot
         .inbox_rows
         .iter()
         .chain(snapshot.archived_rows.iter())
@@ -5113,7 +5232,24 @@ fn project_conversation_rows(snapshot: &UiSnapshot, project_id: [u8; 32]) -> Vec
         })
         .filter(|row| seen.insert(row.id.clone()))
         .cloned()
-        .collect()
+        .collect::<Vec<_>>();
+    rows.extend(
+        snapshot
+            .project_setups
+            .iter()
+            .filter(|setup| {
+                matches!(
+                    setup.draft.target,
+                    UiMailboxDraftTarget::ProjectSetup {
+                        project_id: candidate,
+                        ..
+                    } if candidate == project_id
+                )
+            })
+            .map(project_setup_row)
+            .filter(|row| seen.insert(row.id.clone())),
+    );
+    rows
 }
 
 fn has_project_conversation_root(
@@ -5374,6 +5510,7 @@ fn materialized_view_observed(
     model.observation_mode = UiObservationMode::Materialized;
     model.apply_snapshot(view.snapshot);
     apply_guided_snapshot(model, effects)?;
+    restore_project_setup_route(model);
     if let Some(page) = view.conversation {
         let row_id = page.row_id.clone();
         model.retain_conversation(revision, page);
@@ -5713,8 +5850,8 @@ fn apply_input(
         && let UiInput::Character(character) = input
         && let Some(section) = UiSection::from_shortcut(*character)
     {
-        if model.section() != section {
-            model.change_section(section);
+        if model.section() != section || model.navigation_path().len() > 1 {
+            model.replace_with_workspace_root(section);
             request_configuration_if_needed(model, effects)?;
             if section != UiSection::Inbox {
                 model.request_inbox_preview(effects);
@@ -5758,44 +5895,35 @@ fn apply_input(
             }
         }
         UiInput::NextFocus | UiInput::PreviousFocus => {
-            model.focus = match model.focus {
-                UiFocus::Content
-                    if model.conversation.is_some() || model.conversation_setup.is_some() =>
-                {
-                    UiFocus::Conversation
-                }
+            let next = match model.focus {
+                UiFocus::Content => UiFocus::Content,
                 UiFocus::Conversation if model.current_command_approval().is_some() => {
                     UiFocus::Approval
                 }
-                UiFocus::Conversation | UiFocus::Content => UiFocus::Content,
+                UiFocus::Conversation | UiFocus::Approval => UiFocus::Conversation,
                 UiFocus::Draft => UiFocus::Draft,
-                UiFocus::Approval => UiFocus::Conversation,
             };
-            true
+            let changed = next != model.focus;
+            model.focus = next;
+            changed
         }
         UiInput::MoveCursorRight => match model.focus {
             UiFocus::Content
-                if model.conversation.is_some() || model.conversation_setup.is_some() =>
+                if matches!(
+                    model.section(),
+                    UiSection::Inbox | UiSection::Sent | UiSection::Archived
+                ) =>
             {
-                model.focus = UiFocus::Conversation;
-                model.follow_conversation_tail();
-                true
+                activate(model, effects)?
             }
             UiFocus::Content | UiFocus::Conversation | UiFocus::Draft | UiFocus::Approval => false,
         },
         UiInput::MoveCursorLeft => match model.focus {
-            UiFocus::Conversation => {
-                if model.technical_visible {
-                    model.close_technical_details();
-                } else {
-                    model.focus = UiFocus::Content;
-                }
-                true
-            }
+            UiFocus::Conversation => escape(model),
             UiFocus::Content | UiFocus::Draft | UiFocus::Approval => false,
         },
         UiInput::NextItem => match model.focus {
-            UiFocus::Conversation if model.technical_visible => {
+            UiFocus::Conversation if model.technical_visible() => {
                 model.scroll_technical_details(true)
             }
             UiFocus::Conversation => model.scroll_conversation_viewport(true),
@@ -5803,7 +5931,7 @@ fn apply_input(
             UiFocus::Draft | UiFocus::Approval => false,
         },
         UiInput::PreviousItem => match model.focus {
-            UiFocus::Conversation if model.technical_visible => {
+            UiFocus::Conversation if model.technical_visible() => {
                 model.scroll_technical_details(false)
             }
             UiFocus::Conversation => model.scroll_conversation_viewport(false),
@@ -6318,7 +6446,7 @@ fn open_selected_project_conversations(
             )?;
         }
         [row_id] => {
-            model.selected_row = Some(row_id.clone());
+            model.install_inbox_conversation_route(row_id.clone());
             model.desired_conversation = Some(row_id.clone());
             model.request_inbox_preview(effects);
         }
@@ -7106,8 +7234,10 @@ fn open_guided_project(
         .cloned()
     {
         model.new_modal = None;
-        model.selected_row = Some(project_setup_row_id(setup.draft.draft_id));
+        let row_id = project_setup_row_id(setup.draft.draft_id);
+        model.selected_row = Some(row_id.clone());
         model.conversation_setup = Some(setup.clone());
+        let _ = model.enter_conversation_route(row_id);
         model.open_draft(setup.draft.target, effects)?;
         return Ok(());
     }
@@ -10334,7 +10464,7 @@ fn mailbox_shortcut(
         }
         't' => Ok(model.toggle_technical_details()),
         'j' => Ok(match model.focus {
-            UiFocus::Conversation if model.technical_visible => {
+            UiFocus::Conversation if model.technical_visible() => {
                 model.scroll_technical_details(true)
             }
             UiFocus::Conversation => model.move_conversation_anchor(true),
@@ -10342,7 +10472,7 @@ fn mailbox_shortcut(
             UiFocus::Draft | UiFocus::Approval => false,
         }),
         'k' => Ok(match model.focus {
-            UiFocus::Conversation if model.technical_visible => {
+            UiFocus::Conversation if model.technical_visible() => {
                 model.scroll_technical_details(false)
             }
             UiFocus::Conversation => model.move_conversation_anchor(false),
@@ -10410,7 +10540,6 @@ fn draft_action(target: &UiMailboxDraftTarget) -> UiMailboxAction {
 }
 
 fn select_project_conversation(model: &mut UiModel, project_id: [u8; 32], thread_id: [u8; 32]) {
-    model.change_section(UiSection::Inbox);
     if let Some(row_id) = model.snapshot.as_ref().and_then(|snapshot| {
         snapshot.inbox_rows.iter().find_map(|row| {
             matches!(
@@ -10424,13 +10553,16 @@ fn select_project_conversation(model: &mut UiModel, project_id: [u8; 32], thread
             .then(|| row.id.clone())
         })
     }) {
-        model.selected_row = Some(row_id);
+        model.install_inbox_conversation_route(row_id);
         model.focus = UiFocus::Conversation;
     }
 }
 
 fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, UiError> {
-    if model.focus == UiFocus::Conversation && model.conversation_anchor.is_some() {
+    if model.technical_visible() {
+        return Ok(model.toggle_technical_details());
+    }
+    if model.conversation_route_active() && model.conversation_anchor.is_some() {
         return Ok(model.toggle_technical_details());
     }
     if model.section() == UiSection::Agents {
@@ -10482,6 +10614,10 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
         return Ok(true);
     }
     if let Some(setup) = model.selected_setup().cloned() {
+        let row_id = model.selected_row.clone().unwrap_or_default();
+        if model.active_conversation_row() != Some(row_id.as_str()) {
+            return Ok(model.enter_conversation_route(row_id));
+        }
         model.open_draft(setup.draft.target, effects)?;
         return Ok(true);
     }
@@ -10489,17 +10625,20 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
         return Ok(false);
     }
     let row_id = model.selected_row.clone().unwrap_or_default();
+    if !model.enter_conversation_route(row_id.clone()) {
+        return Ok(false);
+    }
     if model
         .conversation
         .as_ref()
         .is_some_and(|conversation| conversation.row_id == row_id)
     {
-        model.focus = UiFocus::Conversation;
         model.follow_conversation_tail();
-    } else {
+    } else if model.section() == UiSection::Inbox {
         model.desired_conversation = Some(row_id);
         model.request_inbox_preview(effects);
-        model.focus = UiFocus::Conversation;
+    } else {
+        model.request_conversation(row_id, None, false, effects)?;
     }
     Ok(true)
 }
@@ -10514,26 +10653,28 @@ fn load_more(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, U
     let Some((row_id, cursor)) = request else {
         return Ok(false);
     };
-    model.request_conversation(row_id, cursor, true, effects)?;
+    model.request_conversation(row_id, Some(cursor), false, effects)?;
     Ok(true)
 }
 
 fn escape(model: &mut UiModel) -> bool {
-    if model.technical_visible {
-        model.close_technical_details();
-        true
-    } else {
-        match model.focus {
-            UiFocus::Conversation => {
-                model.focus = UiFocus::Content;
-                true
-            }
-            UiFocus::Approval => {
-                model.focus = UiFocus::Conversation;
-                true
-            }
-            UiFocus::Content | UiFocus::Draft => false,
+    match model.focus {
+        UiFocus::Approval => {
+            model.focus = UiFocus::Conversation;
+            true
         }
+        UiFocus::Conversation => {
+            if model.navigation.pop().unwrap_or(false) {
+                model.technical_scroll = 0;
+                if !model.conversation_route_active() {
+                    model.focus = UiFocus::Content;
+                }
+                true
+            } else {
+                false
+            }
+        }
+        UiFocus::Content | UiFocus::Draft => false,
     }
 }
 
@@ -10603,6 +10744,7 @@ fn snapshot_loaded(
     {
         model.apply_snapshot(snapshot);
         apply_guided_snapshot(model, effects)?;
+        restore_project_setup_route(model);
         apply_completion_context(model);
     }
     let observed_revision = model.snapshot.as_ref().map_or(0, |value| value.revision);
@@ -10790,6 +10932,17 @@ fn open_automatic_followup_draft(
     if model.mailbox_draft.is_some() || model.pending_mailbox.is_some() {
         return Ok(());
     }
+    let Some(active_row) = model.active_conversation_row() else {
+        return Ok(());
+    };
+    if model.selected_row.as_deref() != Some(active_row)
+        || model
+            .conversation
+            .as_ref()
+            .is_none_or(|conversation| conversation.row_id != active_row)
+    {
+        return Ok(());
+    }
     let target = match selected_conversation_target(model) {
         Some(UiConversationTarget::Project {
             project_id,
@@ -10947,9 +11100,34 @@ fn install_project_setup(model: &mut UiModel, draft: &UiMailboxDraft) {
             .retain(|candidate| candidate.id != row.id);
         snapshot.inbox_rows.push(row.clone());
     }
-    model.selected_row = Some(row.id);
+    let row_id = row.id;
+    model.selected_row = Some(row_id.clone());
     model.conversation_setup = Some(setup);
     model.conversation = None;
+    if model.section() == UiSection::Inbox && model.focus == UiFocus::Draft {
+        model.navigation.switch_workspace(UiWorkspace::Inbox);
+        let _ = model.navigation.push(UiRoute::Conversation { row_id });
+    }
+}
+
+fn restore_project_setup_route(model: &mut UiModel) {
+    if model.section() != UiSection::Inbox
+        || model.focus != UiFocus::Draft
+        || !matches!(model.active_route(), UiRoute::Workspace(UiWorkspace::Inbox))
+    {
+        return;
+    }
+    let Some(row_id) = model.selected_row.clone().filter(|row_id| {
+        model.rows().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row.id == *row_id && row.kind == UiRowKind::ConversationSetup)
+        })
+    }) else {
+        return;
+    };
+    if model.enter_conversation_route(row_id) {
+        model.focus = UiFocus::Draft;
+    }
 }
 
 fn draft_loaded(
@@ -11180,6 +11358,16 @@ fn mailbox_command_committed(
 }
 
 fn draft_targets_open_conversation(model: &UiModel, draft: &UiMailboxDraft) -> bool {
+    let Some(active_row) = model.active_conversation_row() else {
+        return false;
+    };
+    if model
+        .conversation
+        .as_ref()
+        .is_none_or(|conversation| conversation.row_id != active_row)
+    {
+        return false;
+    }
     match draft.target {
         UiMailboxDraftTarget::Reply { message_id } => {
             model.conversation.as_ref().is_some_and(|conversation| {

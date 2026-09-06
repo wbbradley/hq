@@ -24,8 +24,8 @@ use crate::{
     UiProjectAction, UiProjectAssignedAgentStatus, UiProjectCreationChoice, UiProjectFolderAction,
     UiProjectFolderOwnership, UiProjectFormField, UiProjectInteraction, UiProjectLifecycle,
     UiProjectManagementAction, UiProjectOutcome, UiProjectRecoverySummary, UiProjectSummaryFocus,
-    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
-    UiTechnicalSection, UiTheme, UiThemeRole,
+    UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRoute, UiRow, UiRowKind, UiRowState,
+    UiSection, UiTechnicalSection, UiTheme, UiThemeRole,
     message_markdown::MessageRenderCache,
     model::WIDE_WIDTH,
     shell_highlight::{ShellHighlightCache, ShellSegment, ShellTokenKind},
@@ -2771,37 +2771,35 @@ fn render_rows(
     area: Rect,
     cache: &mut UiRenderCache,
 ) {
-    if model.section() == UiSection::Config {
+    if model.mailbox_draft().is_some()
+        && !model.draft_suspended_by_command_approval()
+        && !matches!(model.active_route(), UiRoute::Conversation { .. })
+    {
+        let draft_height = (area.height / 3).max(6).min(area.height.saturating_sub(2));
+        let [workspace, draft] =
+            Layout::vertical([Constraint::Min(2), Constraint::Length(draft_height)]).areas(area);
+        render_route_surface(frame, model, theme, workspace, cache);
+        render_draft_pane(frame, model, theme, draft, Borders::TOP);
+        return;
+    }
+    render_route_surface(frame, model, theme, area, cache);
+}
+
+fn render_route_surface(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+    cache: &mut UiRenderCache,
+) {
+    if matches!(model.active_route(), UiRoute::ConversationEvidence { .. }) {
+        render_technical_inspector(frame, model, theme, area, Borders::NONE, cache);
+    } else if matches!(model.active_route(), UiRoute::Conversation { .. }) {
+        render_inbox_detail(frame, model, theme, area, Borders::NONE, cache);
+    } else if model.section() == UiSection::Config {
         render_config(frame, model, theme, area);
     } else if model.section() == UiSection::Projects {
         render_projects_workspace(frame, model, theme, area);
-    } else if model.section() == UiSection::Inbox || model.conversation().is_some() {
-        if model.viewport().width >= WIDE_WIDTH {
-            let [summaries, conversation] = Layout::horizontal([
-                Constraint::Length(inbox_list_width(area.width)),
-                Constraint::Min(1),
-            ])
-            .areas(area);
-            render_summary_rows(frame, model, theme, summaries);
-            render_inbox_detail(frame, model, theme, conversation, Borders::LEFT, cache);
-        } else {
-            let conversation_owns_space = matches!(
-                model.focus(),
-                UiFocus::Conversation | UiFocus::Draft | UiFocus::Approval
-            );
-            let constraints = if conversation_owns_space {
-                [Constraint::Length(4), Constraint::Min(1)]
-            } else {
-                [Constraint::Min(1), Constraint::Length(4)]
-            };
-            let [summaries, conversation] = Layout::vertical(constraints).areas(area);
-            if conversation_owns_space {
-                render_compact_selected_summary(frame, model, theme, summaries);
-            } else {
-                render_summary_rows(frame, model, theme, summaries);
-            }
-            render_inbox_detail(frame, model, theme, conversation, Borders::TOP, cache);
-        }
     } else {
         render_summary_rows(frame, model, theme, area);
     }
@@ -3245,30 +3243,6 @@ const fn folder_ownership_label(ownership: UiProjectFolderOwnership) -> &'static
     }
 }
 
-fn render_compact_selected_summary(
-    frame: &mut Frame<'_>,
-    model: &UiModel,
-    theme: &UiTheme,
-    area: Rect,
-) {
-    let count = model.rows().map_or(0, <[UiRow]>::len);
-    let mut lines = vec![
-        Line::styled(
-            format!(
-                "{} · {count} {}",
-                section_label(model.section()),
-                section_item_label(model.section(), count)
-            ),
-            pane_title_style(theme, summary_pane_focused(model)),
-        ),
-        Line::default(),
-    ];
-    if let Some(row) = model.selected_row_data() {
-        lines.extend(render_row(model, row, theme, area.width));
-    }
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
 fn render_inbox_detail(
     frame: &mut Frame<'_>,
     model: &UiModel,
@@ -3281,11 +3255,7 @@ fn render_inbox_detail(
         let approval_height = (area.height / 3).max(7).min(area.height.saturating_sub(2));
         let [conversation, approval_area] =
             Layout::vertical([Constraint::Min(2), Constraint::Length(approval_height)]).areas(area);
-        if model.technical_visible() {
-            render_technical_inspector(frame, model, theme, conversation, outer_border, cache);
-        } else {
-            render_conversation(frame, model, theme, conversation, outer_border, cache);
-        }
+        render_conversation(frame, model, theme, conversation, outer_border, cache);
         render_command_approval(
             frame,
             model,
@@ -3298,30 +3268,8 @@ fn render_inbox_detail(
         let draft_height = (area.height / 3).max(6).min(area.height.saturating_sub(2));
         let [conversation, draft] =
             Layout::vertical([Constraint::Min(2), Constraint::Length(draft_height)]).areas(area);
-        if model.technical_visible() {
-            render_technical_inspector(frame, model, theme, conversation, outer_border, cache);
-        } else {
-            render_conversation(frame, model, theme, conversation, outer_border, cache);
-        }
-        render_draft_pane(frame, model, theme, draft, Borders::TOP | outer_border);
-    } else if model.technical_visible() && model.viewport().width >= WIDE_WIDTH {
-        let inspector_height = (area.height / 3).clamp(7, 12);
-        let [conversation, inspector] = Layout::vertical([
-            Constraint::Min(3),
-            Constraint::Length(inspector_height.min(area.height.saturating_sub(2))),
-        ])
-        .areas(area);
         render_conversation(frame, model, theme, conversation, outer_border, cache);
-        render_technical_inspector(
-            frame,
-            model,
-            theme,
-            inspector,
-            Borders::TOP | outer_border,
-            cache,
-        );
-    } else if model.technical_visible() {
-        render_technical_inspector(frame, model, theme, area, outer_border, cache);
+        render_draft_pane(frame, model, theme, draft, Borders::TOP | outer_border);
     } else {
         render_conversation(frame, model, theme, area, outer_border, cache);
     }
@@ -3936,7 +3884,7 @@ fn render_technical_inspector(
     }
     lines.push(Line::default());
     lines.push(Line::styled(
-        "j/k scroll · t/← close details · ? help",
+        "j/k scroll · Esc conversation · ? help",
         theme.style(UiThemeRole::TextMuted),
     ));
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -4807,6 +4755,8 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         " j/k choose · Enter confirm · Esc leave · Tab switch pane · ? help · q quit".to_owned()
     } else if model.focus() == UiFocus::Draft {
         " Enter send · Ctrl-J/Shift-Enter newline · Esc close · ? help · q quit".to_owned()
+    } else if matches!(model.active_route(), UiRoute::ConversationEvidence { .. }) {
+        " j/k scroll · Esc conversation · ? help · q quit".to_owned()
     } else if model.section() == UiSection::Config {
         if model.config_edit().is_some() {
             " Enter save · Esc cancel · F1 help".to_owned()
@@ -4836,21 +4786,18 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         } else {
             " n New… · c create · / search · ? help · q quit".to_owned()
         }
-    } else if model.conversation_setup().is_some() {
-        " r/Enter write first message · c change agent · Tab switch pane · ? help · q quit"
-            .to_owned()
-    } else if model.focus() == UiFocus::Conversation {
+    } else if model.conversation_setup().is_some()
+        && matches!(model.active_route(), UiRoute::Conversation { .. })
+    {
+        " r/Enter write first message · c change agent · Esc Inbox · ? help · q quit".to_owned()
+    } else if matches!(model.active_route(), UiRoute::Conversation { .. }) {
         conversation_footer(model)
     } else if model.selected_row_data().is_none() {
         " n New… · ? help · q quit".to_owned()
-    } else if model.viewport().width >= WIDE_WIDTH {
-        if model.section() == UiSection::Inbox {
-            " Enter open · n New… · d archive conversation · ? help · q quit".to_owned()
-        } else {
-            " Enter open · n New… · ? help · q quit".to_owned()
-        }
+    } else if model.section() == UiSection::Inbox {
+        " Enter open · n New… · d archive conversation · ? help · q quit".to_owned()
     } else {
-        " Enter open · ? help · q quit".to_owned()
+        " Enter open · n New… · ? help · q quit".to_owned()
     };
     let view_shortcuts_available = model.help_page().is_none()
         && model.new_modal().is_none()
@@ -4888,7 +4835,7 @@ fn conversation_footer(model: &UiModel) -> String {
         conversation.entries.iter().find(|entry| entry.id == anchor)
     });
     if model.technical_visible() {
-        return " j/k scroll · t/← close details · ? help".to_owned();
+        return " j/k scroll · Esc conversation · ? help".to_owned();
     }
     let mut controls = vec![if model.viewport().width >= WIDE_WIDTH {
         "↑/↓ or j/k message"
@@ -4917,7 +4864,12 @@ fn conversation_footer(model: &UiModel) -> String {
     } else {
         "t/Enter info"
     });
-    controls.push("← Inbox");
+    controls.push(match model.section() {
+        UiSection::Inbox => "Esc Inbox",
+        UiSection::Sent => "Esc Sent",
+        UiSection::Archived => "Esc Archived",
+        _ => "Esc back",
+    });
     controls.push("? help");
     format!(" {}", controls.join(" · "))
 }

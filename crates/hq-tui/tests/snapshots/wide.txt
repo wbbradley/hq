@@ -1,18 +1,18 @@
  HQ   Inbox
  this device Connected
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
-Inbox · 3 conversations         │Select a conversation to view its messages.
-                                │
-Build release                   │
-agent-1                         │
-Deploy production               │
-waiting for approval            │
-Investigate timeout             │
-relay needs attention           │
-                                │
-                                │
-                                │
-                                │
-                                │
+Inbox · 3 conversations
+
+Build release
+agent-1
+Deploy production
+waiting for approval
+Investigate timeout
+relay needs attention
+
+
+
+
+
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
  Enter open · n New… · d archive conversation · ? help · q quit · 1–6 views

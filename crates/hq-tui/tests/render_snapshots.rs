@@ -13,8 +13,8 @@ use hq_tui::{
     UiProjectExternalWarning, UiProjectFolderAction, UiProjectManagementAction, UiProjectOutcome,
     UiProjectResource, UiProjectResourceCheck, UiProjectResourceCondition,
     UiProjectResourceConflict, UiProjectResult, UiProjectSummaryFocus, UiProjectThread, UiProvider,
-    UiRenderCache, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection,
-    UiTheme, UiThemeRole, render, render_with_cache, update,
+    UiRenderCache, UiRoute, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, UiTheme, UiThemeRole, render, render_with_cache, update,
 };
 use ratatui::{
     Terminal,
@@ -130,10 +130,8 @@ fn command_approval_renders_inline_without_covering_the_workspace() {
         assert!(rendered.contains("Command for Alice · HQ"));
         assert!(rendered.contains("Run cargo test?"));
         assert!(rendered.contains("Allow once"));
-        assert!(
-            rendered.contains("Deploy production"),
-            "{size:?}\n{rendered}"
-        );
+        assert!(rendered.contains("Can we ship?"), "{size:?}\n{rendered}");
+        assert!(!rendered.contains("Build release"), "{size:?}\n{rendered}");
         assert!(rendered.contains("Alice"), "{size:?}\n{rendered}");
         assert!(rendered.contains("Inbox"));
         assert!(!rendered.contains("Command approval needed"));
@@ -188,7 +186,6 @@ fn project_setup_is_distinct_from_a_conversation_in_wide_and_compact_layouts() {
         },
     ] {
         let rendered = render_text(&project_setup_model(size));
-        assert!(rendered.contains("Alice · hq"));
         assert!(contains_visible_words_in_order(
             &rendered,
             "Conversation with Alice about hq has not started"
@@ -214,8 +211,8 @@ fn project_setup_instructions_only_render_while_conversation_is_focused() {
     assert!(rendered.contains("Press r or Enter to write the first message."));
     assert!(rendered.contains("Press c to choose a different available agent."));
 
-    let list_focused = update(focused.clone(), UiEvent::Input(UiInput::NextFocus))
-        .expect("focus conversation list")
+    let list_focused = update(focused.clone(), UiEvent::Input(UiInput::Escape))
+        .expect("return to the Inbox list")
         .model;
     let rendered = render_text(&list_focused);
     assert!(!rendered.contains("Press r or Enter to write the first message."));
@@ -499,13 +496,13 @@ fn pane_titles_distinguish_active_focus_from_selected_context() {
         }),
         &theme,
     );
-    let inbox_context = conversation
-        .cell(find_text_start(&conversation, "Inbox · 3 conversations"))
-        .expect("unfocused Inbox title");
+    assert!(
+        !snapshot_text(&conversation).contains("Inbox · 3 conversations"),
+        "a conversation route must not retain a visible list pane"
+    );
     let conversation_title = conversation
         .cell(find_text_start(&conversation, "Alice"))
         .expect("focused conversation title");
-    assert_eq!(inbox_context.fg, Color::Blue);
     assert_eq!(conversation_title.fg, Color::LightCyan);
     assert!(conversation_title.modifier.contains(Modifier::BOLD));
 
@@ -992,14 +989,37 @@ fn conversation_layout_renders_typed_activity_after_its_earlier_message() {
 }
 
 #[test]
-fn compact_conversation_focus_keeps_only_the_selected_inbox_summary() {
-    let rendered = render_text(&conversation_model(UiSize {
-        width: 72,
-        height: 20,
-    }));
-    assert!(rendered.contains("Deploy production"), "{rendered}");
-    assert!(rendered.contains("waiting for approval"), "{rendered}");
-    assert!(!rendered.contains("Build release"), "{rendered}");
+fn inbox_lists_and_conversations_are_distinct_full_pane_routes() {
+    for size in [
+        UiSize {
+            width: 104,
+            height: 20,
+        },
+        UiSize {
+            width: 72,
+            height: 20,
+        },
+    ] {
+        let conversation = conversation_model(size);
+        let rendered = render_text(&conversation);
+        assert!(rendered.contains("Can we ship?"), "{size:?}:\n{rendered}");
+        assert!(!rendered.contains("Build release"), "{size:?}:\n{rendered}");
+        assert!(
+            !rendered.contains("Inbox · 3 conversations"),
+            "{size:?}:\n{rendered}"
+        );
+
+        let list = update(conversation, UiEvent::Input(UiInput::Escape))
+            .expect("return to Inbox")
+            .model;
+        let rendered = render_text(&list);
+        assert!(rendered.contains("Build release"), "{size:?}:\n{rendered}");
+        assert!(
+            rendered.contains("Deploy production"),
+            "{size:?}:\n{rendered}"
+        );
+        assert!(!rendered.contains("Can we ship?"), "{size:?}:\n{rendered}");
+    }
 }
 
 #[test]
@@ -1011,15 +1031,7 @@ fn conversation_messages_start_at_the_pane_edge_and_selection_fills_the_row() {
     let theme = UiTheme::terminal();
     let buffer = render_buffer_with_theme(&model, &theme);
     let (body_x, body_y) = find_text_start(&buffer, "Can we ship?");
-    let divider_x = (0..body_x)
-        .rev()
-        .find(|x| {
-            buffer
-                .cell((*x, body_y))
-                .is_some_and(|cell| cell.symbol() == "│")
-        })
-        .expect("Conversation divider");
-    assert_eq!(body_x, divider_x + 1, "message body has no renderer indent");
+    assert_eq!(body_x, 0, "full-pane message body has no renderer indent");
 
     let selected = theme.style(UiThemeRole::ConversationSelectionFocused);
     for y in [body_y - 1, body_y, body_y + 1] {
@@ -1192,7 +1204,8 @@ fn technical_details_are_in_pane_and_keep_exact_activity_content() {
         assert!(rendered.contains("Activity details"), "{rendered}");
         assert!(rendered.contains("compiling"), "{rendered}");
         assert!(rendered.contains("sequence: 2"), "{rendered}");
-        assert!(rendered.contains("← close details"), "{rendered}");
+        assert!(rendered.contains("Esc conversation"), "{rendered}");
+        assert!(!rendered.contains("Can we ship?"), "{rendered}");
         assert!(!rendered.contains("activity sequence="), "{rendered}");
     }
 }
@@ -2691,9 +2704,16 @@ fn project_setup_model(size: UiSize) -> UiModel {
         project_setups: vec![setup],
     };
     let model = loaded_snapshot_model(size, snapshot);
-    update(model, UiEvent::Input(UiInput::NextFocus))
-        .expect("focus setup detail")
-        .model
+    let model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("open setup conversation")
+        .model;
+    assert!(
+        matches!(model.active_route(), UiRoute::Conversation { .. }),
+        "setup activation path: {:?}, selection: {:?}",
+        model.navigation_path(),
+        model.selected_row()
+    );
+    model
 }
 
 fn loaded_snapshot_model(size: UiSize, snapshot: UiSnapshot) -> UiModel {
