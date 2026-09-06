@@ -5749,6 +5749,27 @@ fn synchronize_global_route(model: &mut UiModel) {
                     }),
             },
         })
+    } else if let Some(draft) = &model.mailbox_draft
+        && model.focus == UiFocus::Draft
+        && !matches!(model.navigation.active(), UiRoute::Conversation { .. })
+    {
+        let draft_target = match draft {
+            UiMailboxDraftPane::Loading { target }
+            | UiMailboxDraftPane::Editing {
+                draft: UiMailboxDraft { target, .. },
+                ..
+            } => target,
+        };
+        Some(UiRoute::Form {
+            capability: UiWorkflowCapability::StartNewWork,
+            target: match draft_target {
+                UiMailboxDraftTarget::Project { project_id, .. }
+                | UiMailboxDraftTarget::ProjectSetup { project_id, .. } => {
+                    UiRouteTarget::Project(*project_id)
+                }
+                _ => UiRouteTarget::Global,
+            },
+        })
     } else if model.config_edit.is_some() {
         Some(UiRoute::Form {
             capability: UiWorkflowCapability::EditConfiguration,

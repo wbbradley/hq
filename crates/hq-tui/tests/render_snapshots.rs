@@ -467,7 +467,7 @@ fn status_roles_are_independently_overridable() {
 }
 
 #[test]
-fn pane_titles_distinguish_active_focus_from_selected_context() {
+fn route_titles_use_one_consistent_heading_style() {
     let focused = Style::new()
         .fg(Color::LightCyan)
         .add_modifier(Modifier::BOLD);
@@ -486,7 +486,7 @@ fn pane_titles_distinguish_active_focus_from_selected_context() {
     let inbox_title = inbox
         .cell(find_text_start(&inbox, "Inbox · 3 conversations"))
         .expect("focused Inbox title");
-    assert_eq!(inbox_title.fg, Color::LightCyan);
+    assert_eq!(inbox_title.fg, Color::Cyan);
     assert!(inbox_title.modifier.contains(Modifier::BOLD));
 
     let conversation = render_buffer_with_theme(
@@ -503,7 +503,7 @@ fn pane_titles_distinguish_active_focus_from_selected_context() {
     let conversation_title = conversation
         .cell(find_text_start(&conversation, "Alice"))
         .expect("focused conversation title");
-    assert_eq!(conversation_title.fg, Color::LightCyan);
+    assert_eq!(conversation_title.fg, Color::Cyan);
     assert!(conversation_title.modifier.contains(Modifier::BOLD));
 
     let no_color = render_buffer_with_theme(
@@ -517,7 +517,6 @@ fn pane_titles_distinguish_active_focus_from_selected_context() {
         .cell(find_text_start(&no_color, "Inbox · 3 conversations"))
         .expect("no-color focused Inbox title");
     assert!(no_color_title.modifier.contains(Modifier::BOLD));
-    assert!(no_color_title.modifier.contains(Modifier::UNDERLINED));
 }
 
 #[test]
@@ -548,7 +547,12 @@ fn renderer_contains_no_concrete_color_policy() {
     assert!(!source.contains("Color("));
     assert!(!source.contains("Rgb("));
     assert!(!source.contains("Indexed("));
-    for role in UiThemeRole::ALL {
+    for role in UiThemeRole::ALL.into_iter().filter(|role| {
+        !matches!(
+            role,
+            UiThemeRole::PaneTitleFocused | UiThemeRole::PaneTitleUnfocused
+        )
+    }) {
         assert!(
             source.contains(&format!("UiThemeRole::{role:?}")),
             "renderer must assign semantic role {} to at least one element",
@@ -1350,7 +1354,7 @@ fn project_composer_keeps_orange_recipient_context_on_its_upper_left_border() {
     );
     let project_title = find_text_starts(&buffer, "To: agent-5")
         .into_iter()
-        .find(|(x, y)| *x < size.width / 2 && *y > size.height / 2)
+        .find(|(x, y)| *x < size.width / 2 && *y < size.height / 2)
         .unwrap_or_else(|| {
             panic!(
                 "project title is absent from composer:\n{}",
@@ -2289,6 +2293,7 @@ fn projects_workspace_uses_one_full_pane_route_at_every_width() {
     let no_color_buffer = render_buffer_with_theme(&compact_detail, &UiTheme::no_color());
     let no_color = snapshot_text(&no_color_buffer);
     let compact_detail = render_text(&compact_detail);
+    assert!(compact_detail.contains("HQ / Projects / release"));
     assert!(compact_detail.contains("Project · release"));
     assert!(no_color.contains('›'), "no-color project focus: {no_color}");
     assert!(compact_detail.contains("Start conversation"));
@@ -2304,12 +2309,8 @@ fn projects_workspace_uses_one_full_pane_route_at_every_width() {
     .expect("start project conversation")
     .model;
     let filtered = render_text(&filtered);
-    assert!(
-        filtered.contains("Project: release")
-            && filtered.contains("Esc clear")
-            && filtered.contains("filter"),
-        "filtered Inbox:\n{filtered}"
-    );
+    assert!(filtered.contains("release") && filtered.contains("Loading"));
+    assert!(!filtered.contains("Projects · 1 project"));
 }
 
 #[test]

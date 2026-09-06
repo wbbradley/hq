@@ -25,7 +25,7 @@ use crate::{
     UiProjectFolderOwnership, UiProjectFormField, UiProjectInteraction, UiProjectLifecycle,
     UiProjectManagementAction, UiProjectOutcome, UiProjectRecoverySummary, UiProjectSummaryFocus,
     UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRoute, UiRow, UiRowKind, UiRowState,
-    UiSection, UiTechnicalSection, UiTheme, UiThemeRole,
+    UiSection, UiTechnicalSection, UiTheme, UiThemeRole, UiWorkflowCapability,
     message_markdown::MessageRenderCache,
     model::WIDE_WIDTH,
     shell_highlight::{ShellHighlightCache, ShellSegment, ShellTokenKind},
@@ -78,12 +78,6 @@ pub fn render_with_cache(
     render_header(frame, model, theme, header);
     render_rows(frame, model, theme, content, cache);
     render_footer(frame, model, theme, footer);
-    render_new_modal(frame, model, theme, content);
-    render_mailbox_modal(frame, model, theme, content);
-    render_agent_modal(frame, model, theme, content);
-    render_project_interaction(frame, model, theme, content, true);
-    render_interaction_modal(frame, model, theme, content);
-    render_help(frame, model, theme, content);
     cache.conversation_viewport.take()
 }
 
@@ -952,28 +946,17 @@ fn render_project_interaction(
     model: &UiModel,
     theme: &UiTheme,
     available: Rect,
-    overlay: bool,
+    _overlay: bool,
 ) {
     let Some(interaction) = model.project_interaction() else {
         return;
     };
-    let bounded_confirmation = matches!(
-        interaction,
-        UiProjectInteraction::ConfirmRemoveResource { .. }
-            | UiProjectInteraction::ConfirmClose { .. }
-            | UiProjectInteraction::ConfirmArchive { .. }
-    );
-    if overlay != bounded_confirmation {
-        return;
-    }
     let area = available;
-    if overlay {
-        frame.render_widget(Clear, area);
-        frame.render_widget(
-            Block::new().style(theme.style(UiThemeRole::ModalSurface)),
-            area,
-        );
-    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::new().style(theme.style(UiThemeRole::ModalSurface)),
+        area,
+    );
     let inner_width = area.width.saturating_sub(2);
     let (title, lines) = match interaction {
         UiProjectInteraction::ChooseCreation { selected } => (
@@ -1657,7 +1640,7 @@ fn render_project_interaction(
             .style(theme.style(UiThemeRole::Text))
             .block(
                 Block::new()
-                    .borders(if overlay { Borders::ALL } else { Borders::NONE })
+                    .borders(Borders::ALL)
                     .title(Span::styled(title, theme.style(UiThemeRole::ModalTitle)))
                     .border_style(theme.style(UiThemeRole::ModalBorder)),
             )
@@ -2683,13 +2666,10 @@ fn render_header(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     } else {
         workspace_connection_label(model.connection())
     };
+    let breadcrumb = breadcrumb_text(model, area.width.saturating_sub(5));
     let title = Line::from(vec![
         Span::styled(" HQ ", theme.style(UiThemeRole::HeaderBadge)),
-        Span::raw("  "),
-        Span::styled(
-            section_label(model.section()),
-            theme.style(UiThemeRole::Heading),
-        ),
+        Span::styled(format!("/ {breadcrumb}"), theme.style(UiThemeRole::Heading)),
     ]);
     let context = Line::from(vec![
         Span::styled(" this device ", theme.style(UiThemeRole::TextMuted)),
@@ -2705,6 +2685,101 @@ fn render_header(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     );
 }
 
+fn breadcrumb_text(model: &UiModel, maximum_width: u16) -> String {
+    let labels = model
+        .navigation_path()
+        .iter()
+        .map(|route| route_breadcrumb_label(model, route))
+        .collect::<Vec<_>>();
+    let full = labels.join(" / ");
+    let maximum_width = usize::from(maximum_width);
+    if UnicodeWidthStr::width(full.as_str()) <= maximum_width {
+        return full;
+    }
+    let root = labels.first().map_or("HQ", String::as_str);
+    let active = labels.last().map_or(root, String::as_str);
+    let compact = format!("{root} / … / {active}");
+    if UnicodeWidthStr::width(compact.as_str()) <= maximum_width {
+        compact
+    } else {
+        format!(
+            "…{}",
+            display_suffix(active, maximum_width.saturating_sub(1))
+        )
+    }
+}
+
+fn route_breadcrumb_label(model: &UiModel, route: &UiRoute) -> String {
+    match route {
+        UiRoute::Workspace(workspace) => section_label(UiSection::from(*workspace)).to_owned(),
+        UiRoute::Conversation { .. } => model
+            .conversation()
+            .map_or("Conversation", |conversation| conversation.title.as_str())
+            .to_owned(),
+        UiRoute::ConversationEvidence { .. }
+        | UiRoute::ProjectEvidence { .. }
+        | UiRoute::AgentEvidence { .. } => "Technical details".to_owned(),
+        UiRoute::Project { .. } => model
+            .project_summary()
+            .map_or("Project", |project| project.name.as_str())
+            .to_owned(),
+        UiRoute::ProjectManagement { .. } => "Manage project".to_owned(),
+        UiRoute::ProjectFolders { .. } => "Folders".to_owned(),
+        UiRoute::ProjectFolder { .. } => "Folder details".to_owned(),
+        UiRoute::Agent { .. } => match model.agent_modal() {
+            Some(
+                UiAgentModal::Details { agent, .. }
+                | UiAgentModal::ConfirmRetire { agent, .. }
+                | UiAgentModal::ManagedProvider { agent, .. }
+                | UiAgentModal::ConfirmManagedSession { agent, .. }
+                | UiAgentModal::ManagingSession { agent, .. }
+                | UiAgentModal::ManagedSessionOutcome { agent, .. },
+            ) => agent
+                .names
+                .first()
+                .map_or("Unnamed agent", String::as_str)
+                .to_owned(),
+            _ => model
+                .selected_row_data()
+                .map_or("Agent", |row| row.title.as_str())
+                .to_owned(),
+        },
+        UiRoute::AgentSessions { .. } => "Saved conversations".to_owned(),
+        UiRoute::Help(UiHelpPage::Context) => "Help".to_owned(),
+        UiRoute::Help(UiHelpPage::Technical) => "Technical help".to_owned(),
+        UiRoute::Choice { capability, .. } => workflow_label(*capability).to_owned(),
+        UiRoute::Form { capability, .. } => format!("{} details", workflow_label(*capability)),
+        UiRoute::Confirmation { capability, .. } => {
+            format!("Confirm {}", workflow_label(*capability).to_lowercase())
+        }
+        UiRoute::Progress { capability, .. } => {
+            format!("{} in progress", workflow_label(*capability))
+        }
+        UiRoute::Outcome { capability, .. } => format!("{} result", workflow_label(*capability)),
+        UiRoute::Recovery { capability, .. } => {
+            format!("{} needs attention", workflow_label(*capability))
+        }
+    }
+}
+
+const fn workflow_label(capability: UiWorkflowCapability) -> &'static str {
+    match capability {
+        UiWorkflowCapability::StartNewWork => "New",
+        UiWorkflowCapability::ChooseRecipient => "Choose recipient",
+        UiWorkflowCapability::ChooseProject => "Choose project",
+        UiWorkflowCapability::ChooseAgent => "Choose agent",
+        UiWorkflowCapability::ChooseAgentSession => "Choose agent service",
+        UiWorkflowCapability::EditConfiguration => "Edit settings",
+        UiWorkflowCapability::CreateProject => "Create project",
+        UiWorkflowCapability::EditProjectFolder => "Edit folder",
+        UiWorkflowCapability::EditAgent => "Edit agent",
+        UiWorkflowCapability::ArchiveConversation => "Archive conversation",
+        UiWorkflowCapability::ManageProject => "Manage project",
+        UiWorkflowCapability::ManageAgentSession => "Manage agent conversation",
+        UiWorkflowCapability::AnswerRequest => "Answer request",
+    }
+}
+
 fn render_rows(
     frame: &mut Frame<'_>,
     model: &UiModel,
@@ -2714,13 +2789,15 @@ fn render_rows(
 ) {
     if model.mailbox_draft().is_some()
         && !model.draft_suspended_by_command_approval()
-        && !matches!(model.active_route(), UiRoute::Conversation { .. })
+        && matches!(
+            model.active_route(),
+            UiRoute::Form {
+                capability: UiWorkflowCapability::StartNewWork,
+                ..
+            }
+        )
     {
-        let draft_height = (area.height / 3).max(6).min(area.height.saturating_sub(2));
-        let [workspace, draft] =
-            Layout::vertical([Constraint::Min(2), Constraint::Length(draft_height)]).areas(area);
-        render_route_surface(frame, model, theme, workspace, cache);
-        render_draft_pane(frame, model, theme, draft, Borders::TOP);
+        render_draft_pane(frame, model, theme, area, Borders::NONE);
         return;
     }
     render_route_surface(frame, model, theme, area, cache);
@@ -2733,7 +2810,19 @@ fn render_route_surface(
     area: Rect,
     cache: &mut UiRenderCache,
 ) {
-    if matches!(model.active_route(), UiRoute::ConversationEvidence { .. }) {
+    if model.help_page().is_some() {
+        render_help(frame, model, theme, area);
+    } else if model.interaction_modal().is_some() {
+        render_interaction_modal(frame, model, theme, area);
+    } else if model.new_modal().is_some() {
+        render_new_modal(frame, model, theme, area);
+    } else if model.mailbox_modal().is_some() {
+        render_mailbox_modal(frame, model, theme, area);
+    } else if model.agent_modal().is_some() {
+        render_agent_modal(frame, model, theme, area);
+    } else if model.project_interaction().is_some() {
+        render_project_interaction(frame, model, theme, area, true);
+    } else if matches!(model.active_route(), UiRoute::ConversationEvidence { .. }) {
         render_technical_inspector(frame, model, theme, area, Borders::NONE, cache);
     } else if matches!(model.active_route(), UiRoute::Conversation { .. }) {
         render_inbox_detail(frame, model, theme, area, Borders::NONE, cache);
@@ -2888,10 +2977,7 @@ fn render_project_workspace_detail(
     };
     let title = format!("Project · {}", summary.name);
     let mut lines = vec![
-        Line::styled(
-            title,
-            pane_title_style(theme, project_detail_pane_focused(model)),
-        ),
+        Line::styled(title, theme.style(UiThemeRole::Heading)),
         Line::from(project_lifecycle_label(summary.lifecycle)),
         Line::default(),
     ];
@@ -3456,7 +3542,7 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
                 section_label(model.section()),
                 section_item_label(model.section(), count)
             ),
-            pane_title_style(theme, summary_pane_focused(model)),
+            theme.style(UiThemeRole::Heading),
         ),
         Line::default(),
     ];
@@ -3639,10 +3725,7 @@ fn render_conversation(
     if let Some(conversation) = conversation {
         let mut header = vec![Line::styled(
             conversation.title.as_str(),
-            pane_title_style(
-                theme,
-                matches!(model.focus(), UiFocus::Conversation | UiFocus::Approval),
-            ),
+            theme.style(UiThemeRole::Heading),
         )];
         if let Some(context) = &conversation.context {
             header.push(Line::styled(
@@ -4659,18 +4742,25 @@ fn padded_display_text(value: &str, width: u16) -> String {
     visible
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
     let content = if let Some(page) = model.help_page() {
         match page {
             UiHelpPage::Context => " t technical details · F1/?/Esc close help".to_owned(),
             UiHelpPage::Technical => " t contextual help · F1/?/Esc close help".to_owned(),
         }
-    } else if model.new_modal().is_some()
-        || model.mailbox_modal().is_some()
-        || model.agent_modal().is_some()
-        || model.project_interaction().is_some()
-    {
-        " F1 help · Esc back/cancel · q quit".to_owned()
+    } else if matches!(model.active_route(), UiRoute::Choice { .. }) {
+        " j/k choose · Enter continue · Esc back · F1 help · q quit".to_owned()
+    } else if matches!(model.active_route(), UiRoute::Form { .. }) {
+        " Tab next field · Enter continue · Esc back · F1 help · q quit".to_owned()
+    } else if matches!(model.active_route(), UiRoute::Confirmation { .. }) {
+        " Enter confirm · Esc cancel · F1 help · q quit".to_owned()
+    } else if matches!(model.active_route(), UiRoute::Progress { .. }) {
+        " Working… · this operation cannot be cancelled · F1 help · q quit".to_owned()
+    } else if matches!(model.active_route(), UiRoute::Outcome { .. }) {
+        " Enter finish · Esc back · F1 help · q quit".to_owned()
+    } else if matches!(model.active_route(), UiRoute::Recovery { .. }) {
+        " Enter retry or reconcile · Esc back · F1 help · q quit".to_owned()
     } else if let Some(failure) = model.last_failure() {
         format!(
             " Could not complete that action · {} · ? details",
@@ -4686,6 +4776,11 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         " Enter send · Ctrl-J/Shift-Enter newline · Esc close · ? help · q quit".to_owned()
     } else if matches!(model.active_route(), UiRoute::ConversationEvidence { .. }) {
         " j/k scroll · Esc conversation · ? help · q quit".to_owned()
+    } else if matches!(
+        model.active_route(),
+        UiRoute::ProjectEvidence { .. } | UiRoute::AgentEvidence { .. }
+    ) {
+        " j/k scroll · Esc back · ? help · q quit".to_owned()
     } else if model.section() == UiSection::Config {
         if model.config_edit().is_some() {
             " Enter save · Esc cancel · F1 help".to_owned()
@@ -4709,6 +4804,9 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
                     .to_owned()
             }
         }
+    } else if matches!(model.active_route(), UiRoute::Agent { .. }) {
+        " j/k choose saved conversation · s start · e resume · t stop · Esc Agents · ? help"
+            .to_owned()
     } else if model.section() == UiSection::Agents {
         if model.selected_row_data().is_some() {
             " Enter inspect · n New… · c create · / search · ? help · q quit".to_owned()
@@ -4809,25 +4907,6 @@ fn selected_style(theme: &UiTheme, focused: bool) -> Style {
     } else {
         UiThemeRole::SelectionUnfocused
     })
-}
-
-fn pane_title_style(theme: &UiTheme, focused: bool) -> Style {
-    theme.style(if focused {
-        UiThemeRole::PaneTitleFocused
-    } else {
-        UiThemeRole::PaneTitleUnfocused
-    })
-}
-
-fn summary_pane_focused(model: &UiModel) -> bool {
-    model.focus() == UiFocus::Content
-        && (model.section() != UiSection::Projects
-            || model.project_workspace_level() == UiProjectWorkspaceLevel::List)
-}
-
-fn project_detail_pane_focused(model: &UiModel) -> bool {
-    model.focus() == UiFocus::Content
-        && model.project_workspace_level() != UiProjectWorkspaceLevel::List
 }
 
 const fn connection_label(state: UiConnectionState) -> &'static str {
