@@ -726,6 +726,7 @@ dependencies = [
  "hq-domain",
  "hq-harness",
  "hq-testkit",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

@@ -12,7 +12,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::{ffi::OsStringExt, process::CommandExt as _};
 
 use hq_harness::{HarnessEnvironment, HarnessError, HarnessErrorClass, HarnessInstanceRequest};
 
@@ -66,7 +66,7 @@ pub trait CodexProcessControl: Send + Sync {
     /// Observes exit for at most `wait`.
     fn wait(&self, wait: Duration) -> Result<CodexWaitOutcome, HarnessError>;
 
-    /// Idempotently requests immediate child termination.
+    /// Idempotently requests immediate termination of the owned runtime process group.
     fn kill(&self) -> Result<(), HarnessError>;
 }
 
@@ -149,6 +149,8 @@ impl CodexProcessStarter for ExecCodexProcessStarter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env_clear();
+        #[cfg(unix)]
+        command.process_group(0);
         #[cfg(not(unix))]
         let mut invalid_environment = false;
         environment.visit(|name, value| {
@@ -186,14 +188,93 @@ impl CodexProcessStarter for ExecCodexProcessStarter {
             output: Box::new(output),
             errors: Box::new(errors),
             control: Arc::new(ChildControl {
-                child: Mutex::new(child),
+                state: Mutex::new(ChildState {
+                    child,
+                    outcome: None,
+                    group_terminated: false,
+                }),
             }),
         })
     }
 }
 
 struct ChildControl {
-    child: Mutex<Child>,
+    state: Mutex<ChildState>,
+}
+
+struct ChildState {
+    child: Child,
+    outcome: Option<CodexWaitOutcome>,
+    group_terminated: bool,
+}
+
+impl ChildState {
+    fn observe_exit(&mut self) -> Result<Option<CodexWaitOutcome>, HarnessError> {
+        if self.outcome.is_some() {
+            return Ok(self.outcome);
+        }
+        #[cfg(unix)]
+        {
+            use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+            // Keep the group leader unreaped until cleanup: its PID pins the group
+            // identity so retries cannot signal a later, unrelated process group.
+            let observed = loop {
+                match waitid(
+                    WaitId::Pid(Pid::from_child(&self.child)),
+                    WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+                ) {
+                    Err(rustix::io::Errno::INTR) => {}
+                    result => {
+                        break result
+                            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?;
+                    }
+                }
+            };
+            if observed.is_none() {
+                return Ok(None);
+            }
+            self.terminate_group()?;
+        }
+        if let Some(status) = self
+            .child
+            .try_wait()
+            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?
+        {
+            self.outcome = Some(if status.success() {
+                CodexWaitOutcome::ExitedSuccessfully
+            } else {
+                CodexWaitOutcome::ExitedUnsuccessfully
+            });
+        }
+        Ok(self.outcome)
+    }
+
+    fn terminate_group(&mut self) -> Result<(), HarnessError> {
+        if self.group_terminated || self.outcome.is_some() {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            use rustix::process::{Pid, Signal, kill_process_group};
+            match kill_process_group(Pid::from_child(&self.child), Signal::KILL) {
+                Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                Err(_) => return Err(HarnessError::new(HarnessErrorClass::CleanupFailed)),
+            }
+        }
+        #[cfg(not(unix))]
+        if self
+            .child
+            .try_wait()
+            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?
+            .is_none()
+        {
+            self.child
+                .kill()
+                .map_err(|_| HarnessError::new(HarnessErrorClass::CleanupFailed))?;
+        }
+        self.group_terminated = true;
+        Ok(())
+    }
 }
 
 impl CodexProcessControl for ChildControl {
@@ -202,18 +283,13 @@ impl CodexProcessControl for ChildControl {
             .checked_add(wait)
             .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?;
         loop {
-            let status = self
-                .child
+            let outcome = self
+                .state
                 .lock()
                 .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?
-                .try_wait()
-                .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?;
-            if let Some(status) = status {
-                return Ok(if status.success() {
-                    CodexWaitOutcome::ExitedSuccessfully
-                } else {
-                    CodexWaitOutcome::ExitedUnsuccessfully
-                });
+                .observe_exit()?;
+            if let Some(outcome) = outcome {
+                return Ok(outcome);
             }
             if Instant::now() >= deadline {
                 return Ok(CodexWaitOutcome::Running);
@@ -223,20 +299,10 @@ impl CodexProcessControl for ChildControl {
     }
 
     fn kill(&self) -> Result<(), HarnessError> {
-        let mut child = self
-            .child
+        self.state
             .lock()
-            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?;
-        if child
-            .try_wait()
             .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?
-            .is_none()
-        {
-            child
-                .kill()
-                .map_err(|_| HarnessError::new(HarnessErrorClass::CleanupFailed))?;
-        }
-        Ok(())
+            .terminate_group()
     }
 }
 
@@ -285,6 +351,139 @@ mod tests {
         fs::remove_file(script)?;
         fs::remove_dir(directory)?;
         Ok(())
+    }
+
+    #[test]
+    fn forced_cleanup_stops_descendants_without_touching_an_unrelated_process()
+    -> Result<(), Box<dyn std::error::Error>> {
+        exercise_process_tree_cleanup(false)
+    }
+
+    #[test]
+    fn observing_leader_exit_cleans_descendants_before_caching_terminal_status()
+    -> Result<(), Box<dyn std::error::Error>> {
+        exercise_process_tree_cleanup(true)
+    }
+
+    fn exercise_process_tree_cleanup(leader_exits: bool) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = temporary_directory()?;
+        fs::write(
+            directory.join("app-server"),
+            r"
+/bin/sh -c '/bin/sleep 60 & echo $! > grandchild.pid; echo $$ > child.pid; wait' &
+echo $$ > leader.pid
+while ! test -s grandchild.pid || ! test -s child.pid; do /bin/sleep 0.01; done
+printf ready > ready
+if test -f exit-leader; then exit 0; fi
+wait
+",
+        )?;
+        if leader_exits {
+            fs::write(directory.join("exit-leader"), b"exit")?;
+        }
+        let launch = CodexLaunch {
+            executable: PathBuf::from("/bin/sh"),
+            working_directory: directory.clone(),
+            developer_instructions: String::new(),
+            model: None,
+            permissive: false,
+        };
+        let pipes = ExecCodexProcessStarter.start(&launch, &HarnessEnvironment::default())?;
+        let mut fixture = ProcessTreeFixture {
+            directory,
+            control: std::sync::Arc::clone(&pipes.control),
+            unrelated: std::process::Command::new("/bin/sleep").arg("60").spawn()?,
+        };
+        assert!(
+            wait_until(|| fixture.directory.join("ready").exists()),
+            "descendants become ready"
+        );
+        let child = fs::read_to_string(fixture.directory.join("child.pid"))?;
+        let grandchild = fs::read_to_string(fixture.directory.join("grandchild.pid"))?;
+        assert!(process_is_running(child.trim()));
+        assert!(process_is_running(grandchild.trim()));
+        if !leader_exits {
+            assert_eq!(
+                pipes.control.wait(Duration::from_millis(10))?,
+                CodexWaitOutcome::Running
+            );
+            pipes.control.kill()?;
+        }
+        let outcome = pipes.control.wait(Duration::from_secs(2))?;
+        assert_eq!(
+            outcome,
+            if leader_exits {
+                CodexWaitOutcome::ExitedSuccessfully
+            } else {
+                CodexWaitOutcome::ExitedUnsuccessfully
+            }
+        );
+        assert!(
+            wait_until(
+                || !process_is_running(child.trim()) && !process_is_running(grandchild.trim())
+            ),
+            "cleanup stops both generations of descendants"
+        );
+        pipes.control.kill()?;
+        pipes.control.kill()?;
+        assert_eq!(pipes.control.wait(Duration::ZERO)?, outcome);
+        assert!(
+            fixture.unrelated.try_wait()?.is_none(),
+            "unrelated process survives cleanup and retries"
+        );
+        Ok(())
+    }
+
+    struct ProcessTreeFixture {
+        directory: PathBuf,
+        control: std::sync::Arc<dyn super::CodexProcessControl>,
+        unrelated: std::process::Child,
+    }
+
+    impl Drop for ProcessTreeFixture {
+        fn drop(&mut self) {
+            // Also clean descendants when a pre-fix assertion fails.
+            for name in ["grandchild.pid", "child.pid"] {
+                if let Ok(pid) = fs::read_to_string(self.directory.join(name)) {
+                    let _ = std::process::Command::new("/bin/kill")
+                        .arg("-KILL")
+                        .arg(pid.trim())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+            }
+            let _ = self.control.kill();
+            let _ = self.control.wait(Duration::from_secs(1));
+            let _ = self.unrelated.kill();
+            let _ = self.unrelated.wait();
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn process_is_running(pid: &str) -> bool {
+        let Ok(output) = std::process::Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+        else {
+            return true;
+        };
+        let status = String::from_utf8_lossy(&output.stdout);
+        // Orphaned zombies have terminated; only their OS-owned reaping remains.
+        output.status.success()
+            && !status.trim().is_empty()
+            && !status.trim_start().starts_with('Z')
+    }
+
+    fn wait_until(mut observed: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if observed() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
     }
 
     fn temporary_directory() -> Result<PathBuf, std::io::Error> {
