@@ -13445,3 +13445,14 @@ screens and operations cannot reappear or steal navigation; compact and wide ter
 identical hierarchy; documentation matches behavior; and the full workspace suite passes.
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-06 — Bounded minimum-size conversation pages
+
+Conversation page reads now honor a one-item limit even when durable history and a live activity
+tail coexist. The minimum page retains a durable cursor anchor when history exists, returns the live
+tail when it is the only presentation item, and documents and tests both boundaries alongside full
+workspace verification.
+
+- **[correctness/medium] Keep conversation pages within the requested item limit** — A cursor-free request with `limit = 1` currently reserves one durable-history slot and then appends the live activity tail, returning two items despite the page contract. Make live-tail inclusion consume a slot while preserving a usable continuation cursor, and cover the history-plus-live-tail boundary at the minimum limit. (`crates/hq-store/src/database.rs:1682`)
+
+<!-- End of archived plan entry. -->
