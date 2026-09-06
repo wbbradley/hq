@@ -70,6 +70,8 @@ jobs:
         run: scripts/verify-rust-architecture.sh
       - name: Verify Rust normal-operation independence
         run: scripts/verify-rust-go-independence.sh
+      - name: Test destructive bootstrap teardown contract
+        run: scripts/test-hq-bootstrap.sh
       - name: Test release publication contract
         run: scripts/test-rust-release-publication.sh
       - name: Check

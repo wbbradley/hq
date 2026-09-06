@@ -11,13 +11,24 @@ readonly TOOLCHAIN="${HQ_RUST_TOOLCHAIN:-1.98.0}"
 readonly INSTALL_ROOT="${HQ_INSTALL_ROOT:-${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}}"
 readonly HQ_BIN="$INSTALL_ROOT/bin/hq"
 readonly STATE_ROOT="${HQ_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/hq}"
+readonly XDG_STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/hq"
+readonly FALLBACK_STATE_ROOT="$HOME/.local/state/hq"
+readonly CARGO_BIN_ROOT="${CARGO_HOME:-$HOME/.cargo}/bin/hq"
+readonly RELEASE_BIN="$HOME/.local/bin/hq"
+readonly SYSTEMD_UNIT="$HOME/.config/systemd/user/hq-daemon.service"
+readonly LAUNCHD_PLIST="$HOME/Library/LaunchAgents/com.wbbradley.hq.daemon.plist"
 
 usage() {
   cat <<EOF
 Usage: $PROGRAM_NAME [HUMAN_LABEL]
 
-Build and install HQ from source, discard the selected local installation, and
-walk through first-time identity and human-account creation.
+Tear down HQ in its default user locations, build and install HQ from source,
+and walk through first-time identity and human-account creation.
+
+This destructive developer helper stops the default user service and each known
+default/selected state-root owner, then removes those state roots and the HQ
+executables in ~/.local/bin, the Cargo bin directory, and the selected install
+root. Explicit non-default installations are not discovered or removed.
 
 Environment:
   HQ_SOURCE_DIR       Source checkout (default: $DEFAULT_REPOSITORY)
@@ -51,6 +62,45 @@ esac
 [[ "$STATE_ROOT" = /* ]] || die "state root must be an absolute path: $STATE_ROOT"
 [[ "$STATE_ROOT" != / && "$STATE_ROOT" != "$HOME" ]] || die "refusing unsafe state root: $STATE_ROOT"
 
+STATE_ROOTS=()
+HQ_EXECUTABLES=()
+
+add_unique_path() {
+  local candidate=$1
+  shift
+  local existing
+  for existing in "$@"; do
+    [[ "$existing" != "$candidate" ]] || return 1
+  done
+  return 0
+}
+
+add_state_root() {
+  local candidate=$1
+  [[ "$candidate" = /* ]] || die "state root must be an absolute path: $candidate"
+  [[ "$candidate" != / && "$candidate" != "$HOME" ]] || \
+    die "refusing unsafe state root: $candidate"
+  if add_unique_path "$candidate" "${STATE_ROOTS[@]}"; then
+    STATE_ROOTS+=("$candidate")
+  fi
+}
+
+add_hq_executable() {
+  local candidate=$1
+  if [[ -n "$candidate" ]] && add_unique_path "$candidate" "${HQ_EXECUTABLES[@]}"; then
+    HQ_EXECUTABLES+=("$candidate")
+  fi
+}
+
+add_state_root "$STATE_ROOT"
+add_state_root "$XDG_STATE_ROOT"
+add_state_root "$FALLBACK_STATE_ROOT"
+
+add_hq_executable "$(command -v hq 2>/dev/null || true)"
+add_hq_executable "$HQ_BIN"
+add_hq_executable "$CARGO_BIN_ROOT"
+add_hq_executable "$RELEASE_BIN"
+
 BUILD_COMMIT="$(git -C "$REPOSITORY" rev-parse --verify HEAD)" || \
   die "HQ source checkout not found at $REPOSITORY"
 readonly BUILD_COMMIT
@@ -62,16 +112,57 @@ step "Checking HQ at ${BUILD_COMMIT:0:12}"
     cargo "+$TOOLCHAIN" build --locked --package hq-node --bin hq
 )
 
-if [[ -e "$STATE_ROOT" ]]; then
-  step "Stopping the current HQ node"
-  if command -v hq >/dev/null 2>&1; then
-    hq --state-root "$STATE_ROOT" daemon stop
-  elif [[ -x "$HQ_BIN" ]]; then
-    "$HQ_BIN" --state-root "$STATE_ROOT" daemon stop
-  else
-    die "cannot safely reset existing state without an installed hq executable"
-  fi
-fi
+add_hq_executable "$REPOSITORY/target/debug/hq"
+
+case "$(uname -s)" in
+  Linux)
+    if [[ -e "$SYSTEMD_UNIT" ]]; then
+      command -v systemctl >/dev/null 2>&1 || \
+        die "cannot stop the installed systemd user service without systemctl"
+      step "Stopping and removing the HQ systemd user service"
+      systemctl --user disable --now hq-daemon.service || \
+        die "could not stop hq-daemon.service"
+      rm -f -- "$SYSTEMD_UNIT"
+      systemctl --user daemon-reload || die "could not reload systemd user services"
+    fi
+    ;;
+  Darwin)
+    if [[ -e "$LAUNCHD_PLIST" ]]; then
+      command -v launchctl >/dev/null 2>&1 || \
+        die "cannot stop the installed launchd user agent without launchctl"
+      step "Stopping and removing the HQ launchd user agent"
+      if launchctl print "gui/$(id -u)/com.wbbradley.hq.daemon" >/dev/null 2>&1; then
+        launchctl bootout "gui/$(id -u)/com.wbbradley.hq.daemon" || \
+          die "could not stop com.wbbradley.hq.daemon"
+      fi
+      rm -f -- "$LAUNCHD_PLIST"
+    fi
+    ;;
+esac
+
+for prior_state_root in "${STATE_ROOTS[@]}"; do
+  [[ -e "$prior_state_root" || -L "$prior_state_root" ]] || continue
+  step "Stopping HQ for $prior_state_root"
+  stopped=false
+  for executable in "${HQ_EXECUTABLES[@]}"; do
+    [[ -x "$executable" ]] || continue
+    if "$executable" --state-root "$prior_state_root" daemon stop; then
+      stopped=true
+      break
+    fi
+  done
+  [[ "$stopped" == true ]] || \
+    die "cannot safely reset $prior_state_root because no HQ executable could stop its node"
+done
+
+step "Removing prior HQ state and executables"
+for prior_state_root in "${STATE_ROOTS[@]}"; do
+  rm -rf -- "$prior_state_root"
+done
+for executable in "$HQ_BIN" "$CARGO_BIN_ROOT" "$RELEASE_BIN"; do
+  [[ "$executable" = /* ]] || die "refusing non-absolute executable path: $executable"
+  rm -f -- "$executable"
+done
 
 step "Installing $HQ_BIN"
 HQ_BUILD_COMMIT="$BUILD_COMMIT" \
@@ -83,9 +174,6 @@ HQ_BUILD_COMMIT="$BUILD_COMMIT" \
     --bin hq
 
 [[ -x "$HQ_BIN" ]] || die "cargo did not install an executable at $HQ_BIN"
-
-step "Resetting $STATE_ROOT"
-rm -rf -- "$STATE_ROOT"
 
 step "Creating a new installation identity"
 "$HQ_BIN" --state-root "$STATE_ROOT" identity init
