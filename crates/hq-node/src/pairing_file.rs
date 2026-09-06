@@ -2,11 +2,13 @@
 
 use std::{
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::Read,
     path::Path,
 };
 
 use hq_protocol::MAX_PAIRING_INVITATION_BYTES;
+
+use crate::identity::atomic_create_new;
 
 /// Closed pairing file failure without caller-controlled path detail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,37 +19,49 @@ pub(crate) fn write_new_pairing_file(path: &Path, bytes: &[u8]) -> Result<(), Pa
     if !path.is_absolute() || bytes.len() > MAX_PAIRING_INVITATION_BYTES {
         return Err(PairingFileError);
     }
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(_) | Err(_) => return Err(PairingFileError),
-    }
     let parent = path.parent().ok_or(PairingFileError)?;
     let parent_metadata = fs::symlink_metadata(parent).map_err(|_| PairingFileError)?;
     if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
         return Err(PairingFileError);
     }
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => return reconcile_existing_pairing_file(path, bytes),
+        Err(_) => return Err(PairingFileError),
+    }
+
+    atomic_create_new(path, bytes)
+        .map_err(|_| PairingFileError)
+        .or_else(|_| reconcile_existing_pairing_file(path, bytes))
+}
+
+fn reconcile_existing_pairing_file(path: &Path, expected: &[u8]) -> Result<(), PairingFileError> {
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+        options.custom_flags(nix::libc::O_NOFOLLOW);
     }
     let mut file = options.open(path).map_err(|_| PairingFileError)?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| PairingFileError)?;
-    let mut directory_options = OpenOptions::new();
-    directory_options.read(true);
+    let metadata = file.metadata().map_err(|_| PairingFileError)?;
+    if !metadata.is_file() || metadata.len() != expected.len() as u64 {
+        return Err(PairingFileError);
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        directory_options.custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW);
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(PairingFileError);
+        }
     }
-    directory_options
-        .open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| PairingFileError)
+    let mut actual = Vec::with_capacity(expected.len());
+    file.read_to_end(&mut actual)
+        .map_err(|_| PairingFileError)?;
+    if actual != expected {
+        return Err(PairingFileError);
+    }
+    Ok(())
 }
 
 /// Reads one bounded absolute existing regular non-symlink file.
@@ -93,6 +107,7 @@ mod tests {
         let invitation = directory.join("invite.json");
         write_new_pairing_file(&invitation, b"pairing").expect("new file writes");
         assert_eq!(read_pairing_file(&invitation), Ok(b"pairing".to_vec()));
+        write_new_pairing_file(&invitation, b"pairing").expect("identical retry reconciles");
         assert_eq!(
             write_new_pairing_file(&invitation, b"replacement"),
             Err(PairingFileError)
@@ -101,6 +116,29 @@ mod tests {
         let symlink = directory.join("link.json");
         std::os::unix::fs::symlink(&invitation, &symlink).expect("test symlink");
         assert_eq!(read_pairing_file(&symlink), Err(PairingFileError));
+        fs::remove_dir_all(&directory).expect("test directory removes");
+    }
+
+    #[test]
+    fn pairing_file_retry_rejects_unsafe_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "hq-cli-pairing-file-permissions-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).expect("test directory");
+        let invitation = directory.join("invite.json");
+        fs::write(&invitation, b"pairing").expect("existing file");
+        fs::set_permissions(&invitation, fs::Permissions::from_mode(0o644))
+            .expect("unsafe permissions");
+
+        assert_eq!(
+            write_new_pairing_file(&invitation, b"pairing"),
+            Err(PairingFileError)
+        );
+        assert_eq!(fs::read(&invitation).expect("file remains"), b"pairing");
         fs::remove_dir_all(&directory).expect("test directory removes");
     }
 }

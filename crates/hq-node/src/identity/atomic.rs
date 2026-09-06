@@ -59,6 +59,14 @@ pub(super) fn atomic_write(
     sync_directory(parent)
 }
 
+pub(crate) fn atomic_create_new(target: &Path, bytes: &[u8]) -> Result<(), IdentityError> {
+    atomic_write(
+        target,
+        bytes,
+        WriteMode::CreateNew(IdentityErrorClass::FileSystem),
+    )
+}
+
 fn temporary_path(target: &Path, suffix: [u8; 16]) -> PathBuf {
     let mut name = target.file_name().map_or_else(
         || "hq".to_owned(),
@@ -89,9 +97,11 @@ impl TemporaryFile {
     fn remove(mut self) -> Result<(), IdentityError> {
         let path = self
             .path
-            .take()
+            .as_ref()
             .ok_or_else(|| IdentityError::new(IdentityErrorClass::FileSystem))?;
-        fs::remove_file(path).map_err(file_system)
+        fs::remove_file(path).map_err(file_system)?;
+        self.path = None;
+        Ok(())
     }
 
     fn forget(mut self) {

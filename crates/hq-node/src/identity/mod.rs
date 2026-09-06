@@ -26,6 +26,7 @@ pub use error::{IdentityError, IdentityErrorClass};
 pub use hq_relay::RelayUrl as RelayEndpoint;
 pub use paths::{StateDirectoryOwner, StatePaths};
 
+pub(crate) use atomic::atomic_create_new;
 use atomic::{WriteMode, atomic_write};
 use config::MAX_CONFIGURATION_BYTES;
 use paths::{ensure_private_file, file_system, reject_symlink};
