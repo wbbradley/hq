@@ -4044,16 +4044,11 @@ fn render_conversation_entries(
     if area.width == 0 || area.height == 0 || conversation.entries.is_empty() {
         return;
     }
-    let visible_entries = if model.current_interaction().is_some_and(|interaction| {
-        conversation
-            .entries
-            .last()
-            .is_some_and(|entry| interaction_supersedes_live_tail(interaction, entry))
-    }) {
-        &conversation.entries[..conversation.entries.len() - 1]
-    } else {
-        &conversation.entries
-    };
+    let visible_entries = conversation
+        .entries
+        .iter()
+        .filter(|entry| model.conversation_entry_visible(entry))
+        .collect::<Vec<_>>();
     if visible_entries.is_empty() {
         return;
     }
@@ -4129,36 +4124,6 @@ fn render_conversation_entries(
     }
 }
 
-fn interaction_supersedes_live_tail(
-    interaction: &crate::UiInteraction,
-    entry: &UiConversationEntry,
-) -> bool {
-    if !matches!(
-        &entry.presentation,
-        UiConversationEntryPresentation::Activity {
-            kind: UiConversationActivityKind::AgentTurn | UiConversationActivityKind::Progress,
-            status: UiActivityStatus::Running,
-            ..
-        }
-    ) {
-        return false;
-    }
-    let operation = full_identity(interaction.operation_id);
-    entry.technical.iter().any(|section| {
-        matches!(
-            section,
-            UiTechnicalSection::Activity {
-                provider,
-                session,
-                operation: candidate,
-                ..
-            } if provider == &interaction.provider
-                && session == &interaction.session
-                && candidate == &operation
-        )
-    })
-}
-
 struct ConversationEntryLayout {
     rows: Vec<Line<'static>>,
     height: u16,
@@ -4173,8 +4138,9 @@ fn conversation_entry_layout(
     match &entry.presentation {
         UiConversationEntryPresentation::Message { author, body } => {
             let message = cache.messages.render(&entry.id, body, width, theme);
+            let self_authored = matches!(author, UiConversationAuthor::You);
             let (author, author_role) = match author {
-                UiConversationAuthor::You => ("You", UiThemeRole::ConversationAuthorSelf),
+                UiConversationAuthor::You => ("", UiThemeRole::ConversationMessageSelf),
                 UiConversationAuthor::Participant(label) => {
                     (label.as_str(), UiThemeRole::ConversationAuthorParticipant)
                 }
@@ -4197,8 +4163,13 @@ fn conversation_entry_layout(
                 Some(UiMessageState::Open) | None => "",
             };
             let mut rows = Vec::with_capacity(usize::from(message.body_height()).saturating_add(2));
+            let label = format!("{author}{delivery}{exceptional}");
             rows.push(Line::styled(
-                format!("{author}{delivery}{exceptional}"),
+                if self_authored {
+                    label.trim_start_matches(" · ").to_owned()
+                } else {
+                    label
+                },
                 theme.style(author_role),
             ));
             if message.text().lines.is_empty() {
@@ -4247,52 +4218,52 @@ fn activity_preview_lines(
     cache: &mut UiRenderCache,
 ) -> Vec<Line<'static>> {
     const PREVIEW_LINES: usize = 3;
-    let completed_command_succeeded = matches!(
-        &entry.presentation,
-        UiConversationEntryPresentation::Activity {
-            status: UiActivityStatus::Succeeded,
-            completed: Some(UiCompletedItemPresentation::Command { .. }),
-            ..
-        }
-    );
-    let mut rows = activity_preview(entry, width)
-        .into_iter()
-        .enumerate()
-        .map(|(index, line)| {
-            Line::styled(
-                if index == 0 {
-                    format!("{symbol} {line}")
-                } else {
-                    line
-                },
-                theme.style(if completed_command_succeeded && index > 0 {
-                    UiThemeRole::Text
-                } else {
-                    role
-                }),
-            )
-        })
-        .collect::<Vec<_>>();
     let UiConversationEntryPresentation::Activity {
+        status,
         completed: Some(UiCompletedItemPresentation::Command { command, .. }),
         ..
     } = &entry.presentation
     else {
-        return rows;
+        return activity_preview(entry, width)
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| {
+                Line::styled(
+                    if index == 0 {
+                        format!("{symbol} {line}")
+                    } else {
+                        line
+                    },
+                    theme.style(role),
+                )
+            })
+            .collect();
     };
+    let mut rows = activity_preview(entry, width)
+        .into_iter()
+        .map(|line| Line::styled(line, theme.style(UiThemeRole::Text)))
+        .collect::<Vec<_>>();
+    if let Some(footer) = rows.last_mut() {
+        match status {
+            UiActivityStatus::Failed { .. } => {
+                footer.style = theme.style(UiThemeRole::ConversationActivityError);
+            }
+            UiActivityStatus::Interrupted => {
+                footer.style = theme.style(UiThemeRole::ConversationActivityWarning);
+            }
+            _ => {}
+        }
+    }
+
     let highlighted = cache.commands.highlight(&entry.id, command);
     for (index, segments) in highlighted.iter().take(PREVIEW_LINES).enumerate() {
         let prefix = if index == 0 { "$ " } else { "  " };
-        if let Some(row) = rows.get_mut(index + 1) {
+        if let Some(row) = rows.get_mut(index) {
             *row = styled_shell_line(
                 prefix,
                 segments,
                 usize::from(width),
-                if completed_command_succeeded {
-                    UiThemeRole::Text
-                } else {
-                    role
-                },
+                UiThemeRole::Text,
                 theme,
             );
         }
@@ -4361,56 +4332,27 @@ fn activity_preview(entry: &UiConversationEntry, width: u16) -> Vec<String> {
     else {
         return Vec::new();
     };
+    if matches!(
+        &entry.presentation,
+        UiConversationEntryPresentation::Activity {
+            kind: UiConversationActivityKind::AgentTurn | UiConversationActivityKind::Progress,
+            status: UiActivityStatus::Running,
+            ..
+        }
+    ) {
+        let mut lines = vec![clipped_preview_line(
+            "Agent is working…",
+            usize::from(width),
+        )];
+        if !summary.trim().is_empty() && summary != "Agent is working…" {
+            lines.push(clipped_preview_line(summary, usize::from(width)));
+        }
+        return lines;
+    }
     let mut lines = Vec::new();
     match completed {
-        Some(UiCompletedItemPresentation::Command {
-            command,
-            output,
-            exit_code,
-            command_truncated,
-            output_truncated,
-        }) => {
-            let state = match status {
-                UiActivityStatus::Succeeded => "completed",
-                UiActivityStatus::Failed { .. } => "failed",
-                UiActivityStatus::Interrupted => "interrupted",
-                UiActivityStatus::Snapshot | UiActivityStatus::Running => "activity",
-            };
-            let exit = exit_code.map_or_else(String::new, |code| format!(" · exit {code}"));
-            lines.push(format!("Command {state}{exit}"));
-            let command_lines = command.lines().collect::<Vec<_>>();
-            for (index, line) in command_lines.iter().take(PREVIEW_LINES).enumerate() {
-                lines.push(format!("{}{}", if index == 0 { "$ " } else { "  " }, line));
-            }
-            if *command_truncated || command_lines.len() > PREVIEW_LINES {
-                lines.push(format!(
-                    "  {}",
-                    preview_omission(
-                        command_lines.len().saturating_sub(PREVIEW_LINES),
-                        *command_truncated,
-                        "command"
-                    )
-                ));
-            }
-            if let Some(output) = output {
-                let output_lines = output.lines().collect::<Vec<_>>();
-                lines.extend(
-                    output_lines
-                        .iter()
-                        .take(PREVIEW_LINES)
-                        .map(|line| format!("│ {line}")),
-                );
-                if *output_truncated || output_lines.len() > PREVIEW_LINES {
-                    lines.push(format!(
-                        "│ {}",
-                        preview_omission(
-                            output_lines.len().saturating_sub(PREVIEW_LINES),
-                            *output_truncated,
-                            "output"
-                        )
-                    ));
-                }
-            }
+        Some(command @ UiCompletedItemPresentation::Command { .. }) => {
+            lines = command_preview(command, status);
         }
         Some(UiCompletedItemPresentation::FileChange {
             changes,
@@ -4441,6 +4383,70 @@ fn activity_preview(entry: &UiConversationEntry, width: u16) -> Vec<String> {
         .into_iter()
         .map(|line| clipped_preview_line(&line, usize::from(width)))
         .collect()
+}
+
+fn command_preview(
+    completed: &UiCompletedItemPresentation,
+    status: &UiActivityStatus,
+) -> Vec<String> {
+    const PREVIEW_LINES: usize = 3;
+    let UiCompletedItemPresentation::Command {
+        command,
+        output,
+        exit_code,
+        command_truncated,
+        output_truncated,
+    } = completed
+    else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    let command_lines = if command.is_empty() {
+        vec![""]
+    } else {
+        command.lines().collect::<Vec<_>>()
+    };
+    for (index, line) in command_lines.iter().take(PREVIEW_LINES).enumerate() {
+        lines.push(format!("{}{}", if index == 0 { "$ " } else { "  " }, line));
+    }
+    if *command_truncated || command_lines.len() > PREVIEW_LINES {
+        lines.push(format!(
+            "  {}",
+            preview_omission(
+                command_lines.len().saturating_sub(PREVIEW_LINES),
+                *command_truncated,
+                "command"
+            )
+        ));
+    }
+    if let Some(output) = output {
+        let output_lines = output.lines().collect::<Vec<_>>();
+        lines.extend(
+            output_lines
+                .iter()
+                .take(PREVIEW_LINES)
+                .map(|line| format!("│ {line}")),
+        );
+        if *output_truncated || output_lines.len() > PREVIEW_LINES {
+            lines.push(format!(
+                "│ {}",
+                preview_omission(
+                    output_lines.len().saturating_sub(PREVIEW_LINES),
+                    *output_truncated,
+                    "output"
+                )
+            ));
+        }
+    }
+    match status {
+        UiActivityStatus::Failed { .. } => lines.push(exit_code.map_or_else(
+            || "Command failed".to_owned(),
+            |code| format!("Exited with code {code}"),
+        )),
+        UiActivityStatus::Interrupted => lines.push("Command interrupted".to_owned()),
+        _ => {}
+    }
+    lines
 }
 
 fn preview_omission(known_lines: usize, source_truncated: bool, subject: &str) -> String {
@@ -4606,14 +4612,38 @@ fn render_conversation_entry(
     if area.is_empty() {
         return;
     }
+    let self_authored = matches!(
+        entry.presentation,
+        UiConversationEntryPresentation::Message {
+            author: UiConversationAuthor::You,
+            ..
+        }
+    );
     let selected = model.conversation_anchor() == Some(entry.id.as_str());
-    if selected && matches!(model.focus(), UiFocus::Conversation | UiFocus::Draft) {
-        let role = if model.focus() == UiFocus::Conversation && !model.technical_visible() {
-            UiThemeRole::ConversationSelectionFocused
-        } else {
-            UiThemeRole::ConversationSelectionUnfocused
-        };
-        frame.render_widget(Block::new().style(theme.style(role)), area);
+    let selection = (selected && matches!(model.focus(), UiFocus::Conversation | UiFocus::Draft))
+        .then(|| {
+            theme.style(
+                if model.focus() == UiFocus::Conversation && !model.technical_visible() {
+                    UiThemeRole::ConversationSelectionFocused
+                } else {
+                    UiThemeRole::ConversationSelectionUnfocused
+                },
+            )
+        });
+    let surface = if self_authored {
+        Some(selection.map_or(
+            theme.style(UiThemeRole::ConversationMessageSelf),
+            |selection| {
+                theme
+                    .style(UiThemeRole::ConversationMessageSelf)
+                    .patch(selection)
+            },
+        ))
+    } else {
+        selection
+    };
+    if let Some(surface) = surface {
+        frame.render_widget(Block::new().style(surface), area);
     }
     let lines = layout
         .rows
@@ -4621,6 +4651,16 @@ fn render_conversation_entry(
         .skip(usize::from(first_row))
         .take(usize::from(area.height))
         .cloned()
+        .map(|mut line| {
+            if self_authored && let Some(surface) = surface {
+                line.style = line.style.patch(surface);
+                for span in &mut line.spans {
+                    // Keep Markdown structure while sharing the band's contrast pair.
+                    span.style = span.style.patch(surface);
+                }
+            }
+            line
+        })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), area);
     let continues_above = first_row > 0;
@@ -4990,9 +5030,9 @@ mod tests {
         activity_preview, completed_item_detail_lines, completed_item_detail_styled,
         conversation_entry_layout, conversation_viewport_slices, conversation_viewport_tail_origin,
         display_prefix, display_suffix, draft_context_label, inert_draft_source,
-        interaction_supersedes_live_tail, render_conversation_entries, render_conversation_entry,
-        text_field_line,
+        render_conversation_entries, render_conversation_entry, text_field_line,
     };
+    use crate::model::interaction_supersedes_live_tail;
     use crate::{
         UiActivityStatus, UiCompletedItemPresentation, UiConversationActivityKind,
         UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation,
@@ -5125,6 +5165,32 @@ mod tests {
     }
 
     #[test]
+    fn running_work_keeps_readiness_explicit_alongside_progress() {
+        for kind in [
+            UiConversationActivityKind::AgentTurn,
+            UiConversationActivityKind::Progress,
+        ] {
+            for summary in ["", "Inspecting files"] {
+                let mut entry = message("");
+                entry.presentation = UiConversationEntryPresentation::Activity {
+                    kind,
+                    status: UiActivityStatus::Running,
+                    summary: summary.to_owned(),
+                    detail: String::new(),
+                    truncated: false,
+                    completed: None,
+                };
+                let rows = activity_preview(&entry, 80);
+                assert_eq!(rows[0], "Agent is working…");
+                assert_eq!(rows.len(), if summary.is_empty() { 1 } else { 2 });
+                if !summary.is_empty() {
+                    assert_eq!(rows[1], summary);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn command_preview_is_bounded_to_three_output_lines_with_status_and_omission() {
         let entry = UiConversationEntry {
             id: "command".to_owned(),
@@ -5150,7 +5216,7 @@ mod tests {
             technical: Vec::new(),
         };
         let preview = activity_preview(&entry, 80);
-        assert_eq!(preview[0], "Command failed · exit 17");
+        assert_eq!(preview[0], "$ printf one");
         assert!(preview.iter().any(|line| line == "$ printf one"));
         assert_eq!(
             preview.iter().filter(|line| line.starts_with("│ ")).count(),
@@ -5158,7 +5224,7 @@ mod tests {
         );
         assert_eq!(
             preview.last().map(String::as_str),
-            Some("│ … +1 line (t to view full output)")
+            Some("Exited with code 17")
         );
 
         let mut cache = super::UiRenderCache::new();
@@ -5179,14 +5245,14 @@ mod tests {
             assert!(command.spans.iter().any(|span| {
                 span.style
                     == theme
-                        .style(UiThemeRole::ConversationActivityError)
+                        .style(UiThemeRole::Text)
                         .patch(theme.style(UiThemeRole::Accent))
             }));
         }
     }
 
     #[test]
-    fn completed_command_preview_colors_only_the_status_as_success() {
+    fn completed_command_preview_omits_success_status_and_keeps_highlighting() {
         let entry = UiConversationEntry {
             id: "completed-command".to_owned(),
             presentation: UiConversationEntryPresentation::Activity {
@@ -5212,22 +5278,109 @@ mod tests {
         let mut cache = super::UiRenderCache::new();
         let layout = conversation_entry_layout(&entry, 80, &theme, &mut cache);
 
-        assert_eq!(
-            layout.rows[0].style,
-            theme.style(UiThemeRole::ConversationActivitySuccess)
-        );
-        assert_eq!(layout.rows[2].to_string(), "│ done");
-        assert_eq!(layout.rows[2].style, theme.style(UiThemeRole::Text));
-        assert!(layout.rows[1].spans.iter().any(|span| {
+        assert_eq!(layout.rows[0].to_string(), "$ printf '%s\\n' done");
+        assert_eq!(layout.rows[1].to_string(), "│ done");
+        assert_eq!(layout.rows[1].style, theme.style(UiThemeRole::Text));
+        assert!(layout.rows[0].spans.iter().any(|span| {
             span.style
                 == theme
                     .style(UiThemeRole::Text)
                     .patch(theme.style(UiThemeRole::Success))
         }));
-        assert_eq!(
-            layout.rows[1].spans[0].style,
-            theme.style(UiThemeRole::Text)
-        );
+        assert_eq!(layout.rows.len(), 3);
+    }
+
+    #[test]
+    fn command_preview_uses_typed_outcomes_and_places_footers_after_output() {
+        let theme = UiTheme::terminal();
+        let failed = UiActivityStatus::Failed {
+            reason: "failed".to_owned(),
+        };
+        for (status, exit_code, expected, role) in [
+            (
+                failed.clone(),
+                Some(23),
+                Some("Exited with code 23"),
+                UiThemeRole::ConversationActivityError,
+            ),
+            (
+                failed.clone(),
+                None,
+                Some("Command failed"),
+                UiThemeRole::ConversationActivityError,
+            ),
+            (
+                failed,
+                Some(0),
+                Some("Exited with code 0"),
+                UiThemeRole::ConversationActivityError,
+            ),
+            (
+                UiActivityStatus::Interrupted,
+                Some(0),
+                Some("Command interrupted"),
+                UiThemeRole::ConversationActivityWarning,
+            ),
+            (
+                UiActivityStatus::Succeeded,
+                Some(0),
+                None,
+                UiThemeRole::Text,
+            ),
+            (UiActivityStatus::Succeeded, None, None, UiThemeRole::Text),
+        ] {
+            for output in [None, Some(""), Some("one\ntwo\nthree\nfour")] {
+                let entry = UiConversationEntry {
+                    id: "command-outcome".to_owned(),
+                    presentation: UiConversationEntryPresentation::Activity {
+                        kind: UiConversationActivityKind::CompletedItem,
+                        status: status.clone(),
+                        summary: "Misleading display prose".to_owned(),
+                        detail: String::new(),
+                        truncated: false,
+                        completed: Some(UiCompletedItemPresentation::Command {
+                            command: "echo hello".to_owned(),
+                            output: output.map(str::to_owned),
+                            exit_code,
+                            command_truncated: false,
+                            output_truncated: false,
+                        }),
+                    },
+                    message_state: None,
+                    delivery: None,
+                    message_target: None,
+                    technical: Vec::new(),
+                };
+                let mut cache = super::UiRenderCache::new();
+                let layout = conversation_entry_layout(&entry, 80, &theme, &mut cache);
+                assert_eq!(layout.rows[0].to_string(), "$ echo hello");
+                let last = &layout.rows[layout.rows.len() - 2];
+                if let Some(expected) = expected {
+                    assert_eq!(last.to_string(), expected);
+                    assert_eq!(last.style, theme.style(role));
+                    if output.is_some_and(|output| output.contains("four")) {
+                        assert_eq!(
+                            layout.rows[layout.rows.len() - 3].to_string(),
+                            "│ … +1 line (t to view full output)"
+                        );
+                    }
+                } else {
+                    assert!(
+                        !layout
+                            .rows
+                            .iter()
+                            .any(|line| line.to_string().contains("Command")
+                                || line.to_string().contains("Exited"))
+                    );
+                }
+                assert!(
+                    !layout
+                        .rows
+                        .iter()
+                        .any(|line| line.to_string().contains("Misleading"))
+                );
+            }
+        }
     }
 
     #[test]
@@ -5300,11 +5453,21 @@ mod tests {
         first.id = "first".to_owned();
         let mut second = message("two\nthree");
         second.id = "second".to_owned();
+        let mut hidden = message("");
+        hidden.id = "successful-turn".to_owned();
+        hidden.presentation = UiConversationEntryPresentation::Activity {
+            kind: UiConversationActivityKind::AgentTurn,
+            status: UiActivityStatus::Succeeded,
+            summary: "Hidden success".to_owned(),
+            detail: String::new(),
+            truncated: false,
+            completed: None,
+        };
         let conversation = crate::UiConversation {
             row_id: "thread-a".to_owned(),
             title: "Alice".to_owned(),
             context: None,
-            entries: vec![first, second],
+            entries: vec![first, hidden, second],
             next_cursor: None,
         };
         let model = UiModel::new(UiSize {

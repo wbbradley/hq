@@ -356,7 +356,6 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
         content,
         "installed inbox",
         "https://example.test/preview",
-        "You",
         "d archive conversation",
         "Enter open",
     ] {
@@ -1728,9 +1727,14 @@ fn run_in_pty_with_trace(
             && managed_action_sent
             && !managed_provider_sent
             && completion_offset.is_some_and(|offset| {
+                // Differential rendering can retain the heading's spaces/cells.
+                // The bottom continuation cue proves Home revealed the start.
                 bytes[offset..]
-                    .windows(marker.len())
-                    .any(|window| window == marker.as_bytes())
+                    .windows("↓".len())
+                    .any(|window| window == "↓".as_bytes())
+                    && bytes
+                        .windows(marker.len())
+                        .any(|window| window == marker.as_bytes())
             })
         {
             master
@@ -1994,10 +1998,11 @@ fn run_in_pty_with_trace(
                     .windows(b"Agent is working".len())
                     .any(|window| window == b"Agent is working")
                     && bytes[offset..]
-                        .windows("You · Pending".len())
-                        .any(|window| window == "You · Pending".as_bytes())
+                        .windows("Pending".len())
+                        .any(|window| window == "Pending".as_bytes())
             })
         {
+            completion_offset = Some(bytes.len());
             std::fs::write(completion_gate, b"complete").expect("provider completion gate opens");
             resource_commit_sent = true;
         }
@@ -2012,8 +2017,8 @@ fn run_in_pty_with_trace(
                     .windows(b"finished-turn-2".len())
                     .any(|window| window == b"finished-turn-2")
                     && output
-                        .windows(b"Agent finished".len())
-                        .any(|window| window == b"Agent finished")
+                        .windows(b"0/16384".len())
+                        .any(|window| window == b"0/16384")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -2172,6 +2177,7 @@ fn run_in_pty_with_trace(
                     .any(|window| window == b"Agent is working")
             })
         {
+            completion_offset = Some(bytes.len());
             std::fs::write(completion_gate, b"complete")
                 .expect("initial provider completion gate opens");
             provider_completion_released = true;
@@ -2481,8 +2487,8 @@ fn run_in_pty_with_trace(
                         .windows(b"finished-turn-1".len())
                         .any(|window| window == b"finished-turn-1")
                         && output
-                            .windows(b"Agent finished".len())
-                            .any(|window| window == b"Agent finished")
+                            .windows(b"0/16384".len())
+                            .any(|window| window == b"0/16384")
                 });
             let ordinary_setup_finished = completion_gate.is_none()
                 && Instant::now() >= next_state_probe_at

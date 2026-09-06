@@ -105,7 +105,7 @@ Every configurable role is listed below. A resolved theme always has a style for
 | `ui.text.technical` | IDs and technical evidence |
 | `ui.heading` | Section headings |
 | `ui.accent` | Primary interactive accent |
-| `conversation.author.self` | Explicit `You` author label |
+| `conversation.message.self` | Persistent full-width band for your messages, including whitespace and delivery labels |
 | `conversation.author.participant` | Named or fallback participant author label |
 | `conversation.project.context` | Project name on project-bound composition surfaces |
 | `conversation.activity` | Neutral or running compact transcript activity |
@@ -187,3 +187,12 @@ RGB colors are passed to the terminal exactly as requested. A terminal without t
 may approximate them; HQ does not silently rewrite the theme. Prefer `terminal`, ANSI names, or
 `ansi:N` when terminal-native colors are important. The `no-color` theme retains bold, dim, reverse,
 labels, borders, and selection markers so focus and state remain understandable without color.
+
+Your messages use `conversation.message.self` even when unselected and omit the `You` label.
+The terminal theme uses a bright background; no-color uses reverse video; Base16 uses base05
+as the background and base00 as the foreground. Native themes can override this role.
+Selection patches the band with `conversation.selection.focused` or
+`conversation.selection.unfocused`. Markdown retains structural emphasis, links, and layout
+while sharing the resulting band foreground/background so headings, quotes, and code remain
+legible. Successful commands have no completion line; failed and interrupted command footers
+use the activity error and warning roles respectively.

@@ -902,6 +902,33 @@ mod tests {
     }
 
     #[test]
+    fn native_theme_configures_the_self_message_surface() {
+        let resolver = ThemeResolver::new(None);
+        let definition: NativeThemeDto = toml::from_str(
+            r##"
+            inherits = "terminal"
+            [styles."conversation.message.self"]
+            fg = "#112233"
+            bg = "#ddeeff"
+            modifiers = []
+        "##,
+        )
+        .expect("native theme syntax");
+        let theme = resolver
+            .resolve_native(
+                definition,
+                Path::new("self.toml"),
+                "self",
+                0,
+                &mut Vec::new(),
+            )
+            .expect("self surface role");
+        let surface = theme.style(UiThemeRole::ConversationMessageSelf);
+        assert_eq!(surface.fg, Some(Color::Rgb(17, 34, 51)));
+        assert_eq!(surface.bg, Some(Color::Rgb(221, 238, 255)));
+    }
+
+    #[test]
     fn base16_mapping_requires_the_complete_current_schema() {
         let yaml = br##"
 system: "base16"

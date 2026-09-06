@@ -3677,6 +3677,60 @@ impl UiModel {
         self.conversation.as_ref()
     }
 
+    pub(crate) fn visible_conversation_entries(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = &UiConversationEntry> {
+        self.conversation
+            .iter()
+            .flat_map(|conversation| conversation.entries.iter())
+            .filter(|entry| self.conversation_entry_visible(entry))
+    }
+
+    pub(crate) fn conversation_entry_visible(&self, entry: &UiConversationEntry) -> bool {
+        !matches!(
+            entry.presentation,
+            UiConversationEntryPresentation::Activity {
+                kind: UiConversationActivityKind::AgentTurn,
+                status: UiActivityStatus::Succeeded,
+                ..
+            }
+        ) && !self
+            .current_interaction()
+            .is_some_and(|interaction| interaction_supersedes_live_tail(interaction, entry))
+    }
+
+    fn reconcile_conversation_visibility(&mut self) {
+        let anchor = self.conversation_anchor.as_deref();
+        let visible = self.visible_conversation_entries().collect::<Vec<_>>();
+        let next = anchor
+            .and_then(|anchor| visible.iter().find(|entry| entry.id == anchor))
+            .or_else(|| visible.last())
+            .map(|entry| entry.id.clone());
+        let position_hidden = self
+            .conversation_viewport_position
+            .as_ref()
+            .is_some_and(|position| !visible.iter().any(|entry| entry.id == position.entry_id));
+        let evidence_hidden = matches!(self.navigation.active(), UiRoute::ConversationEvidence { entry_id, .. }
+            if !visible.iter().any(|entry| &entry.id == entry_id));
+        let geometry_hidden =
+            self.conversation_viewport_geometry
+                .as_ref()
+                .is_some_and(|geometry| {
+                    geometry
+                        .entries
+                        .iter()
+                        .any(|measured| !visible.iter().any(|entry| entry.id == measured.entry_id))
+                });
+        if next != self.conversation_anchor || position_hidden || geometry_hidden {
+            self.conversation_anchor = next;
+            self.conversation_viewport_position = None;
+            self.conversation_viewport_geometry = None;
+        }
+        if evidence_hidden {
+            self.close_technical_details();
+        }
+    }
+
     /// Returns the stable selected conversation-entry identity.
     pub fn conversation_anchor(&self) -> Option<&str> {
         self.conversation_anchor.as_deref()
@@ -4546,24 +4600,20 @@ impl UiModel {
     }
 
     fn move_conversation_anchor(&mut self, forward: bool) -> bool {
-        let Some(conversation) = &self.conversation else {
-            return false;
-        };
-        if conversation.entries.is_empty() {
+        let entries = self.visible_conversation_entries().collect::<Vec<_>>();
+        if entries.is_empty() {
             return false;
         }
-        let current = self.conversation_anchor.as_deref().and_then(|selected| {
-            conversation
-                .entries
-                .iter()
-                .position(|entry| entry.id == selected)
-        });
+        let current = self
+            .conversation_anchor
+            .as_deref()
+            .and_then(|selected| entries.iter().position(|entry| entry.id == selected));
         let next = match (current, forward) {
-            (Some(index), true) => (index + 1).min(conversation.entries.len() - 1),
+            (Some(index), true) => (index + 1).min(entries.len() - 1),
             (Some(index), false) => index.saturating_sub(1),
             (None, _) => 0,
         };
-        let selected = conversation.entries[next].id.clone();
+        let selected = entries[next].id.clone();
         if self.conversation_anchor.as_ref() == Some(&selected) {
             false
         } else {
@@ -4595,11 +4645,9 @@ impl UiModel {
         }
         let mut previous_index = None;
         for measured in &observation.entries {
-            let Some(index) = conversation
-                .entries
-                .iter()
-                .position(|entry| entry.id == measured.entry_id)
-            else {
+            let Some(index) = conversation.entries.iter().position(|entry| {
+                entry.id == measured.entry_id && self.conversation_entry_visible(entry)
+            }) else {
                 return false;
             };
             if previous_index.is_some_and(|previous| index <= previous) {
@@ -5505,6 +5553,7 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
     }
     synchronize_project_route(&mut model);
     synchronize_global_route(&mut model);
+    model.reconcile_conversation_visibility();
     Ok(UiTransition { model, effects })
 }
 
@@ -11523,6 +11572,44 @@ fn agent_turn_just_finished(previous: Option<&UiConversation>, next: &UiConversa
                 .any(|candidate| candidate.id == entry.id && is_terminal_agent_turn(candidate))
     });
     was_running && !remains_running && has_new_terminal_turn
+}
+
+pub(crate) fn interaction_supersedes_live_tail(
+    interaction: &crate::UiInteraction,
+    entry: &UiConversationEntry,
+) -> bool {
+    if !matches!(
+        &entry.presentation,
+        UiConversationEntryPresentation::Activity {
+            kind: UiConversationActivityKind::AgentTurn | UiConversationActivityKind::Progress,
+            status: UiActivityStatus::Running,
+            ..
+        }
+    ) {
+        return false;
+    }
+    let operation =
+        interaction
+            .operation_id
+            .iter()
+            .fold(String::with_capacity(64), |mut value, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(value, "{byte:02x}");
+                value
+            });
+    entry.technical.iter().any(|section| {
+        matches!(
+            section,
+            UiTechnicalSection::Activity {
+                provider,
+                session,
+                operation: candidate,
+                ..
+            } if provider == &interaction.provider
+                && session == &interaction.session
+                && candidate == &operation
+        )
+    })
 }
 
 fn is_running_agent_turn(entry: &UiConversationEntry) -> bool {

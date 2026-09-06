@@ -24,8 +24,8 @@ pub enum UiThemeRole {
     PaneTitleUnfocused,
     /// Primary interactive accent.
     Accent,
-    /// Reserved local-human author label in a conversation.
-    ConversationAuthorSelf,
+    /// Persistent full-width surface for locally authored conversation messages.
+    ConversationMessageSelf,
     /// Named or fallback counterparty author label in a conversation.
     ConversationAuthorParticipant,
     /// Project name retained as neutral conversation composition context.
@@ -107,7 +107,7 @@ impl UiThemeRole {
         Self::PaneTitleFocused,
         Self::PaneTitleUnfocused,
         Self::Accent,
-        Self::ConversationAuthorSelf,
+        Self::ConversationMessageSelf,
         Self::ConversationAuthorParticipant,
         Self::ConversationProjectContext,
         Self::ConversationActivity,
@@ -155,7 +155,7 @@ impl UiThemeRole {
             Self::PaneTitleFocused => "ui.pane.title.focused",
             Self::PaneTitleUnfocused => "ui.pane.title.unfocused",
             Self::Accent => "ui.accent",
-            Self::ConversationAuthorSelf => "conversation.author.self",
+            Self::ConversationMessageSelf => "conversation.message.self",
             Self::ConversationAuthorParticipant => "conversation.author.participant",
             Self::ConversationProjectContext => "conversation.project.context",
             Self::ConversationActivity => "conversation.activity",
@@ -269,8 +269,8 @@ impl UiTheme {
         );
         set(
             &mut styles,
-            UiThemeRole::ConversationAuthorSelf,
-            Style::new().fg(Color::Cyan).bold(),
+            UiThemeRole::ConversationMessageSelf,
+            Style::new().fg(Color::Black).bg(Color::Gray),
         );
         set(
             &mut styles,
@@ -465,8 +465,8 @@ impl UiTheme {
         set(&mut styles, UiThemeRole::Accent, Style::new().bold());
         set(
             &mut styles,
-            UiThemeRole::ConversationAuthorSelf,
-            Style::new().bold(),
+            UiThemeRole::ConversationMessageSelf,
+            Style::new().reversed(),
         );
         set(
             &mut styles,
@@ -590,8 +590,8 @@ impl UiTheme {
             )
             .with_style(UiThemeRole::Accent, Style::new().fg(accent))
             .with_style(
-                UiThemeRole::ConversationAuthorSelf,
-                Style::new().fg(accent).bold(),
+                UiThemeRole::ConversationMessageSelf,
+                Style::new().fg(background).bg(text),
             )
             .with_style(
                 UiThemeRole::ConversationAuthorParticipant,
@@ -778,8 +778,8 @@ mod tests {
             Some(Color::Indexed(13))
         );
         assert_eq!(
-            theme.style(UiThemeRole::ConversationAuthorSelf).fg,
-            Some(Color::Indexed(13))
+            theme.style(UiThemeRole::ConversationMessageSelf).fg,
+            Some(Color::Indexed(0))
         );
         assert_eq!(
             theme.style(UiThemeRole::ConversationAuthorParticipant).fg,
@@ -802,8 +802,13 @@ mod tests {
     #[test]
     fn no_color_conversation_roles_retain_text_and_focus_cues() {
         let theme = UiTheme::no_color();
+        assert!(
+            theme
+                .style(UiThemeRole::ConversationMessageSelf)
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
         for role in [
-            UiThemeRole::ConversationAuthorSelf,
             UiThemeRole::ConversationAuthorParticipant,
             UiThemeRole::ConversationActivitySuccess,
             UiThemeRole::ConversationActivityWarning,

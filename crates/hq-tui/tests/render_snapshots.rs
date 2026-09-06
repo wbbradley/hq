@@ -292,9 +292,9 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
 #[test]
 fn locally_authored_messages_only_show_delivery_state_while_it_is_useful() {
     for (delivery, label) in [
-        (UiMessageDelivery::Pending, "You · Pending"),
-        (UiMessageDelivery::Sent, "You"),
-        (UiMessageDelivery::Received, "You · Received"),
+        (UiMessageDelivery::Pending, "Pending"),
+        (UiMessageDelivery::Sent, "Can we ship?"),
+        (UiMessageDelivery::Received, "Received"),
     ] {
         let rendered = render_text(&conversation_model_with_delivery(
             UiSize {
@@ -304,8 +304,102 @@ fn locally_authored_messages_only_show_delivery_state_while_it_is_useful() {
             delivery,
         ));
         assert!(rendered.contains(label), "{rendered}");
+        assert!(!rendered.contains("You"), "{rendered}");
         if delivery == UiMessageDelivery::Sent {
             assert!(!rendered.contains("You · Sent"), "{rendered}");
+        }
+    }
+}
+
+#[test]
+fn self_message_bands_fill_the_width_and_keep_markdown_legible_across_themes() {
+    let native = UiTheme::terminal().with_style(
+        UiThemeRole::ConversationMessageSelf,
+        Style::new().fg(Color::Black).bg(Color::Yellow),
+    );
+    let base16 = UiTheme::from_base16(
+        "test".to_owned(),
+        None,
+        hq_tui::Base16Palette::new(std::array::from_fn(|index| {
+            Color::Indexed(u8::try_from(index).expect("palette index"))
+        })),
+    );
+    for theme in [UiTheme::terminal(), UiTheme::no_color(), base16, native] {
+        for width in [40, 64, 120] {
+            let model = conversation_model_with_content(
+                UiSize { width, height: 28 },
+                UiMessageState::Open,
+                Some(UiMessageDelivery::Pending),
+                "**Can we ship?**",
+                "Checking files",
+            );
+            let model = update(
+                model,
+                UiEvent::ConversationViewportObserved {
+                    observation: hq_tui::UiConversationViewportObservation {
+                        conversation_id: "deploy-9".to_owned(),
+                        width,
+                        height: 20,
+                        entries: vec![
+                            hq_tui::UiConversationEntryGeometry {
+                                entry_id: "message-1".to_owned(),
+                                height: 3,
+                            },
+                            hq_tui::UiConversationEntryGeometry {
+                                entry_id: "activity-2".to_owned(),
+                                height: 3,
+                            },
+                        ],
+                    },
+                },
+            )
+            .expect("measure transcript")
+            .model;
+            for selection_role in [
+                Some(UiThemeRole::ConversationSelectionFocused),
+                Some(UiThemeRole::ConversationSelectionUnfocused),
+                None,
+            ] {
+                let model = match selection_role {
+                    None => {
+                        update(model.clone(), UiEvent::Input(UiInput::Character('j')))
+                            .expect("select activity")
+                            .model
+                    }
+                    Some(UiThemeRole::ConversationSelectionUnfocused) => {
+                        update(model.clone(), UiEvent::Input(UiInput::Character('r')))
+                            .expect("compose reply")
+                            .model
+                    }
+                    _ => model.clone(),
+                };
+                let buffer = render_buffer_with_theme(&model, &theme);
+                let (_, y) = find_text_start(&buffer, "Can we ship?");
+                let mut surface = theme.style(UiThemeRole::ConversationMessageSelf);
+                if let Some(role) = selection_role {
+                    surface = surface.patch(theme.style(role));
+                }
+                for row in [y - 1, y, y + 1] {
+                    for x in 0..width {
+                        let cell = buffer.cell((x, row)).expect("band cell");
+                        if let Some(fg) = surface.fg {
+                            assert_eq!(cell.fg, fg);
+                        }
+                        if let Some(bg) = surface.bg {
+                            assert_eq!(cell.bg, bg);
+                        }
+                        assert!(cell.modifier.contains(surface.add_modifier));
+                    }
+                }
+                assert!(
+                    buffer
+                        .cell((0, y))
+                        .expect("bold body")
+                        .modifier
+                        .contains(Modifier::BOLD)
+                );
+                assert!(!snapshot_text(&buffer).contains("You"));
+            }
         }
     }
 }
@@ -978,7 +1072,7 @@ fn conversation_layout_renders_typed_activity_after_its_earlier_message() {
     let rendered = snapshot_text(terminal.backend().buffer());
     let message = rendered.find("Alice").expect("author rendered");
     let activity = rendered
-        .find("● Work in progress…")
+        .find("● Agent is working…")
         .expect("activity rendered");
     assert!(message < activity, "earlier message precedes its activity");
     assert!(rendered.contains("Can we ship?"));
@@ -1096,7 +1190,7 @@ fn markdown_messages_render_safely_across_widths_without_parsing_activity() {
             "{size:?}:\n{rendered}"
         );
         assert!(
-            rendered.contains("● **Work** `remains raw`"),
+            rendered.contains("**Work** `remains raw`"),
             "{size:?}:\n{rendered}"
         );
 
@@ -2242,7 +2336,7 @@ fn ordinary_surfaces_use_user_intentions_and_label_technical_evidence() {
         .model;
         let conversation = render_text(&conversation);
         assert!(
-            conversation.contains("● Work in progress…"),
+            conversation.contains("● Agent is working…"),
             "conversation at {size:?}:\n{conversation}"
         );
         assert!(!conversation.contains("update · information only"));

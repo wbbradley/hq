@@ -4182,7 +4182,7 @@ fn sent_agent_message_follows_the_live_tail_through_automatic_followup() {
     assert_eq!(finished.model.focus(), UiFocus::Draft);
     assert_eq!(
         finished.model.conversation_anchor(),
-        Some("turn-finished"),
+        Some("agent-response"),
         "the automatic composer opens with every latest message visible"
     );
     assert!(matches!(
@@ -4749,6 +4749,100 @@ fn initially_opening_an_already_finished_turn_does_not_open_a_draft() {
             .iter()
             .all(|effect| !matches!(effect, UiEffect::OpenDraft { .. }))
     );
+}
+
+#[test]
+fn conversation_navigation_skips_successful_turns_but_retains_terminal_evidence() {
+    let opened = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
+            row_id: "thread-a".to_owned(),
+            entries: vec![
+                entry("message", false),
+                agent_turn_entry("hidden-middle", UiActivityStatus::Succeeded),
+                agent_turn_entry("interrupted", UiActivityStatus::Interrupted),
+                agent_turn_entry("hidden-tail", UiActivityStatus::Succeeded),
+            ],
+            next_cursor: None,
+        },
+    );
+    let mut model = update(opened.model, UiEvent::Input(UiInput::Activate))
+        .expect("open")
+        .model;
+    assert_eq!(model.conversation_anchor(), Some("interrupted"));
+    assert_eq!(model.conversation().expect("loaded").entries.len(), 4);
+    model = update(model, UiEvent::Input(UiInput::Character('k')))
+        .expect("previous")
+        .model;
+    assert_eq!(model.conversation_anchor(), Some("message"));
+    model = update(model, UiEvent::Input(UiInput::Character('j')))
+        .expect("next")
+        .model;
+    assert_eq!(model.conversation_anchor(), Some("interrupted"));
+    model = update(model, UiEvent::Input(UiInput::Character('j')))
+        .expect("at end")
+        .model;
+    assert_eq!(model.conversation_anchor(), Some("interrupted"));
+}
+
+#[test]
+fn completed_turn_refresh_removes_hidden_selection_geometry_and_detail_routes() {
+    let opened = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        UiConversationPage {
+            title: "Alice".to_owned(),
+            context: None,
+            row_id: "thread-a".to_owned(),
+            entries: vec![
+                entry("message", false),
+                agent_turn_entry("turn", UiActivityStatus::Running),
+            ],
+            next_cursor: None,
+        },
+    );
+    let opened = update(opened.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let details = update(opened.model, UiEvent::Input(UiInput::Character('t'))).expect("details");
+    assert!(details.model.technical_visible());
+    let finished = update(
+        details.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a"]),
+                conversation: Some(UiConversationPage {
+                    title: "Alice".to_owned(),
+                    context: None,
+                    row_id: "thread-a".to_owned(),
+                    entries: vec![
+                        entry("message", false),
+                        agent_turn_entry("turn", UiActivityStatus::Succeeded),
+                    ],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("finish");
+    assert_eq!(finished.model.conversation_anchor(), Some("message"));
+    assert!(!finished.model.technical_visible());
+    let stale = update(
+        finished.model,
+        UiEvent::ConversationViewportObserved {
+            observation: UiConversationViewportObservation {
+                conversation_id: "thread-a".to_owned(),
+                width: 80,
+                height: 10,
+                entries: vec![UiConversationEntryGeometry {
+                    entry_id: "turn".to_owned(),
+                    height: 3,
+                }],
+            },
+        },
+    )
+    .expect("reject stale geometry");
+    assert!(stale.model.conversation_viewport_position().is_none());
+    assert_eq!(stale.model.conversation_anchor(), Some("message"));
 }
 
 #[test]
