@@ -13479,3 +13479,15 @@ pass.
 - **[operational/medium] Make failed pairing-file creation safely retryable** — The writer creates the final destination before writing and syncing, but leaves that path behind after any later failure; subsequent attempts then fail `create_new`, whether the artifact is partial or only has uncertain directory durability. Preserve the no-overwrite invariant while providing explicit, recoverable cleanup or reconciliation for every post-create failure. (`crates/hq-node/src/pairing_file.rs:16`)
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-06 — Validated secure relay redirects
+
+WebSocket handshakes now resolve relative redirect references against the current validated relay
+URL and validate the resolved target again at every hop. Connections that begin with `wss` retain
+that secure-transport requirement throughout the chain, while plaintext origins may upgrade to
+`wss`; loopback and policy tests cover the complete behavior, strict lint passes, and all relay
+tests pass.
+
+- **[security/medium] Validate relay redirects and forbid secure-transport downgrade** — WebSocket redirect locations replace the validated target verbatim, so relative redirects fail and an initial `wss` relay can silently redirect to plaintext `ws`. Resolve redirects against the current URL, reapply relay URL policy at every hop, and reject any downgrade from secure transport. (`crates/hq-relay/src/websocket.rs:109`)
+
+<!-- End of archived plan entry. -->
