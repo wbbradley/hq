@@ -25,7 +25,14 @@ EOF
 
 cat >"$fake_bin/git" <<'EOF'
 #!/usr/bin/env bash
-printf '%040d\n' 0
+case " $* " in
+  *" rev-parse --show-toplevel "*)
+    printf '%s\n' "$HQ_SOURCE_DIR"
+    ;;
+  *)
+    printf '%040d\n' 0
+    ;;
+esac
 EOF
 chmod +x "$fake_bin/git"
 
@@ -115,6 +122,10 @@ done
 [[ ! -e "$home/.cargo/bin/hq" ]]
 [[ -x "$fixture/install/bin/hq" ]]
 [[ -e "$fixture/selected-state/new-installation" ]]
+if grep -Fq 'agent create alice' "$log" || grep -Fq 'project create source' "$log"; then
+  printf 'default bootstrap unexpectedly created fixtures\n' >&2
+  exit 1
+fi
 
 mkdir -p "$home/Library/LaunchAgents"
 : >"$home/Library/LaunchAgents/com.wbbradley.hq.daemon.plist"
@@ -127,10 +138,12 @@ HQ_INSTALL_ROOT="$fixture/install" \
 HQ_STATE_ROOT="$fixture/selected-state" \
 HQ_BOOTSTRAP_TEST_LOG="$log" \
 HQ_BOOTSTRAP_TEST_UNAME=Darwin \
-  "$repository_root/scripts/hq-bootstrap" tester >/dev/null
+  "$repository_root/scripts/hq-bootstrap" --fixtures tester >/dev/null
 
 grep -Fq 'launchctl bootout gui/' "$log"
 grep -Fq '/com.wbbradley.hq.daemon' "$log"
+grep -Fq 'new-hq --state-root '"$fixture/selected-state"' agent create alice' "$log"
+grep -Fq 'new-hq --state-root '"$fixture/selected-state"' project create source --path '"$source_root" "$log"
 [[ ! -e "$home/Library/LaunchAgents/com.wbbradley.hq.daemon.plist" ]]
 
 printf 'hq-bootstrap teardown test passed\n'

@@ -20,10 +20,14 @@ readonly LAUNCHD_PLIST="$HOME/Library/LaunchAgents/com.wbbradley.hq.daemon.plist
 
 usage() {
   cat <<EOF
-Usage: $PROGRAM_NAME [HUMAN_LABEL]
+Usage: $PROGRAM_NAME [--fixtures] [HUMAN_LABEL]
 
 Tear down HQ in its default user locations, build and install HQ from source,
 and walk through first-time identity and human-account creation.
+
+Options:
+  --fixtures           Create an alice agent and a project for the source Git root
+  -h, --help           Show this help
 
 This destructive developer helper stops the default user service and each known
 default/selected state-root owner, then removes those state roots and the HQ
@@ -49,14 +53,30 @@ die() {
   exit 1
 }
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-esac
+CREATE_FIXTURES=false
+HUMAN_LABEL_SET=false
+HUMAN_LABEL=
+while (( $# )); do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --fixtures)
+      CREATE_FIXTURES=true
+      ;;
+    --*)
+      die "unknown option: $1"
+      ;;
+    *)
+      [[ "$HUMAN_LABEL_SET" == false ]] || die "expected at most one human-account label"
+      HUMAN_LABEL=$1
+      HUMAN_LABEL_SET=true
+      ;;
+  esac
+  shift
+done
 
-(( $# <= 1 )) || die "expected at most one human-account label"
 [[ -f "$REPOSITORY/crates/hq-node/Cargo.toml" ]] || die "hq-node crate not found in $REPOSITORY"
 [[ "$INSTALL_ROOT" = /* ]] || die "install root must be an absolute path: $INSTALL_ROOT"
 [[ "$STATE_ROOT" = /* ]] || die "state root must be an absolute path: $STATE_ROOT"
@@ -104,6 +124,18 @@ add_hq_executable "$RELEASE_BIN"
 BUILD_COMMIT="$(git -C "$REPOSITORY" rev-parse --verify HEAD)" || \
   die "HQ source checkout not found at $REPOSITORY"
 readonly BUILD_COMMIT
+
+FIXTURE_PROJECT_ROOT=
+FIXTURE_PROJECT_NAME=
+if [[ "$CREATE_FIXTURES" == true ]]; then
+  FIXTURE_PROJECT_ROOT="$(git -C "$REPOSITORY" rev-parse --show-toplevel)" || \
+    die "could not find the source Git root from $REPOSITORY"
+  [[ "$FIXTURE_PROJECT_ROOT" = /* ]] || \
+    die "source Git root is not an absolute path: $FIXTURE_PROJECT_ROOT"
+  FIXTURE_PROJECT_NAME="${FIXTURE_PROJECT_ROOT##*/}"
+  [[ -n "$FIXTURE_PROJECT_NAME" ]] || die "cannot name a fixture project for the filesystem root"
+  readonly FIXTURE_PROJECT_ROOT FIXTURE_PROJECT_NAME
+fi
 
 step "Checking HQ at ${BUILD_COMMIT:0:12}"
 (
@@ -179,10 +211,19 @@ step "Creating a new installation identity"
 "$HQ_BIN" --state-root "$STATE_ROOT" identity init
 
 step "Creating the local human account"
-if (( $# == 1 )); then
-  "$HQ_BIN" --state-root "$STATE_ROOT" human create "$1"
+if [[ "$HUMAN_LABEL_SET" == true ]]; then
+  "$HQ_BIN" --state-root "$STATE_ROOT" human create "$HUMAN_LABEL"
 else
   "$HQ_BIN" --state-root "$STATE_ROOT" human create
+fi
+
+if [[ "$CREATE_FIXTURES" == true ]]; then
+  step "Creating sample agent alice"
+  "$HQ_BIN" --state-root "$STATE_ROOT" agent create alice
+
+  step "Creating sample project $FIXTURE_PROJECT_NAME"
+  "$HQ_BIN" --state-root "$STATE_ROOT" \
+    project create "$FIXTURE_PROJECT_NAME" --path "$FIXTURE_PROJECT_ROOT"
 fi
 
 printf '\nHQ is ready. Run: %s --state-root %q tui\n' "$HQ_BIN" "$STATE_ROOT"
