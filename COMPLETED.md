@@ -13467,3 +13467,15 @@ semantics; strict lint and the full workspace suite pass.
 - **[performance/medium] Bound live-tail activity reads to the requested conversation page** — Every initial conversation read currently scans all activity rows, hydrates each row separately, and accumulates per-operation state even when the caller requests one item. Derive the live tail with bounded database work so refresh cost and memory do not grow with the conversation's complete activity history, while preserving the current turn/progress/completion semantics. (`crates/hq-store/src/database.rs:1918`)
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-06 — Retry-safe pairing-file publication
+
+Pairing invitations now publish from a private, fully synced same-directory temporary file through
+an atomic no-overwrite link. A retry reconciles only byte-identical private regular files, while
+different contents, symlinks, and unsafe permissions remain untouched and rejected; temporary-file
+cleanup also retains ownership until removal succeeds. Strict lint and the full workspace suite
+pass.
+
+- **[operational/medium] Make failed pairing-file creation safely retryable** — The writer creates the final destination before writing and syncing, but leaves that path behind after any later failure; subsequent attempts then fail `create_new`, whether the artifact is partial or only has uncertain directory durability. Preserve the no-overwrite invariant while providing explicit, recoverable cleanup or reconciliation for every post-create failure. (`crates/hq-node/src/pairing_file.rs:16`)
+
+<!-- End of archived plan entry. -->
