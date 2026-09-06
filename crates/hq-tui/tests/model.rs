@@ -21,8 +21,9 @@ use hq_tui::{
     UiProjectConversationSetup, UiProjectCreationChoice, UiProjectFolderAction, UiProjectFormField,
     UiProjectInteraction, UiProjectManagementAction, UiProjectOutcome, UiProjectResource,
     UiProjectResourceCheck, UiProjectResourceCondition, UiProjectResourceConflict, UiProjectResult,
-    UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRow, UiRowKind,
-    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiProjectSummaryFocus, UiProjectThread, UiProjectWorkspaceLevel, UiProvider, UiRoute, UiRow,
+    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    UiWorkspace, update,
 };
 
 #[test]
@@ -1478,6 +1479,10 @@ fn logical_selection_focus_section_resize_and_quit_are_pure_transitions() {
             height: 18,
         }
     );
+    assert_eq!(
+        resized.model.navigation_path(),
+        &[UiRoute::Workspace(UiWorkspace::Sent)]
+    );
     let quit = update(resized.model, UiEvent::Input(UiInput::Quit)).expect("quit transition");
     assert!(quit.model.should_exit());
     assert_eq!(quit.effects, vec![UiEffect::Exit]);
@@ -1503,6 +1508,10 @@ fn number_shortcuts_switch_directly_to_each_view_and_current_view_is_idempotent(
         let switched = update(base.clone(), UiEvent::Input(UiInput::Character(shortcut)))
             .expect("direct view shortcut");
         assert_eq!(switched.model.section(), expected);
+        assert_eq!(
+            switched.model.navigation_path(),
+            &[UiRoute::Workspace(UiWorkspace::from(expected))]
+        );
         assert_eq!(switched.model.focus(), UiFocus::Content);
         if expected == UiSection::Config {
             assert!(
@@ -1712,6 +1721,50 @@ fn explicit_help_and_refresh_work_without_discarding_an_open_dialog() {
             .iter()
             .any(|effect| matches!(effect, UiEffect::LoadSnapshot { .. }))
     );
+}
+
+#[test]
+fn workspace_list_selection_re_resolves_by_stable_identity_after_refresh() {
+    let mut source = snapshot(1, &["alpha", "beta"]);
+    source.sent_rows = snapshot_for(UiSection::Sent, 1, &["sent"]).sent_rows;
+    let selected =
+        update(loaded_model(source), UiEvent::Input(UiInput::NextItem)).expect("select beta");
+    let sent = update(selected.model, UiEvent::Input(UiInput::Character('2')))
+        .expect("replace with Sent root");
+
+    let refreshing = update(sent.model, UiEvent::Input(UiInput::Refresh)).expect("refresh");
+    let refresh_id = snapshot_effect(&refreshing.effects);
+    let mut reordered = snapshot(2, &["beta", "alpha"]);
+    reordered.sent_rows = snapshot_for(UiSection::Sent, 2, &["sent"]).sent_rows;
+    let refreshed = update(
+        refreshing.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: refresh_id,
+            snapshot: reordered,
+        },
+    )
+    .expect("reordered snapshot");
+    let inbox = update(refreshed.model, UiEvent::Input(UiInput::Character('1')))
+        .expect("return to Inbox root");
+    assert_eq!(inbox.model.selected_row(), Some("beta"));
+
+    let sent =
+        update(inbox.model, UiEvent::Input(UiInput::Character('2'))).expect("leave Inbox again");
+    let refreshing = update(sent.model, UiEvent::Input(UiInput::Refresh)).expect("refresh");
+    let refresh_id = snapshot_effect(&refreshing.effects);
+    let mut removed = snapshot(3, &["alpha"]);
+    removed.sent_rows = snapshot_for(UiSection::Sent, 3, &["sent"]).sent_rows;
+    let refreshed = update(
+        refreshing.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: refresh_id,
+            snapshot: removed,
+        },
+    )
+    .expect("removed selection snapshot");
+    let inbox = update(refreshed.model, UiEvent::Input(UiInput::Character('1')))
+        .expect("return after removal");
+    assert_eq!(inbox.model.selected_row(), Some("alpha"));
 }
 
 #[test]
@@ -2350,7 +2403,7 @@ fn command_approval_navigation_is_scoped_to_explicit_inline_focus() {
 }
 
 #[test]
-fn inline_approval_suspends_and_restores_the_exact_draft_without_capturing_views() {
+fn workspace_replacement_retains_draft_data_without_restoring_hidden_input_focus() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
     let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("open reply");
     let (open_id, _) = open_draft_effect(&opening.effects);
@@ -2388,45 +2441,24 @@ fn inline_approval_suspends_and_restores_the_exact_draft_without_capturing_views
     let agents = update(observed.model, UiEvent::Input(UiInput::Character('4')))
         .expect("hidden draft does not capture global shortcut");
     assert_eq!(agents.model.section(), UiSection::Agents);
+    assert_eq!(
+        agents.model.navigation_path(),
+        &[UiRoute::Workspace(UiWorkspace::Agents)]
+    );
+    assert_eq!(agents.model.focus(), UiFocus::Content);
+    assert!(agents.model.conversation().is_none());
+    assert!(agents.model.mailbox_draft().is_some());
     let inbox = update(agents.model, UiEvent::Input(UiInput::Character('1')))
-        .expect("return to blocked conversation");
-    assert_eq!(inbox.model.focus(), UiFocus::Approval);
-
-    let left = update(inbox.model, UiEvent::Input(UiInput::Escape))
-        .expect("Escape leaves approval without answering");
-    assert_eq!(left.model.focus(), UiFocus::Conversation);
+        .expect("return to Inbox root");
+    assert_eq!(inbox.model.focus(), UiFocus::Content);
+    assert!(inbox.model.conversation().is_none());
+    assert!(inbox.model.mailbox_draft().is_some());
     assert!(
-        left.effects
+        inbox
+            .effects
             .iter()
             .all(|effect| !matches!(effect, UiEffect::AnswerInteraction { .. }))
     );
-    let refocused =
-        update(left.model, UiEvent::Input(UiInput::NextFocus)).expect("Tab returns to approval");
-    let submitted =
-        update(refocused.model, UiEvent::Input(UiInput::Activate)).expect("approval submits");
-    let effect_id = submitted
-        .effects
-        .iter()
-        .find_map(|effect| match effect {
-            UiEffect::AnswerInteraction { id, .. } => Some(*id),
-            _ => None,
-        })
-        .expect("answer effect");
-    let answered = update(
-        submitted.model,
-        UiEvent::InteractionAnswered {
-            effect_id,
-            request_id: [7; 32],
-            outcome: hq_tui::UiInteractionAnswerOutcome::Answered,
-        },
-    )
-    .expect("answer completes");
-    assert_eq!(answered.model.focus(), UiFocus::Draft);
-    assert!(matches!(
-        answered.model.mailbox_draft(),
-        Some(UiMailboxDraftPane::Editing { draft, .. })
-            if draft.content == "retained text" && draft.version == 7
-    ));
 }
 
 #[test]
@@ -2726,7 +2758,7 @@ fn conversation_viewport_home_end_and_geometry_refresh_preserve_stable_entry_row
 }
 
 #[test]
-fn conversation_viewport_clamps_restores_workspace_and_remeasures_after_resize() {
+fn conversation_viewport_clamps_and_workspace_replacement_drops_hidden_detail_state() {
     let model = opened_conversation(vec![
         entry("message-1", false),
         entry("message-2", false),
@@ -2793,15 +2825,11 @@ fn conversation_viewport_clamps_restores_workspace_and_remeasures_after_resize()
     let sent = update(content.model, UiEvent::Input(UiInput::Character('2')))
         .expect("visit Sent workspace");
     let restored = update(sent.model, UiEvent::Input(UiInput::Character('1')))
-        .expect("restore Inbox workspace");
+        .expect("replace with Inbox root");
     assert_eq!(restored.model.section(), UiSection::Inbox);
-    assert_eq!(
-        restored.model.conversation_viewport_position(),
-        Some(&UiConversationViewportPosition {
-            entry_id: "message-1".to_owned(),
-            row: 0,
-        })
-    );
+    assert_eq!(restored.model.selected_row(), Some("thread-a"));
+    assert!(restored.model.conversation().is_none());
+    assert!(restored.model.conversation_viewport_position().is_none());
 }
 
 #[test]
@@ -5726,7 +5754,7 @@ fn stopped_session_completion_survives_a_failed_refresh_and_returns_to_agent_det
 }
 
 #[test]
-fn mailbox_navigation_workspace_survives_visiting_agent_session_management() {
+fn mailbox_selection_survives_workspace_replacement_without_hidden_conversation_state() {
     let mut source = snapshot(1, &["thread-a"]);
     let agent_source = agents_snapshot(1, vec![agent(9, "runtime")]);
     source.agent_rows = agent_source.agent_rows;
@@ -5754,8 +5782,8 @@ fn mailbox_navigation_workspace_survives_visiting_agent_session_management() {
         .expect("return to Inbox")
         .model;
     assert_eq!(model.selected_row(), Some("thread-a"));
-    assert_eq!(model.conversation_anchor(), Some("message-a"));
-    assert!(model.conversation().is_some());
+    assert!(model.conversation_anchor().is_none());
+    assert!(model.conversation().is_none());
 }
 
 #[test]

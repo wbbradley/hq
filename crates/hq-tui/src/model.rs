@@ -187,6 +187,536 @@ impl UiSection {
     }
 }
 
+/// Canonical top-level workspace selected by navigation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum UiWorkspace {
+    /// Open human mailbox work.
+    Inbox,
+    /// Human-authored sent work.
+    Sent,
+    /// Archived human mailbox work.
+    Archived,
+    /// Named agents and sessions.
+    Agents,
+    /// Projects and resources.
+    Projects,
+    /// Installation-local defaults and appearance.
+    Config,
+}
+
+impl From<UiSection> for UiWorkspace {
+    fn from(section: UiSection) -> Self {
+        match section {
+            UiSection::Inbox => Self::Inbox,
+            UiSection::Sent => Self::Sent,
+            UiSection::Archived => Self::Archived,
+            UiSection::Agents => Self::Agents,
+            UiSection::Projects => Self::Projects,
+            UiSection::Config => Self::Config,
+        }
+    }
+}
+
+impl From<UiWorkspace> for UiSection {
+    fn from(workspace: UiWorkspace) -> Self {
+        match workspace {
+            UiWorkspace::Inbox => Self::Inbox,
+            UiWorkspace::Sent => Self::Sent,
+            UiWorkspace::Archived => Self::Archived,
+            UiWorkspace::Agents => Self::Agents,
+            UiWorkspace::Projects => Self::Projects,
+            UiWorkspace::Config => Self::Config,
+        }
+    }
+}
+
+/// Stable target retained by a chooser, form, decision, operation, or recovery route.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum UiRouteTarget {
+    /// No identity-bearing target exists yet.
+    Global,
+    /// Exact conversation summary row.
+    Conversation(String),
+    /// Exact project.
+    Project([u8; 32]),
+    /// Exact project folder.
+    ProjectFolder {
+        /// Stable project identity.
+        project_id: [u8; 32],
+        /// Stable folder identity.
+        folder_id: [u8; 32],
+    },
+    /// Exact named agent.
+    Agent([u8; 32]),
+    /// Exact provider interaction request.
+    Interaction([u8; 32]),
+}
+
+/// User-facing capability performed by a sequential workflow route.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum UiWorkflowCapability {
+    /// Start a new distinct kind of work.
+    StartNewWork,
+    /// Choose a message recipient.
+    ChooseRecipient,
+    /// Choose a project.
+    ChooseProject,
+    /// Choose an agent.
+    ChooseAgent,
+    /// Choose an agent service or durable session.
+    ChooseAgentSession,
+    /// Edit local configuration.
+    EditConfiguration,
+    /// Create a project.
+    CreateProject,
+    /// Add or change a project folder.
+    EditProjectFolder,
+    /// Create or edit an agent.
+    EditAgent,
+    /// Archive a conversation.
+    ArchiveConversation,
+    /// Change a project's lifecycle or assignment.
+    ManageProject,
+    /// Retire or switch an agent session.
+    ManageAgentSession,
+    /// Answer a global request.
+    AnswerRequest,
+}
+
+/// Small typed entry in the canonical TUI path.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum UiRoute {
+    /// One top-level workspace root.
+    Workspace(UiWorkspace),
+    /// Full conversation bound to an exact summary identity.
+    Conversation {
+        /// Stable conversation summary row.
+        row_id: String,
+    },
+    /// Technical evidence for an exact transcript item.
+    ConversationEvidence {
+        /// Stable containing conversation row.
+        row_id: String,
+        /// Stable message or activity identity.
+        entry_id: String,
+    },
+    /// Selected project summary.
+    Project {
+        /// Stable project identity.
+        project_id: [u8; 32],
+    },
+    /// Labeled project management context.
+    ProjectManagement {
+        /// Stable project identity.
+        project_id: [u8; 32],
+    },
+    /// Project folder catalog.
+    ProjectFolders {
+        /// Stable project identity.
+        project_id: [u8; 32],
+    },
+    /// Exact project folder details.
+    ProjectFolder {
+        /// Stable project identity.
+        project_id: [u8; 32],
+        /// Stable folder identity.
+        folder_id: [u8; 32],
+    },
+    /// Exact project technical evidence.
+    ProjectEvidence {
+        /// Stable project identity.
+        project_id: [u8; 32],
+    },
+    /// Exact named-agent details.
+    Agent {
+        /// Stable named-agent identity.
+        agent_id: [u8; 32],
+    },
+    /// Session and action choices for one named agent.
+    AgentSessions {
+        /// Stable named-agent identity.
+        agent_id: [u8; 32],
+    },
+    /// Exact named-agent technical evidence.
+    AgentEvidence {
+        /// Stable named-agent identity.
+        agent_id: [u8; 32],
+    },
+    /// Contextual help as a normal child screen.
+    Help(UiHelpPage),
+    /// Sequential typed chooser.
+    Choice {
+        /// Capability whose available choices are presented.
+        capability: UiWorkflowCapability,
+        /// Stable target, when the capability has one.
+        target: UiRouteTarget,
+    },
+    /// Sequential typed form.
+    Form {
+        /// Capability whose fields are presented.
+        capability: UiWorkflowCapability,
+        /// Stable target, when the capability has one.
+        target: UiRouteTarget,
+    },
+    /// Explicit typed confirmation or force decision.
+    Confirmation {
+        /// Capability being confirmed.
+        capability: UiWorkflowCapability,
+        /// Exact target of the decision.
+        target: UiRouteTarget,
+    },
+    /// Non-cancellable outstanding operation.
+    Progress {
+        /// Capability being executed.
+        capability: UiWorkflowCapability,
+        /// Exact target of the operation.
+        target: UiRouteTarget,
+        /// Process-local operation correlation.
+        effect_id: EffectId,
+    },
+    /// Definite outcome for an exact operation.
+    Outcome {
+        /// Capability that completed.
+        capability: UiWorkflowCapability,
+        /// Exact target of the operation.
+        target: UiRouteTarget,
+        /// Process-local operation correlation.
+        effect_id: EffectId,
+    },
+    /// Typed missing-target or uncertain-operation recovery.
+    Recovery {
+        /// Capability that needs recovery.
+        capability: UiWorkflowCapability,
+        /// Exact target or operation evidence retained for recovery.
+        target: UiRouteTarget,
+    },
+}
+
+/// What Enter does on a route according to the closed route table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiEnterResult {
+    /// Enter has no navigation meaning.
+    None,
+    /// Enter pushes a selected nested destination.
+    Push,
+    /// Enter replaces the sequential screen with its successor.
+    Advance,
+    /// Enter completes the workflow to its declared return level.
+    Complete,
+    /// Enter retries or reconciles retained typed evidence.
+    Recover,
+}
+
+/// What Escape does on a route according to the closed route table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiEscapeResult {
+    /// A workspace root remains installed.
+    Stay,
+    /// One visible route is popped.
+    Pop,
+    /// The active operation cannot be cancelled.
+    BlockedWhileRunning,
+}
+
+/// What successful completion does on a route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiCompletionResult {
+    /// The route has no completion transition.
+    None,
+    /// Replace the current sequential route with its next screen.
+    Advance,
+    /// Consume sequential screens through the declared typed return level.
+    Return,
+}
+
+/// Simultaneous UI permitted beside the active route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiAdjacentView {
+    /// No other screen may share the content rectangle.
+    None,
+    /// A composer or conversation-scoped approval may share a conversation.
+    ConversationInput,
+}
+
+/// Closed navigation behavior for one route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiRouteContract {
+    /// Enter transition.
+    pub enter: UiEnterResult,
+    /// Escape transition.
+    pub escape: UiEscapeResult,
+    /// Successful completion transition.
+    pub completion: UiCompletionResult,
+    /// Permitted adjacent presentation.
+    pub adjacent: UiAdjacentView,
+}
+
+impl UiRoute {
+    /// Returns the closed navigation contract for this route family.
+    pub const fn contract(&self) -> UiRouteContract {
+        match self {
+            Self::Workspace(_) => UiRouteContract {
+                enter: UiEnterResult::Push,
+                escape: UiEscapeResult::Stay,
+                completion: UiCompletionResult::None,
+                adjacent: UiAdjacentView::None,
+            },
+            Self::Conversation { .. } => UiRouteContract {
+                enter: UiEnterResult::Push,
+                escape: UiEscapeResult::Pop,
+                completion: UiCompletionResult::None,
+                adjacent: UiAdjacentView::ConversationInput,
+            },
+            Self::Progress { .. } => UiRouteContract {
+                enter: UiEnterResult::None,
+                escape: UiEscapeResult::BlockedWhileRunning,
+                completion: UiCompletionResult::Advance,
+                adjacent: UiAdjacentView::None,
+            },
+            Self::Outcome { .. } => UiRouteContract {
+                enter: UiEnterResult::Complete,
+                escape: UiEscapeResult::Pop,
+                completion: UiCompletionResult::Return,
+                adjacent: UiAdjacentView::None,
+            },
+            Self::Recovery { .. } => UiRouteContract {
+                enter: UiEnterResult::Recover,
+                escape: UiEscapeResult::Pop,
+                completion: UiCompletionResult::Return,
+                adjacent: UiAdjacentView::None,
+            },
+            Self::Choice { .. } | Self::Form { .. } | Self::Confirmation { .. } => {
+                UiRouteContract {
+                    enter: UiEnterResult::Advance,
+                    escape: UiEscapeResult::Pop,
+                    completion: UiCompletionResult::Advance,
+                    adjacent: UiAdjacentView::None,
+                }
+            }
+            Self::ConversationEvidence { .. }
+            | Self::ProjectEvidence { .. }
+            | Self::AgentEvidence { .. }
+            | Self::Help(_) => UiRouteContract {
+                enter: UiEnterResult::None,
+                escape: UiEscapeResult::Pop,
+                completion: UiCompletionResult::None,
+                adjacent: UiAdjacentView::None,
+            },
+            Self::Project { .. }
+            | Self::ProjectManagement { .. }
+            | Self::ProjectFolders { .. }
+            | Self::ProjectFolder { .. }
+            | Self::Agent { .. }
+            | Self::AgentSessions { .. } => UiRouteContract {
+                enter: UiEnterResult::Push,
+                escape: UiEscapeResult::Pop,
+                completion: UiCompletionResult::Return,
+                adjacent: UiAdjacentView::None,
+            },
+        }
+    }
+}
+
+/// Typed destination consumed when a child flow completes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiReturnLevel {
+    /// Return to the named workspace root.
+    Workspace(UiWorkspace),
+    /// Return to this exact identity-bearing route.
+    Route(UiRoute),
+}
+
+/// Invalid navigation request rejected before it can create hidden history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiNavigationError {
+    /// A canonical path was empty.
+    EmptyPath,
+    /// The first entry was not a workspace root.
+    MissingWorkspaceRoot,
+    /// A workspace root appeared below another route.
+    NestedWorkspaceRoot,
+    /// A route did not have its required canonical parent.
+    InvalidParent,
+    /// A requested typed completion destination was absent.
+    ReturnLevelMissing,
+    /// A non-cancellable progress route rejected Back.
+    OperationInProgress,
+}
+
+/// One canonical path from HQ's root to the active route.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiNavigation {
+    path: Vec<UiRoute>,
+}
+
+impl UiNavigation {
+    fn new(workspace: UiWorkspace) -> Self {
+        Self {
+            path: vec![UiRoute::Workspace(workspace)],
+        }
+    }
+
+    /// Borrows the complete canonical route path.
+    pub fn path(&self) -> &[UiRoute] {
+        &self.path
+    }
+
+    /// Returns the active route.
+    pub fn active(&self) -> &UiRoute {
+        let Some(active) = self.path.last() else {
+            unreachable!("navigation always retains a workspace root");
+        };
+        active
+    }
+
+    /// Returns the root workspace.
+    pub fn workspace(&self) -> UiWorkspace {
+        match self.path.first() {
+            Some(UiRoute::Workspace(workspace)) => *workspace,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Pushes one genuinely nested canonical destination.
+    pub fn push(&mut self, route: UiRoute) -> Result<(), UiNavigationError> {
+        if matches!(route, UiRoute::Workspace(_)) {
+            return Err(UiNavigationError::NestedWorkspaceRoot);
+        }
+        if !canonical_parent(self.active(), &route) {
+            return Err(UiNavigationError::InvalidParent);
+        }
+        self.path.push(route);
+        Ok(())
+    }
+
+    /// Pops one visible level. A workspace root is an explicit no-op.
+    pub fn pop(&mut self) -> Result<bool, UiNavigationError> {
+        if self.active().contract().escape == UiEscapeResult::BlockedWhileRunning {
+            return Err(UiNavigationError::OperationInProgress);
+        }
+        if self.path.len() == 1 {
+            return Ok(false);
+        }
+        self.path.pop();
+        Ok(true)
+    }
+
+    /// Replaces the active sequential screen without retaining it in Back history.
+    pub fn replace(&mut self, route: UiRoute) -> Result<(), UiNavigationError> {
+        if self.path.len() == 1 || matches!(route, UiRoute::Workspace(_)) {
+            return Err(UiNavigationError::InvalidParent);
+        }
+        let parent = &self.path[self.path.len() - 2];
+        if !canonical_parent(parent, &route) {
+            return Err(UiNavigationError::InvalidParent);
+        }
+        let Some(active) = self.path.last_mut() else {
+            unreachable!("non-root path has an active route");
+        };
+        *active = route;
+        Ok(())
+    }
+
+    /// Consumes child routes through an exact declared return level.
+    pub fn complete_to(&mut self, level: &UiReturnLevel) -> Result<(), UiNavigationError> {
+        let position = match level {
+            UiReturnLevel::Workspace(workspace) => self.path.iter().position(
+                |route| matches!(route, UiRoute::Workspace(candidate) if candidate == workspace),
+            ),
+            UiReturnLevel::Route(expected) => self.path.iter().rposition(|route| route == expected),
+        }
+        .ok_or(UiNavigationError::ReturnLevelMissing)?;
+        self.path.truncate(position + 1);
+        Ok(())
+    }
+
+    /// Installs a complete canonical path, replacing all incidental origin history.
+    pub fn install(&mut self, path: Vec<UiRoute>) -> Result<(), UiNavigationError> {
+        validate_canonical_path(&path)?;
+        self.path = path;
+        Ok(())
+    }
+
+    /// Replaces the path with exactly one workspace root.
+    pub fn switch_workspace(&mut self, workspace: UiWorkspace) {
+        self.path.clear();
+        self.path.push(UiRoute::Workspace(workspace));
+    }
+}
+
+fn validate_canonical_path(path: &[UiRoute]) -> Result<(), UiNavigationError> {
+    let Some(UiRoute::Workspace(_)) = path.first() else {
+        return Err(if path.is_empty() {
+            UiNavigationError::EmptyPath
+        } else {
+            UiNavigationError::MissingWorkspaceRoot
+        });
+    };
+    for pair in path.windows(2) {
+        if matches!(pair[1], UiRoute::Workspace(_)) {
+            return Err(UiNavigationError::NestedWorkspaceRoot);
+        }
+        if !canonical_parent(&pair[0], &pair[1]) {
+            return Err(UiNavigationError::InvalidParent);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::match_same_arms)]
+fn canonical_parent(parent: &UiRoute, child: &UiRoute) -> bool {
+    match child {
+        UiRoute::Workspace(_) => false,
+        UiRoute::Conversation { .. } => matches!(
+            parent,
+            UiRoute::Workspace(UiWorkspace::Inbox | UiWorkspace::Sent | UiWorkspace::Archived)
+        ),
+        UiRoute::ConversationEvidence { row_id, .. } => {
+            matches!(parent, UiRoute::Conversation { row_id: parent_id } if parent_id == row_id)
+        }
+        UiRoute::Project { .. } => {
+            matches!(parent, UiRoute::Workspace(UiWorkspace::Projects))
+        }
+        UiRoute::ProjectManagement { project_id } => {
+            matches!(parent, UiRoute::Project { project_id: parent_id } if parent_id == project_id)
+        }
+        UiRoute::ProjectFolders { project_id } => {
+            matches!(parent, UiRoute::ProjectManagement { project_id: parent_id } if parent_id == project_id)
+        }
+        UiRoute::ProjectEvidence { project_id } => {
+            matches!(parent, UiRoute::Project { project_id: parent_id } if parent_id == project_id)
+                || matches!(parent, UiRoute::ProjectManagement { project_id: parent_id } if parent_id == project_id)
+        }
+        UiRoute::ProjectFolder { project_id, .. } => {
+            matches!(parent, UiRoute::ProjectFolders { project_id: parent_id } if parent_id == project_id)
+        }
+        UiRoute::Agent { .. } => matches!(parent, UiRoute::Workspace(UiWorkspace::Agents)),
+        UiRoute::AgentSessions { agent_id } | UiRoute::AgentEvidence { agent_id } => {
+            matches!(parent, UiRoute::Agent { agent_id: parent_id } if parent_id == agent_id)
+        }
+        UiRoute::Help(_) => !matches!(parent, UiRoute::Help(_)),
+        UiRoute::Choice { .. } => {
+            !matches!(parent, UiRoute::Progress { .. } | UiRoute::Outcome { .. })
+        }
+        UiRoute::Form { .. } | UiRoute::Confirmation { .. } => {
+            matches!(
+                parent,
+                UiRoute::Workspace(_)
+                    | UiRoute::Project { .. }
+                    | UiRoute::ProjectManagement { .. }
+                    | UiRoute::ProjectFolders { .. }
+                    | UiRoute::Agent { .. }
+                    | UiRoute::AgentSessions { .. }
+                    | UiRoute::Choice { .. }
+            )
+        }
+        UiRoute::Progress { .. } | UiRoute::Outcome { .. } | UiRoute::Recovery { .. } => !matches!(
+            parent,
+            UiRoute::Workspace(_) | UiRoute::Progress { .. } | UiRoute::Outcome { .. }
+        ),
+    }
+}
+
 fn bounded_navigation_index(current: Option<usize>, len: usize, forward: bool) -> Option<usize> {
     if len == 0 {
         return None;
@@ -215,7 +745,7 @@ pub enum UiFocus {
 }
 
 /// Page shown by the persistent contextual-help overlay.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum UiHelpPage {
     /// Plain-language purpose, state, and available actions.
     Context,
@@ -2600,50 +3130,48 @@ struct PendingMailbox {
     kind: PendingMailboxKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct UiSectionWorkspace {
-    selected_row: Option<String>,
-    conversation: Option<UiConversation>,
-    conversation_setup: Option<UiProjectConversationSetup>,
-    conversation_anchor: Option<String>,
-    conversation_scroll_mode: ConversationScrollMode,
-    conversation_viewport_position: Option<UiConversationViewportPosition>,
-    technical_visible: bool,
-    technical_scroll: u16,
-    focus: UiFocus,
-    conversation_failure: Option<ConversationFailure>,
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct UiSectionWorkspaces {
-    inbox: Option<UiSectionWorkspace>,
-    sent: Option<UiSectionWorkspace>,
-    archived: Option<UiSectionWorkspace>,
-    agents: Option<UiSectionWorkspace>,
-    projects: Option<UiSectionWorkspace>,
-    config: Option<UiSectionWorkspace>,
+struct UiListSelections {
+    inbox: Option<String>,
+    sent: Option<String>,
+    archived: Option<String>,
+    agents: Option<String>,
+    projects: Option<String>,
 }
 
-impl UiSectionWorkspaces {
-    const fn get(&self, section: UiSection) -> Option<&UiSectionWorkspace> {
-        match section {
-            UiSection::Inbox => self.inbox.as_ref(),
-            UiSection::Sent => self.sent.as_ref(),
-            UiSection::Archived => self.archived.as_ref(),
-            UiSection::Agents => self.agents.as_ref(),
-            UiSection::Projects => self.projects.as_ref(),
-            UiSection::Config => self.config.as_ref(),
+impl UiListSelections {
+    fn get(&self, workspace: UiWorkspace) -> Option<&str> {
+        match workspace {
+            UiWorkspace::Inbox => self.inbox.as_deref(),
+            UiWorkspace::Sent => self.sent.as_deref(),
+            UiWorkspace::Archived => self.archived.as_deref(),
+            UiWorkspace::Agents => self.agents.as_deref(),
+            UiWorkspace::Projects => self.projects.as_deref(),
+            UiWorkspace::Config => None,
         }
     }
 
-    const fn get_mut(&mut self, section: UiSection) -> &mut Option<UiSectionWorkspace> {
-        match section {
-            UiSection::Inbox => &mut self.inbox,
-            UiSection::Sent => &mut self.sent,
-            UiSection::Archived => &mut self.archived,
-            UiSection::Agents => &mut self.agents,
-            UiSection::Projects => &mut self.projects,
-            UiSection::Config => &mut self.config,
+    fn save(&mut self, workspace: UiWorkspace, selected: Option<String>) {
+        let destination = match workspace {
+            UiWorkspace::Inbox => &mut self.inbox,
+            UiWorkspace::Sent => &mut self.sent,
+            UiWorkspace::Archived => &mut self.archived,
+            UiWorkspace::Agents => &mut self.agents,
+            UiWorkspace::Projects => &mut self.projects,
+            UiWorkspace::Config => return,
+        };
+        *destination = selected;
+    }
+}
+
+impl UiListSelections {
+    fn empty() -> Self {
+        Self {
+            inbox: None,
+            sent: None,
+            archived: None,
+            agents: None,
+            projects: None,
         }
     }
 }
@@ -2734,7 +3262,7 @@ pub struct UiModel {
     viewport: UiSize,
     connection: UiConnectionState,
     connection_generation: u64,
-    section: UiSection,
+    navigation: UiNavigation,
     focus: UiFocus,
     snapshot: Option<UiSnapshot>,
     selected_row: Option<String>,
@@ -2788,7 +3316,7 @@ pub struct UiModel {
     pending_managed_session: Option<EffectId>,
     pending_project: Option<PendingProject>,
     pending_project_conversation: Option<([u8; 32], [u8; 32])>,
-    section_workspaces: UiSectionWorkspaces,
+    list_selections: UiListSelections,
     retry_timer: Option<EffectId>,
     autosave_timer: Option<EffectId>,
     completion_timer: Option<EffectId>,
@@ -2806,12 +3334,12 @@ pub struct UiModel {
 
 impl UiModel {
     /// Constructs a disconnected model without performing any effects.
-    pub const fn new(viewport: UiSize) -> Self {
+    pub fn new(viewport: UiSize) -> Self {
         Self {
             viewport,
             connection: UiConnectionState::Disconnected,
             connection_generation: 0,
-            section: UiSection::Inbox,
+            navigation: UiNavigation::new(UiWorkspace::Inbox),
             focus: UiFocus::Content,
             snapshot: None,
             selected_row: None,
@@ -2870,14 +3398,7 @@ impl UiModel {
             pending_managed_session: None,
             pending_project: None,
             pending_project_conversation: None,
-            section_workspaces: UiSectionWorkspaces {
-                inbox: None,
-                sent: None,
-                archived: None,
-                agents: None,
-                projects: None,
-                config: None,
-            },
+            list_selections: UiListSelections::empty(),
             retry_timer: None,
             autosave_timer: None,
             completion_timer: None,
@@ -3049,8 +3570,20 @@ impl UiModel {
     }
 
     /// Returns the selected semantic section.
-    pub const fn section(&self) -> UiSection {
-        self.section
+    pub fn section(&self) -> UiSection {
+        match self.navigation.workspace() {
+            UiWorkspace::Inbox => UiSection::Inbox,
+            UiWorkspace::Sent => UiSection::Sent,
+            UiWorkspace::Archived => UiSection::Archived,
+            UiWorkspace::Agents => UiSection::Agents,
+            UiWorkspace::Projects => UiSection::Projects,
+            UiWorkspace::Config => UiSection::Config,
+        }
+    }
+
+    /// Borrows the single canonical path from the workspace root to the active route.
+    pub fn navigation_path(&self) -> &[UiRoute] {
+        self.navigation.path()
     }
 
     /// Returns the current logical focus.
@@ -3091,10 +3624,10 @@ impl UiModel {
     /// Borrows the latest rows for the selected semantic section.
     pub fn rows(&self) -> Option<&[UiRow]> {
         self.snapshot.as_ref().map(|snapshot| {
-            if self.section == UiSection::Inbox && self.project_filter.is_some() {
+            if self.section() == UiSection::Inbox && self.project_filter.is_some() {
                 self.project_filter_rows.as_slice()
             } else {
-                snapshot.rows(self.section)
+                snapshot.rows(self.section())
             }
         })
     }
@@ -3626,7 +4159,7 @@ impl UiModel {
     }
 
     fn request_inbox_preview(&mut self, effects: &mut Vec<UiEffect>) {
-        if self.section != UiSection::Inbox {
+        if self.section() != UiSection::Inbox {
             if self.requested_conversation.take().is_some() {
                 effects.push(UiEffect::ObserveConversation { row_id: None });
             }
@@ -3794,61 +4327,23 @@ impl UiModel {
         Ok(())
     }
 
-    fn save_section_workspace(&mut self) {
-        *self.section_workspaces.get_mut(self.section) = Some(UiSectionWorkspace {
-            selected_row: self.selected_row.clone(),
-            conversation: self.conversation.clone(),
-            conversation_setup: self.conversation_setup.clone(),
-            conversation_anchor: self.conversation_anchor.clone(),
-            conversation_scroll_mode: self.conversation_scroll_mode,
-            conversation_viewport_position: self.conversation_viewport_position.clone(),
-            technical_visible: self.technical_visible,
-            technical_scroll: self.technical_scroll,
-            focus: self.focus,
-            conversation_failure: self.conversation_failure.clone(),
-        });
-    }
-
-    fn restore_section_workspace(&mut self) {
-        let workspace = self.section_workspaces.get(self.section).cloned();
-        if let Some(workspace) = workspace {
-            self.selected_row = workspace.selected_row;
-            self.conversation = workspace.conversation;
-            self.conversation_setup = workspace.conversation_setup;
-            self.conversation_anchor = workspace.conversation_anchor;
-            self.conversation_scroll_mode = workspace.conversation_scroll_mode;
-            self.conversation_viewport_position = workspace.conversation_viewport_position;
-            self.conversation_viewport_geometry = None;
-            self.technical_visible = workspace.technical_visible;
-            self.technical_scroll = workspace.technical_scroll;
-            self.focus = workspace.focus;
-            self.conversation_failure = workspace.conversation_failure;
-        } else {
-            self.selected_row = None;
-            self.conversation = None;
-            self.conversation_anchor = None;
-            self.conversation_scroll_mode = ConversationScrollMode::Anchored;
-            self.conversation_viewport_position = None;
-            self.conversation_viewport_geometry = None;
-            self.technical_visible = false;
-            self.technical_scroll = 0;
-            self.focus = UiFocus::Content;
-            self.conversation_failure = None;
-        }
-        self.pending_conversation = None;
-        self.conversation_failure = None;
-    }
-
     fn change_section(&mut self, next: UiSection) {
-        if self.section == next {
+        if self.section() == next {
             return;
         }
-        self.save_section_workspace();
-        self.section = next;
+        self.list_selections
+            .save(self.navigation.workspace(), self.selected_row.clone());
+        let next_workspace = UiWorkspace::from(next);
+        self.navigation.switch_workspace(next_workspace);
         if next == UiSection::Config {
             self.configuration_freshness = ConfigurationFreshness::ReloadNeeded;
         }
-        self.restore_section_workspace();
+        self.selected_row = self.list_selections.get(next_workspace).map(str::to_owned);
+        self.desired_conversation = None;
+        self.conversation_setup = None;
+        self.close_conversation();
+        self.focus = UiFocus::Content;
+        self.conversation_failure = None;
         self.reconcile_current_section();
         self.refresh_selected_project_summary();
     }
@@ -3890,7 +4385,7 @@ impl UiModel {
         let selected = rows[next].id.clone();
         if current_selection == Some(&selected) {
             false
-        } else if self.section == UiSection::Inbox {
+        } else if self.section() == UiSection::Inbox {
             let is_conversation = rows[next].kind == UiRowKind::Conversation;
             self.selected_row = Some(selected.clone());
             self.desired_conversation = is_conversation.then_some(selected);
@@ -3898,7 +4393,7 @@ impl UiModel {
         } else {
             self.selected_row = Some(selected);
             self.close_conversation();
-            if self.section == UiSection::Projects {
+            if self.section() == UiSection::Projects {
                 self.project_summary_focus = UiProjectSummaryFocus::Conversation;
                 self.refresh_selected_project_summary();
             }
@@ -5023,32 +5518,6 @@ fn reconcile_command_approval_focus(model: &mut UiModel, prior_restore: Option<U
             UiFocus::Conversation
         };
     }
-    restore_saved_inbox_focus_if_unblocked(model, prior_restore);
-}
-
-fn restore_saved_inbox_focus_if_unblocked(model: &mut UiModel, restore: Option<UiFocus>) {
-    let Some(workspace) = model.section_workspaces.inbox.as_mut() else {
-        return;
-    };
-    if workspace.focus != UiFocus::Approval {
-        return;
-    }
-    let still_blocked = workspace.conversation.as_ref().is_some_and(|conversation| {
-        model.command_approvals.values().any(|state| {
-            matches!(
-                &state.interaction.target,
-                UiInteractionTarget::Conversation { row_id }
-                    if row_id == &conversation.row_id
-            )
-        })
-    });
-    if !still_blocked {
-        workspace.focus = if restore == Some(UiFocus::Draft) && model.mailbox_draft.is_some() {
-            UiFocus::Draft
-        } else {
-            UiFocus::Conversation
-        };
-    }
 }
 
 fn show_next_interaction(model: &mut UiModel) {
@@ -5101,16 +5570,15 @@ fn interaction_answered(
                     .to_owned(),
         });
     }
-    if let Some(command) = removed_command {
-        if model.focus == UiFocus::Approval && model.current_command_approval().is_none() {
-            model.focus =
-                if command.restore_focus == UiFocus::Draft && model.mailbox_draft.is_some() {
-                    UiFocus::Draft
-                } else {
-                    UiFocus::Conversation
-                };
-        }
-        restore_saved_inbox_focus_if_unblocked(model, Some(command.restore_focus));
+    if let Some(command) = removed_command
+        && model.focus == UiFocus::Approval
+        && model.current_command_approval().is_none()
+    {
+        model.focus = if command.restore_focus == UiFocus::Draft && model.mailbox_draft.is_some() {
+            UiFocus::Draft
+        } else {
+            UiFocus::Conversation
+        };
     }
     effects.push(UiEffect::RequestRedraw);
 }
@@ -5219,7 +5687,7 @@ fn apply_input(
         return Ok(());
     }
     if matches!(input, UiInput::Refresh) {
-        if model.section == UiSection::Config {
+        if model.section() == UiSection::Config {
             model.configuration_freshness = ConfigurationFreshness::ReloadNeeded;
             request_configuration_if_needed(model, effects)?;
         } else {
@@ -5245,15 +5713,17 @@ fn apply_input(
         && let UiInput::Character(character) = input
         && let Some(section) = UiSection::from_shortcut(*character)
     {
-        if model.section != section {
+        if model.section() != section {
             model.change_section(section);
             request_configuration_if_needed(model, effects)?;
-            model.request_inbox_preview(effects);
+            if section != UiSection::Inbox {
+                model.request_inbox_preview(effects);
+            }
             effects.push(UiEffect::RequestRedraw);
         }
         return Ok(());
     }
-    if model.section == UiSection::Config
+    if model.section() == UiSection::Config
         && (model.focus == UiFocus::Content || model.config_edit.is_some())
     {
         request_configuration_if_needed(model, effects)?;
@@ -5379,7 +5849,7 @@ fn request_configuration_if_needed(
     model: &mut UiModel,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
-    if model.section == UiSection::Config
+    if model.section() == UiSection::Config
         && (model.configuration.is_none()
             || model.configuration_freshness == ConfigurationFreshness::ReloadNeeded)
         && model.pending_configuration.is_none()
@@ -5397,7 +5867,7 @@ fn apply_project_workspace_input(
     input: &UiInput,
     effects: &mut Vec<UiEffect>,
 ) -> Result<Option<bool>, UiError> {
-    if model.section == UiSection::Inbox
+    if model.section() == UiSection::Inbox
         && model.project_filter.is_some()
         && model.focus != UiFocus::Conversation
         && matches!(input, UiInput::Escape)
@@ -5405,7 +5875,7 @@ fn apply_project_workspace_input(
         model.clear_project_filter();
         return Ok(Some(true));
     }
-    if model.section != UiSection::Projects || model.focus != UiFocus::Content {
+    if model.section() != UiSection::Projects || model.focus != UiFocus::Content {
         return Ok(None);
     }
     match (model.project_workspace_level, input) {
@@ -6017,7 +6487,7 @@ fn normalize_vim_navigation(model: &UiModel, input: &UiInput) -> UiInput {
 }
 
 fn text_input_is_active(model: &UiModel) -> bool {
-    if model.section == UiSection::Config && model.config_edit.is_some() {
+    if model.section() == UiSection::Config && model.config_edit.is_some() {
         return true;
     }
     if matches!(
@@ -9411,7 +9881,7 @@ fn project_matches(project: &UiProject, query: &str) -> bool {
 }
 
 fn select_project_search_match(model: &mut UiModel, forward: bool) {
-    if model.section != UiSection::Projects || model.project_search.is_empty() {
+    if model.section() != UiSection::Projects || model.project_search.is_empty() {
         return;
     }
     let Some(snapshot) = &model.snapshot else {
@@ -9477,7 +9947,7 @@ fn agent_matches(agent: &UiAgent, query: &str) -> bool {
 }
 
 fn select_agent_search_match(model: &mut UiModel, forward: bool) {
-    if model.section != UiSection::Agents || model.agent_search.is_empty() {
+    if model.section() != UiSection::Agents || model.agent_search.is_empty() {
         return;
     }
     let Some(snapshot) = &model.snapshot else {
@@ -9762,7 +10232,7 @@ fn mailbox_shortcut(
             if model.current_command_approval().is_some() {
                 return Ok(false);
             }
-            if matches!(model.section, UiSection::Agents | UiSection::Archived) {
+            if matches!(model.section(), UiSection::Agents | UiSection::Archived) {
                 return Ok(false);
             }
             if let Some(setup) = model.selected_setup().cloned() {
@@ -9797,7 +10267,7 @@ fn mailbox_shortcut(
             Ok(true)
         }
         'd' => {
-            if model.section != UiSection::Inbox {
+            if model.section() != UiSection::Inbox {
                 return Ok(false);
             }
             let Some(conversation) = selected_conversation_target(model) else {
@@ -9815,32 +10285,32 @@ fn mailbox_shortcut(
             });
             Ok(true)
         }
-        '/' if model.section == UiSection::Agents => {
+        '/' if model.section() == UiSection::Agents => {
             model.agent_modal = Some(UiAgentModal::Search {
                 query: model.agent_search.clone(),
             });
             Ok(true)
         }
-        'c' if model.section == UiSection::Agents => {
+        'c' if model.section() == UiSection::Agents => {
             model.agent_modal = Some(UiAgentModal::Create {
                 name: String::new(),
                 submitting: false,
             });
             Ok(true)
         }
-        '/' if model.section == UiSection::Projects => {
+        '/' if model.section() == UiSection::Projects => {
             model.project_interaction = Some(UiProjectInteraction::Search {
                 query: model.project_search.clone(),
             });
             Ok(true)
         }
-        'c' if model.section == UiSection::Projects => {
+        'c' if model.section() == UiSection::Projects => {
             model.project_interaction = Some(UiProjectInteraction::ChooseCreation {
                 selected: UiProjectCreationChoice::ExistingFolder,
             });
             Ok(true)
         }
-        'c' if model.section == UiSection::Inbox => {
+        'c' if model.section() == UiSection::Inbox => {
             if model.selected_setup().is_some() {
                 return Ok(open_setup_agent_picker(model));
             }
@@ -9858,7 +10328,7 @@ fn mailbox_shortcut(
             )?;
             Ok(true)
         }
-        'w' if model.section == UiSection::Projects => {
+        'w' if model.section() == UiSection::Projects => {
             open_worktree_project_form(model);
             Ok(true)
         }
@@ -9963,7 +10433,7 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
     if model.focus == UiFocus::Conversation && model.conversation_anchor.is_some() {
         return Ok(model.toggle_technical_details());
     }
-    if model.section == UiSection::Agents {
+    if model.section() == UiSection::Agents {
         let Some(agent) = selected_agent(model).cloned() else {
             return Ok(false);
         };
@@ -9974,10 +10444,10 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
         });
         return Ok(true);
     }
-    if model.section == UiSection::Projects {
+    if model.section() == UiSection::Projects {
         return open_selected_project_conversations(model, effects);
     }
-    if model.section == UiSection::Inbox
+    if model.section() == UiSection::Inbox
         && model
             .selected_row_data()
             .is_some_and(|row| row.kind == UiRowKind::Agent)
@@ -11896,17 +12366,223 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        ConfigurationFreshness, TextEdit, UiAgent, UiAgentLifecycle, UiAgentStatus, UiConfigField,
-        UiConfiguration, UiConversationTarget, UiEffect, UiError, UiEvent, UiFailure, UiFocus,
-        UiFormField, UiFormKind, UiFormState, UiGuidedSubmission, UiHumanState, UiInput,
-        UiInteraction, UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind,
-        UiInteractionModal, UiInteractionResponse, UiInteractionTarget, UiMailboxDraftPane,
-        UiMailboxDraftTarget, UiModel, UiNewWorkflow, UiProject, UiProjectAction,
-        UiProjectAssignment, UiProjectInteraction, UiProjectResourceCheck, UiProjectThread, UiRow,
-        UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiThemeChoice,
+        ConfigurationFreshness, EffectId, TextEdit, UiAdjacentView, UiAgent, UiAgentLifecycle,
+        UiAgentStatus, UiConfigField, UiConfiguration, UiConversationTarget, UiEffect, UiError,
+        UiEscapeResult, UiEvent, UiFailure, UiFocus, UiFormField, UiFormKind, UiFormState,
+        UiGuidedSubmission, UiHelpPage, UiHumanState, UiInput, UiInteraction,
+        UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind, UiInteractionModal,
+        UiInteractionResponse, UiInteractionTarget, UiMailboxDraftPane, UiMailboxDraftTarget,
+        UiModel, UiNavigation, UiNavigationError, UiNewWorkflow, UiProject, UiProjectAction,
+        UiProjectAssignment, UiProjectInteraction, UiProjectResourceCheck, UiProjectThread,
+        UiReturnLevel, UiRoute, UiRouteTarget, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
+        UiSnapshot, UiThemeChoice, UiWorkflowCapability, UiWorkspace,
         apply_project_interaction_input, edit_text, normalize_path_input,
         refresh_project_interaction, select_project_conversation, update,
     };
+    use std::num::NonZeroU64;
+
+    fn effect_id(value: u64) -> EffectId {
+        EffectId(NonZeroU64::new(value).expect("test effect identity is nonzero"))
+    }
+
+    #[test]
+    fn navigation_stack_pushes_pops_replaces_and_completes_visible_levels() {
+        let project_id = [1; 32];
+        let project = UiRoute::Project { project_id };
+        let mut navigation = UiNavigation::new(UiWorkspace::Projects);
+        assert_eq!(navigation.pop(), Ok(false));
+
+        navigation.push(project.clone()).expect("project is nested");
+        navigation
+            .push(UiRoute::Choice {
+                capability: UiWorkflowCapability::ChooseAgent,
+                target: UiRouteTarget::Project(project_id),
+            })
+            .expect("agent choice is nested");
+        navigation
+            .replace(UiRoute::Form {
+                capability: UiWorkflowCapability::EditAgent,
+                target: UiRouteTarget::Project(project_id),
+            })
+            .expect("sequential form replaces the chooser");
+        assert_eq!(navigation.path().len(), 3);
+
+        navigation
+            .complete_to(&UiReturnLevel::Route(project.clone()))
+            .expect("exact project remains in the path");
+        assert_eq!(
+            navigation.path(),
+            &[UiRoute::Workspace(UiWorkspace::Projects), project.clone()]
+        );
+        assert_eq!(navigation.pop(), Ok(true));
+        assert_eq!(
+            navigation.path(),
+            &[UiRoute::Workspace(UiWorkspace::Projects)]
+        );
+    }
+
+    #[test]
+    fn canonical_deep_paths_replace_origin_history_and_reject_invalid_identity_paths() {
+        let mut navigation = UiNavigation::new(UiWorkspace::Projects);
+        navigation
+            .push(UiRoute::Project {
+                project_id: [2; 32],
+            })
+            .expect("project path");
+        navigation
+            .install(vec![
+                UiRoute::Workspace(UiWorkspace::Inbox),
+                UiRoute::Conversation {
+                    row_id: "conversation-a".to_owned(),
+                },
+                UiRoute::ConversationEvidence {
+                    row_id: "conversation-a".to_owned(),
+                    entry_id: "message-a".to_owned(),
+                },
+            ])
+            .expect("canonical Inbox deep path");
+        assert_eq!(navigation.workspace(), UiWorkspace::Inbox);
+        assert_eq!(navigation.path().len(), 3);
+
+        assert_eq!(
+            navigation.install(Vec::new()),
+            Err(UiNavigationError::EmptyPath)
+        );
+        assert_eq!(
+            navigation.install(vec![UiRoute::Conversation {
+                row_id: "orphan".to_owned(),
+            }]),
+            Err(UiNavigationError::MissingWorkspaceRoot)
+        );
+        assert_eq!(
+            navigation.install(vec![
+                UiRoute::Workspace(UiWorkspace::Inbox),
+                UiRoute::Conversation {
+                    row_id: "conversation-a".to_owned(),
+                },
+                UiRoute::ConversationEvidence {
+                    row_id: "different-conversation".to_owned(),
+                    entry_id: "message-a".to_owned(),
+                },
+            ]),
+            Err(UiNavigationError::InvalidParent)
+        );
+        assert_eq!(navigation.workspace(), UiWorkspace::Inbox);
+        assert_eq!(navigation.path().len(), 3, "failed installs are atomic");
+    }
+
+    #[test]
+    fn progress_is_non_cancellable_and_advances_without_leaving_a_stale_screen() {
+        let project_id = [3; 32];
+        let mut navigation = UiNavigation::new(UiWorkspace::Projects);
+        navigation
+            .push(UiRoute::Choice {
+                capability: UiWorkflowCapability::CreateProject,
+                target: UiRouteTarget::Global,
+            })
+            .expect("creation choice");
+        navigation
+            .push(UiRoute::Form {
+                capability: UiWorkflowCapability::CreateProject,
+                target: UiRouteTarget::Global,
+            })
+            .expect("creation form");
+        let progress = UiRoute::Progress {
+            capability: UiWorkflowCapability::CreateProject,
+            target: UiRouteTarget::Project(project_id),
+            effect_id: effect_id(1),
+        };
+        navigation
+            .replace(progress)
+            .expect("form advances to progress");
+        assert_eq!(
+            navigation.pop(),
+            Err(UiNavigationError::OperationInProgress)
+        );
+        navigation
+            .replace(UiRoute::Outcome {
+                capability: UiWorkflowCapability::CreateProject,
+                target: UiRouteTarget::Project(project_id),
+                effect_id: effect_id(1),
+            })
+            .expect("matching completion advances to outcome");
+        assert_eq!(navigation.path().len(), 3);
+    }
+
+    #[test]
+    fn route_table_declares_every_family_and_only_conversations_allow_adjacent_input() {
+        let routes = [
+            UiRoute::Workspace(UiWorkspace::Inbox),
+            UiRoute::Conversation {
+                row_id: "conversation".to_owned(),
+            },
+            UiRoute::ConversationEvidence {
+                row_id: "conversation".to_owned(),
+                entry_id: "entry".to_owned(),
+            },
+            UiRoute::Project {
+                project_id: [1; 32],
+            },
+            UiRoute::ProjectManagement {
+                project_id: [1; 32],
+            },
+            UiRoute::ProjectFolders {
+                project_id: [1; 32],
+            },
+            UiRoute::ProjectFolder {
+                project_id: [1; 32],
+                folder_id: [2; 32],
+            },
+            UiRoute::ProjectEvidence {
+                project_id: [1; 32],
+            },
+            UiRoute::Agent { agent_id: [3; 32] },
+            UiRoute::AgentSessions { agent_id: [3; 32] },
+            UiRoute::AgentEvidence { agent_id: [3; 32] },
+            UiRoute::Help(UiHelpPage::Context),
+            UiRoute::Choice {
+                capability: UiWorkflowCapability::StartNewWork,
+                target: UiRouteTarget::Global,
+            },
+            UiRoute::Form {
+                capability: UiWorkflowCapability::EditConfiguration,
+                target: UiRouteTarget::Global,
+            },
+            UiRoute::Confirmation {
+                capability: UiWorkflowCapability::ArchiveConversation,
+                target: UiRouteTarget::Conversation("conversation".to_owned()),
+            },
+            UiRoute::Progress {
+                capability: UiWorkflowCapability::ManageProject,
+                target: UiRouteTarget::Project([1; 32]),
+                effect_id: effect_id(2),
+            },
+            UiRoute::Outcome {
+                capability: UiWorkflowCapability::ManageProject,
+                target: UiRouteTarget::Project([1; 32]),
+                effect_id: effect_id(2),
+            },
+            UiRoute::Recovery {
+                capability: UiWorkflowCapability::ManageProject,
+                target: UiRouteTarget::Project([1; 32]),
+            },
+        ];
+        for route in &routes {
+            let contract = route.contract();
+            assert_eq!(
+                contract.adjacent == UiAdjacentView::ConversationInput,
+                matches!(route, UiRoute::Conversation { .. })
+            );
+            assert_eq!(
+                contract.escape == UiEscapeResult::Stay,
+                matches!(route, UiRoute::Workspace(_))
+            );
+            assert_eq!(
+                contract.escape == UiEscapeResult::BlockedWhileRunning,
+                matches!(route, UiRoute::Progress { .. })
+            );
+        }
+    }
 
     #[test]
     fn project_conversation_selection_uses_the_typed_agent_row_identity() {
