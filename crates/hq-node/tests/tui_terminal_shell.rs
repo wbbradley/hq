@@ -25,7 +25,7 @@ use hq_tui::{
     UiConversationViewportPosition, UiFailure, UiHumanState, UiInput, UiInteraction,
     UiInteractionKind, UiInteractionTarget, UiMailboxAction, UiMailboxCommandResult,
     UiMailboxDraft, UiMailboxDraftTarget, UiMaterializedConversationView, UiMessageState, UiModel,
-    UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
+    UiRoute, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot, UiWorkspace,
 };
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
@@ -172,10 +172,16 @@ fn normal_quit_and_ctrl_c_cancellation_restore_exactly_once() {
 #[test]
 fn retained_subscription_view_is_drawn_without_refetching_startup_state() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let terminal = ScriptedTerminal::new(
+    let route_paths = Arc::new(Mutex::new(Vec::new()));
+    let mut terminal = ScriptedTerminal::new(
         Arc::clone(&log),
-        [Ok(Some(TuiTerminalEvent::Input(UiInput::Quit)))],
+        [
+            Ok(Some(TuiTerminalEvent::Input(UiInput::Activate))),
+            Ok(Some(TuiTerminalEvent::Input(UiInput::Escape))),
+            Ok(Some(TuiTerminalEvent::Input(UiInput::Quit))),
+        ],
     );
+    terminal.route_paths = Some(Arc::clone(&route_paths));
     let snapshot_loads = Arc::new(AtomicUsize::new(0));
     let client = CountingClient {
         snapshot_loads: Arc::clone(&snapshot_loads),
@@ -219,6 +225,20 @@ fn retained_subscription_view_is_drawn_without_refetching_startup_state() {
 
     assert_eq!(snapshot_loads.load(Ordering::SeqCst), 0);
     assert!(log.lock().expect("terminal log").contains(&"draw"));
+    assert_eq!(
+        route_paths.lock().expect("route paths").as_slice(),
+        &[
+            vec![UiRoute::Workspace(UiWorkspace::Inbox)],
+            vec![
+                UiRoute::Workspace(UiWorkspace::Inbox),
+                UiRoute::Conversation {
+                    row_id: "thread-a".to_owned(),
+                },
+            ],
+            vec![UiRoute::Workspace(UiWorkspace::Inbox)],
+        ],
+        "the shell must preserve the typed root/detail/Back journey"
+    );
 }
 
 #[test]
@@ -459,6 +479,7 @@ struct ScriptedTerminal {
     draw_delay: Duration,
     draw_observations: VecDeque<Option<UiConversationViewportObservation>>,
     draw_positions: Option<Arc<Mutex<Vec<Option<UiConversationViewportPosition>>>>>,
+    route_paths: Option<Arc<Mutex<Vec<Vec<UiRoute>>>>>,
 }
 
 struct WakeDrivenTerminal {
@@ -532,6 +553,7 @@ impl ScriptedTerminal {
             draw_delay: Duration::ZERO,
             draw_observations: VecDeque::new(),
             draw_positions: None,
+            route_paths: None,
         }
     }
 
@@ -581,6 +603,12 @@ impl TuiTerminalPort for ScriptedTerminal {
                 .lock()
                 .expect("draw positions")
                 .push(model.conversation_viewport_position().cloned());
+        }
+        if let Some(route_paths) = &self.route_paths {
+            route_paths
+                .lock()
+                .expect("route paths")
+                .push(model.navigation_path().to_vec());
         }
         Ok(self.draw_observations.pop_front().flatten())
     }

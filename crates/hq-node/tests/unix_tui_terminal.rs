@@ -346,6 +346,11 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
         "Inbox navigation failed: {:?}",
         run.bytes
     );
+    assert!(
+        text_without_csi_sequences(&run.bytes).contains("HQ / Inbox"),
+        "Inbox root breadcrumb was not rendered: {:?}",
+        run.bytes
+    );
     for phrase in [
         "Personal notes",
         content,
@@ -364,6 +369,7 @@ fn installed_inbox_eagerly_renders_and_returns_from_conversation_to_its_list() {
         );
     }
     for obsolete in [
+        "Inbox · Conversation",
         "Conversation · complete",
         "message · open",
         "update · information only",

@@ -285,18 +285,22 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   normalization, reduction, schema-v1 persistence, local API conversion, and TUI mapping. Ordinary
   activity is compact and non-actionable; exact content and failure evidence remain available as
   technical detail.
-- Message text is entered only in the modeless Inbox draft pane; the Projects workspace and guided setup
-  contain no message-entry dialog or `send instructions` action.
-- Projects preserve selection by project and folder identity across refresh and resize. Wide layouts
-  keep list and summary together; compact layouts expose one-level Back across summary, Manage
-  project, Folders, and pane-owned forms.
+- Message text is entered only in the conversation-scoped Inbox composer; Projects and guided setup
+  contain no message-entry form or `send instructions` action.
+- One typed route path represents every visible TUI level. Selection and passive refresh leave a
+  workspace root unchanged; Enter pushes exact detail or advances a sequential workflow; Escape
+  pops one still-meaningful level. Global shortcuts and cross-workspace links install canonical
+  destination-rooted paths.
+- Projects preserve selection by project and folder identity across refresh and resize. Project
+  root, exact summary, Manage, Folders, exact folder, evidence, and workflow routes each own the
+  complete content pane at wide and compact sizes.
 - Enter on a project routes by typed Inbox conversation cardinality: an existing unfinished setup
   resumes its exact draft, zero conversations begins guided setup, one opens the exact row, and many
   shows the explicit project conversation list without guessing from display text, assignment,
   recency, provider, session, or row position.
 - Labeled folder, agent, lifecycle, recovery, and technical actions are state-dependent. Routine
   message delivery is automatic, and retry is absent without explicit stalled-delivery evidence.
-  Only destructive and force decisions use bounded modal confirmation.
+  Destructive and force decisions use explicit full-pane confirmation routes.
 - A project conversation row retains typed project, thread, and initiating-message identities.
   `r` continues that exact thread, while `c` creates a separate root and selects the row whose
   initiating message matches the committed message ID after authoritative refresh.
@@ -310,17 +314,17 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   worktree may report `Running` over multiple bounded polls and reconnects; every poll replays the
   exact retained command frame, terminal completion waits for the exact derived project ID in an
   authoritative snapshot, and the agent picker opens once for that project even when it is not the
-  first catalog row. Escape follows form -> creation choice -> retained project picker -> launcher,
-  while running Git work cannot be dismissed as cancellation and completed creation cannot reappear.
+  first catalog row. Escape follows the remaining typed parent path one level at a time, while
+  running Git work cannot be dismissed as cancellation and completed creation cannot reappear.
 - Sending in an open conversation immediately inserts one non-actionable local-human `Pending` row.
   Definite commit replaces it by exact canonical identity, project delivery stays queued until typed
   dispatch evidence, definite rejection restores the exact draft, and response loss never creates a
   second authored row.
 - One available agent service is chosen automatically without a `Start project work` confirmation;
   multiple services still require an explicit service choice and a real handoff remains reviewed.
-- Wide Inbox layout keeps a bounded 24–36-column list and gives later width to Conversation;
-  compact layout keeps both list and transcript visible. Authors and bodies start at the pane edge,
-  and full-row focus does not add a marker or reflow text.
+- Inbox roots and exact conversations are distinct full-pane routes. Wide and compact widths have
+  identical hierarchy, route depth, pending input, and Back behavior; width changes only wrapping,
+  clipping, and visible rows.
 - Transcript capacity is measured from wrapped display cells and painted as continuous slices from
   a stable entry-plus-row viewport position. Oversized entries can flow through both pane edges,
   `↑`/`↓` identify clipped content, and selection remains independent from row scrolling. An
@@ -337,9 +341,13 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   selected-row disappearance cannot paint a mismatched page or duplicate a message. A disappearing
   row chooses the row at its prior index (or the new final row) and suppresses the unmatched interim
   view until that successor's page arrives.
-- Technical disclosure uses a bounded wide inspector or compact secondary pane, retains exact
-  typed routing/semantics/evidence/activity values and raw detail, and closes before Back leaves the
-  conversation. It never replaces an open draft.
+- Technical disclosure is a full-pane typed child retaining exact routing, semantics, evidence,
+  activity values, and raw detail. Escape returns to the exact conversation before its mailbox
+  root. Conversation composition and exactly correlated approval are the only adjacent surfaces.
+- Route-aware breadcrumbs expose current plain-language context plus connection/refresh state and
+  clip by display cells. They are presentation only. Footers describe only the active route's
+  actions; resize, refresh, reconnect, target removal, and late effects cannot change the path or
+  restore a completed workflow.
 - Server-session contracts require a written hello before requests, only one unconfirmed response,
   session-owned single-use write tickets, post-write subscription activation, and idempotent cleanup
   after lost responses or stale disconnects. Every typed request family routes through application
