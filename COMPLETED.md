@@ -13456,3 +13456,14 @@ workspace verification.
 - **[correctness/medium] Keep conversation pages within the requested item limit** — A cursor-free request with `limit = 1` currently reserves one durable-history slot and then appends the live activity tail, returning two items despite the page contract. Make live-tail inclusion consume a slot while preserving a usable continuation cursor, and cover the history-plus-live-tail boundary at the minimum limit. (`crates/hq-store/src/database.rs:1682`)
 
 <!-- End of archived plan entry. -->
+
+## 2026-09-06 — Materialized conversation live tails
+
+Conversation reduction now materializes at most one exact live-tail activity per conversation in a
+digest-protected rebuildable table. Initial page reads use one keyed lookup and one hydration while
+preserving running-turn, progress, completion, human-boundary, repair, reopen, and corruption
+semantics; strict lint and the full workspace suite pass.
+
+- **[performance/medium] Bound live-tail activity reads to the requested conversation page** — Every initial conversation read currently scans all activity rows, hydrates each row separately, and accumulates per-operation state even when the caller requests one item. Derive the live tail with bounded database work so refresh cost and memory do not grow with the conversation's complete activity history, while preserving the current turn/progress/completion semantics. (`crates/hq-store/src/database.rs:1918`)
+
+<!-- End of archived plan entry. -->
