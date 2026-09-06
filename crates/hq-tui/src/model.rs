@@ -788,6 +788,14 @@ pub enum UiInput {
     MoveCursorLeft,
     /// Move the insertion caret one Unicode scalar right.
     MoveCursorRight,
+    /// Move backward one character only inside an editable field.
+    MoveCharacterBackward,
+    /// Move forward one character only inside an editable field.
+    MoveCharacterForward,
+    /// Move to the previous word start only inside an editable field.
+    MoveWordBackward,
+    /// Move to the next word start only inside an editable field.
+    MoveWordForward,
     /// Move the insertion caret to the beginning of the current line.
     MoveCursorHome,
     /// Move the insertion caret to the end of the current line.
@@ -798,6 +806,18 @@ pub enum UiInput {
     DeleteToLineEnd,
     /// Delete from the beginning of the current line to the insertion caret.
     DeleteToLineStart,
+}
+
+impl UiInput {
+    const fn is_editing_movement(&self) -> bool {
+        matches!(
+            self,
+            Self::MoveCharacterBackward
+                | Self::MoveCharacterForward
+                | Self::MoveWordBackward
+                | Self::MoveWordForward
+        )
+    }
 }
 
 /// Passive terminal dimensions supplied by the shell.
@@ -2115,6 +2135,8 @@ enum TextEdit<'a> {
     Delete,
     Left,
     Right,
+    WordLeft,
+    WordRight,
     Home,
     End,
     Up,
@@ -3504,6 +3526,14 @@ impl UiModel {
         (self.form.active == self.active_form_kind())
             .then(|| self.form.errors.get(&field).map(String::as_str))
             .flatten()
+    }
+
+    pub(crate) fn editing_movement_available(&self) -> bool {
+        self.interaction_modal.is_none()
+            && self.section() != UiSection::Config
+            && text_input_is_active(self)
+            && (self.active_form_kind() != Some(UiFormKind::MailboxCompose)
+                || self.focus == UiFocus::Draft)
     }
 
     fn active_form_kind(&self) -> Option<UiFormKind> {
@@ -6414,6 +6444,16 @@ fn apply_input(
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
     model.sync_form();
+    if input.is_editing_movement() {
+        if model.help_page.is_some() || !model.editing_movement_available() {
+            return Ok(());
+        }
+        if apply_open_modal_input(model, input, effects)?.unwrap_or(false) {
+            effects.push(UiEffect::RequestRedraw);
+        }
+        return Ok(());
+    }
+
     let normalized_input = normalize_vim_navigation(model, input);
     let input = &normalized_input;
     let dismissed_completion = model.completion_notice.take().is_some();
@@ -6566,7 +6606,11 @@ fn apply_input(
         | UiInput::MoveCursorEnd
         | UiInput::Delete
         | UiInput::DeleteToLineEnd
-        | UiInput::DeleteToLineStart => false,
+        | UiInput::DeleteToLineStart
+        | UiInput::MoveCharacterBackward
+        | UiInput::MoveCharacterForward
+        | UiInput::MoveWordBackward
+        | UiInput::MoveWordForward => false,
     };
     if changed {
         request_configuration_if_needed(model, effects)?;
@@ -8497,6 +8541,10 @@ fn apply_draft_input(
             | UiInput::Delete
             | UiInput::MoveCursorLeft
             | UiInput::MoveCursorRight
+            | UiInput::MoveCharacterBackward
+            | UiInput::MoveCharacterForward
+            | UiInput::MoveWordBackward
+            | UiInput::MoveWordForward
             | UiInput::MoveCursorHome
             | UiInput::MoveCursorEnd
             | UiInput::NextItem
@@ -8558,6 +8606,9 @@ fn apply_draft_text_input(
         MAX_DRAFT_BYTES,
     ) {
         return Ok(false);
+    }
+    if input.is_editing_movement() {
+        return Ok(true);
     }
     if draft.content.len() == previous_content_len {
         model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
@@ -8787,6 +8838,10 @@ fn apply_project_interaction_input(
             | UiInput::Delete
             | UiInput::MoveCursorLeft
             | UiInput::MoveCursorRight
+            | UiInput::MoveCharacterBackward
+            | UiInput::MoveCharacterForward
+            | UiInput::MoveWordBackward
+            | UiInput::MoveWordForward
             | UiInput::MoveCursorHome
             | UiInput::MoveCursorEnd => {
                 let changed = edit_text_input(
@@ -8799,7 +8854,9 @@ fn apply_project_interaction_input(
                 if !changed {
                     return Ok(false);
                 }
-                update_project_search(model, query);
+                if !input.is_editing_movement() {
+                    update_project_search(model, query);
+                }
                 Ok(true)
             }
             UiInput::NextItem | UiInput::PreviousItem => {
@@ -9505,6 +9562,51 @@ fn next_char_boundary(value: &str, cursor: usize) -> usize {
         .map_or(value.len(), |character| cursor + character.len_utf8())
 }
 
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn previous_word_boundary(value: &str, cursor: usize) -> usize {
+    let mut before = value[..cursor].char_indices().rev().peekable();
+    let mut start = cursor;
+    while before
+        .peek()
+        .is_some_and(|(_, character)| !is_word_character(*character))
+    {
+        if let Some((index, _)) = before.next() {
+            start = index;
+        }
+    }
+    while before
+        .peek()
+        .is_some_and(|(_, character)| is_word_character(*character))
+    {
+        if let Some((index, _)) = before.next() {
+            start = index;
+        }
+    }
+    start
+}
+
+fn next_word_boundary(value: &str, cursor: usize) -> usize {
+    let mut after = value[cursor..].char_indices().peekable();
+    while after
+        .peek()
+        .is_some_and(|(_, character)| is_word_character(*character))
+    {
+        after.next();
+    }
+    while after
+        .peek()
+        .is_some_and(|(_, character)| !is_word_character(*character))
+    {
+        after.next();
+    }
+    after
+        .next()
+        .map_or(value.len(), |(index, _)| cursor + index)
+}
+
 fn edit_text(
     form: &mut UiFormState,
     field: UiFormField,
@@ -9555,6 +9657,16 @@ fn edit_text(
             cursor = next_char_boundary(target, cursor);
             true
         }
+        TextEdit::WordLeft | TextEdit::WordRight => {
+            let next = if matches!(edit, TextEdit::WordLeft) {
+                previous_word_boundary(target, cursor)
+            } else {
+                next_word_boundary(target, cursor)
+            };
+            let changed = next != cursor;
+            cursor = next;
+            changed
+        }
         TextEdit::Home if cursor != line_start(target, cursor) => {
             cursor = line_start(target, cursor);
             true
@@ -9586,7 +9698,9 @@ fn edit_text(
         | TextEdit::DeleteToLineEnd
         | TextEdit::DeleteToLineStart => false,
     };
-    form.cursors.insert(field, cursor);
+    if handled {
+        form.cursors.insert(field, cursor);
+    }
     handled
 }
 
@@ -9604,8 +9718,10 @@ fn edit_text_input(
         UiInput::InsertNewline => TextEdit::Insert("\n"),
         UiInput::Backspace => TextEdit::Backspace,
         UiInput::Delete => TextEdit::Delete,
-        UiInput::MoveCursorLeft => TextEdit::Left,
-        UiInput::MoveCursorRight => TextEdit::Right,
+        UiInput::MoveCursorLeft | UiInput::MoveCharacterBackward => TextEdit::Left,
+        UiInput::MoveCursorRight | UiInput::MoveCharacterForward => TextEdit::Right,
+        UiInput::MoveWordBackward => TextEdit::WordLeft,
+        UiInput::MoveWordForward => TextEdit::WordRight,
         UiInput::MoveCursorHome => TextEdit::Home,
         UiInput::MoveCursorEnd => TextEdit::End,
         UiInput::NextItem => TextEdit::Down,
@@ -9766,7 +9882,7 @@ fn edit_project_field(model: &mut UiModel, input: &UiInput) -> bool {
         _ => return false,
     };
     let changed = edit_text_input(form, field, target, input, MAX_PROJECT_TEXT_BYTES);
-    if changed {
+    if changed && !input.is_editing_movement() {
         model.last_failure = None;
     }
     changed
@@ -10260,6 +10376,10 @@ fn apply_agent_modal_input(
             | UiInput::Delete
             | UiInput::MoveCursorLeft
             | UiInput::MoveCursorRight
+            | UiInput::MoveCharacterBackward
+            | UiInput::MoveCharacterForward
+            | UiInput::MoveWordBackward
+            | UiInput::MoveWordForward
             | UiInput::MoveCursorHome
             | UiInput::MoveCursorEnd => {
                 if !edit_text_input(
@@ -10271,7 +10391,9 @@ fn apply_agent_modal_input(
                 ) {
                     return Ok(false);
                 }
-                update_agent_search(model, query);
+                if !input.is_editing_movement() {
+                    update_agent_search(model, query);
+                }
                 Ok(true)
             }
             UiInput::NextItem | UiInput::PreviousItem => {
@@ -10421,6 +10543,10 @@ fn apply_agent_modal_input(
             | UiInput::Delete
             | UiInput::MoveCursorLeft
             | UiInput::MoveCursorRight
+            | UiInput::MoveCharacterBackward
+            | UiInput::MoveCharacterForward
+            | UiInput::MoveWordBackward
+            | UiInput::MoveWordForward
             | UiInput::MoveCursorHome
             | UiInput::MoveCursorEnd
                 if !submitting =>
@@ -10485,6 +10611,10 @@ fn apply_agent_modal_input(
             | UiInput::Delete
             | UiInput::MoveCursorLeft
             | UiInput::MoveCursorRight
+            | UiInput::MoveCharacterBackward
+            | UiInput::MoveCharacterForward
+            | UiInput::MoveWordBackward
+            | UiInput::MoveWordForward
             | UiInput::MoveCursorHome
             | UiInput::MoveCursorEnd
                 if !submitting =>
@@ -13264,6 +13394,7 @@ fn client_failed(
 mod tests {
     #![allow(clippy::expect_used)]
 
+    use super::UiAgentModal;
     use super::{
         ConfigurationFreshness, EffectId, TextEdit, UiAdjacentView, UiAgent, UiAgentLifecycle,
         UiAgentStatus, UiConfigField, UiConfiguration, UiConversationTarget, UiEffect, UiError,
@@ -14025,6 +14156,326 @@ mod tests {
             normalize_path_input("$HOME/project", Some("/Users/example")),
             Err("Use an absolute path, ~, or ~/…")
         );
+    }
+
+    #[test]
+    fn editing_movements_preserve_text_errors_and_unicode_boundaries() {
+        for (before, after, input) in [
+            ("é|界", "|é界", UiInput::MoveCharacterBackward),
+            ("é|界", "é界|", UiInput::MoveCharacterForward),
+            ("|", "|", UiInput::MoveWordBackward),
+            ("|", "|", UiInput::MoveWordForward),
+            ("|hello", "|hello", UiInput::MoveCharacterBackward),
+            ("hello|", "hello|", UiInput::MoveCharacterForward),
+            ("hello|", "hello|", UiInput::MoveWordForward),
+            ("|hello", "|hello", UiInput::MoveWordBackward),
+            ("hello ... |", "|hello ... ", UiInput::MoveWordBackward),
+            (
+                "hello...世界_é| next",
+                "hello...|世界_é next",
+                UiInput::MoveWordBackward,
+            ),
+            (
+                "hel|lo...世界_é next",
+                "hello...|世界_é next",
+                UiInput::MoveWordForward,
+            ),
+            (
+                "hello|...世界_é",
+                "hello...|世界_é",
+                UiInput::MoveWordForward,
+            ),
+            ("|...世界_é", "...|世界_é", UiInput::MoveWordForward),
+            ("one \n\t|two", "|one \n\ttwo", UiInput::MoveWordBackward),
+            ("one| \n\ttwo", "one \n\t|two", UiInput::MoveWordForward),
+            ("one two|", "one |two", UiInput::MoveWordBackward),
+        ] {
+            for field in [
+                UiFormField::Message,
+                UiFormField::AgentName,
+                UiFormField::SessionName,
+                UiFormField::AgentSearch,
+                UiFormField::ProjectSearch,
+                UiFormField::Project(super::UiProjectFormField::Brief),
+            ] {
+                let cursor = before.find('|').expect("cursor marker");
+                let expected = after.find('|').expect("expected cursor");
+                let mut text = before.replace('|', "");
+                assert_eq!(text, after.replace('|', ""));
+                let mut form = UiFormState::default();
+                form.cursors.insert(field, cursor);
+                form.errors.insert(field, "Retain validation".to_owned());
+                let errors = form.errors.clone();
+                let changed = super::edit_text_input(&mut form, field, &mut text, &input, 1024);
+                assert_eq!(changed, cursor != expected, "{before:?} {input:?}");
+                assert_eq!(
+                    form.cursors.get(&field),
+                    Some(&expected),
+                    "{before:?} {input:?}"
+                );
+                assert_eq!(text, before.replace('|', ""));
+                assert!(text.is_char_boundary(expected));
+                assert_eq!(form.errors, errors);
+            }
+        }
+    }
+
+    #[test]
+    fn editing_boundary_noops_do_not_create_cursor_state() {
+        for (value, input) in [
+            ("", UiInput::MoveCharacterBackward),
+            ("", UiInput::MoveWordBackward),
+            ("one", UiInput::MoveCharacterForward),
+            ("one", UiInput::MoveWordForward),
+        ] {
+            let mut text = value.to_owned();
+            let mut form = UiFormState::default();
+            let before = form.clone();
+            assert!(!super::edit_text_input(
+                &mut form,
+                UiFormField::Message,
+                &mut text,
+                &input,
+                1024
+            ));
+            assert_eq!(form, before);
+        }
+    }
+
+    fn assert_cursor_only_movements(mut model: UiModel, field: UiFormField) {
+        model.sync_form();
+        model.form.cursors.insert(field, 7);
+        model
+            .form
+            .errors
+            .insert(field, "Keep field error".to_owned());
+        model.last_failure = Some(UiFailure {
+            code: "keep".to_owned(),
+            action: "Keep recovery".to_owned(),
+        });
+        model.autosave_timer = Some(effect_id(40));
+        for (input, cursor) in [
+            (UiInput::MoveWordBackward, 4),
+            (UiInput::MoveCharacterBackward, 3),
+            (UiInput::MoveCharacterForward, 4),
+            (UiInput::MoveWordForward, 7),
+            (UiInput::MoveWordForward, 7),
+            (UiInput::MoveCharacterForward, 7),
+        ] {
+            let changed = model.form.cursors.get(&field) != Some(&cursor);
+            let mut expected = model.clone();
+            expected.form.cursors.insert(field, cursor);
+            let mut effects = Vec::new();
+            super::apply_input(&mut model, &input, &mut effects).expect("editing movement");
+            assert_eq!(
+                model, expected,
+                "{field:?}: {input:?} only moves the cursor"
+            );
+            assert_eq!(
+                effects,
+                if changed {
+                    vec![UiEffect::RequestRedraw]
+                } else {
+                    Vec::new()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn editing_movements_reach_agent_names_sessions_and_searches_without_rebuilding_state() {
+        for (modal, field) in [
+            (
+                UiAgentModal::Create {
+                    name: "one two".to_owned(),
+                    submitting: false,
+                },
+                UiFormField::AgentName,
+            ),
+            (
+                UiAgentModal::RenameSession {
+                    agent_id: [1; 32],
+                    provider: "codex".to_owned(),
+                    session: "session".to_owned(),
+                    display_name: "one two".to_owned(),
+                    submitting: false,
+                },
+                UiFormField::SessionName,
+            ),
+            (
+                UiAgentModal::Search {
+                    query: "one two".to_owned(),
+                },
+                UiFormField::AgentSearch,
+            ),
+        ] {
+            let mut state = model();
+            state.agent_modal = Some(modal);
+            assert_cursor_only_movements(state, field);
+        }
+        let mut state = model();
+        state.project_interaction = Some(UiProjectInteraction::Search {
+            query: "one two".to_owned(),
+        });
+        assert_cursor_only_movements(state, UiFormField::ProjectSearch);
+    }
+
+    #[test]
+    fn editing_movements_preserve_clean_and_dirty_drafts_and_pending_autosave() {
+        for dirty in [false, true] {
+            let mut state = model();
+            state.focus = UiFocus::Draft;
+            state.mailbox_draft = Some(UiMailboxDraftPane::Editing {
+                draft: super::UiMailboxDraft {
+                    draft_id: [1; 32],
+                    target: UiMailboxDraftTarget::SelfNote,
+                    content: "one two".to_owned(),
+                    version: 7,
+                },
+                dirty,
+                submitting: false,
+                closing: false,
+            });
+            assert_cursor_only_movements(state, UiFormField::Message);
+        }
+    }
+
+    #[test]
+    fn editing_movements_reach_every_project_creation_text_field() {
+        use super::UiProjectFormField as Field;
+        for field in [Field::Name, Field::Brief, Field::Path] {
+            let mut state = model();
+            state.project_interaction = Some(UiProjectInteraction::CreateExisting {
+                name: "one two".to_owned(),
+                brief: "one two".to_owned(),
+                path: "one two".to_owned(),
+                field,
+                submitting: false,
+            });
+            assert_cursor_only_movements(state, UiFormField::Project(field));
+        }
+        for field in [
+            Field::Name,
+            Field::Brief,
+            Field::Source,
+            Field::Destination,
+            Field::Branch,
+            Field::Base,
+        ] {
+            let mut state = model();
+            state.project_interaction = Some(UiProjectInteraction::CreateWorktree {
+                name: "one two".to_owned(),
+                brief: "one two".to_owned(),
+                source: "one two".to_owned(),
+                destination: "one two".to_owned(),
+                branch: "one two".to_owned(),
+                base: "one two".to_owned(),
+                field,
+                submitting: false,
+            });
+            assert_cursor_only_movements(state, UiFormField::Project(field));
+        }
+    }
+
+    #[test]
+    fn editing_movements_reach_resource_paths_and_runtime_directories() {
+        use super::UiProjectFormField as Field;
+        for (modal, field) in [
+            (
+                UiProjectInteraction::AddResource {
+                    project: project("demo"),
+                    path: "one two".to_owned(),
+                    make_primary: false,
+                    submitting: false,
+                },
+                Field::Path,
+            ),
+            (
+                UiProjectInteraction::ReplaceResource {
+                    project: project("demo"),
+                    resource_id: [2; 32],
+                    path: "one two".to_owned(),
+                    submitting: false,
+                },
+                Field::Path,
+            ),
+            (
+                UiProjectInteraction::Activate {
+                    project: project("demo"),
+                    agents: Vec::new(),
+                    providers: Vec::new(),
+                    agent_id: None,
+                    thread: None,
+                    new_session: true,
+                    provider: "codex".to_owned(),
+                    directory: "one two".to_owned(),
+                    field: Field::Directory,
+                    submitting: false,
+                },
+                Field::Directory,
+            ),
+            (
+                UiProjectInteraction::Handoff {
+                    project: project("demo"),
+                    agents: Vec::new(),
+                    providers: Vec::new(),
+                    agent_id: None,
+                    thread: None,
+                    new_session: true,
+                    provider: "codex".to_owned(),
+                    directory: "one two".to_owned(),
+                    field: Field::Directory,
+                    confirmed: false,
+                    force_takeover: false,
+                    submitting: false,
+                },
+                Field::Directory,
+            ),
+        ] {
+            let mut state = model();
+            state.project_interaction = Some(modal);
+            assert_cursor_only_movements(state, UiFormField::Project(field));
+        }
+    }
+
+    #[test]
+    fn editing_movements_are_inert_outside_editable_fields() {
+        let mut conversation = model();
+        conversation.focus = UiFocus::Conversation;
+        let mut configuration = model();
+        configuration.navigation = UiNavigation::new(UiWorkspace::Config);
+        configuration.config_edit = Some("one two".to_owned());
+        let mut help = model();
+        help.help_page = Some(UiHelpPage::Context);
+        help.agent_modal = Some(UiAgentModal::Create {
+            name: "one two".to_owned(),
+            submitting: false,
+        });
+        let mut choice = model();
+        choice.project_interaction = Some(UiProjectInteraction::AddResource {
+            project: project("demo"),
+            path: "one two".to_owned(),
+            make_primary: false,
+            submitting: false,
+        });
+        choice.sync_form();
+        choice.form.focused = Some(UiFormField::Project(super::UiProjectFormField::Primary));
+        for mut state in vec![model(), conversation, configuration, help, choice].into_boxed_slice()
+        {
+            state.sync_form();
+            for input in [
+                UiInput::MoveCharacterBackward,
+                UiInput::MoveCharacterForward,
+                UiInput::MoveWordBackward,
+                UiInput::MoveWordForward,
+            ] {
+                let expected = state.clone();
+                let mut effects = Vec::new();
+                super::apply_input(&mut state, &input, &mut effects).expect("inert movement");
+                assert_eq!(state, expected);
+                assert!(effects.is_empty());
+            }
+        }
     }
 
     #[test]

@@ -1395,6 +1395,8 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
             .expect("open compose help")
             .model;
         let help = render_text(&help);
+        assert!(help.contains("Ctrl-B/F"), "{help}");
+        assert!(help.contains("Ctrl-Left/Right"), "{help}");
         assert!(help.contains("Ctrl-A/Home line start"), "{help}");
         assert!(help.contains("Delete/Ctrl-D delete right"), "{help}");
         assert!(help.contains("Ctrl-K delete to line end"), "{help}");
@@ -1502,6 +1504,25 @@ fn agent_inspection_is_responsive_and_rendering_only_borrows_state() {
             );
         }
         assert!(!rendered.contains("runnable:"));
+    }
+}
+
+#[test]
+fn editable_dialog_help_explains_character_and_word_movement() {
+    for width in [64, 120] {
+        let details = agent_details_model(UiSize { width, height: 24 });
+        let agents = update(details, UiEvent::Input(UiInput::Escape))
+            .expect("close details")
+            .model;
+        let form = update(agents, UiEvent::Input(UiInput::Character('c')))
+            .expect("agent form")
+            .model;
+        let help = update(form, UiEvent::Input(UiInput::Help))
+            .expect("editor help")
+            .model;
+        let rendered = render_text(&help);
+        assert!(rendered.contains("Ctrl-B/F"), "{rendered}");
+        assert!(rendered.contains("Ctrl-Left/Right"), "{rendered}");
     }
 }
 

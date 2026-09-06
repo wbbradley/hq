@@ -521,6 +521,10 @@ fn normalize_key(key: KeyEvent) -> Option<TuiTerminalEvent> {
     }
     if key.modifiers == KeyModifiers::CONTROL {
         let input = match key.code {
+            KeyCode::Char('b' | 'B') => UiInput::MoveCharacterBackward,
+            KeyCode::Char('f' | 'F') => UiInput::MoveCharacterForward,
+            KeyCode::Left => UiInput::MoveWordBackward,
+            KeyCode::Right => UiInput::MoveWordForward,
             KeyCode::Char('a' | 'A') => UiInput::MoveCursorHome,
             KeyCode::Char('e' | 'E') => UiInput::MoveCursorEnd,
             KeyCode::Char('k' | 'K') => UiInput::DeleteToLineEnd,

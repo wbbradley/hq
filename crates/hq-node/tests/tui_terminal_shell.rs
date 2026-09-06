@@ -151,6 +151,38 @@ fn compose_control_keys_normalize_to_text_editing_intents() {
 }
 
 #[test]
+fn character_and_word_control_keys_use_editing_only_intents() {
+    for (code, input) in [
+        (KeyCode::Char('b'), UiInput::MoveCharacterBackward),
+        (KeyCode::Char('B'), UiInput::MoveCharacterBackward),
+        (KeyCode::Char('f'), UiInput::MoveCharacterForward),
+        (KeyCode::Char('F'), UiInput::MoveCharacterForward),
+        (KeyCode::Left, UiInput::MoveWordBackward),
+        (KeyCode::Right, UiInput::MoveWordForward),
+    ] {
+        assert_eq!(
+            normalize_crossterm_event(&Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))),
+            Some(TuiTerminalEvent::Input(input))
+        );
+        assert_eq!(
+            normalize_crossterm_event(&Event::Key(KeyEvent::new(
+                code,
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            ))),
+            None
+        );
+        assert_eq!(
+            normalize_crossterm_event(&Event::Key(KeyEvent::new_with_kind(
+                code,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Release
+            ))),
+            None
+        );
+    }
+}
+
+#[test]
 fn normal_quit_and_ctrl_c_cancellation_restore_exactly_once() {
     for terminal_event in [
         TuiTerminalEvent::Input(UiInput::Quit),

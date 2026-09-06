@@ -31,6 +31,9 @@ use crate::{
     shell_highlight::{ShellHighlightCache, ShellSegment, ShellTokenKind},
 };
 
+const CHARACTER_MOVEMENT_HELP: &str = "Ctrl-B/F or ←/→ move one character";
+const WORD_MOVEMENT_HELP: &str = "Ctrl-Left/Right move one word";
+
 const MINIMUM_WIDTH: u16 = 40;
 const MINIMUM_HEIGHT: u16 = 10;
 /// Reusable bounded presentation state owned by a terminal renderer.
@@ -588,7 +591,9 @@ fn dialog_help_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'stati
             ),
             Line::default(),
             Line::styled("Editing keys", theme.style(UiThemeRole::Heading)),
-            Line::from("←/→ move one character · ↑/↓ move one line"),
+            Line::from(CHARACTER_MOVEMENT_HELP),
+            Line::from(WORD_MOVEMENT_HELP),
+            Line::from("↑/↓ move one line"),
             Line::from("Ctrl-A/Home line start · Ctrl-E/End line end"),
             Line::from("Backspace delete left · Delete/Ctrl-D delete right"),
             Line::from("Ctrl-K delete to line end · Ctrl-U delete to line start"),
@@ -654,13 +659,18 @@ fn dialog_help_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'stati
     } else {
         return None;
     };
-    Some(vec![
+    let mut lines = vec![
         Line::styled(title, theme.style(UiThemeRole::Heading)),
         Line::from(purpose),
         Line::default(),
         Line::from("Follow the labels and the action guide at the bottom of the dialog."),
-        Line::from("t — technical details · F1 / Esc — close help"),
-    ])
+    ];
+    if model.editing_movement_available() {
+        lines.push(Line::from(CHARACTER_MOVEMENT_HELP));
+        lines.push(Line::from(WORD_MOVEMENT_HELP));
+    }
+    lines.push(Line::from("t — technical details · F1 / Esc — close help"));
+    Some(lines)
 }
 
 fn technical_help_lines(model: &UiModel, theme: &UiTheme) -> Vec<Line<'static>> {
