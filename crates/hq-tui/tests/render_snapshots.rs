@@ -1237,10 +1237,15 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
             .expect("move caret onto final character")
             .model;
         let before = model.clone();
+        let composer_surface = Color::Rgb(63, 61, 59);
+        let theme = UiTheme::terminal().with_style(
+            UiThemeRole::Input,
+            Style::new().fg(Color::White).bg(composer_surface),
+        );
         let backend = TestBackend::new(size.width, size.height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| render(frame, &model, &UiTheme::terminal()))
+            .draw(|frame| render(frame, &model, &theme))
             .expect("render composer");
         assert_eq!(model, before);
         let rendered = snapshot_text(terminal.backend().buffer());
@@ -1262,6 +1267,18 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
             .expect("character under compose caret");
         assert_eq!(caret.symbol(), "t");
         assert!(caret.modifier.contains(Modifier::REVERSED));
+        for position in [
+            (draft_start.0 + 24, draft_start.1),
+            (draft_start.0, draft_start.1 + 1),
+        ] {
+            let blank_editor_cell = terminal
+                .backend()
+                .buffer()
+                .cell(position)
+                .expect("blank composer cell");
+            assert_eq!(blank_editor_cell.symbol(), " ");
+            assert_eq!(blank_editor_cell.bg, composer_surface);
+        }
 
         let help = update(model, UiEvent::Input(UiInput::Help))
             .expect("open compose help")

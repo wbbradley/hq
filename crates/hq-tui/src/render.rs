@@ -3474,7 +3474,9 @@ fn render_draft_pane(
                 model.focus() == UiFocus::Draft,
             );
             frame.render_widget(
-                Paragraph::new(content).wrap(Wrap { trim: false }),
+                Paragraph::new(content)
+                    .style(theme.style(UiThemeRole::Input))
+                    .wrap(Wrap { trim: false }),
                 text_area,
             );
             let hint_text = model
