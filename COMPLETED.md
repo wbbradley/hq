@@ -49,6 +49,105 @@ compatibility tests remain unchanged and passing.
 
 <!-- End of archived plan entry. -->
 
+## Typed navigation controller and workspace roots
+
+Implemented an encapsulated typed navigation stack with stable identity-bearing routes, checked
+push/pop/replace/completion/deep-path operations, and a closed route contract for Enter, Escape,
+completion, and adjacent UI. `UiModel` now derives its workspace from that single path, workspace
+shortcuts replace the path with a root, and per-workspace cloned conversations/focus were replaced
+by stable list selections that re-resolve across reorder and removal. Draft and operation data stay
+durable without restoring hidden input focus. Pure algebra, model, resize, refresh, and full
+workspace tests pass, as does strict workspace Clippy.
+
+### Original plan entry
+
+## Establish the typed navigation controller and workspace roots
+
+HQ's TUI has no canonical navigation representation. `UiSection`, `UiFocus`,
+`UiProjectWorkspaceLevel`, and retained `UiSectionWorkspaces` currently combine to produce multiple
+implicit histories. Establish one encapsulated typed route stack as the sole canonical path, and
+make global workspace shortcuts replace it with the selected workspace root. Keep only stable list
+selection state per workspace; switching workspaces must not restore cloned conversations, focus,
+technical panes, or modal state. Resize must remain geometry-only.
+
+This foundation must support push, pop, sequential replace/advance, completion to a typed return
+level, canonical-path installation, and workspace-root replacement. Routes carry stable identity,
+never display labels, timestamps, domain snapshots, or page-local indices. A closed route contract
+must declare Enter, Escape, completion, and permitted adjacent UI semantics for each introduced
+route family. Escape at a workspace root is a no-op, and `q`/Ctrl-C remains explicit exit.
+
+### Implementation plan
+
+- Modify `crates/hq-tui/src/model.rs`:
+  - Add capability-named `UiRoute`, `UiWorkspace`, route-transition, return-level, and adjacent-UI
+    types plus an encapsulated `UiNavigation` controller.
+  - Implement checked stack algebra for `push`, `pop`, `replace`, `complete_to`, canonical path
+    installation, and workspace switching. Reject paths whose root or parent/child relationship is
+    not canonical.
+  - Define the route contract table used to validate canonical parentage and expose Enter, Escape,
+    completion, and adjacent-view behavior without deriving identity from labels.
+  - Store `UiNavigation` in `UiModel`, derive the legacy `section()` projection from its workspace
+    root during incremental migration, and remove `UiSectionWorkspaces`.
+  - Replace per-workspace cloned state with a small stable-ID list-selection catalog. Workspace
+    switching saves/re-resolves only the selected row, closes visible child state, installs the
+    destination root, and cannot restore a draft/approval focus or conversation from a hidden
+    history.
+  - Keep asynchronous operation state, retained conversation pages, drafts, catalogs, and viewport
+    evidence outside the route stack.
+- Modify `crates/hq-tui/src/lib.rs` to export the public typed route and route-contract vocabulary
+  required by renderers, shells, and integration tests.
+- Modify `crates/hq-tui/tests/model.rs` first to add failing behavioral tests proving workspace-root
+  replacement, stable selection re-resolution, absence of hidden restored detail/focus, Escape
+  no-op at a root, and resize preservation of the exact route path.
+- Add pure unit tests in `crates/hq-tui/src/model.rs` covering push/pop, replace/advance,
+  completion-return truncation, invalid canonical paths, canonical deep-path installation, route
+  contract edges, and non-cancellable progress behavior.
+
+Risks: the existing model is intentionally incremental and many screens still use legacy fields;
+the `section()` projection must remain temporarily available without becoming a second source of
+navigation truth. Draft and pending-operation data must be retained while their input focus is
+closed on workspace replacement. Later migration tasks may extend the closed route vocabulary,
+but must use this controller rather than add parallel depth state.
+
+Acceptance: pure stack tests pass; every introduced route has a declared contract; `UiModel` owns
+one canonical path; shortcuts replace that path with exactly one workspace root; returning to a
+workspace may restore an extant stable row selection but never a hidden conversation, modal,
+technical pane, or input focus; and resize changes no route, selection identity, pending input, or
+operation identity.
+
+## Post-Plan Execution Steps
+
+Execute these steps in order:
+
+### Implement
+Execute the plan above.
+
+**Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+`Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+### Verify
+
+1. Run the project's build/lint command. Fix all warnings.
+2. Run the project's test suite.
+3. If tests fail, fix them before proceeding.
+4. If test coverage for the new work is insufficient, add tests.
+
+### Commit
+
+Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+### Update the plan file
+
+Read the plan file at `/home/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/home/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+1. A brief summary, written now, of what was actually implemented.
+2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+
+<!-- End of archived plan entry. -->
+
 ## 2026-09-03 — Restart-safe unstarted project conversations
 
 
