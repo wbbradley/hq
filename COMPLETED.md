@@ -13391,3 +13391,28 @@ completions cannot close or replace another route; all former dialogs render in 
 pane; and route-family model/render tests cover compact and wide terminals.
 
 <!-- End of archived plan entry. -->
+
+## Render route-aware full-pane chrome
+
+Made the active typed route select the full content surface and its contextual footer, with
+plain-language breadcrumbs derived from current presentation state and clipped safely by display
+cells. Removed ordinary pane-focus styling and overlay geometry, kept only conversation-scoped
+adjacency, and covered compact, wide, minimum-size, and route-family rendering without model
+mutation.
+
+## Render route-aware full-pane chrome
+
+Make the active route the sole ordinary owner of the content rectangle. Remove Inbox and Projects
+master-detail layouts, compact inactive previews, pane-focus borders, and centered modal overlays.
+Render route-aware plain-language breadcrumbs with connection/refresh context and display-cell-safe
+clipping that preserves the current destination and useful parent context. Derive labels only from
+current authoritative presentation; breadcrumbs are never identity. Make the footer explain only
+the active route's actions and their results while preserving minimum-size behavior, semantic
+themes, no-color meaning, and renderer purity.
+
+Acceptance: terminal-buffer tests cover every route family at compact and wide sizes and prove
+width changes only geometry, never hierarchy, stack depth, active route, pending input, or return
+levels. Conversation composition and conversation-scoped approval are the only documented adjacent
+views.
+
+<!-- End of archived plan entry. -->
