@@ -31,9 +31,9 @@ use hq_protocol::{
     DispatchOutcome, MAX_EVENT_BYTES, ProtocolNamespace, RawEventBytes, VerifiedSemanticFact,
 };
 use hq_reducer::{
-    ActivityView, AgentLifecycle, AgentProjection, AgentProjectionKey, AuthorityPolicy,
-    AuthorityProjection, AuthorityProjectionKey, ConversationKey, ConversationProjection,
-    DecisionStatus, MembershipState, MessageView, ProjectProjection, ProjectProjectionKey,
+    AgentLifecycle, AgentProjection, AgentProjectionKey, AuthorityPolicy, AuthorityProjection,
+    AuthorityProjectionKey, ConversationKey, ConversationProjection, DecisionStatus,
+    MembershipState, MessageView, ProjectProjection, ProjectProjectionKey,
 };
 use rusqlite::{
     Connection, Error as SqlError, ErrorCode, OpenFlags, OptionalExtension, Transaction,
@@ -53,7 +53,7 @@ use crate::{
 const APPLICATION_ID: i64 = 0x4851_5253;
 const SCHEMA_VERSION: i64 = 1;
 const SCHEMA_MARKER: &str = "hq-store-v1";
-const SCHEMA_TABLES: [&str; 120] = [
+const SCHEMA_TABLES: [&str; 121] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -109,6 +109,7 @@ const SCHEMA_TABLES: [&str; 120] = [
     "conversation_action_groups",
     "conversation_action_entries",
     "conversation_activities",
+    "conversation_live_tails",
     "conversation_activity_retentions",
     "conversation_retained_progress",
     "agent_state",
@@ -682,6 +683,12 @@ CREATE TABLE conversation_activities (
 ) STRICT, WITHOUT ROWID;
 
 CREATE UNIQUE INDEX conversation_activities_by_fact_id ON conversation_activities(fact_id);
+
+CREATE TABLE conversation_live_tails (
+    conversation_digest BLOB PRIMARY KEY NOT NULL
+        CHECK(typeof(conversation_digest) = 'blob' AND length(conversation_digest) = 32),
+    fact_id BLOB NOT NULL REFERENCES conversation_activities(fact_id) ON DELETE RESTRICT
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE conversation_activity_retentions (
     key_digest BLOB PRIMARY KEY NOT NULL REFERENCES conversation_projection_keys(key_digest),
@@ -1921,107 +1928,28 @@ impl Database {
 fn load_conversation_live_tail(
     connection: &Connection,
     key_digest: [u8; 32],
-) -> Result<Option<ActivityView>, StoreError> {
-    type OperationKey = (MailboxAddress, String, String, OperationId);
-    type Candidate = (i64, ActivityView);
-
-    #[derive(Default)]
-    struct OperationActivity {
-        latest_turn: Option<Candidate>,
-        progress: Vec<Candidate>,
-        completed_sequence_by_item: BTreeMap<Option<String>, std::num::NonZeroU64>,
-    }
-
-    let latest_local_human_message = connection
+) -> Result<Option<hq_reducer::ActivityView>, StoreError> {
+    let fact_id = connection
         .query_row(
-            "SELECT max(ordered.position) \
-             FROM reduction_conversation_order ordered \
-             JOIN conversation_messages message ON message.fact_id = ordered.fact_id \
-             JOIN reduction_state state ON state.singleton = 1 \
-             WHERE ordered.key_digest = ?1 \
-               AND message.sender_installation = state.policy_installation \
-               AND message.sender_mailbox = state.policy_human_mailbox",
+            "SELECT fact_id FROM conversation_live_tails WHERE conversation_digest = ?1",
             [key_digest.as_slice()],
-            |row| row.get::<_, Option<i64>>(0),
+            |row| row.get::<_, Vec<u8>>(0),
         )
-        .map_err(sql_error)?;
-
-    let mut statement = connection
-        .prepare(
-            "SELECT ordered.position, ordered.fact_id \
-             FROM reduction_conversation_order ordered \
-             JOIN conversation_activities activity ON activity.fact_id = ordered.fact_id \
-             WHERE ordered.key_digest = ?1 AND activity.kind IN (2, 5, 6) \
-             ORDER BY ordered.position",
-        )
-        .map_err(sql_error)?;
-    let rows = statement
-        .query_map([key_digest.as_slice()], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })
-        .map_err(sql_error)?;
-    let mut operations = BTreeMap::<OperationKey, OperationActivity>::new();
-    for row in rows {
-        let (position, fact_id) = row.map_err(sql_error)?;
-        let fact_id = FactId::from_bytes(fixed_bytes(fact_id)?);
-        let ConversationEntry::Activity(activity) =
-            conversation::load_entry(connection, fact_id, 2)?
-        else {
-            return Err(StoreError::new(StoreErrorClass::RebuildableStateCorrupt));
-        };
-        let activity = *activity;
-        let key = (
-            activity.source,
-            activity.correlation.provider().as_str().to_owned(),
-            activity.correlation.session().as_str().to_owned(),
-            activity.correlation.operation(),
-        );
-        let candidates = operations.entry(key).or_default();
-        match (activity.kind, &activity.status) {
-            (hq_domain::ActivityKind::AgentTurn, _) => {
-                if candidates.latest_turn.as_ref().is_none_or(|(_, current)| {
-                    (activity.sequence, activity.fact_id) > (current.sequence, current.fact_id)
-                }) {
-                    candidates.latest_turn = Some((position, activity));
+        .optional()
+        .map_err(sql_error)?
+        .map(fixed_bytes)
+        .transpose()?
+        .map(FactId::from_bytes);
+    fact_id
+        .map(
+            |fact_id| match conversation::load_entry(connection, fact_id, 2)? {
+                ConversationEntry::Activity(activity) => Ok(*activity),
+                ConversationEntry::Message(_) => {
+                    Err(StoreError::new(StoreErrorClass::RebuildableStateCorrupt))
                 }
-            }
-            (hq_domain::ActivityKind::Progress, hq_domain::ActivityStatus::Running)
-                if !activity.content.as_str().trim().is_empty() =>
-            {
-                candidates.progress.push((position, activity));
-            }
-            (hq_domain::ActivityKind::CompletedItem, _) => {
-                let item = activity.item.as_ref().map(|item| item.as_str().to_owned());
-                candidates
-                    .completed_sequence_by_item
-                    .entry(item)
-                    .and_modify(|sequence| *sequence = (*sequence).max(activity.sequence))
-                    .or_insert(activity.sequence);
-            }
-            _ => {}
-        }
-    }
-    Ok(operations
-        .into_values()
-        .filter_map(|operation| {
-            let fallback = operation
-                .latest_turn
-                .filter(|(_, turn)| turn.status == hq_domain::ActivityStatus::Running)?;
-            let progress = operation
-                .progress
-                .into_iter()
-                .filter(|(position, progress)| {
-                    latest_local_human_message.is_none_or(|boundary| *position > boundary)
-                        && operation
-                            .completed_sequence_by_item
-                            .get(&progress.item.as_ref().map(|item| item.as_str().to_owned()))
-                            .is_none_or(|completed| *completed <= progress.sequence)
-                })
-                .max_by_key(|(position, progress)| (progress.sequence, *position));
-            Some(progress.unwrap_or(fallback))
-        })
-        .max_by_key(|(position, _)| *position)
-        .map(|(_, activity)| activity))
+            },
+        )
+        .transpose()
 }
 
 fn conversation_summaries(

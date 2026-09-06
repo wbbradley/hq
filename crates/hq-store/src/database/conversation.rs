@@ -14,8 +14,8 @@ use hq_domain::{
 };
 use hq_reducer::{
     ActionGroupView, ActivityKey, ActivityRetentionView, ActivitySessionKey, ActivityView,
-    CausalRelation, ConversationAggregateKey, ConversationArchiveView, ConversationProjection,
-    ConversationProjectionKey, MessageView, ThreadView,
+    CausalRelation, ConversationAggregateKey, ConversationArchiveView, ConversationKey,
+    ConversationProjection, ConversationProjectionKey, MessageView, ThreadView,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ use crate::{
 const MAXIMUM_CONVERSATION_ROWS: i64 = 64_000_000;
 const ZERO: [u8; 32] = [0; 32];
 
-const TABLES: [&str; 19] = [
+const TABLES: [&str; 20] = [
     "conversation_aggregate_keys",
     "conversation_frontiers",
     "conversation_projection_keys",
@@ -47,6 +47,7 @@ const TABLES: [&str; 19] = [
     "conversation_action_groups",
     "conversation_action_entries",
     "conversation_activities",
+    "conversation_live_tails",
     "conversation_activity_retentions",
     "conversation_retained_progress",
 ];
@@ -57,6 +58,7 @@ pub(super) fn clear(transaction: &Transaction<'_>) -> Result<(), StoreError> {
             "DELETE FROM conversation_state;
              DELETE FROM conversation_retained_progress;
              DELETE FROM conversation_activity_retentions;
+             DELETE FROM conversation_live_tails;
              DELETE FROM conversation_activities;
              DELETE FROM conversation_action_entries;
              DELETE FROM conversation_action_groups;
@@ -81,6 +83,8 @@ pub(super) fn clear(transaction: &Transaction<'_>) -> Result<(), StoreError> {
 pub(super) fn insert(
     transaction: &Transaction<'_>,
     snapshot: &ConversationProjectionSnapshot,
+    conversation_orders: &BTreeMap<ConversationKey, Vec<FactId>>,
+    local_human: MailboxAddress,
 ) -> Result<(), StoreError> {
     if snapshot.projections().keys().ne(snapshot.support().keys()) {
         return Err(corrupt());
@@ -97,6 +101,7 @@ pub(super) fn insert(
         let support = snapshot.support().get(key).ok_or_else(corrupt)?;
         insert_facts(transaction, "conversation_support", digest, support)?;
     }
+    insert_live_tails(transaction, snapshot, conversation_orders, local_human)?;
     let counts = Counts::read(transaction)?;
     counts.validate()?;
     if counts.aggregate_key_count != length(std::iter::once(snapshot.frontiers().len()))?
@@ -125,6 +130,132 @@ pub(super) fn insert(
         )
         .map_err(database)?;
     Ok(())
+}
+
+type ActivityOperationKey = (MailboxAddress, String, String, OperationId);
+type ActivityCandidate<'a> = (usize, &'a ActivityView);
+
+#[derive(Default)]
+struct OperationActivity<'a> {
+    latest_turn: Option<ActivityCandidate<'a>>,
+    progress: Vec<ActivityCandidate<'a>>,
+    completed_sequence_by_item: BTreeMap<Option<String>, NonZeroU64>,
+}
+
+fn insert_live_tails(
+    transaction: &Transaction<'_>,
+    snapshot: &ConversationProjectionSnapshot,
+    conversation_orders: &BTreeMap<ConversationKey, Vec<FactId>>,
+    local_human: MailboxAddress,
+) -> Result<(), StoreError> {
+    let messages = snapshot
+        .projections()
+        .values()
+        .filter_map(|projection| match projection {
+            ConversationProjection::Message(message) => Some((message.fact_id, message.as_ref())),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let activities = snapshot
+        .projections()
+        .values()
+        .filter_map(|projection| match projection {
+            ConversationProjection::Activity(activity) => {
+                Some((activity.fact_id, activity.as_ref()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (key, order) in conversation_orders {
+        if let Some(fact_id) = select_live_tail(order, &messages, &activities, local_human) {
+            transaction
+                .execute(
+                    "INSERT INTO conversation_live_tails(conversation_digest, fact_id) \
+                     VALUES (?1, ?2)",
+                    params![
+                        super::repair::conversation_key_digest(key).as_slice(),
+                        fact_id.as_bytes().as_slice()
+                    ],
+                )
+                .map_err(database)?;
+        }
+    }
+    Ok(())
+}
+
+fn select_live_tail(
+    order: &[FactId],
+    messages: &BTreeMap<FactId, &MessageView>,
+    activities: &BTreeMap<FactId, &ActivityView>,
+    local_human: MailboxAddress,
+) -> Option<FactId> {
+    let latest_local_human_message = order
+        .iter()
+        .enumerate()
+        .filter_map(|(position, fact_id)| {
+            messages
+                .get(fact_id)
+                .is_some_and(|message| message.content.sender == local_human)
+                .then_some(position)
+        })
+        .max();
+    let mut operations = BTreeMap::<ActivityOperationKey, OperationActivity<'_>>::new();
+    for (position, fact_id) in order.iter().enumerate() {
+        let Some(activity) = activities.get(fact_id).copied() else {
+            continue;
+        };
+        let operation_key = (
+            activity.source,
+            activity.correlation.provider().as_str().to_owned(),
+            activity.correlation.session().as_str().to_owned(),
+            activity.correlation.operation(),
+        );
+        let candidates = operations.entry(operation_key).or_default();
+        match (activity.kind, &activity.status) {
+            (ActivityKind::AgentTurn, _) => {
+                if candidates.latest_turn.is_none_or(|(_, current)| {
+                    (activity.sequence, activity.fact_id) > (current.sequence, current.fact_id)
+                }) {
+                    candidates.latest_turn = Some((position, activity));
+                }
+            }
+            (ActivityKind::Progress, ActivityStatus::Running)
+                if !activity.content.as_str().trim().is_empty() =>
+            {
+                candidates.progress.push((position, activity));
+            }
+            (ActivityKind::CompletedItem, _) => {
+                let item = activity.item.as_ref().map(|item| item.as_str().to_owned());
+                candidates
+                    .completed_sequence_by_item
+                    .entry(item)
+                    .and_modify(|sequence| *sequence = (*sequence).max(activity.sequence))
+                    .or_insert(activity.sequence);
+            }
+            _ => {}
+        }
+    }
+    operations
+        .into_values()
+        .filter_map(|operation| {
+            let fallback = operation
+                .latest_turn
+                .filter(|(_, turn)| turn.status == ActivityStatus::Running)?;
+            let progress = operation
+                .progress
+                .into_iter()
+                .filter(|(position, progress)| {
+                    latest_local_human_message.is_none_or(|boundary| *position > boundary)
+                        && operation
+                            .completed_sequence_by_item
+                            .get(&progress.item.as_ref().map(|item| item.as_str().to_owned()))
+                            .is_none_or(|completed| *completed <= progress.sequence)
+                })
+                .max_by_key(|(position, progress)| (progress.sequence, *position));
+            Some(progress.unwrap_or(fallback))
+        })
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, activity)| activity.fact_id)
 }
 
 pub(super) fn load(connection: &Connection) -> Result<ConversationProjectionSnapshot, StoreError> {
@@ -2004,6 +2135,7 @@ fn count(connection: &Connection, table: &str) -> Result<i64, StoreError> {
         "conversation_action_groups" => "SELECT count(*) FROM conversation_action_groups",
         "conversation_action_entries" => "SELECT count(*) FROM conversation_action_entries",
         "conversation_activities" => "SELECT count(*) FROM conversation_activities",
+        "conversation_live_tails" => "SELECT count(*) FROM conversation_live_tails",
         "conversation_activity_retentions" => {
             "SELECT count(*) FROM conversation_activity_retentions"
         }
@@ -2031,7 +2163,7 @@ fn length(values: impl IntoIterator<Item = usize>) -> Result<i64, StoreError> {
 }
 
 fn row_digest(connection: &Connection) -> Result<[u8; 32], StoreError> {
-    const QUERIES: [&str; 19] = [
+    const QUERIES: [&str; 20] = [
         "SELECT quote(key_digest)||char(31)||quote(key_kind)||char(31)||quote(key_a)||char(31)||quote(key_b)||char(31)||quote(provider)||char(31)||quote(session)||char(31)||quote(operation_id)||char(31)||quote(item_present)||char(31)||quote(item)||char(31)||quote(activity_kind)||char(31)||quote(logical_key)||char(31)||quote(runtime) FROM conversation_aggregate_keys ORDER BY key_digest",
         "SELECT quote(key_digest)||char(31)||quote(fact_id) FROM conversation_frontiers ORDER BY key_digest, fact_id",
         "SELECT quote(key_digest)||char(31)||quote(key_kind)||char(31)||quote(key_a)||char(31)||quote(key_b)||char(31)||quote(provider)||char(31)||quote(session)||char(31)||quote(operation_id)||char(31)||quote(item_present)||char(31)||quote(item)||char(31)||quote(activity_kind)||char(31)||quote(logical_key)||char(31)||quote(runtime) FROM conversation_projection_keys ORDER BY key_digest",
@@ -2049,6 +2181,7 @@ fn row_digest(connection: &Connection) -> Result<[u8; 32], StoreError> {
         "SELECT quote(key_digest)||char(31)||quote(final_answer_present)||char(31)||quote(final_answer) FROM conversation_action_groups ORDER BY key_digest",
         "SELECT quote(key_digest)||char(31)||quote(position)||char(31)||quote(fact_id) FROM conversation_action_entries ORDER BY key_digest, position",
         "SELECT quote(key_digest)||char(31)||quote(fact_id)||char(31)||quote(kind)||char(31)||quote(sequence)||char(31)||quote(status)||char(31)||quote(failure_reason)||char(31)||quote(content)||char(31)||quote(truncated) FROM conversation_activities ORDER BY key_digest",
+        "SELECT quote(conversation_digest)||char(31)||quote(fact_id) FROM conversation_live_tails ORDER BY conversation_digest",
         "SELECT quote(key_digest)||char(31)||quote(total_progress) FROM conversation_activity_retentions ORDER BY key_digest",
         "SELECT quote(key_digest)||char(31)||quote(position)||char(31)||quote(fact_id) FROM conversation_retained_progress ORDER BY key_digest, position",
     ];
@@ -2177,6 +2310,7 @@ mod tests {
             "UPDATE conversation_action_entries SET position = position + 10",
             "UPDATE conversation_activities SET content = 'changed'",
             "UPDATE conversation_activities SET kind = CASE kind WHEN 1 THEN 2 ELSE 1 END",
+            "UPDATE conversation_live_tails SET fact_id = X'0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D'",
             "UPDATE conversation_activity_retentions SET total_progress = total_progress + 1",
             "UPDATE conversation_retained_progress SET position = position + 10",
         ] {
@@ -2289,16 +2423,14 @@ mod tests {
                     fact_id: id(10),
                     source,
                     correlation: correlation.clone(),
-                    item: Some(ShortText::new("progress-item").expect("item validates")),
-                    kind: ActivityKind::Progress,
+                    item: None,
+                    kind: ActivityKind::AgentTurn,
                     sequence: NonZeroU64::new(u64::MAX).expect("sequence is nonzero"),
                     logical_key: ShortText::new("progress").expect("key validates"),
                     runtime: ShortText::new("runtime").expect("runtime validates"),
                     occurred_at: Timestamp::from_unix_millis(124),
-                    status: ActivityStatus::Failed(
-                        ErrorCode::new("failed").expect("reason validates"),
-                    ),
-                    content: ContentText::new("progress").expect("content validates"),
+                    status: ActivityStatus::Running,
+                    content: ContentText::new("running").expect("content validates"),
                     truncated: true,
                     completed: None,
                 })),
@@ -2390,7 +2522,22 @@ mod tests {
                 .expect("canonical support inserts");
         }
         let transaction = connection.transaction().expect("transaction starts");
-        insert(&transaction, expected).expect("conversation rows insert");
+        let source = MailboxAddress::new(
+            InstallationId::from_bytes([0x41; 32]),
+            MailboxId::from_bytes([0x42; 32]),
+        );
+        let conversation = ConversationKey::ProviderSession {
+            counterparty: source,
+            provider: ProviderId::new("provider").expect("provider validates"),
+            session: ProviderSessionId::new("session").expect("session validates"),
+        };
+        insert(
+            &transaction,
+            expected,
+            &BTreeMap::from([(conversation, vec![id(5), id(10), id(13)])]),
+            source,
+        )
+        .expect("conversation rows insert");
         transaction.commit().expect("conversation rows commit");
         connection
     }

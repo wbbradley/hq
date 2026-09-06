@@ -449,7 +449,15 @@ fn replace_transaction_at(
     insert_index(transaction, expected, failpoint)?;
     super::authority::insert(transaction, expected_authority)?;
     fail_at(failpoint, RepairFailpoint::AfterAuthorityInsert)?;
-    super::conversation::insert(transaction, expected_conversation)?;
+    super::conversation::insert(
+        transaction,
+        expected_conversation,
+        expected.conversation_orders(),
+        MailboxAddress::new(
+            expected.policy().local_installation(),
+            expected.policy().local_human_mailbox(),
+        ),
+    )?;
     fail_at(failpoint, RepairFailpoint::AfterConversationInsert)?;
     super::agent::insert(transaction, expected_agent)?;
     fail_at(failpoint, RepairFailpoint::AfterAgentInsert)?;

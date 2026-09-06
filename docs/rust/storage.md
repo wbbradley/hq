@@ -363,14 +363,15 @@ and hydrates at most `limit` exact projections. It never loads the canonical cor
 projection snapshot, or sorts conversation history.
 
 The indexed read filters retained `Progress` and running `AgentTurn` facts out of durable cursor
-pages. On the initial page only, it derives a single presentation tail from the bounded selected
-activity rows: a fully correlated running turn is replaced by its canonically latest non-empty
-progress winner, if any. Terminal turn evidence removes that live candidate and remains ordinary
-history. The tail consumes one requested page slot when the limit permits both history and live
-presentation. At the minimum limit, a durable entry takes precedence so it can anchor continued
-history; a live tail occupies that slot only when no durable entry exists. Original positions
-continue to anchor cursors, so filtered rows cannot duplicate or omit durable entries at a page
-boundary.
+pages. Reduction materialization records at most one live presentation-tail fact per conversation:
+a fully correlated running turn is replaced by its canonically latest non-empty progress winner, if
+any. Terminal turn evidence removes that live candidate and remains ordinary history. An initial
+page reads that exact keyed fact and hydrates at most one activity instead of scanning the
+conversation's activity history. The tail consumes one requested page slot when the limit permits
+both history and live presentation. At the minimum limit, a durable entry takes precedence so it
+can anchor continued history; a live tail occupies that slot only when no durable entry exists.
+Original positions continue to anchor cursors, so filtered rows cannot duplicate or omit durable
+entries at a page boundary.
 
 ## Explicit repair
 
