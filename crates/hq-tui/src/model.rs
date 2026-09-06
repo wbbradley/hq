@@ -3313,6 +3313,8 @@ pub struct UiModel {
     pending_mailbox: Option<PendingMailbox>,
     pending_agent: Option<EffectId>,
     pending_managed_session: Option<EffectId>,
+    agent_route_effect: Option<EffectId>,
+    managed_session_route_effect: Option<EffectId>,
     pending_project: Option<PendingProject>,
     project_route_effect: Option<EffectId>,
     pending_project_conversation: Option<([u8; 32], [u8; 32])>,
@@ -3395,6 +3397,8 @@ impl UiModel {
             pending_mailbox: None,
             pending_agent: None,
             pending_managed_session: None,
+            agent_route_effect: None,
+            managed_session_route_effect: None,
             pending_project: None,
             project_route_effect: None,
             pending_project_conversation: None,
@@ -4314,6 +4318,7 @@ impl UiModel {
             *expected_name = Some(name.clone());
         }
         let id = self.allocate_effect()?;
+        self.agent_route_effect = Some(id);
         self.pending_agent = Some(id);
         effects.push(UiEffect::SubmitAgentCommand { id, action });
         Ok(())
@@ -4328,6 +4333,7 @@ impl UiModel {
             return Ok(());
         }
         let id = self.allocate_effect()?;
+        self.managed_session_route_effect = Some(id);
         self.pending_managed_session = Some(id);
         effects.push(UiEffect::SubmitManagedSession { id, action });
         Ok(())
@@ -5498,6 +5504,7 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         } => client_failed(&mut model, generation, failure, &mut effects),
     }
     synchronize_project_route(&mut model);
+    synchronize_global_route(&mut model);
     Ok(UiTransition { model, effects })
 }
 
@@ -5680,6 +5687,266 @@ fn synchronize_project_route(model: &mut UiModel) {
         }
     ) {
         let _ = model.navigation.pop();
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn synchronize_global_route(model: &mut UiModel) {
+    let desired = if let Some(page) = model.help_page {
+        Some(UiRoute::Help(page))
+    } else if let Some(dialog) = &model.interaction_modal {
+        let interaction = match dialog {
+            UiInteractionModal::Prompt { interaction, .. }
+            | UiInteractionModal::Submitting { interaction, .. } => interaction,
+        };
+        let target = UiRouteTarget::Interaction(interaction.request_id);
+        let capability = UiWorkflowCapability::AnswerRequest;
+        Some(match dialog {
+            UiInteractionModal::Submitting { .. } => UiRoute::Progress {
+                capability,
+                target,
+                effect_id: model
+                    .pending_interactions
+                    .iter()
+                    .find_map(|(effect_id, request_id)| {
+                        (*request_id == interaction.request_id).then_some(*effect_id)
+                    })
+                    .unwrap_or(EffectId(NonZeroU64::MIN)),
+            },
+            UiInteractionModal::Prompt { .. }
+                if matches!(
+                    interaction.kind,
+                    UiInteractionKind::CommandApproval
+                        | UiInteractionKind::FileApproval
+                        | UiInteractionKind::Permission
+                        | UiInteractionKind::McpUrl
+                ) =>
+            {
+                UiRoute::Confirmation { capability, target }
+            }
+            UiInteractionModal::Prompt { .. } if interaction.allow_text => {
+                UiRoute::Form { capability, target }
+            }
+            UiInteractionModal::Prompt { .. } => UiRoute::Choice { capability, target },
+        })
+    } else if let Some(dialog) = &model.agent_modal {
+        Some(agent_dialog_route(model, dialog))
+    } else if let Some(dialog) = &model.new_modal {
+        Some(new_dialog_route(model, dialog))
+    } else if let Some(dialog) = &model.mailbox_modal {
+        Some(match dialog {
+            UiMailboxModal::SelectDirect { .. } => UiRoute::Choice {
+                capability: UiWorkflowCapability::ChooseRecipient,
+                target: UiRouteTarget::Global,
+            },
+            UiMailboxModal::Confirm { .. } => UiRoute::Confirmation {
+                capability: UiWorkflowCapability::ArchiveConversation,
+                target: model
+                    .selected_row
+                    .as_ref()
+                    .map_or(UiRouteTarget::Global, |row_id| {
+                        UiRouteTarget::Conversation(row_id.clone())
+                    }),
+            },
+        })
+    } else if model.config_edit.is_some() {
+        Some(UiRoute::Form {
+            capability: UiWorkflowCapability::EditConfiguration,
+            target: UiRouteTarget::Global,
+        })
+    } else {
+        None
+    };
+
+    reconcile_global_route(model, desired);
+}
+
+fn agent_dialog_route(model: &UiModel, dialog: &UiAgentModal) -> UiRoute {
+    let effect_id = || EffectId(NonZeroU64::MIN);
+    match dialog {
+        UiAgentModal::Search { .. } => UiRoute::Choice {
+            capability: UiWorkflowCapability::EditAgent,
+            target: UiRouteTarget::Global,
+        },
+        UiAgentModal::Details { agent, .. } => UiRoute::Agent {
+            agent_id: agent.agent_id,
+        },
+        UiAgentModal::Create { submitting, .. } => {
+            if *submitting {
+                UiRoute::Progress {
+                    capability: UiWorkflowCapability::EditAgent,
+                    target: UiRouteTarget::Global,
+                    effect_id: model.agent_route_effect.unwrap_or_else(effect_id),
+                }
+            } else {
+                UiRoute::Form {
+                    capability: UiWorkflowCapability::EditAgent,
+                    target: UiRouteTarget::Global,
+                }
+            }
+        }
+        UiAgentModal::RenameSession {
+            agent_id,
+            submitting,
+            ..
+        } => {
+            let capability = UiWorkflowCapability::ManageAgentSession;
+            let target = UiRouteTarget::Agent(*agent_id);
+            if *submitting {
+                UiRoute::Progress {
+                    capability,
+                    target,
+                    effect_id: model.agent_route_effect.unwrap_or_else(effect_id),
+                }
+            } else {
+                UiRoute::Form { capability, target }
+            }
+        }
+        UiAgentModal::ConfirmRetire { agent, .. } => UiRoute::Confirmation {
+            capability: UiWorkflowCapability::EditAgent,
+            target: UiRouteTarget::Agent(agent.agent_id),
+        },
+        UiAgentModal::ManagedProvider { agent, .. } => UiRoute::Choice {
+            capability: UiWorkflowCapability::ChooseAgentSession,
+            target: UiRouteTarget::Agent(agent.agent_id),
+        },
+        UiAgentModal::ConfirmManagedSession { agent, .. } => UiRoute::Confirmation {
+            capability: UiWorkflowCapability::ManageAgentSession,
+            target: UiRouteTarget::Agent(agent.agent_id),
+        },
+        UiAgentModal::ManagingSession { agent, .. } => UiRoute::Progress {
+            capability: UiWorkflowCapability::ManageAgentSession,
+            target: UiRouteTarget::Agent(agent.agent_id),
+            effect_id: model.managed_session_route_effect.unwrap_or_else(effect_id),
+        },
+        UiAgentModal::ManagedSessionOutcome { agent, result } => {
+            let capability = UiWorkflowCapability::ManageAgentSession;
+            let target = UiRouteTarget::Agent(agent.agent_id);
+            if matches!(result.outcome, UiManagedSessionOutcome::Uncertain { .. }) {
+                UiRoute::Recovery { capability, target }
+            } else {
+                UiRoute::Outcome {
+                    capability,
+                    target,
+                    effect_id: model.managed_session_route_effect.unwrap_or_else(effect_id),
+                }
+            }
+        }
+    }
+}
+
+fn new_dialog_route(model: &UiModel, dialog: &UiNewModal) -> UiRoute {
+    match dialog {
+        UiNewModal::Launcher { .. } => UiRoute::Choice {
+            capability: UiWorkflowCapability::StartNewWork,
+            target: UiRouteTarget::Global,
+        },
+        UiNewModal::ChooseProject { .. } => UiRoute::Choice {
+            capability: UiWorkflowCapability::ChooseProject,
+            target: UiRouteTarget::Global,
+        },
+        UiNewModal::ChooseAgent { project, .. } | UiNewModal::ChangeSetupAgent { project, .. } => {
+            UiRoute::Choice {
+                capability: UiWorkflowCapability::ChooseAgent,
+                target: UiRouteTarget::Project(project.project_id),
+            }
+        }
+        UiNewModal::ChooseProvider { agent, .. } => UiRoute::Choice {
+            capability: UiWorkflowCapability::ChooseAgentSession,
+            target: UiRouteTarget::Agent(agent.agent_id),
+        },
+        UiNewModal::ReviewProject { project, .. } => UiRoute::Confirmation {
+            capability: UiWorkflowCapability::StartNewWork,
+            target: UiRouteTarget::Project(project.project_id),
+        },
+        UiNewModal::AgentUnavailable { agent, .. } => UiRoute::Recovery {
+            capability: UiWorkflowCapability::ChooseAgent,
+            target: UiRouteTarget::Agent(agent.agent_id),
+        },
+        UiNewModal::ProjectUnavailable { project, .. } => UiRoute::Recovery {
+            capability: UiWorkflowCapability::ChooseProject,
+            target: UiRouteTarget::Project(project.project_id),
+        },
+        UiNewModal::Working { .. } => UiRoute::Progress {
+            capability: UiWorkflowCapability::StartNewWork,
+            target: model
+                .new_workflow
+                .as_ref()
+                .and_then(new_workflow_project_id)
+                .map_or(UiRouteTarget::Global, UiRouteTarget::Project),
+            effect_id: model
+                .project_route_effect
+                .unwrap_or(EffectId(NonZeroU64::MIN)),
+        },
+    }
+}
+
+fn new_workflow_project_id(workflow: &UiNewWorkflow) -> Option<[u8; 32]> {
+    match workflow {
+        UiNewWorkflow::ChoosingProject { selected } => *selected,
+        UiNewWorkflow::ProjectCreation { return_project, .. } => *return_project,
+        UiNewWorkflow::ProjectSnapshot { project_id, .. }
+        | UiNewWorkflow::ChooseAgent { project_id }
+        | UiNewWorkflow::AgentCreation { project_id, .. } => Some(*project_id),
+        UiNewWorkflow::Instruction(submission) | UiNewWorkflow::Activation(submission) => {
+            Some(submission.project_id)
+        }
+        UiNewWorkflow::InputSnapshot { submission, .. } => Some(submission.project_id),
+    }
+}
+
+fn reconcile_global_route(model: &mut UiModel, desired: Option<UiRoute>) {
+    if desired.as_ref() == Some(model.navigation.active()) {
+        return;
+    }
+    if let Some(desired) = desired {
+        if !matches!(model.navigation.active(), UiRoute::Agent { .. })
+            && (!matches!(desired, UiRoute::Help(_))
+                || matches!(model.navigation.active(), UiRoute::Help(_)))
+            && is_global_workflow_route(model.navigation.active())
+            && model.navigation.replace(desired.clone()).is_ok()
+        {
+            return;
+        }
+        if matches!(desired, UiRoute::Agent { .. }) {
+            while is_global_workflow_route(model.navigation.active()) {
+                if model.navigation.pop().unwrap_or(false) {
+                    continue;
+                }
+                break;
+            }
+            if model.navigation.active() == &desired {
+                return;
+            }
+        }
+        let _ = model.navigation.push(desired);
+    } else {
+        while is_global_workflow_route(model.navigation.active()) {
+            if !model.navigation.pop().unwrap_or(false) {
+                break;
+            }
+        }
+    }
+}
+
+fn is_global_workflow_route(route: &UiRoute) -> bool {
+    match route {
+        UiRoute::Agent { .. }
+        | UiRoute::AgentSessions { .. }
+        | UiRoute::AgentEvidence { .. }
+        | UiRoute::Help(_) => true,
+        UiRoute::Choice { capability, .. }
+        | UiRoute::Form { capability, .. }
+        | UiRoute::Confirmation { capability, .. }
+        | UiRoute::Progress { capability, .. }
+        | UiRoute::Outcome { capability, .. }
+        | UiRoute::Recovery { capability, .. } => !matches!(
+            capability,
+            UiWorkflowCapability::CreateProject
+                | UiWorkflowCapability::EditProjectFolder
+                | UiWorkflowCapability::ManageProject
+        ),
+        _ => false,
     }
 }
 

@@ -41,6 +41,13 @@ fn new_launcher_keeps_project_direct_and_personal_intents_distinct() {
             selected: UiNewChoice::ProjectWork
         })
     ));
+    assert!(matches!(
+        launcher.active_route(),
+        UiRoute::Choice {
+            capability: hq_tui::UiWorkflowCapability::StartNewWork,
+            target: hq_tui::UiRouteTarget::Global
+        }
+    ));
 
     let direct = update(launcher, UiEvent::Input(UiInput::NextItem))
         .expect("choose direct message")
@@ -1663,6 +1670,10 @@ fn contextual_help_freezes_background_actions_and_survives_resize() {
 
     let opened = update(loaded, UiEvent::Input(UiInput::Character('?'))).expect("open help");
     assert_eq!(opened.model.help_page(), Some(UiHelpPage::Context));
+    assert_eq!(
+        opened.model.active_route(),
+        &UiRoute::Help(UiHelpPage::Context)
+    );
     assert_eq!(redraw_count(&opened.effects), 1);
 
     let frozen = update(opened.model, UiEvent::Input(UiInput::NextItem))
@@ -1682,6 +1693,10 @@ fn contextual_help_freezes_background_actions_and_survives_resize() {
     let technical =
         update(frozen.model, UiEvent::Input(UiInput::Character('t'))).expect("show technical help");
     assert_eq!(technical.model.help_page(), Some(UiHelpPage::Technical));
+    assert_eq!(
+        technical.model.active_route(),
+        &UiRoute::Help(UiHelpPage::Technical)
+    );
     assert_eq!(redraw_count(&technical.effects), 1);
 
     let invalidated = update(technical.model, UiEvent::Invalidated { revision: 2 })
@@ -5374,6 +5389,13 @@ fn agent_search_and_details_keep_stable_identity_across_reload_reconnect_and_res
         Some(UiAgentModal::Search { query }) if query == "beta"
     ));
     let details = update(reloaded.model, UiEvent::Input(UiInput::Activate)).expect("inspect");
+    assert_eq!(
+        details.model.navigation_path(),
+        &[
+            UiRoute::Workspace(UiWorkspace::Agents),
+            UiRoute::Agent { agent_id: [2; 32] },
+        ]
+    );
     let resized = update(
         details.model,
         UiEvent::Resized(UiSize {

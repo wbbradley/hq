@@ -108,14 +108,7 @@ fn render_interaction_modal(
             text,
         } => (interaction, true, *selected, text.as_str()),
     };
-    let width = available.width.saturating_sub(4).clamp(1, 82);
-    let height = available.height.clamp(1, 22);
-    let area = Rect {
-        x: available.x + available.width.saturating_sub(width) / 2,
-        y: available.y + available.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
+    let area = available;
     frame.render_widget(Clear, area);
     let title = match interaction.kind {
         UiInteractionKind::Question => format!(" {} needs an answer ", interaction.agent_name),
@@ -197,14 +190,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, ava
     let Some(interaction) = model.new_modal() else {
         return;
     };
-    let width = available.width.saturating_sub(4).clamp(1, 82);
-    let height = available.height.clamp(1, 20);
-    let area = Rect {
-        x: available.x + available.width.saturating_sub(width) / 2,
-        y: available.y + available.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
+    let area = available;
     let (title, mut lines) = match interaction {
         UiNewModal::Launcher { selected } => {
             let choices = [
@@ -517,14 +503,7 @@ fn render_help(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, availabl
     let Some(page) = model.help_page() else {
         return;
     };
-    let width = available.width.saturating_sub(4).clamp(1, 88);
-    let height = available.height.clamp(1, 18);
-    let area = Rect {
-        x: available.x + available.width.saturating_sub(width) / 2,
-        y: available.y + available.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
+    let area = available;
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::new().style(theme.style(UiThemeRole::ModalSurface)),
@@ -987,18 +966,7 @@ fn render_project_interaction(
     if overlay != bounded_confirmation {
         return;
     }
-    let area = if overlay {
-        let width = available.width.saturating_sub(4).clamp(1, 88);
-        let height = available.height.clamp(1, 22);
-        Rect {
-            x: available.x + available.width.saturating_sub(width) / 2,
-            y: available.y + available.height.saturating_sub(height) / 2,
-            width,
-            height,
-        }
-    } else {
-        available
-    };
+    let area = available;
     if overlay {
         frame.render_widget(Clear, area);
         frame.render_widget(
@@ -2165,14 +2133,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, a
     let Some(interaction) = model.agent_modal() else {
         return;
     };
-    let width = available.width.saturating_sub(4).clamp(1, 82);
-    let height = available.height.clamp(1, 20);
-    let area = Rect {
-        x: available.x + available.width.saturating_sub(width) / 2,
-        y: available.y + available.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
+    let area = available;
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::new().style(theme.style(UiThemeRole::ModalSurface)),
@@ -2587,14 +2548,7 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
     let Some(interaction) = model.mailbox_modal() else {
         return;
     };
-    let width = available.width.saturating_sub(4).clamp(1, 76);
-    let height = available.height.clamp(1, 18);
-    let area = Rect {
-        x: available.x + available.width.saturating_sub(width) / 2,
-        y: available.y + available.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
+    let area = available;
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::new().style(theme.style(UiThemeRole::ModalSurface)),
