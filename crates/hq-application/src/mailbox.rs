@@ -14,9 +14,9 @@ use hq_reducer::{
 };
 
 use crate::{
-    ContinueProjectMessageRequest, ConversationArchiveRequest, DomainSnapshot, LocalFactInputs,
-    MessageAuthoringAuthority, MutationDecision, NewMessageRequest, ReplyRequest,
-    plan_asynchronous_message, plan_conversation_archive, plan_project_message_continuation,
+    ContinueAsynchronousMessageRequest, ConversationArchiveRequest, DomainSnapshot,
+    LocalFactInputs, MessageAuthoringAuthority, MutationDecision, NewMessageRequest, ReplyRequest,
+    plan_asynchronous_message, plan_asynchronous_message_continuation, plan_conversation_archive,
     plan_reply,
 };
 
@@ -285,10 +285,10 @@ pub fn plan_mailbox_command(
                     {
                         return Err(stale_target());
                     }
-                    plan_project_message_continuation(
+                    plan_asynchronous_message_continuation(
                         authority,
                         inputs,
-                        ContinueProjectMessageRequest {
+                        ContinueAsynchronousMessageRequest {
                             thread_id: *thread_id,
                             root_fact: root.fact_id,
                             root: root.content.clone(),

@@ -54,10 +54,10 @@ pub use mailbox::{
     MailboxDraftSaveRequest, MailboxDraftTarget, plan_mailbox_command,
 };
 pub use messaging::{
-    ContinueProjectMessageRequest, ConversationArchiveRequest, MessageAuthoringAuthority,
+    ContinueAsynchronousMessageRequest, ConversationArchiveRequest, MessageAuthoringAuthority,
     MessageStateRequest, NewMessageRequest, ReplyRequest, ThreadCancellationRequest,
-    plan_asynchronous_message, plan_conversation_archive, plan_message_archive,
-    plan_message_restore, plan_project_message_continuation, plan_question, plan_reply,
+    plan_asynchronous_message, plan_asynchronous_message_continuation, plan_conversation_archive,
+    plan_message_archive, plan_message_restore, plan_question, plan_reply,
     plan_thread_cancellation,
 };
 pub use mutation::{

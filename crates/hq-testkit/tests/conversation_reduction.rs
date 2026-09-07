@@ -2189,3 +2189,169 @@ fn progress_retention_keeps_exactly_the_newest_two_hundred_and_rebuilds_identica
     );
     Ok(())
 }
+
+#[test]
+fn private_asynchronous_exchanges_retain_one_conversation_across_arrival_orders()
+-> Result<(), Box<dyn Error>> {
+    for (self_note, correlated) in [(false, false), (false, true), (true, false)] {
+        let mut values = DeterministicValues::new(310);
+        let world = local_world(&mut values)?;
+        let recipient = if self_note { world.human } else { world.agent };
+        let correlation = correlated
+            .then(|| operation(7, "provider", "session"))
+            .transpose()?;
+        let root_id = values.message_id();
+        let root = local_message_fact(
+            &mut values,
+            &world,
+            10,
+            [world.human_root.id(), world.agent_root.id()],
+            root_id,
+            world.human,
+            recipient,
+            MessagePurpose::Asynchronous,
+            PresentationKind::Message,
+            correlation.clone(),
+            |message| SemanticPayload::AsynchronousMessageSent {
+                thread_id: None,
+                message,
+            },
+        )?;
+        let thread = ThreadId::from_bytes(*root.id().as_bytes());
+        let mut messages = vec![root.clone()];
+        for (time, sender, recipient) in
+            [(20, recipient, world.human), (30, world.human, recipient)]
+        {
+            let id = values.message_id();
+            messages.push(local_message_fact(
+                &mut values,
+                &world,
+                time,
+                [world.human_root.id(), world.agent_root.id(), root.id()],
+                id,
+                sender,
+                recipient,
+                MessagePurpose::Asynchronous,
+                PresentationKind::Message,
+                correlation.clone(),
+                |message| SemanticPayload::AsynchronousMessageSent {
+                    thread_id: Some(thread),
+                    message,
+                },
+            )?);
+        }
+        let policy = AuthorityPolicy::new(
+            world.installation.installation_id(),
+            world.human.mailbox_id(),
+        );
+        let expected = [(
+            correlation.map_or(
+                ConversationKey::Thread {
+                    counterparty: recipient,
+                    thread,
+                },
+                |correlation| ConversationKey::ProviderSession {
+                    counterparty: recipient,
+                    provider: correlation.provider().clone(),
+                    session: correlation.session().clone(),
+                },
+            ),
+            messages.iter().map(Fact::id).collect::<Vec<_>>(),
+        )]
+        .into_iter()
+        .collect();
+        for arrival in arrival_permutations(&messages) {
+            let report = reduce_complete(
+                world.base_facts().into_iter().chain(arrival),
+                &world.reducer(),
+            )?;
+            for message in &messages {
+                assert_eq!(
+                    report.decisions()[&message.id()].status(),
+                    DecisionStatus::Projected
+                );
+            }
+            assert_eq!(conversation_orders(&report, policy)?, expected);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn asynchronous_continuations_reject_context_changes_and_require_the_root()
+-> Result<(), Box<dyn Error>> {
+    let mut values = DeterministicValues::new(311);
+    let world = local_world(&mut values)?;
+    let root_id = values.message_id();
+    let correlation = operation(7, "provider", "session")?;
+    let root = local_message_fact(
+        &mut values,
+        &world,
+        10,
+        [world.human_root.id(), world.agent_root.id()],
+        root_id,
+        world.human,
+        world.agent,
+        MessagePurpose::Asynchronous,
+        PresentationKind::Message,
+        Some(correlation.clone()),
+        |message| SemanticPayload::AsynchronousMessageSent {
+            thread_id: None,
+            message,
+        },
+    )?;
+    let thread = ThreadId::from_bytes(*root.id().as_bytes());
+    for case in 0..7 {
+        let id = values.message_id();
+        let parents = if case == 4 {
+            vec![world.human_root.id(), world.agent_root.id()]
+        } else {
+            vec![world.human_root.id(), world.agent_root.id(), root.id()]
+        };
+        let continuation = local_message_fact(
+            &mut values,
+            &world,
+            20,
+            parents,
+            id,
+            world.human,
+            world.agent,
+            MessagePurpose::Asynchronous,
+            PresentationKind::Message,
+            Some(correlation.clone()),
+            |mut message| {
+                match case {
+                    0 => message.recipient = Some(world.human),
+                    1 => message.project_id = Some(ProjectId::from_bytes([88; 32])),
+                    2 => message.correlation = None,
+                    6 => message.sender = world.agent,
+                    _ => {}
+                }
+                SemanticPayload::AsynchronousMessageSent {
+                    thread_id: Some(if case == 3 {
+                        ThreadId::from_bytes([88; 32])
+                    } else {
+                        thread
+                    }),
+                    message,
+                }
+            },
+        )?;
+        let mut facts = world.base_facts();
+        if case != 5 {
+            facts.push(root.clone());
+        }
+        facts.push(continuation.clone());
+        let report = reduce_complete(facts, &world.reducer())?;
+        assert_eq!(
+            report.decisions()[&continuation.id()].status(),
+            if case == 5 {
+                DecisionStatus::Unresolved
+            } else {
+                DecisionStatus::Invalid
+            },
+            "case {case}"
+        );
+    }
+    Ok(())
+}

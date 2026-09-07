@@ -5,9 +5,10 @@
 use std::collections::BTreeSet;
 
 use hq_application::{
-    ContinueProjectMessageRequest, LocalFactInputs, MessageAuthoringAuthority, MessageStateRequest,
-    NewMessageRequest, ReplyRequest, ThreadCancellationRequest, plan_message_archive,
-    plan_project_message_continuation, plan_question, plan_reply, plan_thread_cancellation,
+    ContinueAsynchronousMessageRequest, LocalFactInputs, MessageAuthoringAuthority,
+    MessageStateRequest, NewMessageRequest, ReplyRequest, ThreadCancellationRequest,
+    plan_asynchronous_message_continuation, plan_message_archive, plan_question, plan_reply,
+    plan_thread_cancellation,
 };
 use hq_domain::{
     AuthorityReference, AuthorityRole, ContentText, FactId, FactScope, InstallationId,
@@ -286,10 +287,10 @@ fn project_continuation_cites_and_retains_the_exact_asynchronous_root() {
         project_id: Some(project_id),
     };
     let thread_id = ThreadId::from_bytes(*root_fact.as_bytes());
-    let plan = plan_project_message_continuation(
+    let plan = plan_asynchronous_message_continuation(
         authority.clone(),
         inputs(),
-        ContinueProjectMessageRequest {
+        ContinueAsynchronousMessageRequest {
             thread_id,
             root_fact,
             root: root.clone(),
@@ -313,10 +314,10 @@ fn project_continuation_cites_and_retains_the_exact_asynchronous_root() {
     ));
 
     assert!(
-        plan_project_message_continuation(
+        plan_asynchronous_message_continuation(
             authority,
             inputs(),
-            ContinueProjectMessageRequest {
+            ContinueAsynchronousMessageRequest {
                 thread_id: ThreadId::from_bytes([99; 32]),
                 root_fact,
                 root,
@@ -328,4 +329,71 @@ fn project_continuation_cites_and_retains_the_exact_asynchronous_root() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn private_asynchronous_continuations_keep_participants_and_root() {
+    for (root_sender, root_recipient, writer, expected_recipient) in
+        [(3, 4, 3, 4), (3, 4, 4, 3), (3, 3, 3, 3)]
+    {
+        let author = authority(writer);
+        let root = MessageContent {
+            message_id: message(20),
+            sender: authority(root_sender).sender,
+            recipient: Some(authority(root_recipient).sender),
+            body: ContentText::new("first message").expect("body"),
+            purpose: MessagePurpose::Asynchronous,
+            presentation: PresentationKind::Message,
+            correlation: Some(hq_domain::OperationCorrelation::new(
+                hq_domain::ProviderId::new("provider").expect("provider"),
+                hq_domain::ProviderSessionId::new("session").expect("session"),
+                hq_domain::OperationId::from_bytes([21; 32]),
+            )),
+            project_id: None,
+        };
+        let request = ContinueAsynchronousMessageRequest {
+            thread_id: ThreadId::from_bytes(*fact(21).as_bytes()),
+            root_fact: fact(21),
+            root,
+            root_scope: author.scope.clone(),
+            message_id: message(22),
+            body: ContentText::new("another message").expect("body"),
+            presentation: PresentationKind::Message,
+        };
+        let plan =
+            plan_asynchronous_message_continuation(author.clone(), inputs(), request.clone())
+                .expect("private continuation");
+        assert!(plan.causal().parents().contains(&request.root_fact));
+        assert!(
+            matches!(plan.payload(), SemanticPayload::AsynchronousMessageSent {
+            thread_id: Some(thread_id), message: content,
+        } if *thread_id == request.thread_id
+            && content.sender == author.sender
+            && content.recipient == Some(authority(expected_recipient).sender)
+            && content.project_id.is_none()
+            && content.correlation == request.root.correlation)
+        );
+        let mut wrong_thread = request.clone();
+        wrong_thread.thread_id = ThreadId::from_bytes([99; 32]);
+        assert!(
+            plan_asynchronous_message_continuation(author.clone(), inputs(), wrong_thread).is_err()
+        );
+        let mut wrong_scope = request.clone();
+        wrong_scope.root_scope =
+            FactScope::InstallationPrivate(InstallationId::from_bytes([99; 32]));
+        assert!(
+            plan_asynchronous_message_continuation(author.clone(), inputs(), wrong_scope).is_err()
+        );
+        let mut question = request.clone();
+        question.root.purpose = MessagePurpose::Question;
+        assert!(
+            plan_asynchronous_message_continuation(author.clone(), inputs(), question).is_err()
+        );
+        if writer != root_sender {
+            let mut project = request.clone();
+            project.root.project_id = Some(ProjectId::from_bytes([88; 32]));
+            assert!(plan_asynchronous_message_continuation(author, inputs(), project).is_err());
+        }
+        assert!(plan_asynchronous_message_continuation(authority(5), inputs(), request).is_err());
+    }
 }

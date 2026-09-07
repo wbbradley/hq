@@ -41,14 +41,14 @@ pub struct NewMessageRequest {
     pub project_id: Option<ProjectId>,
 }
 
-/// Complete passive intent for one asynchronous project-thread continuation.
+/// Complete passive intent for one asynchronous conversation continuation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContinueProjectMessageRequest {
-    /// Existing stable project exchange.
+pub struct ContinueAsynchronousMessageRequest {
+    /// Existing stable asynchronous exchange.
     pub thread_id: ThreadId,
     /// Exact initiating message fact.
     pub root_fact: FactId,
-    /// Immutable initiating message used to validate project addressing.
+    /// Immutable initiating message used to validate participant addressing.
     pub root: MessageContent,
     /// Immutable initiating audience.
     pub root_scope: FactScope,
@@ -152,30 +152,38 @@ pub fn plan_asynchronous_message(
     plan_root(authority, inputs, request, MessagePurpose::Asynchronous)
 }
 
-/// Plans one causally bound continuation of an asynchronous project exchange.
-pub fn plan_project_message_continuation(
+/// Plans one causally bound continuation of an asynchronous exchange.
+pub fn plan_asynchronous_message_continuation(
     authority: MessageAuthoringAuthority,
     inputs: LocalFactInputs,
-    request: ContinueProjectMessageRequest,
+    request: ContinueAsynchronousMessageRequest,
 ) -> Result<FactPlan, ApplicationError> {
     if request.root_scope != authority.scope
         || request.root.purpose != MessagePurpose::Asynchronous
         || request.thread_id != ThreadId::from_bytes(*request.root_fact.as_bytes())
-        || request.root.sender != authority.sender
         || request.root.recipient.is_none()
-        || request.root.project_id.is_none()
     {
         return Err(invalid());
     }
-    validate_authority_with_project(&authority, request.root.recipient, true)?;
+    let recipient = if request.root.sender == authority.sender {
+        request.root.recipient
+    } else if request.root.project_id.is_none()
+        && matches!(request.root_scope, FactScope::InstallationPrivate(_))
+        && request.root.recipient == Some(authority.sender)
+    {
+        Some(request.root.sender)
+    } else {
+        return Err(invalid());
+    };
+    validate_authority_with_project(&authority, recipient, request.root.project_id.is_some())?;
     let content = MessageContent {
         message_id: request.message_id,
         sender: authority.sender,
-        recipient: request.root.recipient,
+        recipient,
         body: request.body,
         purpose: MessagePurpose::Asynchronous,
         presentation: request.presentation,
-        correlation: None,
+        correlation: request.root.correlation,
         project_id: request.root.project_id,
     };
     let causal = causal(&authority, [request.root_fact])?;

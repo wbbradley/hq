@@ -780,14 +780,20 @@ fn validate_asynchronous_continuation(
     else {
         return Err(ConversationReason::ThreadMismatch);
     };
+    let same_direction =
+        message.sender == root_message.sender && message.recipient == root_message.recipient;
+    let reversed_private = root_message.project_id.is_none()
+        && matches!(root.scope(), FactScope::InstallationPrivate(_))
+        && root_message.recipient == Some(message.sender)
+        && message.recipient == Some(root_message.sender);
     (fact.causal().parents().contains(&root.id())
         && same_scope(root.scope(), fact.scope())
         && root_message.purpose == MessagePurpose::Asynchronous
-        && root_message.project_id.is_some()
+        && root_message.recipient.is_some()
         && message.purpose == MessagePurpose::Asynchronous
-        && message.sender == root_message.sender
-        && message.recipient == root_message.recipient
-        && message.project_id == root_message.project_id)
+        && (same_direction || reversed_private)
+        && message.project_id == root_message.project_id
+        && message.correlation == root_message.correlation)
         .then_some(())
         .ok_or(ConversationReason::ThreadMismatch)
 }

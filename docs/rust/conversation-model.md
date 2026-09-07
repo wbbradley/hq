@@ -17,6 +17,13 @@ independent grow-only set. Cancellations remain a separate grow-only set. `Threa
 answers, all cancellations, canonical ready-answer order, and every answer/cancellation pair as
 `Before`, `After`, or `Concurrent` using usable reachability.
 
+Asynchronous continuations cite the exact initiating root and retain its `ThreadId`, scope,
+project association, and operation correlation. Private direct conversations allow either original
+participant to write to the other; personal notes retain the human sender and recipient. Project
+continuations remain inputs from the original sender to the original project mailbox. An explicit
+thread cannot retarget another exchange or turn an asynchronous message into a question answer.
+Missing causal roots defer projection; mismatched participant/context evidence fails closed.
+
 `MessageId` is a stable public handle, not a winner key. Unequal canonical facts reusing one handle
 are explicitly conflicted and cannot create a message, thread action, archive target, delivery
 claim, or final-answer selection. Human text is retained only as bounded display content; strings
