@@ -792,6 +792,40 @@ impl HarnessSupervisor {
     pub fn launch(&self, request: HarnessLaunchRequest) -> Result<ProviderSessionId, HarnessError> {
         self.ensure_accepting()?;
         let mut workers = self.lock_workers()?;
+        self.launch_owned(request, &mut workers)
+    }
+
+    /// Reuses a matching live worker or resumes the exact saved session without replaying inputs.
+    /// Project callers must revalidate eligibility before explicitly delivering each input.
+    pub fn ensure_resumed(
+        &self,
+        request: HarnessLaunchRequest,
+    ) -> Result<ProviderSessionId, HarnessError> {
+        self.ensure_accepting()?;
+        let HarnessSessionRequest::Resume { session_id } = &request.session else {
+            return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
+        };
+        let mut workers = self.lock_workers()?;
+        if let Some(worker) = workers.get_mut(&request.agent_id) {
+            if worker.provider_id != request.provider_id
+                || worker.session_id != *session_id
+                || worker.project_id != request.project_id
+            {
+                return Err(HarnessError::new(
+                    HarnessErrorClass::SessionIdentityMismatch,
+                ));
+            }
+            renew_worker(&self.config, &self.dependencies, request.agent_id, worker)?;
+            return Ok(worker.session_id.clone());
+        }
+        self.launch_owned(request, &mut workers)
+    }
+
+    fn launch_owned(
+        &self,
+        request: HarnessLaunchRequest,
+        workers: &mut BTreeMap<AgentId, HarnessWorker>,
+    ) -> Result<ProviderSessionId, HarnessError> {
         if workers.contains_key(&request.agent_id) || workers.len() == self.config.max_workers {
             return Err(HarnessError::new(HarnessErrorClass::OwnershipConflict));
         }
@@ -950,11 +984,17 @@ impl HarnessSupervisor {
         let worker = workers
             .get_mut(&agent_id)
             .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
-        for delivery in &deliveries {
+        // Project queues require a fresh canonical eligibility check by the project workflow.
+        let deliveries = deliveries
+            .iter()
+            .filter(|delivery| delivery.project.is_none());
+        let mut reconciled = 0;
+        for delivery in deliveries {
             renew_worker(&self.config, &self.dependencies, agent_id, worker)?;
             reconcile_delivery(&self.dependencies, worker, delivery)?;
+            reconciled += 1;
         }
-        Ok(deliveries.len())
+        Ok(reconciled)
     }
 
     /// Accepts normalized work into one worker's bounded FIFO/coalescing buffer and drains it.

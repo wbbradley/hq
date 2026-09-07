@@ -355,6 +355,17 @@ impl ProjectRuntimePort for UnusedRuntime {
         unavailable()
     }
 
+    fn delivery_accepted(
+        &self,
+        _request: &EffectRequest<ProjectRuntimeDelivery>,
+    ) -> Result<bool, ApplicationError> {
+        unavailable()
+    }
+
+    fn ensure_ready(&self, _request: &ProjectRuntimeRequest) -> Result<(), ApplicationError> {
+        unavailable()
+    }
+
     fn deliver(
         &self,
         _request: &EffectRequest<ProjectRuntimeDelivery>,

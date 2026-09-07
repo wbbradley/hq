@@ -45,9 +45,17 @@ Delivery state is monotonic:
 A pending delivery advances to uncertain before submission. After response loss or daemon restart,
 an uncertain delivery uses exact submission lookup before retry. Authoritative acceptance advances
 to accepted without resubmission. Definite absence permits only the exact recorded retry. Collision
-or indeterminate lookup fails closed. Starting an exact resumed worker immediately wakes its durable
-pending and uncertain records; ordinary repair wakes may safely repeat because terminal records are
-excluded and all transitions are idempotent.
+or indeterminate lookup fails closed. Starting an exact resumed direct-session worker immediately
+wakes its durable direct pending and uncertain records. Project records are excluded from generic
+wake/recovery: the project workflow must revalidate current eligibility and explicitly select each
+input. Ordinary repair wakes may safely repeat because terminal records are excluded and all
+transitions are idempotent.
+
+Project dispatch uses `ensure_resumed` to reuse a matching live worker or resume the exact saved
+session without replaying inputs. The worker lock serializes readiness with concurrent launch and
+stop. A live worker for a different project, provider or session rejects the request; a retained
+ready-session row or successful operation receipt is not proof of a live worker. Failed exact resume
+never falls back to starting a new conversation.
 
 Each state read is explicitly bounded. Direct exact-identity reads support client replay without
 scanning or regressing a terminal record. A caller that owns more runnable rows than one bounded

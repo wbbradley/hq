@@ -953,11 +953,8 @@ impl ProjectRuntimePort for HarnessNodeComponent {
                 // remain resolvable after the process starter clears ambient inheritance.
                 environment,
             };
-            if request.body.resume_session.is_some() {
-                supervisor.recover(launch)
-            } else {
-                supervisor.launch(launch)
-            }
+            // Project input replay is owned by the workflow after canonical revalidation.
+            supervisor.launch(launch)
         });
         let outcome = match outcome {
             Ok(session) => Ok(EffectOutcome::Accepted(session)),
@@ -970,28 +967,46 @@ impl ProjectRuntimePort for HarnessNodeComponent {
         outcome
     }
 
+    fn delivery_accepted(
+        &self,
+        request: &EffectRequest<ProjectRuntimeDelivery>,
+    ) -> Result<bool, ApplicationError> {
+        self.with_supervisor(|supervisor| {
+            let retained =
+                supervisor.delivery(request.body.binding.agent_id, request.body.submission_id)?;
+            Ok(retained.is_some_and(|delivery| {
+                same_project_delivery(request, &delivery)
+                    && delivery.state == HarnessDeliveryState::Accepted
+            }))
+        })
+    }
+
+    fn ensure_ready(&self, request: &ProjectRuntimeRequest) -> Result<(), ApplicationError> {
+        let session_id = request
+            .resume_session
+            .clone()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::InvalidRequest))?;
+        let environment = project_launch_environment()?;
+        let result = self.with_supervisor(|supervisor| {
+            supervisor
+                .ensure_resumed(HarnessLaunchRequest {
+                    agent_id: request.agent_id,
+                    project_id: Some(request.project_id),
+                    launch_directory: request.launch_directory.clone(),
+                    provider_id: request.provider.clone(),
+                    session: HarnessSessionRequest::Resume { session_id },
+                    environment,
+                })
+                .map(|_| ())
+        });
+        self.wake_event_task();
+        result
+    }
+
     fn deliver(
         &self,
         request: &EffectRequest<ProjectRuntimeDelivery>,
     ) -> Result<EffectOutcome<()>, ApplicationError> {
-        self.inner.trace.record(
-            BoundaryKind::ProjectDispatched,
-            BoundaryIds {
-                message: Some(*request.body.submission_id.as_bytes()),
-                dispatch: Some(*request.body.dispatch_id.as_bytes()),
-                operation: Some(*request.operation_id.as_bytes()),
-                ..BoundaryIds::default()
-            },
-        );
-        self.inner.trace.record(
-            BoundaryKind::CodexSubmitted,
-            BoundaryIds {
-                message: Some(*request.body.submission_id.as_bytes()),
-                dispatch: Some(*request.body.dispatch_id.as_bytes()),
-                operation: Some(*request.operation_id.as_bytes()),
-                ..BoundaryIds::default()
-            },
-        );
         let outcome = self.with_supervisor(|supervisor| {
             let delivery = HarnessDeliveryRecord {
                 agent_id: request.body.binding.agent_id,
@@ -1046,6 +1061,26 @@ impl ProjectRuntimePort for HarnessNodeComponent {
                 None => attempt.map(|()| EffectOutcome::Uncertain(request.operation_id)),
             }
         });
+        if matches!(&outcome, Ok(EffectOutcome::Accepted(()))) {
+            self.inner.trace.record(
+                BoundaryKind::ProjectDispatched,
+                BoundaryIds {
+                    message: Some(*request.body.submission_id.as_bytes()),
+                    dispatch: Some(*request.body.dispatch_id.as_bytes()),
+                    operation: Some(*request.operation_id.as_bytes()),
+                    ..BoundaryIds::default()
+                },
+            );
+            self.inner.trace.record(
+                BoundaryKind::CodexSubmitted,
+                BoundaryIds {
+                    message: Some(*request.body.submission_id.as_bytes()),
+                    dispatch: Some(*request.body.dispatch_id.as_bytes()),
+                    operation: Some(*request.operation_id.as_bytes()),
+                    ..BoundaryIds::default()
+                },
+            );
+        }
         self.wake_event_task();
         outcome
     }
@@ -1149,6 +1184,37 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn queued_project_delivery_without_worker_emits_no_submission_boundary() {
+        let database = TestDatabase::new();
+        let store = Store::open(&database.path, NonZeroUsize::MIN).expect("store opens");
+        let trace_path = database.path.with_extension("jsonl");
+        let mut component = HarnessNodeComponent::new(
+            HarnessSupervisorConfig::default(),
+            &store,
+            Arc::new(HarnessRegistry::new()),
+            Arc::new(CountingPersistence::default()),
+            Arc::new(SystemHarnessClock),
+            Arc::new(RandomHarnessTokens),
+            Arc::new(UnavailableAgentSessionCanonical),
+        )
+        .with_boundary_trace(BoundaryTrace::open(&trace_path, BoundaryProcess::Node));
+        let cancellation = CancellationToken::new();
+        component.start(cancellation.child()).expect("start");
+        let request = delivery_request();
+        assert_eq!(
+            component.deliver(&request).expect("queued"),
+            EffectOutcome::Uncertain(request.operation_id)
+        );
+        let records = fs::read_to_string(&trace_path).expect("trace");
+        assert!(!records.contains("codex_submitted"));
+        assert!(!records.contains("project_dispatched"));
+        component.stop_intake().expect("close intake");
+        cancellation.cancel();
+        component.drain().expect("drain");
+        fs::remove_file(trace_path).expect("remove trace");
+    }
 
     #[test]
     fn project_launch_environment_preserves_the_nodes_executable_search_path() {

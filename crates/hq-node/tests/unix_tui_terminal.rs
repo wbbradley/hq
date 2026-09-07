@@ -802,7 +802,7 @@ fn installed_tui_creates_and_manages_an_existing_tree_project() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation() {
+fn installed_guided_work_resumes_exact_conversation_after_node_restart() {
     let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -815,7 +815,7 @@ fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation()
     let search_path = format!("{}:{inherited_path}", provider_bin.display());
 
     initialize_identity(&state_root);
-    let _daemon = start_foreground_daemon(&state_root, &search_path, &provider_bin.join("codex"));
+    let daemon = start_foreground_daemon(&state_root, &search_path, &provider_bin.join("codex"));
     let human = hq_output_with_search_path(&state_root, &["human", "create"], &search_path);
     assert!(human.status.success(), "human create failed: {human:?}");
 
@@ -867,6 +867,11 @@ fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation()
         project["dispatches"][0]["message_id"]
     );
 
+    let original_assignment = project["assignment"].clone();
+    drop(daemon);
+    let _restarted =
+        start_foreground_daemon(&state_root, &search_path, &provider_bin.join("codex"));
+
     let follow_up = "continue with the installed follow-up";
     let completion_gate = provider_bin.join("completion-gate-2");
     let gate = Command::new("mkfifo")
@@ -906,6 +911,35 @@ fn installed_guided_work_dispatches_initial_and_follow_up_in_open_conversation()
     );
     assert!(mailbox_contains(&state_root, follow_up));
     assert!(mailbox_contains(&state_root, "finished-turn-2"));
+    assert_eq!(project["assignment"], original_assignment);
+    let calls = std::fs::read_to_string(provider_bin.join("calls.log")).expect("provider calls");
+    let calls = calls
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("call JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call["method"] == "thread/start")
+            .count(),
+        1
+    );
+    let resumes = calls
+        .iter()
+        .filter(|call| call["method"] == "thread/resume")
+        .collect::<Vec<_>>();
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(
+        resumes[0]["params"]["threadId"],
+        original_assignment["session"]
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call["method"] == "turn/start")
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -2614,10 +2648,23 @@ fn run_in_pty_with_trace(
                 ),
                 _ => None,
             };
-            let boundary_evidence =
-                boundary_trace.and_then(|path| std::fs::read_to_string(path).ok());
+            let boundary_evidence = boundary_trace
+                .map(Path::to_path_buf)
+                .or_else(|| Some(state_root.join("diagnostics/boundaries.jsonl")))
+                .and_then(|path| std::fs::read_to_string(path).ok());
+            let reply_evidence = match interaction {
+                PtyInteraction::ReplyToProjectConversation {
+                    name,
+                    completion_gate,
+                    ..
+                } => Some((
+                    project_json(state_root, name),
+                    std::fs::read_to_string(completion_gate.with_file_name("calls.log")).ok(),
+                )),
+                _ => None,
+            };
             panic!(
-                "TUI process timed out for {interaction:?} (initial={initial_key_sent}, content={content_sent}, action={managed_action_sent}, provider={managed_provider_sent}, resource={resource_commit_sent}, exit={exit_sent}); provider calls: {provider_calls:?}; project: {guided_project:?}; boundaries: {boundary_evidence:?}; output: {}",
+                "TUI process timed out for {interaction:?} (initial={initial_key_sent}, content={content_sent}, action={managed_action_sent}, provider={managed_provider_sent}, resource={resource_commit_sent}, exit={exit_sent}); provider calls: {provider_calls:?}; project: {guided_project:?}; boundaries: {boundary_evidence:?}; reply evidence: {reply_evidence:?}; output: {}",
                 String::from_utf8_lossy(&bytes)
             );
         }
@@ -2905,7 +2952,8 @@ import sys
 import time
 
 thread_id = "hq-test-thread"
-turn_number = 0
+counter_path = os.path.join(os.path.dirname(__file__), "turn-number")
+turn_number = int(open(counter_path).read()) if os.path.exists(counter_path) else 0
 for line in sys.stdin:
     with open(os.path.join(os.path.dirname(__file__), "calls.log"), "a") as log:
         log.write(line)
@@ -2923,6 +2971,8 @@ for line in sys.stdin:
         result = {"thread": {"id": thread_id, "turns": []}}
     elif method == "turn/start":
         turn_number += 1
+        with open(counter_path, "w") as counter:
+            counter.write(str(turn_number))
         turn_id = f"hq-test-turn-{turn_number}"
         turn = {"id": turn_id, "status": "inProgress", "items": []}
         print(json.dumps({"method": "turn/started", "params": {"threadId": thread_id, "turn": turn}}), flush=True)
@@ -3036,6 +3086,11 @@ impl Drop for ForegroundDaemonGuard<'_> {
     fn drop(&mut self) {
         let _ = hq_output(self.state_root, &["daemon", "stop"]);
         if let Some(mut child) = self.child.take() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while child.try_wait().is_ok_and(|status| status.is_none()) && Instant::now() < deadline
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
             let _ = child.kill();
             let _ = child.wait();
         }

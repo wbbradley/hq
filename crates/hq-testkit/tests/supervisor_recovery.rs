@@ -35,6 +35,134 @@ use hq_harness::{
 };
 
 #[test]
+fn direct_session_recovery_still_reconciles_acceptance_without_resubmission() {
+    let agent = AgentId::from_bytes([1; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider");
+    let session_id = ProviderSessionId::new("durable-session").expect("session");
+    let provider = Arc::new(ProviderState::default());
+    let state = Arc::new(MemoryState::default());
+    let dependencies = dependencies(
+        registry(provider_id.clone(), session_id.clone(), provider.clone()),
+        state.clone(),
+        Arc::new(MemoryPersistence::available()),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    );
+    let first = supervisor(dependencies.clone());
+    first
+        .launch(launch(
+            agent,
+            provider_id.clone(),
+            HarnessSessionRequest::Start,
+        ))
+        .expect("start");
+    let mut input = delivery(agent, &provider_id, &session_id);
+    input.project = None;
+    first.deliver(input).expect("acceptance response lost");
+    first.stop(agent).expect("stop");
+    let restarted = supervisor(dependencies);
+    restarted
+        .recover(launch(
+            agent,
+            provider_id,
+            HarnessSessionRequest::Resume { session_id },
+        ))
+        .expect("resume direct worker");
+    assert_eq!(
+        state.delivery_state(agent),
+        Some(HarnessDeliveryState::Accepted)
+    );
+    assert_eq!(provider.submission_calls.load(Ordering::SeqCst), 1);
+    restarted.shutdown().expect("shutdown");
+}
+
+#[test]
+fn exact_project_resume_reuses_worker_without_draining_saved_deliveries() {
+    let agent = AgentId::from_bytes([1; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider");
+    let session_id = ProviderSessionId::new("durable-session").expect("session");
+    let provider = Arc::new(ProviderState::default());
+    let state = Arc::new(MemoryState::default());
+    let dependencies = dependencies(
+        registry(provider_id.clone(), session_id.clone(), provider.clone()),
+        state.clone(),
+        Arc::new(MemoryPersistence::available()),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    );
+    let saved = delivery(agent, &provider_id, &session_id);
+    let first = supervisor(dependencies.clone());
+    first
+        .deliver(saved.clone())
+        .expect_err("no worker; input stays queued");
+    let restarted = supervisor(dependencies);
+    let request = || {
+        let mut request = launch(
+            agent,
+            provider_id.clone(),
+            HarnessSessionRequest::Resume {
+                session_id: session_id.clone(),
+            },
+        );
+        request.project_id = saved.project.as_ref().map(|project| project.project_id);
+        request
+    };
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| restarted.ensure_resumed(request()));
+        let second = scope.spawn(|| restarted.ensure_resumed(request()));
+        assert_eq!(
+            first.join().expect("first joins").expect("resume"),
+            session_id
+        );
+        assert_eq!(
+            second.join().expect("second joins").expect("reuse"),
+            session_id
+        );
+    });
+    let leases = state.snapshot().leases;
+    assert_eq!(
+        restarted.ensure_resumed(request()).expect("reuse"),
+        session_id
+    );
+    assert_eq!(state.snapshot().leases, leases);
+    assert_eq!(restarted.wake().expect("generic wake"), 0);
+    assert_eq!(provider.submission_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        state.delivery_state(agent),
+        Some(HarnessDeliveryState::Pending)
+    );
+    for mismatch in ["project", "provider", "session"] {
+        let mut invalid = request();
+        match mismatch {
+            "project" => invalid.project_id = Some(ProjectId::from_bytes([99; 32])),
+            "provider" => invalid.provider_id = ProviderId::new("different").expect("provider"),
+            _ => {
+                invalid.session = HarnessSessionRequest::Resume {
+                    session_id: ProviderSessionId::new("different").expect("session"),
+                }
+            }
+        }
+        assert_eq!(
+            restarted
+                .ensure_resumed(invalid)
+                .expect_err("identity mismatch")
+                .class,
+            HarnessErrorClass::SessionIdentityMismatch
+        );
+    }
+    restarted
+        .deliver(saved.clone())
+        .expect("explicit eligible delivery");
+    restarted.deliver(saved).expect("reconcile lost response");
+    assert_eq!(provider.submission_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        state.delivery_state(agent),
+        Some(HarnessDeliveryState::Accepted)
+    );
+    restarted.shutdown().expect("shutdown");
+}
+
+#[test]
 fn live_polling_persists_source_order_and_releases_closed_workers() {
     let agent = AgentId::from_bytes([41; 32]);
     let provider_id = ProviderId::new("scripted").expect("provider validates");
@@ -698,7 +826,14 @@ fn restart_reconciles_response_loss_and_partial_event_persistence_before_forced_
                 session_id: session_id.clone(),
             },
         ))
-        .expect("restarted worker resumes and wakes durable work");
+        .expect("restarted worker resumes without replaying project work");
+    assert_eq!(
+        state.delivery_state(agent),
+        Some(HarnessDeliveryState::Uncertain)
+    );
+    restarted
+        .deliver(delivery(agent, &provider_id, &session_id))
+        .expect("current project explicitly reconciles its eligible input");
     assert_eq!(
         state.delivery_state(agent),
         Some(HarnessDeliveryState::Accepted)

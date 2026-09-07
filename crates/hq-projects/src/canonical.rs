@@ -120,6 +120,36 @@ where
     }
 }
 
+fn workflow_assignment(
+    assignment: &hq_reducer::ProjectAssignmentView,
+) -> CanonicalProjectAssignment {
+    let (thread_id, launch_directory, phase_runnable, blocked) = match &assignment.phase {
+        ProjectAssignmentPhase::Runnable {
+            thread_id,
+            launch_directory,
+        } => (
+            Some(*thread_id),
+            Some(launch_directory.clone()),
+            true,
+            false,
+        ),
+        ProjectAssignmentPhase::Configuring | ProjectAssignmentPhase::Blocked(_) => (
+            None,
+            None,
+            false,
+            matches!(assignment.phase, ProjectAssignmentPhase::Blocked(_)),
+        ),
+    };
+    CanonicalProjectAssignment {
+        intent: assignment.intent.clone(),
+        binding: assignment.binding.clone(),
+        thread_id,
+        launch_directory,
+        runnable: assignment.runnable && phase_runnable,
+        blocked,
+    }
+}
+
 fn workflow_snapshot(
     snapshot: &DomainSnapshot,
     project_id: ProjectId,
@@ -183,23 +213,7 @@ fn workflow_snapshot(
         },
         |agent_id| agent_project_threads(snapshot, project_id, agent_id),
     );
-    let assignment = view.assignment.as_ref().map(|assignment| {
-        let (thread_id, phase_runnable, blocked) = match assignment.phase {
-            ProjectAssignmentPhase::Runnable { thread_id, .. } => (Some(thread_id), true, false),
-            ProjectAssignmentPhase::Configuring | ProjectAssignmentPhase::Blocked(_) => (
-                None,
-                false,
-                matches!(assignment.phase, ProjectAssignmentPhase::Blocked(_)),
-            ),
-        };
-        CanonicalProjectAssignment {
-            intent: assignment.intent.clone(),
-            binding: assignment.binding.clone(),
-            thread_id,
-            runnable: assignment.runnable && phase_runnable,
-            blocked,
-        }
-    });
+    let assignment = view.assignment.as_ref().map(workflow_assignment);
     let requested_agent_available = requested_agent.is_none_or(|agent_id| {
         agent_available_to_project(snapshot, project_id, view.home, agent_id)
     });

@@ -329,7 +329,16 @@ After sequencing, the home automatically schedules the oldest pending input for 
 project through the ordinary durable project saga. Closed, unassigned, blocked, and otherwise
 non-runnable projects retain accepted input until they become runnable. Stable command and delivery
 identities make post-commit, startup, drain, and busy-workflow retries converge without submitting
-the same input twice. Manual dispatch is not an ordinary messaging step; it is a typed recovery
+the same input twice. Before delivering an eligible input, the workflow validates the assignment's
+saved launch directory and ensures its exact provider session is live. An input with exact durable
+provider acceptance needs only canonical attribution repair; that repair does not require a live
+provider or a successful resume. After that external boundary,
+it rereads the project and checks the assignment, resources and selected input again. Resume never
+drains project records on its own: only the current workflow grants delivery eligibility. Thus a
+node restart can leave an idle assignment stopped without preventing the next message from resuming
+its saved conversation. Failed readiness leaves the input saved with a resume diagnostic.
+
+Manual dispatch is not an ordinary messaging step; it is a typed recovery
 action exposed only when stalled-delivery evidence requires intervention.
 
 Post-commit wakes contain no message or project payload and may coalesce. The worker rereads durable

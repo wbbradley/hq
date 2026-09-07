@@ -286,16 +286,21 @@ impl CanonicalProjectPort for ScriptedCanonical {
                     intent,
                     binding: None,
                     thread_id: None,
+                    launch_directory: None,
                     runnable: false,
                     blocked: false,
                 });
             }
             CanonicalProjectMutationAction::MakeRunnable {
-                binding, thread_id, ..
+                binding,
+                thread_id,
+                launch_directory,
+                ..
             } => {
                 let assignment = state.snapshot.assignment.as_mut().expect("configuring");
                 assignment.binding = Some(binding);
                 assignment.thread_id = Some(thread_id);
+                assignment.launch_directory = Some(launch_directory);
                 assignment.runnable = true;
                 assignment.blocked = false;
             }
@@ -617,6 +622,9 @@ struct RuntimeState {
     delivery_order: Vec<MessageId>,
     delivery_calls: usize,
     start_requests: Vec<ProjectRuntimeRequest>,
+    readiness_requests: Vec<ProjectRuntimeRequest>,
+    close_during_readiness: Option<ScriptedCanonical>,
+    reject_readiness: bool,
     starts: usize,
     stops: usize,
 }
@@ -693,6 +701,33 @@ impl ProjectRuntimePort for ScriptedRuntime {
                 ProviderSessionId::new("session-ready").expect("session"),
             ))
         }
+    }
+
+    fn delivery_accepted(
+        &self,
+        request: &EffectRequest<ProjectRuntimeDelivery>,
+    ) -> Result<bool, ApplicationError> {
+        let state = self.0.lock().expect("runtime lock");
+        Ok(state.deliveries.get(&request.body.submission_id) == Some(&request.request_digest))
+    }
+
+    fn ensure_ready(&self, request: &ProjectRuntimeRequest) -> Result<(), ApplicationError> {
+        let mut state = self.0.lock().expect("runtime lock");
+        state.readiness_requests.push(request.clone());
+        if let Some(canonical) = &state.close_during_readiness {
+            canonical
+                .0
+                .lock()
+                .expect("canonical lock")
+                .snapshot
+                .lifecycle = CanonicalProjectLifecycle::Closing;
+        }
+        if state.reject_readiness {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::AdapterUnavailable,
+            ));
+        }
+        Ok(())
     }
 
     fn deliver(
@@ -2885,6 +2920,98 @@ fn stale_or_inactive_handoff_and_retirement_stop_before_runtime_effects() {
     }
 }
 
+#[test]
+fn dispatch_revalidates_saved_launch_directory_before_readiness() {
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::default();
+    let outcome = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        ScriptedResources::new(ResourceBehavior::RejectLaunch),
+    )
+    .control(dispatch_request())
+    .expect("launch rejection");
+    assert!(matches!(outcome, ProjectCommandOutcome::Rejected { .. }));
+    let state = runtime.0.lock().expect("runtime lock");
+    assert!(state.readiness_requests.is_empty());
+    assert_eq!(state.delivery_calls, 0);
+    assert_eq!(canonical.snapshot_value().pending_inputs.len(), 1);
+}
+
+#[test]
+fn accepted_delivery_repairs_canonical_state_even_when_resume_is_unavailable() {
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::uncertain_delivery_once();
+    let store = MemorySagaStore::default();
+    let workflow =
+        ProjectWorkflowManager::new(store, canonical.clone(), runtime.clone(), HealthyResources);
+    assert!(matches!(
+        workflow.control(dispatch_request()).expect("lost response"),
+        ProjectCommandOutcome::Reconcilable { .. }
+    ));
+    runtime.0.lock().expect("runtime lock").reject_readiness = true;
+    assert!(matches!(
+        workflow
+            .control(dispatch_request())
+            .expect("repair acceptance"),
+        ProjectCommandOutcome::Completed { .. }
+    ));
+    assert!(canonical.snapshot_value().pending_inputs.is_empty());
+    let state = runtime.0.lock().expect("runtime lock");
+    assert_eq!(state.delivery_order.len(), 1);
+    assert_eq!(state.readiness_requests.len(), 1);
+}
+
+#[test]
+fn dispatch_checks_exact_session_readiness_before_delivery() {
+    let initial = runnable_snapshot();
+    let assignment = initial.assignment.as_ref().expect("assignment");
+    let binding = assignment.binding.as_ref().expect("binding").clone();
+    let canonical = ScriptedCanonical::new(initial);
+    let runtime = ScriptedRuntime::default();
+    let outcome = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical,
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(dispatch_request())
+    .expect("dispatch");
+    assert!(matches!(outcome, ProjectCommandOutcome::Completed { .. }));
+    let state = runtime.0.lock().expect("runtime lock");
+    assert_eq!(state.readiness_requests.len(), 1);
+    let request = &state.readiness_requests[0];
+    assert_eq!(request.agent_id, binding.agent_id);
+    assert_eq!(request.provider, binding.provider);
+    assert_eq!(request.resume_session.as_ref(), Some(&binding.session));
+    assert_eq!(request.launch_directory, Some(locator("/work/project")));
+    assert_eq!(state.delivery_calls, 1);
+}
+
+#[test]
+fn dispatch_does_not_submit_when_readiness_fails_or_project_closes_during_resume() {
+    for close in [false, true] {
+        let canonical = ScriptedCanonical::new(runnable_snapshot());
+        let runtime = ScriptedRuntime::default();
+        {
+            let mut state = runtime.0.lock().expect("runtime lock");
+            state.reject_readiness = !close;
+            state.close_during_readiness = close.then(|| canonical.clone());
+        }
+        let _outcome = ProjectWorkflowManager::new(
+            MemorySagaStore::default(),
+            canonical.clone(),
+            runtime.clone(),
+            HealthyResources,
+        )
+        .control(dispatch_request())
+        .expect("retained recovery outcome");
+        assert_eq!(runtime.0.lock().expect("runtime lock").delivery_calls, 0);
+        assert_eq!(canonical.snapshot_value().pending_inputs.len(), 1);
+    }
+}
+
 fn activation_request() -> ProjectCommandRequest {
     ProjectCommandRequest {
         command_id: CommandId::from_bytes([1; 32]),
@@ -2990,6 +3117,7 @@ fn runnable_snapshot() -> ProjectWorkflowSnapshot {
             session: ProviderSessionId::new("session-ready").expect("session"),
         }),
         thread_id: Some(ThreadId::from_bytes([18; 32])),
+        launch_directory: Some(locator("/work/project")),
         runnable: true,
         blocked: false,
     });

@@ -138,9 +138,9 @@ pub enum BoundaryKind {
     StoreCommitted,
     /// Project reconciliation became ready.
     ProjectWoken,
-    /// One durable project dispatch reached the runtime boundary.
+    /// The runtime ledger confirmed acceptance of one project dispatch.
     ProjectDispatched,
-    /// A normalized instruction was submitted to Codex.
+    /// The runtime ledger confirmed provider acceptance of a normalized instruction.
     CodexSubmitted,
     /// A normalized provider event reached the harness owner.
     ProviderEventReceived,

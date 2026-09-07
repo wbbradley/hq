@@ -48,6 +48,8 @@ pub struct CanonicalProjectAssignment {
     pub binding: Option<AssignmentBinding>,
     /// Selected project thread, when runnable.
     pub thread_id: Option<ThreadId>,
+    /// Saved launch directory of the acknowledged assignment.
+    pub launch_directory: Option<ResourceLocator>,
     /// Whether canonical policy currently permits delivery.
     pub runnable: bool,
     /// Whether failed graceful quiescence requires explicit human resolution.
@@ -519,6 +521,19 @@ pub trait ProjectRuntimePort {
         &self,
         request: &EffectRequest<ProjectRuntimeRequest>,
     ) -> Result<EffectOutcome<ProviderSessionId>, hq_application::ApplicationError>;
+
+    /// Reads exact durable acceptance without requiring a live provider worker.
+    fn delivery_accepted(
+        &self,
+        request: &EffectRequest<ProjectRuntimeDelivery>,
+    ) -> Result<bool, hq_application::ApplicationError>;
+
+    /// Ensures the exact saved session is live without replaying any project inputs.
+    /// Success is current process evidence, not replay of a previous launch receipt.
+    fn ensure_ready(
+        &self,
+        request: &ProjectRuntimeRequest,
+    ) -> Result<(), hq_application::ApplicationError>;
 
     /// Reconciles before retry and reports acceptance only from the sole durable delivery ledger.
     fn deliver(
@@ -2808,10 +2823,18 @@ where
                 body: input.body.clone(),
             },
         };
+        let dispatch_head = if self.runtime.delivery_accepted(&request)? {
+            // Canonical attribution can be repaired from durable acceptance even if resume fails.
+            snapshot.head
+        } else if let Some(head) = self.prepare_dispatch_runtime(record, &snapshot, &input)? {
+            head
+        } else {
+            return Ok(());
+        };
         match self.runtime.deliver(&request)? {
             EffectOutcome::Accepted(()) => match self.mutate(
                 record,
-                snapshot.head,
+                dispatch_head,
                 b"record-dispatch",
                 CanonicalProjectMutationAction::RecordDispatch {
                     input,
@@ -2848,6 +2871,100 @@ where
                 )
             }
         }
+    }
+
+    fn prepare_dispatch_runtime(
+        &self,
+        record: &mut ProjectSagaRecord,
+        snapshot: &ProjectWorkflowSnapshot,
+        input: &PendingProjectInput,
+    ) -> Result<Option<FactId>, hq_application::ApplicationError> {
+        if !snapshot.active_human || snapshot.archived {
+            reject(
+                &self.store,
+                record,
+                error(
+                    ErrorCategory::Unauthorized,
+                    "project_dispatch_not_authorized",
+                ),
+            )?;
+            return Ok(None);
+        }
+        let Some(assignment) = &snapshot.assignment else {
+            return Ok(None);
+        };
+        let (Some(binding), Some(directory)) = (&assignment.binding, &assignment.launch_directory)
+        else {
+            reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_resume_binding_missing"),
+            )?;
+            return Ok(None);
+        };
+        let validation = EffectRequest {
+            operation_id: derived_operation(record.operation_id, b"resume-directory", &[]),
+            request_digest: derived_digest(record.operation_id, b"resume-directory", &[]),
+            issued_at: record.issued_at,
+            body: ProjectLaunchValidationRequest {
+                home: record.home,
+                project_id: record.project_id,
+                launch_directory: directory.clone(),
+                resources: snapshot.resources.clone(),
+            },
+        };
+        if !matches!(self.resources.validate_launch_directory(&validation)?,
+            EffectOutcome::Accepted(observation) if observation.health == ResourceHealth::Healthy
+                && observation.within_claims && observation.observed_canonical == *directory)
+        {
+            reject(
+                &self.store,
+                record,
+                error(
+                    ErrorCategory::Unresolved,
+                    "project_launch_directory_invalid",
+                ),
+            )?;
+            return Ok(None);
+        }
+        let request = ProjectRuntimeRequest {
+            project_id: record.project_id,
+            agent_id: binding.agent_id,
+            provider: binding.provider.clone(),
+            resume_session: Some(binding.session.clone()),
+            launch_directory: Some(directory.clone()),
+        };
+        if self.runtime.ensure_ready(&request).is_err() {
+            reconcile(
+                &self.store,
+                record,
+                ProjectCommandStage::DispatchingInputs,
+                effect_error("project_runtime_resume_unavailable"),
+                EffectKind::None,
+            )?;
+            return Ok(None);
+        }
+        // Resume crosses an external boundary. The queue may not confer delivery rights after it.
+        let current = self
+            .canonical
+            .snapshot(record.project_id, record.account_id, None)?;
+        if current.home != record.home
+            || !current.active_human
+            || current.archived
+            || current.lifecycle != CanonicalProjectLifecycle::Open
+            || !current.claimable
+            || current.assignment != snapshot.assignment
+            || current.resources != snapshot.resources
+            || current.pending_inputs.first() != Some(input)
+        {
+            reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_dispatch_target_changed"),
+            )?;
+            return Ok(None);
+        }
+        Ok(Some(current.head))
     }
 
     fn compensate(
