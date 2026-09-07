@@ -2815,8 +2815,7 @@ fn sending_from_a_partial_history_window_does_not_insert_receipts_into_old_histo
         },
     )
     .expect("partial historical window");
-    let opening =
-        update(historical.model, UiEvent::Input(UiInput::Character('r'))).expect("compose");
+    let opening = open_typed_conversation_composer(historical.model);
     let (effect_id, target) = open_draft_effect(&opening.effects);
     let target = target.clone();
     let draft = update(
@@ -3359,7 +3358,7 @@ fn command_approval_navigation_is_scoped_to_explicit_inline_focus() {
 #[test]
 fn workspace_replacement_retains_draft_data_without_restoring_hidden_input_focus() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
-    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("open reply");
+    let opening = open_typed_conversation_composer(opened);
     let (open_id, _) = open_draft_effect(&opening.effects);
     let loaded = update(
         opening.model,
@@ -3367,9 +3366,7 @@ fn workspace_replacement_retains_draft_data_without_restoring_hidden_input_focus
             effect_id: open_id,
             draft: UiMailboxDraft {
                 draft_id: [4; 32],
-                target: UiMailboxDraftTarget::Reply {
-                    message_id: [3; 32],
-                },
+                target: conversation_draft_target(),
                 content: "retained text".to_owned(),
                 version: 7,
             },
@@ -3599,12 +3596,11 @@ fn a_command_approval_does_not_block_replies_in_another_conversation() {
     .expect("second conversation loads");
     let conversation = update(switched.model, UiEvent::Input(UiInput::MoveCursorRight))
         .expect("focus second conversation");
-    let reply = update(conversation.model, UiEvent::Input(UiInput::Character('r')))
-        .expect("reply remains available");
-    assert!(matches!(
+    let reply = open_typed_conversation_composer(conversation.model);
+    assert_eq!(
         open_draft_effect(&reply.effects).1,
-        UiMailboxDraftTarget::Reply { message_id } if *message_id == [5; 32]
-    ));
+        &conversation_draft_target()
+    );
 }
 
 #[test]
@@ -4345,8 +4341,7 @@ fn inbox_back_closes_technical_details_before_leaving_the_conversation() {
 #[test]
 fn escape_focuses_transcript_then_returns_to_the_list_without_discarding_the_draft() {
     let model = opened_conversation(vec![actionable_entry("question", [4; 32])]);
-    let opening =
-        update(model, UiEvent::Input(UiInput::Character('r'))).expect("open reply composer");
+    let opening = open_typed_conversation_composer(model);
     let (effect_id, target) = open_draft_effect(&opening.effects);
     let composing = update(
         opening.model,
@@ -4662,36 +4657,28 @@ fn self_note_draft_autosaves_and_survives_resize_reconnect_and_reload() {
 }
 
 #[test]
-fn activity_never_becomes_a_reply_or_state_action_target() {
+fn message_inspection_cannot_supply_missing_conversation_send_context() {
     let opened = opened_conversation(vec![
         actionable_entry("message", [1; 32]),
         entry("activity", true),
     ]);
-    let inspecting = update(opened, UiEvent::Input(UiInput::Activate)).expect("inspect message");
-    let activity =
-        update(inspecting.model, UiEvent::Input(UiInput::Character('j'))).expect("select activity");
-    let guided = update(
-        activity.model.clone(),
-        UiEvent::Input(UiInput::Character('r')),
-    )
-    .expect("activity reply explains its prerequisite");
-    assert!(guided.model.mailbox_modal().is_none());
-    assert_eq!(
-        guided.model.transient_help(),
-        Some("select a message; activity updates cannot be replied to")
-    );
-
-    let message =
-        update(activity.model, UiEvent::Input(UiInput::Character('k'))).expect("select message");
-    let reply = update(
-        message.model.clone(),
-        UiEvent::Input(UiInput::Character('r')),
-    )
-    .expect("reply opens typed target");
-    assert!(matches!(
-        open_draft_effect(&reply.effects).1,
-        UiMailboxDraftTarget::Reply { message_id } if *message_id == [1; 32]
-    ));
+    let inspecting = update(opened, UiEvent::Input(UiInput::Activate)).expect("inspect");
+    let mut model = inspecting.model;
+    for input in [
+        UiInput::Character('r'),
+        UiInput::Character('j'),
+        UiInput::Character('r'),
+    ] {
+        let result = update(model, UiEvent::Input(input)).expect("input");
+        assert!(result.model.mailbox_draft().is_none());
+        assert!(
+            !result
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::OpenDraft { .. }))
+        );
+        model = result.model;
+    }
 }
 
 #[test]
@@ -4711,7 +4698,7 @@ fn message_level_archive_and_restore_shortcuts_are_inert() {
 #[test]
 fn compose_newline_inserts_at_the_caret_and_plain_enter_still_submits() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
-    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let opening = open_typed_conversation_composer(opened);
     let (open_id, target) = open_draft_effect(&opening.effects);
     let target = target.clone();
     let loaded = update(
@@ -4720,9 +4707,7 @@ fn compose_newline_inserts_at_the_caret_and_plain_enter_still_submits() {
             effect_id: open_id,
             draft: UiMailboxDraft {
                 draft_id: [4; 32],
-                target: UiMailboxDraftTarget::Reply {
-                    message_id: [3; 32],
-                },
+                target: conversation_draft_target(),
                 content: "ab".to_owned(),
                 version: 1,
             },
@@ -4758,7 +4743,7 @@ fn compose_newline_inserts_at_the_caret_and_plain_enter_still_submits() {
     assert_eq!(saved.content, "a\nb");
 
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
-    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let opening = open_typed_conversation_composer(opened);
     let (open_id, _) = open_draft_effect(&opening.effects);
     let full = "x".repeat(16 * 1024);
     let loaded = update(
@@ -4786,7 +4771,7 @@ fn compose_newline_inserts_at_the_caret_and_plain_enter_still_submits() {
 fn compose_supports_line_navigation_and_directional_line_deletion() {
     fn composer(content: &str) -> UiModel {
         let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
-        let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+        let opening = open_typed_conversation_composer(opened);
         let (open_id, _) = open_draft_effect(&opening.effects);
         update(
             opening.model,
@@ -4794,9 +4779,7 @@ fn compose_supports_line_navigation_and_directional_line_deletion() {
                 effect_id: open_id,
                 draft: UiMailboxDraft {
                     draft_id: [4; 32],
-                    target: UiMailboxDraftTarget::Reply {
-                        message_id: [3; 32],
-                    },
+                    target: conversation_draft_target(),
                     content: content.to_owned(),
                     version: 1,
                 },
@@ -4880,13 +4863,11 @@ fn compose_supports_line_navigation_and_directional_line_deletion() {
 #[test]
 fn dirty_reply_saves_before_submit_and_stale_rejection_preserves_text() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
-    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let opening = open_typed_conversation_composer(opened);
     let (open_id, _) = open_draft_effect(&opening.effects);
     let draft = UiMailboxDraft {
         draft_id: [4; 32],
-        target: UiMailboxDraftTarget::Reply {
-            message_id: [3; 32],
-        },
+        target: conversation_draft_target(),
         content: String::new(),
         version: 1,
     };
@@ -4930,8 +4911,17 @@ fn dirty_reply_saves_before_submit_and_stale_rejection_preserves_text() {
             UiEffect::SubmitMailboxCommand {
                 id,
                 draft: Some(draft),
-                action: UiMailboxAction::Reply { target_message },
-            } if draft.content == "answer text" && *target_message == [3; 32] => Some(*id),
+                action: UiMailboxAction::Conversation { conversation },
+            } if draft.content == "answer text"
+                && *conversation
+                    == hq_tui::UiConversationId::Thread {
+                        counterparty_installation: [1; 32],
+                        counterparty_mailbox: [2; 32],
+                        thread_id: [3; 32],
+                    } =>
+            {
+                Some(*id)
+            }
             _ => None,
         })
         .expect("typed reply command");
@@ -4961,9 +4951,9 @@ fn dirty_reply_saves_before_submit_and_stale_rejection_preserves_text() {
 }
 
 #[test]
-fn committed_reply_dismisses_the_editor_and_appears_as_sent_at_the_conversation_tail() {
+fn committed_conversation_message_reopens_the_editor_and_appears_as_sent_at_the_tail() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
-    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let opening = open_typed_conversation_composer(opened);
     let (open_id, _) = open_draft_effect(&opening.effects);
     let loaded = update(
         opening.model,
@@ -4971,9 +4961,7 @@ fn committed_reply_dismisses_the_editor_and_appears_as_sent_at_the_conversation_
             effect_id: open_id,
             draft: UiMailboxDraft {
                 draft_id: [4; 32],
-                target: UiMailboxDraftTarget::Reply {
-                    message_id: [3; 32],
-                },
+                target: conversation_draft_target(),
                 content: "answer text".to_owned(),
                 version: 1,
             },
@@ -5032,7 +5020,9 @@ fn committed_reply_dismisses_the_editor_and_appears_as_sent_at_the_conversation_
     )
     .expect("committed reply");
 
-    assert!(committed.model.mailbox_draft().is_none());
+    assert!(
+        matches!(committed.model.mailbox_draft(), Some(UiMailboxDraftPane::Loading { target }) if target == &conversation_draft_target())
+    );
     let sent = committed
         .model
         .conversation()
@@ -5072,8 +5062,7 @@ fn composing_and_sending_preserve_a_scrolled_reading_position() {
         .expect("conversation test transition or evidence")
         .model;
     let position = reading.conversation_viewport_position().cloned();
-    let opening = update(reading, UiEvent::Input(UiInput::Character('r')))
-        .expect("conversation test transition or evidence");
+    let opening = open_typed_conversation_composer(reading);
     assert!(!opening.model.conversation_follows_tail());
     let (effect_id, target) = open_draft_effect(&opening.effects);
     let target = target.clone();
@@ -5139,13 +5128,13 @@ fn composing_and_sending_preserve_a_scrolled_reading_position() {
 }
 
 #[test]
-fn sent_agent_message_follows_the_live_tail_through_automatic_followup() {
+fn sent_agent_message_follows_the_live_tail_without_retargeting_the_composer() {
     let opened = opened_conversation(vec![
         actionable_entry("question", [3; 32]),
         agent_turn_entry("turn-running", UiActivityStatus::Running),
     ]);
     let question = update(opened, UiEvent::Input(UiInput::Activate)).expect("inspect question");
-    let opening = update(question.model, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let opening = open_typed_conversation_composer(question.model);
     let (open_id, _) = open_draft_effect(&opening.effects);
     let loaded = update(
         opening.model,
@@ -5153,9 +5142,7 @@ fn sent_agent_message_follows_the_live_tail_through_automatic_followup() {
             effect_id: open_id,
             draft: UiMailboxDraft {
                 draft_id: [4; 32],
-                target: UiMailboxDraftTarget::Reply {
-                    message_id: [3; 32],
-                },
+                target: conversation_draft_target(),
                 content: "answer text".to_owned(),
                 version: 1,
             },
@@ -5205,7 +5192,7 @@ fn sent_agent_message_follows_the_live_tail_through_automatic_followup() {
         committed.model,
         UiEvent::MaterializedViewObserved {
             view: UiMaterializedConversationView {
-                snapshot: snapshot(2, &["thread-a"]),
+                snapshot: typed_conversation_snapshot(2),
                 conversation: Some(UiConversationPage {
                     window: None,
                     multiple_non_user_senders: false,
@@ -5234,21 +5221,19 @@ fn sent_agent_message_follows_the_live_tail_through_automatic_followup() {
     assert!(matches!(
         finished.model.mailbox_draft(),
         Some(UiMailboxDraftPane::Loading {
-            target: UiMailboxDraftTarget::Reply { message_id },
-        }) if *message_id == [6; 32]
+            target,
+        }) if target == &conversation_draft_target()
     ));
 }
 
 #[test]
 fn definite_mailbox_rejection_removes_optimistic_reply_and_restores_exact_draft() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
-    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let opening = open_typed_conversation_composer(opened);
     let (open_id, _) = open_draft_effect(&opening.effects);
     let draft = UiMailboxDraft {
         draft_id: [4; 32],
-        target: UiMailboxDraftTarget::Reply {
-            message_id: [3; 32],
-        },
+        target: conversation_draft_target(),
         content: "exact answer".to_owned(),
         version: 7,
     };
@@ -5315,7 +5300,7 @@ fn definite_mailbox_rejection_removes_optimistic_reply_and_restores_exact_draft(
 #[test]
 fn uncertain_mailbox_response_retains_one_optimistic_reply_and_command_identity() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
-    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let opening = open_typed_conversation_composer(opened);
     let (open_id, _) = open_draft_effect(&opening.effects);
     let loaded = update(
         opening.model,
@@ -5323,9 +5308,7 @@ fn uncertain_mailbox_response_retains_one_optimistic_reply_and_command_identity(
             effect_id: open_id,
             draft: UiMailboxDraft {
                 draft_id: [4; 32],
-                target: UiMailboxDraftTarget::Reply {
-                    message_id: [3; 32],
-                },
+                target: conversation_draft_target(),
                 content: "possibly sent".to_owned(),
                 version: 1,
             },
@@ -5372,7 +5355,7 @@ fn uncertain_mailbox_response_retains_one_optimistic_reply_and_command_identity(
 #[test]
 fn committed_reply_does_not_duplicate_a_message_loaded_by_an_earlier_invalidation() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
-    let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");
+    let opening = open_typed_conversation_composer(opened);
     let (open_id, _) = open_draft_effect(&opening.effects);
     let loaded = update(
         opening.model,
@@ -5380,9 +5363,7 @@ fn committed_reply_does_not_duplicate_a_message_loaded_by_an_earlier_invalidatio
             effect_id: open_id,
             draft: UiMailboxDraft {
                 draft_id: [5; 32],
-                target: UiMailboxDraftTarget::Reply {
-                    message_id: [3; 32],
-                },
+                target: conversation_draft_target(),
                 content: "answer text".to_owned(),
                 version: 1,
             },
@@ -5916,10 +5897,10 @@ fn completed_turn_refresh_removes_hidden_selection_geometry_and_detail_routes() 
 }
 
 #[test]
-fn terminal_agent_turn_automatically_replies_to_the_latest_direct_message() {
+fn agent_turn_completion_does_not_retarget_the_conversation_composer() {
     let message_id = [8; 32];
     let opened = materialized_transition(
-        snapshot(1, &["thread-a"]),
+        typed_conversation_snapshot(1),
         UiConversationPage {
             window: None,
             multiple_non_user_senders: false,
@@ -5939,7 +5920,7 @@ fn terminal_agent_turn_automatically_replies_to_the_latest_direct_message() {
         opened.model,
         UiEvent::MaterializedViewObserved {
             view: UiMaterializedConversationView {
-                snapshot: snapshot(2, &["thread-a"]),
+                snapshot: typed_conversation_snapshot(2),
                 conversation: Some(UiConversationPage {
                     window: None,
                     multiple_non_user_senders: false,
@@ -5960,10 +5941,8 @@ fn terminal_agent_turn_automatically_replies_to_the_latest_direct_message() {
     assert!(matches!(
         finished.model.mailbox_draft(),
         Some(UiMailboxDraftPane::Loading {
-            target: UiMailboxDraftTarget::Reply {
-                message_id: selected_message,
-            },
-        }) if *selected_message == message_id
+            target,
+        }) if target == &conversation_draft_target()
     ));
 }
 
@@ -6024,10 +6003,10 @@ fn terminal_agent_turn_does_not_replace_an_existing_draft() {
 }
 
 #[test]
-fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
+fn conversation_composer_is_available_while_agent_turns_are_running() {
     let message_id = [8; 32];
     let opened = materialized_transition(
-        snapshot(1, &["thread-a"]),
+        typed_conversation_snapshot(1),
         UiConversationPage {
             window: None,
             multiple_non_user_senders: false,
@@ -6048,7 +6027,7 @@ fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
         opened.model,
         UiEvent::MaterializedViewObserved {
             view: UiMaterializedConversationView {
-                snapshot: snapshot(2, &["thread-a"]),
+                snapshot: typed_conversation_snapshot(2),
                 conversation: Some(UiConversationPage {
                     window: None,
                     multiple_non_user_senders: false,
@@ -6066,13 +6045,15 @@ fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
         },
     )
     .expect("one terminal turn observed");
-    assert!(one_finished.model.mailbox_draft().is_none());
+    assert!(
+        matches!(one_finished.model.mailbox_draft(), Some(UiMailboxDraftPane::Loading { target }) if target == &conversation_draft_target())
+    );
 
     let all_finished = update(
         one_finished.model,
         UiEvent::MaterializedViewObserved {
             view: UiMaterializedConversationView {
-                snapshot: snapshot(3, &["thread-a"]),
+                snapshot: typed_conversation_snapshot(3),
                 conversation: Some(UiConversationPage {
                     window: None,
                     multiple_non_user_senders: false,
@@ -6093,15 +6074,13 @@ fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
     assert!(matches!(
         all_finished.model.mailbox_draft(),
         Some(UiMailboxDraftPane::Loading {
-            target: UiMailboxDraftTarget::Reply {
-                message_id: selected_message,
-            },
-        }) if *selected_message == message_id
+            target,
+        }) if target == &conversation_draft_target()
     ));
 }
 
 #[test]
-fn project_reply_continues_the_exact_selected_conversation() {
+fn compose_shortcut_opens_the_exact_project_conversation() {
     let project_id = [5; 32];
     let mut initial = snapshot(1, &["existing"]);
     initial.inbox_rows[0].conversation_target = Some(UiConversationTarget::Project {
@@ -6117,9 +6096,8 @@ fn project_reply_continues_the_exact_selected_conversation() {
     .expect("continue selected project conversation");
     assert!(matches!(
         open_draft_effect(&continued.effects).1,
-        UiMailboxDraftTarget::Project {
-            project_id: selected_project,
-            thread_id: Some(thread_id),
+        UiMailboxDraftTarget::Conversation {
+            conversation: hq_tui::UiConversationId::Project { project_id: selected_project, thread_id },
         } if *selected_project == project_id && *thread_id == [6; 32]
     ));
 }
@@ -9882,4 +9860,110 @@ fn a_new_draft_requested_during_send_waits_for_the_receipt_and_survives_composer
     .expect("receipt");
     let (_, target) = open_draft_effect(&committed.effects);
     assert_eq!(target, &UiMailboxDraftTarget::SelfNote);
+}
+
+fn conversation_draft_target() -> UiMailboxDraftTarget {
+    UiMailboxDraftTarget::Conversation {
+        conversation: hq_tui::UiConversationId::Thread {
+            counterparty_installation: [1; 32],
+            counterparty_mailbox: [2; 32],
+            thread_id: [3; 32],
+        },
+    }
+}
+
+fn open_typed_conversation_composer(model: UiModel) -> hq_tui::UiTransition {
+    let mut source = model.snapshot().expect("source snapshot").clone();
+    source.revision += 1;
+    let conversation = model.conversation().expect("conversation");
+    source
+        .inbox_rows
+        .iter_mut()
+        .find(|row| row.id == conversation.row_id)
+        .expect("conversation row")
+        .conversation_target = Some(UiConversationTarget::Thread {
+        counterparty_installation: [1; 32],
+        counterparty_mailbox: [2; 32],
+        thread_id: [3; 32],
+    });
+    let mut window = conversation.window.clone();
+    if let Some(window) = &mut window {
+        window.revision = source.revision;
+    }
+    let page = UiConversationPage {
+        window,
+        multiple_non_user_senders: conversation.multiple_non_user_senders,
+        row_id: conversation.row_id.clone(),
+        title: conversation.title.clone(),
+        context: conversation.context.clone(),
+        entries: conversation.entries.clone(),
+        next_cursor: conversation.next_cursor.clone(),
+    };
+    update(
+        model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: source,
+                conversation: Some(page),
+            },
+        },
+    )
+    .expect("conversation context opens composer")
+}
+
+fn typed_conversation_snapshot(revision: u64) -> UiSnapshot {
+    let mut source = snapshot(revision, &["thread-a"]);
+    source.inbox_rows[0].conversation_target = Some(UiConversationTarget::Thread {
+        counterparty_installation: [1; 32],
+        counterparty_mailbox: [2; 32],
+        thread_id: [3; 32],
+    });
+    source
+}
+
+#[test]
+fn composing_after_inspecting_another_message_keeps_the_conversation_target() {
+    let reading = update(
+        typed_conversation_composer("keep this draft"),
+        UiEvent::Input(UiInput::Escape),
+    )
+    .expect("read");
+    let observed = update(
+        reading.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: typed_conversation_snapshot(2),
+                conversation: Some(UiConversationPage {
+                    window: None,
+                    multiple_non_user_senders: false,
+                    row_id: "thread-a".to_owned(),
+                    title: "Alice".to_owned(),
+                    context: None,
+                    entries: vec![
+                        actionable_entry("question", [3; 32]),
+                        actionable_entry("different-message", [8; 32]),
+                    ],
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("another message");
+    let inspecting = update(observed.model, UiEvent::Input(UiInput::Activate)).expect("inspect");
+    let selected = update(inspecting.model, UiEvent::Input(UiInput::NextItem))
+        .expect("choose another message");
+    let composing =
+        update(selected.model, UiEvent::Input(UiInput::Character('r'))).expect("compose");
+    assert_eq!(composing.model.focus(), UiFocus::Draft);
+    assert!(!composing.model.conversation_inspecting());
+    assert!(
+        matches!(composing.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, .. })
+        if draft.target == conversation_draft_target() && draft.content == "keep this draft")
+    );
+    assert!(
+        !composing
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::OpenDraft { .. }))
+    );
 }

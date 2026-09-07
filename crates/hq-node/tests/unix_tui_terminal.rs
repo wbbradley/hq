@@ -1571,7 +1571,9 @@ fn run_in_pty_with_trace(
                     completion_offset = Some(bytes.len());
                 }
                 10 if rendered.contains("HISTORY_END") => {
-                    master.write_all(b"\x1b[H").expect("read older history");
+                    master
+                        .write_all(b"\t\x1b[H")
+                        .expect("focus transcript and read older history");
                     master.flush().expect("history flush");
                     oversized_phase = 1;
                     completion_offset = Some(bytes.len());
@@ -1865,13 +1867,13 @@ fn run_in_pty_with_trace(
             && content_sent
             && !managed_action_sent
             && completion_offset.is_some_and(|offset| {
-                text_without_csi_sequences(&bytes[offset..]).contains("scroll")
+                text_without_csi_sequences(&bytes[offset..]).contains("Tab/Esc read")
             })
         {
             let keys = if visit_bounds {
-                b"\x1b[H".as_slice()
+                b"\t\x1b[H".as_slice()
             } else {
-                b"\x1b[D"
+                b"\t\x1b[D"
             };
             master.write_all(keys).expect("Inbox navigation keys write");
             master.flush().expect("Inbox navigation keys flush");
@@ -1975,7 +1977,7 @@ fn run_in_pty_with_trace(
                     .any(|window| window == last.as_bytes())
             })
         {
-            master.write_all(b"\x1b[H").expect("Home key writes");
+            master.write_all(b"\t\x1b[H").expect("Home key writes");
             master.flush().expect("Home key flushes");
             oversized_phase = 3;
             completion_offset = Some(bytes.len());
@@ -2055,7 +2057,7 @@ fn run_in_pty_with_trace(
             })
         {
             master
-                .write_all(b"\x1b[D")
+                .write_all(b"\t\x1b[D")
                 .expect("second Inbox back key writes");
             master.flush().expect("second Inbox back key flushes");
             oversized_phase = 8;
@@ -2293,11 +2295,11 @@ fn run_in_pty_with_trace(
         ) && resize_phase == 1
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"r/Enter write first message".len())
-                    .any(|window| window == b"r/Enter write first message")
+                    .windows(b"Press Tab to write".len())
+                    .any(|window| window == b"Press Tab to write")
             })
         {
-            master.write_all(b"r").expect("guided setup resume writes");
+            master.write_all(b"\t").expect("guided setup resume writes");
             master.flush().expect("guided setup resume flushes");
             resize_phase = 2;
             completion_offset = Some(bytes.len());
@@ -2646,14 +2648,8 @@ fn run_in_pty_with_trace(
                             .windows(b"0/16384".len())
                             .any(|window| window == b"0/16384")
                 });
-            let ordinary_setup_finished = completion_gate.is_none()
-                && Instant::now() >= next_state_probe_at
-                && completion_offset.is_some_and(|offset| {
-                    bytes[offset..]
-                        .windows(b"Project agent".len())
-                        .any(|window| window == b"Project agent")
-                })
-                && {
+            let ordinary_setup_finished =
+                completion_gate.is_none() && Instant::now() >= next_state_probe_at && {
                     next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
                     project_is_runnable_with_one_dispatch(state_root, name)
                 };

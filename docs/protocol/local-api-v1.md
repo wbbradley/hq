@@ -298,7 +298,8 @@ reply or mailbox targets retain their text for recovery and reselection.
 
 `control_mailbox` carries a stable command ID, an exact digest over the typed action, optional
 draft ID or inline content, authored time, and signing randomness. The closed actions are reply,
-direct message, self-note, project message, and whole-conversation archive. Clients never supply
+direct message, self-note, project message, conversation message, and whole-conversation archive.
+Conversation messages bind the complete typed conversation identity in both draft and command. Clients never supply
 root facts or archive support. The node resolves the local human authority, target mailbox or
 conversation, question root, and current causal support from the transaction snapshot. A
 draft-backed committed fact, its

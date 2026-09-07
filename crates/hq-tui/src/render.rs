@@ -885,9 +885,9 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
                     "↑/↓ or j/k — scroll line · PgUp/PgDn — scroll page · Enter — inspect",
                 ));
                 actions.push(Line::from(if model.section() == UiSection::Inbox {
-                    "r — reply · d — archive conversation · PgDn — load more"
+                    "Tab — compose · d — archive conversation · PgDn — page"
                 } else {
-                    "r — reply · PgDn — load more"
+                    "Tab — compose · PgDn — page"
                 }));
             } else if model.selected_row_data().is_some() {
                 actions.push(Line::from("Enter — open selected conversation"));
@@ -5120,10 +5120,6 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
 }
 
 fn conversation_footer(model: &UiModel) -> String {
-    let selected = model.conversation().and_then(|conversation| {
-        let anchor = model.conversation_anchor()?;
-        conversation.entries.iter().find(|entry| entry.id == anchor)
-    });
     if model.technical_visible() {
         return " j/k scroll · Esc conversation · ? help".to_owned();
     }
@@ -5140,19 +5136,16 @@ fn conversation_footer(model: &UiModel) -> String {
         "End latest",
         "Enter inspect",
     ];
+    if model.mailbox_draft().is_some() {
+        controls.push("Tab compose");
+    }
     if matches!(
         model
             .selected_row_data()
             .and_then(|row| row.conversation_target.as_ref()),
         Some(crate::model::UiConversationTarget::Project { .. })
     ) {
-        controls.push("r continue");
         controls.push("c new conversation");
-    } else if selected
-        .and_then(|entry| entry.message_target)
-        .is_some_and(|target| target.reply_allowed)
-    {
-        controls.push("r reply");
     }
     if model.section() == UiSection::Inbox {
         controls.push("d archive conversation");

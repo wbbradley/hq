@@ -45,7 +45,7 @@ retains its separate question-owner cancellation planner. The same endpoint also
 agent messages and self-notes for the interactive client, while durable draft autosave/load/delete
 remain local operational state rather than canonical facts.
 
-The installed `hq tui` uses that same endpoint for `r` reply and whole-conversation archive.
+The installed `hq tui` uses that same endpoint for conversation-scoped composition and whole-conversation archive.
 Direct messages and personal notes live under the `n` New launcher, while `d` stops agent work and
 archives the selected conversation. Its local draft editor autosaves after bounded
 input, saves the latest text before close or submit, retains stale targets for recovery, and keeps

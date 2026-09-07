@@ -2748,20 +2748,12 @@ pub struct UiFailure {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UiTransientHelp {
-    OpenConversationMessage,
-    SelectConversationMessage,
     NoConversationToArchive,
 }
 
 impl UiTransientHelp {
     const fn text(self) -> &'static str {
         match self {
-            Self::OpenConversationMessage => {
-                "open the conversation with Enter, then select a message to reply"
-            }
-            Self::SelectConversationMessage => {
-                "select a message; activity updates cannot be replied to"
-            }
             Self::NoConversationToArchive => {
                 "this row has no conversation yet; press Enter to start one"
             }
@@ -11791,44 +11783,17 @@ fn mailbox_shortcut(
             if model.current_command_approval().is_some() {
                 return Ok(false);
             }
-            if matches!(model.section(), UiSection::Agents | UiSection::Archived) {
-                return Ok(false);
-            }
-            if model.active_conversation_row().is_some()
-                && selected_conversation_target(model).is_some()
-            {
-                open_conversation_composer(model, true, effects)?;
-                return Ok(true);
-            }
             if let Some(setup) = model.selected_setup().cloned() {
                 model.open_draft(setup.draft.target, effects)?;
                 return Ok(true);
             }
-            if let Some(UiConversationTarget::Project {
-                project_id,
-                thread_id,
-                ..
-            }) = selected_conversation_target(model)
-            {
-                model.open_draft(
-                    UiMailboxDraftTarget::Project {
-                        project_id,
-                        thread_id: Some(thread_id),
-                    },
-                    effects,
-                )?;
-                return Ok(true);
+            if selected_conversation_target(model).is_none() {
+                return Ok(false);
             }
-            let Some(target) = selected_message_target(model).filter(|target| target.reply_allowed)
-            else {
-                return Ok(show_select_message_help(model));
-            };
-            model.open_draft(
-                UiMailboxDraftTarget::Reply {
-                    message_id: target.message_id,
-                },
-                effects,
-            )?;
+            if model.active_conversation_row().is_none() {
+                return activate(model, effects);
+            }
+            open_conversation_composer(model, true, effects)?;
             Ok(true)
         }
         'p' => {
@@ -11930,29 +11895,6 @@ fn selected_conversation_target(model: &UiModel) -> Option<UiConversationTarget>
     model
         .selected_row_data()
         .and_then(|row| row.conversation_target.clone())
-}
-
-fn selected_message_target(model: &UiModel) -> Option<UiMessageTarget> {
-    let anchor = model.conversation_anchor.as_deref()?;
-    model
-        .conversation
-        .as_ref()?
-        .entries
-        .iter()
-        .find(|entry| entry.id == anchor)?
-        .message_target
-}
-
-fn show_select_message_help(model: &mut UiModel) -> bool {
-    let help = if model.conversation.is_some() {
-        Some(UiTransientHelp::SelectConversationMessage)
-    } else if model.selected_row_is_conversation() {
-        Some(UiTransientHelp::OpenConversationMessage)
-    } else {
-        None
-    };
-    model.transient_help = help;
-    help.is_some()
 }
 
 fn draft_action(target: &UiMailboxDraftTarget) -> UiMailboxAction {
@@ -12539,6 +12481,7 @@ fn open_conversation_composer(
         return Ok(());
     };
     if entering {
+        model.finish_conversation_inspection();
         model.focus = UiFocus::Draft;
     }
     if let Some(current) = model.draft_target().cloned() {
@@ -12601,36 +12544,7 @@ fn open_automatic_followup_draft(
     {
         return Ok(());
     }
-    if selected_conversation_target(model).is_some() {
-        return open_conversation_composer(model, false, effects);
-    }
-    let target = match selected_conversation_target(model) {
-        Some(UiConversationTarget::Project {
-            project_id,
-            thread_id,
-            ..
-        }) => Some(UiMailboxDraftTarget::Project {
-            project_id,
-            thread_id: Some(thread_id),
-        }),
-        Some(
-            UiConversationTarget::Thread { .. } | UiConversationTarget::ProviderSession { .. },
-        )
-        | None => model.conversation.as_ref().and_then(|conversation| {
-            conversation.entries.iter().rev().find_map(|entry| {
-                entry
-                    .message_target
-                    .filter(|target| target.reply_allowed)
-                    .map(|target| UiMailboxDraftTarget::Reply {
-                        message_id: target.message_id,
-                    })
-            })
-        }),
-    };
-    if let Some(target) = target {
-        model.open_draft(target, effects)?;
-    }
-    Ok(())
+    open_conversation_composer(model, false, effects)
 }
 
 fn place_live_activity_at_tail(entries: &mut Vec<UiConversationEntry>) {

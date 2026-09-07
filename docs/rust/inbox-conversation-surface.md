@@ -83,10 +83,11 @@ reading position and tail mode. Ordinary reading does not highlight a selected m
 
 ## Conversation-scoped adjacent content
 
-Conversation composition is one of the two permitted adjacent views. Reply and new-message drafts
-retain their exact draft, conversation, message target, and project-thread identities. Unicode
-editing, multiline paste, autosave, stale-target reselection, and response-loss handling preserve
-content. Only a committed canonical receipt consumes the draft.
+Conversation composition is one of the two permitted adjacent views. Conversation and new-message
+drafts retain their exact typed targets and draft identities. Unicode editing, multiline paste,
+autosave, stale-context recovery, and response-loss handling preserve content. Only a committed
+canonical receipt consumes the draft. Inspection never supplies a send target: composing from
+inspection returns to the retained conversation editor, and agent completion does not retarget it.
 
 The other permitted adjacent view is a command approval proven to belong to this conversation by
 exact project, agent, provider, session, and operation evidence. An unresolved, ambiguous, or
@@ -153,7 +154,7 @@ There is no persistent list/detail split, collapsed list preview, pane focus, or
 navigation. Width affects wrapping, clipping, and visible row count only.
 
 The breadcrumb communicates the active canonical path plus connection/refresh context. The footer
-lists only actions valid on that route: selection/open at a root; reply, compose, archive/restore,
+lists only actions valid on that route: selection/open at a root; compose, archive/restore,
 details, and scrolling where applicable in a conversation; Back when a parent exists. Help exposes
 stable IDs and causal evidence separately.
 
