@@ -360,6 +360,9 @@ fn mutation_digest(content: &[u8], auxiliary_randomness: &[u8; 32]) -> CommandDi
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MailboxDraftTargetDto {
+    Conversation {
+        conversation: ConversationKeyDto,
+    },
     Reply {
         message_id: Id32,
     },
@@ -434,6 +437,10 @@ pub enum MailboxDraftDeleteOutcomeDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum MailboxCommandActionDto {
+    Conversation {
+        conversation: ConversationKeyDto,
+        message_id: Id32,
+    },
     Reply {
         target_message: Id32,
         message_id: Id32,
@@ -514,7 +521,8 @@ impl MailboxCommandRequestDto {
         }
         let message_action = matches!(
             self.action,
-            MailboxCommandActionDto::Reply { .. }
+            MailboxCommandActionDto::Conversation { .. }
+                | MailboxCommandActionDto::Reply { .. }
                 | MailboxCommandActionDto::Direct { .. }
                 | MailboxCommandActionDto::SelfNote { .. }
                 | MailboxCommandActionDto::Project { .. }
@@ -522,7 +530,9 @@ impl MailboxCommandRequestDto {
         if message_action != (self.draft_id.is_some() ^ self.content.is_some()) {
             return Err(ValueError::InvalidCanonicalPlan);
         }
-        if let MailboxCommandActionDto::ArchiveConversation { conversation } = &self.action {
+        if let MailboxCommandActionDto::ArchiveConversation { conversation }
+        | MailboxCommandActionDto::Conversation { conversation, .. } = &self.action
+        {
             validate_conversation_key(conversation)?;
         }
         Ok(())
@@ -533,6 +543,14 @@ fn mailbox_command_digest(request: &MailboxCommandRequestDto) -> CommandDigest {
     let mut hasher = Sha256::new();
     hasher.update(MAILBOX_COMMAND_DIGEST_DOMAIN);
     match &request.action {
+        MailboxCommandActionDto::Conversation {
+            conversation,
+            message_id,
+        } => {
+            hasher.update([6]);
+            put_conversation_key(&mut hasher, conversation);
+            hasher.update(message_id.bytes());
+        }
         MailboxCommandActionDto::Reply {
             target_message,
             message_id,

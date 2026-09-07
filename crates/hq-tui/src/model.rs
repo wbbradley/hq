@@ -928,6 +928,63 @@ pub enum UiConversationTarget {
     },
 }
 
+/// Stable conversation identity without presentation or initiating-message metadata.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum UiConversationId {
+    Project {
+        project_id: [u8; 32],
+        thread_id: [u8; 32],
+    },
+    Thread {
+        counterparty_installation: [u8; 32],
+        counterparty_mailbox: [u8; 32],
+        thread_id: [u8; 32],
+    },
+    ProviderSession {
+        counterparty_installation: [u8; 32],
+        counterparty_mailbox: [u8; 32],
+        provider: String,
+        session: String,
+    },
+}
+
+impl UiConversationTarget {
+    /// Returns the exact conversation identity independently of display metadata.
+    pub fn conversation_id(&self) -> UiConversationId {
+        match self {
+            Self::Project {
+                project_id,
+                thread_id,
+                ..
+            } => UiConversationId::Project {
+                project_id: *project_id,
+                thread_id: *thread_id,
+            },
+            Self::Thread {
+                counterparty_installation,
+                counterparty_mailbox,
+                thread_id,
+            } => UiConversationId::Thread {
+                counterparty_installation: *counterparty_installation,
+                counterparty_mailbox: *counterparty_mailbox,
+                thread_id: *thread_id,
+            },
+            Self::ProviderSession {
+                counterparty_installation,
+                counterparty_mailbox,
+                provider,
+                session,
+            } => UiConversationId::ProviderSession {
+                counterparty_installation: *counterparty_installation,
+                counterparty_mailbox: *counterparty_mailbox,
+                provider: provider.clone(),
+                session: session.clone(),
+            },
+        }
+    }
+}
+
 /// Passive shell-normalized summary row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiRow {
@@ -2460,6 +2517,8 @@ pub enum UiAgentModal {
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiMailboxDraftTarget {
+    /// Compose to an exact conversation, resolved by the source.
+    Conversation { conversation: UiConversationId },
     /// Reply to one exact message.
     Reply { message_id: [u8; 32] },
     /// Send to one exact installation-qualified mailbox.
@@ -2521,6 +2580,8 @@ pub struct UiMailboxCommandResult {
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiMailboxAction {
+    /// Send the draft to its exact conversation.
+    Conversation { conversation: UiConversationId },
     /// Reply using the currently loaded draft.
     Reply { target_message: [u8; 32] },
     /// Send the currently loaded draft to an exact mailbox.
@@ -3377,6 +3438,7 @@ pub struct UiModel {
     technical_scroll: u16,
     mailbox_modal: Option<UiMailboxModal>,
     mailbox_draft: Option<UiMailboxDraftPane>,
+    conversation_cursors: BTreeMap<UiConversationId, usize>,
     agent_modal: Option<UiAgentModal>,
     interactions: VecDeque<UiInteraction>,
     interaction_modal: Option<UiInteractionModal>,
@@ -3460,6 +3522,7 @@ impl UiModel {
             technical_scroll: 0,
             mailbox_modal: None,
             mailbox_draft: None,
+            conversation_cursors: BTreeMap::new(),
             agent_modal: None,
             interactions: VecDeque::new(),
             interaction_modal: None,
@@ -3897,6 +3960,17 @@ impl UiModel {
         self.mailbox_draft.as_ref()
     }
 
+    pub(crate) fn draft_matches_active_conversation(&self) -> bool {
+        match self.draft_target() {
+            Some(UiMailboxDraftTarget::Conversation { conversation }) => {
+                self.active_conversation_row().is_some()
+                    && selected_conversation_target(self)
+                        .is_some_and(|target| target.conversation_id() == *conversation)
+            }
+            _ => true,
+        }
+    }
+
     /// Borrows the authoritative project name associated with the active draft, when applicable.
     pub fn draft_project_name(&self) -> Option<&str> {
         let project_id = self.draft_project_id()?;
@@ -3911,6 +3985,21 @@ impl UiModel {
     /// Borrows the authoritative display name of the active draft's recipient.
     pub fn draft_recipient_name(&self) -> Option<&str> {
         match self.draft_target()? {
+            UiMailboxDraftTarget::Conversation {
+                conversation:
+                    UiConversationId::Project {
+                        project_id,
+                        thread_id,
+                    },
+            } => self.project_draft_recipient(*project_id, Some(*thread_id)),
+            UiMailboxDraftTarget::Conversation { conversation } => self
+                .selected_row_data()
+                .filter(|row| {
+                    row.conversation_target
+                        .as_ref()
+                        .is_some_and(|target| target.conversation_id() == *conversation)
+                })
+                .map(|row| row.title.as_str()),
             UiMailboxDraftTarget::SelfNote => Some("You"),
             UiMailboxDraftTarget::Direct {
                 installation_id,
@@ -4020,7 +4109,10 @@ impl UiModel {
 
     fn draft_project_id(&self) -> Option<[u8; 32]> {
         Some(match self.draft_target()? {
-            UiMailboxDraftTarget::Project { project_id, .. }
+            UiMailboxDraftTarget::Conversation {
+                conversation: UiConversationId::Project { project_id, .. },
+            }
+            | UiMailboxDraftTarget::Project { project_id, .. }
             | UiMailboxDraftTarget::ProjectSetup { project_id, .. } => *project_id,
             UiMailboxDraftTarget::Reply { .. } => {
                 match self.selected_row_data()?.conversation_target.as_ref() {
@@ -4032,7 +4124,9 @@ impl UiModel {
                     | None => return None,
                 }
             }
-            UiMailboxDraftTarget::Direct { .. } | UiMailboxDraftTarget::SelfNote => return None,
+            UiMailboxDraftTarget::Conversation { .. }
+            | UiMailboxDraftTarget::Direct { .. }
+            | UiMailboxDraftTarget::SelfNote => return None,
         })
     }
 
@@ -4043,7 +4137,8 @@ impl UiModel {
                 thread_id: None,
             }
             | UiMailboxDraftTarget::ProjectSetup { project_id, .. } => Some(*project_id),
-            UiMailboxDraftTarget::Reply { .. }
+            UiMailboxDraftTarget::Conversation { .. }
+            | UiMailboxDraftTarget::Reply { .. }
             | UiMailboxDraftTarget::Direct { .. }
             | UiMailboxDraftTarget::SelfNote
             | UiMailboxDraftTarget::Project {
@@ -4529,7 +4624,17 @@ impl UiModel {
         target: UiMailboxDraftTarget,
         effects: &mut Vec<UiEffect>,
     ) -> Result<(), UiError> {
+        if matches!(&self.mailbox_draft, Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.target == target)
+        {
+            self.focus = UiFocus::Draft;
+            return Ok(());
+        }
         if self.pending_mailbox.is_some() {
+            return Ok(());
+        }
+        if matches!(&self.mailbox_draft, Some(UiMailboxDraftPane::Editing { draft, dirty: true, .. }) if draft.target != target)
+        {
+            self.save_draft(effects)?;
             return Ok(());
         }
         self.close_technical_details();
@@ -4539,7 +4644,15 @@ impl UiModel {
             id,
             kind: PendingMailboxKind::OpenDraft,
         });
-        self.change_section(UiSection::Inbox);
+        if self.active_conversation_row().is_none() {
+            self.change_section(UiSection::Inbox);
+        }
+        if let UiMailboxDraftTarget::Conversation { conversation } = &target {
+            self.form.cursors.remove(&UiFormField::Message);
+            if let Some(cursor) = self.conversation_cursors.get(conversation) {
+                self.form.cursors.insert(UiFormField::Message, *cursor);
+            }
+        }
         self.focus = UiFocus::Draft;
         self.mailbox_modal = None;
         self.mailbox_draft = Some(UiMailboxDraftPane::Loading {
@@ -5798,6 +5911,11 @@ fn project_setup_row_id(draft_id: [u8; 32]) -> String {
 /// Applies one event without performing I/O or domain mutation.
 #[allow(clippy::too_many_lines)]
 pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiError> {
+    let previous_conversation = model.active_conversation_row().map(str::to_owned);
+    let previous_target = previous_conversation
+        .as_ref()
+        .and_then(|_| selected_conversation_target(&model))
+        .map(|target| target.conversation_id());
     let mut effects = Vec::new();
     match event {
         UiEvent::Started => start(&mut model, &mut effects)?,
@@ -5934,6 +6052,15 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
     synchronize_project_route(&mut model);
     synchronize_global_route(&mut model);
     model.reconcile_conversation_visibility();
+    let target = model
+        .active_conversation_row()
+        .and_then(|_| selected_conversation_target(&model))
+        .map(|target| target.conversation_id());
+    if model.active_conversation_row().is_some() {
+        let entering = model.active_conversation_row() != previous_conversation.as_deref()
+            || target != previous_target;
+        open_conversation_composer(&mut model, entering, &mut effects)?;
+    }
     Ok(UiTransition { model, effects })
 }
 
@@ -6904,6 +7031,7 @@ fn apply_input(
                 UiFocus::Conversation if model.current_command_approval().is_some() => {
                     UiFocus::Approval
                 }
+                UiFocus::Conversation if model.mailbox_draft.is_some() => UiFocus::Draft,
                 UiFocus::Conversation | UiFocus::Approval => UiFocus::Conversation,
                 UiFocus::Draft => UiFocus::Draft,
             };
@@ -7787,7 +7915,9 @@ fn text_input_is_active(model: &UiModel) -> bool {
     ) {
         return true;
     }
-    !model.draft_suspended_by_command_approval()
+    model.focus == UiFocus::Draft
+        && model.draft_matches_active_conversation()
+        && !model.draft_suspended_by_command_approval()
         && matches!(
             model.mailbox_draft,
             Some(UiMailboxDraftPane::Editing { .. })
@@ -7814,7 +7944,11 @@ fn apply_open_modal_input(
     if model.mailbox_modal.is_some() {
         return apply_mailbox_modal_input(model, input.clone(), effects).map(Some);
     }
-    if model.mailbox_draft.is_some() && !model.draft_suspended_by_command_approval() {
+    if model.focus == UiFocus::Draft
+        && model.draft_matches_active_conversation()
+        && model.mailbox_draft.is_some()
+        && !model.draft_suspended_by_command_approval()
+    {
         return apply_draft_input(model, input.clone(), effects).map(Some);
     }
     Ok(None)
@@ -8915,6 +9049,15 @@ fn apply_draft_input(
         effects.push(UiEffect::Exit);
         return Ok(false);
     }
+    if model.active_conversation_row().is_some()
+        && matches!(
+            input,
+            UiInput::Escape | UiInput::NextFocus | UiInput::PreviousFocus
+        )
+    {
+        model.focus = UiFocus::Conversation;
+        return Ok(true);
+    }
     if matches!(input, UiInput::Escape) {
         if matches!(
             model.mailbox_draft,
@@ -8974,38 +9117,47 @@ fn apply_draft_input(
                 apply_draft_text_input(model, &input, draft, dirty, effects)
             }
             UiInput::Activate if !submitting && !closing => {
-                if draft.content.is_empty() {
-                    model.form.errors.insert(
-                        UiFormField::Message,
-                        "Enter a message before sending".to_owned(),
-                    );
-                    model.last_failure = None;
-                    return Ok(true);
-                }
-                if dirty {
-                    model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
-                        draft,
-                        dirty: true,
-                        submitting: true,
-                        closing: false,
-                    });
-                    model.autosave_timer = None;
-                    model.save_draft(effects)?;
-                } else {
-                    let action = draft_action(&draft.target);
-                    model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
-                        draft: draft.clone(),
-                        dirty: false,
-                        submitting: true,
-                        closing: false,
-                    });
-                    model.submit_mailbox(Some(draft), action, effects)?;
-                }
-                Ok(true)
+                submit_draft(model, draft, dirty, effects)
             }
             _ => Ok(false),
         },
     }
+}
+
+fn submit_draft(
+    model: &mut UiModel,
+    draft: UiMailboxDraft,
+    dirty: bool,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    if draft.content.is_empty() {
+        model.form.errors.insert(
+            UiFormField::Message,
+            "Enter a message before sending".to_owned(),
+        );
+        model.last_failure = None;
+        return Ok(true);
+    }
+    if dirty {
+        model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
+            draft,
+            dirty: true,
+            submitting: true,
+            closing: false,
+        });
+        model.autosave_timer = None;
+        model.save_draft(effects)?;
+    } else {
+        let action = draft_action(&draft.target);
+        model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
+            draft: draft.clone(),
+            dirty: false,
+            submitting: true,
+            closing: false,
+        });
+        model.submit_mailbox(Some(draft), action, effects)?;
+    }
+    Ok(true)
 }
 
 fn apply_draft_text_input(
@@ -11578,6 +11730,12 @@ fn mailbox_shortcut(
             if matches!(model.section(), UiSection::Agents | UiSection::Archived) {
                 return Ok(false);
             }
+            if model.active_conversation_row().is_some()
+                && selected_conversation_target(model).is_some()
+            {
+                open_conversation_composer(model, true, effects)?;
+                return Ok(true);
+            }
             if let Some(setup) = model.selected_setup().cloned() {
                 model.open_draft(setup.draft.target, effects)?;
                 return Ok(true);
@@ -11735,6 +11893,9 @@ fn show_select_message_help(model: &mut UiModel) -> bool {
 
 fn draft_action(target: &UiMailboxDraftTarget) -> UiMailboxAction {
     match target {
+        UiMailboxDraftTarget::Conversation { conversation } => UiMailboxAction::Conversation {
+            conversation: conversation.clone(),
+        },
         UiMailboxDraftTarget::Reply { message_id } => UiMailboxAction::Reply {
             target_message: *message_id,
         },
@@ -12278,6 +12439,62 @@ fn is_terminal_agent_turn(entry: &UiConversationEntry) -> bool {
     )
 }
 
+fn open_conversation_composer(
+    model: &mut UiModel,
+    entering: bool,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    if model.current_command_approval().is_some() {
+        return Ok(());
+    }
+    let target = selected_conversation_target(model)
+        .map(|target| UiMailboxDraftTarget::Conversation {
+            conversation: target.conversation_id(),
+        })
+        .or_else(|| {
+            model
+                .selected_setup()
+                .map(|setup| setup.draft.target.clone())
+        });
+    let Some(target) = target else {
+        return Ok(());
+    };
+    if let Some(current) = model.draft_target().cloned() {
+        if current == target {
+            if entering {
+                model.focus = UiFocus::Draft;
+            }
+            return Ok(());
+        }
+        let UiMailboxDraftTarget::Conversation { conversation } = current else {
+            return Ok(());
+        };
+        if let Some(UiMailboxDraftPane::Editing { draft, .. }) = &model.mailbox_draft {
+            model
+                .conversation_cursors
+                .insert(conversation, model.message_field_cursor(&draft.content));
+        }
+        if model.pending_mailbox.is_some() {
+            return Ok(());
+        }
+        if matches!(
+            model.mailbox_draft,
+            Some(UiMailboxDraftPane::Editing { dirty: true, .. })
+        ) {
+            if model.last_failure.is_none() {
+                model.save_draft(effects)?;
+            }
+            return Ok(());
+        }
+        model.mailbox_draft = None;
+        model.autosave_timer = None;
+    }
+    if model.pending_mailbox.is_none() && (entering || model.last_failure.is_none()) {
+        model.open_draft(target, effects)?;
+    }
+    Ok(())
+}
+
 fn open_automatic_followup_draft(
     model: &mut UiModel,
     effects: &mut Vec<UiEffect>,
@@ -12295,6 +12512,9 @@ fn open_automatic_followup_draft(
             .is_none_or(|conversation| conversation.row_id != active_row)
     {
         return Ok(());
+    }
+    if selected_conversation_target(model).is_some() {
+        return open_conversation_composer(model, false, effects);
     }
     let target = match selected_conversation_target(model) {
         Some(UiConversationTarget::Project {
@@ -12637,6 +12857,13 @@ fn mailbox_command_committed(
     }
     let committed_draft = submission.draft.clone();
     let action = submission.action.clone();
+    let reopen_target = committed_draft
+        .as_ref()
+        .filter(|draft| {
+            matches!(draft.target, UiMailboxDraftTarget::Conversation { .. })
+                && draft_targets_open_conversation(model, draft)
+        })
+        .map(|draft| draft.target.clone());
     let optimistic_entry = submission.optimistic_entry.clone();
     let project_target = committed_draft
         .as_ref()
@@ -12673,7 +12900,13 @@ fn mailbox_command_committed(
             draft,
             message_id,
             optimistic_entry.as_deref(),
-            matches!(action, UiMailboxAction::Project { .. }),
+            matches!(
+                action,
+                UiMailboxAction::Project { .. }
+                    | UiMailboxAction::Conversation {
+                        conversation: UiConversationId::Project { .. }
+                    }
+            ),
         );
     }
     if let (Some(submission), Some(message_id)) = (
@@ -12707,7 +12940,24 @@ fn mailbox_command_committed(
         }
     }
     invalidated(model, revision, effects)?;
+    if let Some(target) = reopen_target {
+        reopen_conversation_composer(model, target, effects)?;
+    }
     effects.push(UiEffect::RequestRedraw);
+    Ok(())
+}
+
+fn reopen_conversation_composer(
+    model: &mut UiModel,
+    target: UiMailboxDraftTarget,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    let approval_focused = model.focus == UiFocus::Approval;
+    model.form.cursors.remove(&UiFormField::Message);
+    model.open_draft(target, effects)?;
+    if approval_focused {
+        model.focus = UiFocus::Approval;
+    }
     Ok(())
 }
 
@@ -12723,6 +12973,10 @@ fn draft_targets_open_conversation(model: &UiModel, draft: &UiMailboxDraft) -> b
         return false;
     }
     match draft.target {
+        UiMailboxDraftTarget::Conversation { ref conversation } => {
+            selected_conversation_target(model)
+                .is_some_and(|target| target.conversation_id() == *conversation)
+        }
         UiMailboxDraftTarget::Reply { message_id } => {
             model.conversation.as_ref().is_some_and(|conversation| {
                 conversation.entries.iter().any(|entry| {
@@ -12766,7 +13020,9 @@ fn append_pending_message(
     }
     if model.conversation_has_newer_history() {
         model.conversation_new_content = true;
-        model.focus = UiFocus::Conversation;
+        if !matches!(draft.target, UiMailboxDraftTarget::Conversation { .. }) {
+            model.focus = UiFocus::Conversation;
+        }
         return None;
     }
     let id = format!("pending-mailbox-message:{}", effect_id.0.get());
@@ -12792,7 +13048,9 @@ fn append_pending_message(
     } else {
         model.conversation_new_content = true;
     }
-    model.focus = UiFocus::Conversation;
+    if !matches!(draft.target, UiMailboxDraftTarget::Conversation { .. }) {
+        model.focus = UiFocus::Conversation;
+    }
     model.conversation_viewport_geometry = None;
     model.close_technical_details();
     Some(id)
@@ -12825,12 +13083,17 @@ fn reconcile_committed_message(
                 .retain(|entry| entry.id != optimistic_entry);
         }
         replace_viewport_entry_identity(model, optimistic_entry, &existing_id);
-        retain_sent_message_anchor(model);
+        retain_sent_message_anchor(
+            model,
+            matches!(draft.target, UiMailboxDraftTarget::Conversation { .. }),
+        );
         return;
     }
     if model.conversation_has_newer_history() {
         model.conversation_new_content = true;
-        model.focus = UiFocus::Conversation;
+        if !matches!(draft.target, UiMailboxDraftTarget::Conversation { .. }) {
+            model.focus = UiFocus::Conversation;
+        }
         return;
     }
     let id = format!("committed-message:{message_id:?}");
@@ -12854,7 +13117,10 @@ fn reconcile_committed_message(
             reply_allowed: false,
         });
         replace_viewport_entry_identity(model, Some(optimistic_entry), &id);
-        retain_sent_message_anchor(model);
+        retain_sent_message_anchor(
+            model,
+            matches!(draft.target, UiMailboxDraftTarget::Conversation { .. }),
+        );
         return;
     }
     conversation.entries.push(UiConversationEntry {
@@ -12878,10 +13144,13 @@ fn reconcile_committed_message(
         technical: Vec::new(),
     });
     place_live_activity_at_tail(&mut conversation.entries);
-    retain_sent_message_anchor(model);
+    retain_sent_message_anchor(
+        model,
+        matches!(draft.target, UiMailboxDraftTarget::Conversation { .. }),
+    );
 }
 
-fn retain_sent_message_anchor(model: &mut UiModel) {
+fn retain_sent_message_anchor(model: &mut UiModel, preserve_focus: bool) {
     if model.conversation_scroll_mode == ConversationScrollMode::FollowTail {
         model.conversation_anchor = model
             .conversation
@@ -12889,7 +13158,7 @@ fn retain_sent_message_anchor(model: &mut UiModel) {
             .and_then(|conversation| conversation.entries.last())
             .map(|entry| entry.id.clone());
     }
-    if model.focus != UiFocus::Approval {
+    if !preserve_focus && model.focus != UiFocus::Approval {
         model.focus = UiFocus::Conversation;
     }
     model.close_technical_details();
@@ -13955,7 +14224,7 @@ mod tests {
             height: 24,
         });
         model.focus = UiFocus::Approval;
-        super::retain_sent_message_anchor(&mut model);
+        super::retain_sent_message_anchor(&mut model, false);
         assert_eq!(model.focus, UiFocus::Approval);
     }
 

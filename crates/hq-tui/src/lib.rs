@@ -17,7 +17,7 @@ pub use model::{
     UiCompletedFileChange, UiCompletedItemPresentation, UiCompletionResult, UiConfigField,
     UiConfiguration, UiConnectionState, UiConversation, UiConversationActivityKind,
     UiConversationAuthor, UiConversationEntry, UiConversationEntryGeometry,
-    UiConversationEntryPresentation, UiConversationPage, UiConversationSender,
+    UiConversationEntryPresentation, UiConversationId, UiConversationPage, UiConversationSender,
     UiConversationTarget, UiConversationViewportObservation, UiConversationViewportPosition,
     UiConversationWindow, UiDirectTarget, UiEffect, UiEnterResult, UiError, UiEscapeResult,
     UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanIssue, UiHumanMembershipEvidence,

@@ -114,6 +114,27 @@ a pending row or receipt among older entries. Exact committed evidence replaces 
 definite rejection restores the exact draft; ambiguous response loss reconciles without a duplicate.
 Project delivery status comes from typed dispatch evidence.
 
+## Conversation composition
+
+Opening a conversation prepares its composer with input focus. The transcript and composer remain
+visible together. Tab and Shift-Tab switch surfaces; Escape from the composer focuses the transcript,
+and Escape from ordinary reading returns to the list. Retained draft text does not capture reading
+keys. The focused composer grows with rendered text up to its configured height cap, then scrolls
+internally to keep the caret visible. An unfocused composer occupies one row. Small layouts omit
+editor decoration before sacrificing the editable row.
+
+Conversation drafts carry a typed conversation identity through the client, API, and store. The
+source resolves the initiating root from transaction-consistent canonical state. Direct asynchronous
+messages and personal notes continue that root; project input retains the exact project exchange.
+Provider sessions use unambiguous question context or a unique causal root frontier, never the
+visible message, display text, timestamps, or page position. Ambiguous requests retain the draft
+without choosing arbitrary message authority.
+
+A conversation send retains its text until the exact command commits. The committed receipt opens
+a fresh composer for the same conversation. Reentering a retained editor preserves its cursor.
+Switching conversations saves the preceding draft before preparing the new target, and keystrokes
+cannot edit a draft belonging to another conversation.
+
 ## Responsive rendering and actions
 
 The mailbox root and conversation detail are separate full-pane routes at compact and wide widths.

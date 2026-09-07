@@ -155,3 +155,63 @@ fn every_explicit_target_round_trips_without_a_canonical_foreign_key() {
     assert_eq!(loaded.len(), 6);
     assert!(loaded.iter().all(|draft| draft.content == "recover me"));
 }
+
+#[test]
+fn conversation_draft_identities_survive_reopen_without_losing_session_context() {
+    use hq_domain::{ConversationId, ProviderSessionId};
+    let directory = TestDirectory::new();
+    let database = directory.database_path();
+    let store = open_store(&database);
+    let counterparty = MailboxAddress::new(
+        InstallationId::from_bytes([51; 32]),
+        MailboxId::from_bytes([52; 32]),
+    );
+    let targets = [
+        ConversationId::Thread {
+            counterparty,
+            thread: ThreadId::from_bytes([53; 32]),
+        },
+        ConversationId::ProviderSession {
+            counterparty,
+            provider: ProviderId::new("provider").expect("provider"),
+            session: ProviderSessionId::new("session-a").expect("session"),
+        },
+        ConversationId::ProviderSession {
+            counterparty,
+            provider: ProviderId::new("provider").expect("provider"),
+            session: ProviderSessionId::new("session-b").expect("session"),
+        },
+        ConversationId::ProjectThread {
+            project_id: ProjectId::from_bytes([54; 32]),
+            thread: ThreadId::from_bytes([55; 32]),
+        },
+    ];
+    for (index, conversation) in targets.iter().enumerate() {
+        store
+            .application_state_handle()
+            .save_mailbox_draft(MailboxDraftSaveRequest {
+                draft_id: OperationId::from_bytes([u8::try_from(index).expect("small index"); 32]),
+                target: MailboxDraftTarget::Conversation {
+                    conversation: conversation.clone(),
+                },
+                content: "retained text".to_owned(),
+                expected_version: None,
+            })
+            .expect("conversation draft saves");
+    }
+    store.close().expect("close");
+    let reopened = open_store(&database);
+    let drafts = reopened
+        .application_state_handle()
+        .load_mailbox_drafts()
+        .expect("drafts load");
+    assert_eq!(drafts.len(), targets.len());
+    for (draft, conversation) in drafts.iter().zip(targets) {
+        assert_eq!(
+            draft.target,
+            MailboxDraftTarget::Conversation { conversation }
+        );
+        assert_eq!(draft.content, "retained text");
+        assert_eq!(draft.version, 1);
+    }
+}

@@ -930,6 +930,13 @@ pub fn mailbox_command_from_v1(
             .draft_id
             .map(|draft_id| OperationId::from_bytes(draft_id.bytes())),
         action: match request.action {
+            MailboxCommandActionDto::Conversation {
+                conversation,
+                message_id,
+            } => MailboxCommandAction::Conversation {
+                conversation: conversation_key_from_v1(conversation)?,
+                message_id: hq_domain::MessageId::from_bytes(message_id.bytes()),
+            },
             MailboxCommandActionDto::Reply {
                 target_message,
                 message_id,
@@ -980,6 +987,13 @@ pub fn mailbox_command_request_to_v1(request: &MailboxCommandRequest) -> Mailbox
             .draft_id
             .map(|draft_id| Id32::new(*draft_id.as_bytes())),
         match request.action {
+            MailboxCommandAction::Conversation {
+                ref conversation,
+                message_id,
+            } => MailboxCommandActionDto::Conversation {
+                conversation: conversation_key_to_v1(conversation),
+                message_id: Id32::new(*message_id.as_bytes()),
+            },
             MailboxCommandAction::Reply {
                 target_message,
                 message_id,
@@ -1077,6 +1091,11 @@ fn mailbox_draft_to_v1(draft: &MailboxDraft) -> MailboxDraftDto {
     MailboxDraftDto {
         draft_id: Id32::new(*draft.draft_id.as_bytes()),
         target: match draft.target {
+            MailboxDraftTarget::Conversation { ref conversation } => {
+                MailboxDraftTargetDto::Conversation {
+                    conversation: conversation_key_to_v1(conversation),
+                }
+            }
             MailboxDraftTarget::Reply { message_id } => MailboxDraftTargetDto::Reply {
                 message_id: Id32::new(*message_id.as_bytes()),
             },
@@ -1111,6 +1130,9 @@ fn mailbox_draft_target_from_v1(
     target: &MailboxDraftTargetDto,
 ) -> Result<MailboxDraftTarget, ValueError> {
     Ok(match target {
+        MailboxDraftTargetDto::Conversation { conversation } => MailboxDraftTarget::Conversation {
+            conversation: conversation_key_from_v1(conversation.clone())?,
+        },
         MailboxDraftTargetDto::Reply { message_id } => MailboxDraftTarget::Reply {
             message_id: hq_domain::MessageId::from_bytes(message_id.bytes()),
         },

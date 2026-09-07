@@ -9,6 +9,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
@@ -2601,7 +2602,8 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                     "Archive this conversation?",
                     Some("HQ will stop active work first, then put away the whole conversation."),
                 ),
-                UiMailboxAction::Reply { .. }
+                UiMailboxAction::Conversation { .. }
+                | UiMailboxAction::Reply { .. }
                 | UiMailboxAction::Direct { .. }
                 | UiMailboxAction::Project { .. } => (
                     "Send this message?",
@@ -2632,6 +2634,7 @@ const MAX_DRAFT_BYTES: usize = 16 * 1024;
 
 const fn draft_target_label(target: &UiMailboxDraftTarget) -> &'static str {
     match target {
+        UiMailboxDraftTarget::Conversation { .. } => "Message",
         UiMailboxDraftTarget::Reply { .. } => "Reply",
         UiMailboxDraftTarget::Direct { .. } => "Direct message",
         UiMailboxDraftTarget::SelfNote => "Self-note",
@@ -3310,14 +3313,50 @@ fn render_inbox_detail(
             Borders::TOP | outer_border,
         );
     } else if model.mailbox_draft().is_some() && !model.draft_suspended_by_command_approval() {
-        let draft_height = (area.height / 3).max(6).min(area.height.saturating_sub(2));
+        let draft_height = conversation_composer_height(model, theme, area, outer_border);
         let [conversation, draft] =
-            Layout::vertical([Constraint::Min(2), Constraint::Length(draft_height)]).areas(area);
+            Layout::vertical([Constraint::Min(1), Constraint::Length(draft_height)]).areas(area);
         render_conversation(frame, model, theme, conversation, outer_border, cache);
         render_draft_pane(frame, model, theme, draft, Borders::TOP | outer_border);
     } else {
         render_conversation(frame, model, theme, area, outer_border, cache);
     }
+}
+
+fn conversation_composer_height(
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+    borders: Borders,
+) -> u16 {
+    if model.focus() != UiFocus::Draft {
+        return 1.min(area.height);
+    }
+    let cap = model
+        .configuration()
+        .and_then(|config| config.composer_height_percent)
+        .map_or(area.height / 3, |percent| {
+            u16::try_from((u32::from(area.height) * u32::from(percent)) / 100).unwrap_or(u16::MAX)
+        })
+        .max(1)
+        .min(area.height.saturating_sub(1));
+    let width = Block::new().borders(borders).inner(area).width;
+    let rows = match model.mailbox_draft() {
+        Some(UiMailboxDraftPane::Editing { draft, .. }) => draft_editor_layout(
+            theme,
+            &draft.content,
+            model.message_field_cursor(&draft.content),
+            true,
+            Some(width),
+        )
+        .0
+        .lines
+        .len(),
+        _ => 1,
+    };
+    u16::try_from(rows.saturating_add(2))
+        .unwrap_or(u16::MAX)
+        .min(cap)
 }
 
 fn render_command_approval(
@@ -3403,6 +3442,9 @@ fn render_draft_pane(
     let Some(draft_pane) = model.mailbox_draft() else {
         return;
     };
+    if render_compact_draft(frame, model, theme, draft_pane, area) {
+        return;
+    }
     match draft_pane {
         UiMailboxDraftPane::Loading { target } => {
             let block = with_draft_context_title(
@@ -3457,24 +3499,18 @@ fn render_draft_pane(
             );
             let inner = block.inner(area);
             frame.render_widget(block, area);
+            let hint_height = u16::from(inner.height > 1);
             let [text_area, hint] =
-                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-            let cursor = model.message_field_cursor(&draft.content);
-            let content = draft_source_text(
-                theme,
-                &draft.content,
-                cursor,
-                model.focus() == UiFocus::Draft,
+                Layout::vertical([Constraint::Min(1), Constraint::Length(hint_height)])
+                    .areas(inner);
+            render_draft_editor(frame, model, theme, &draft.content, text_area);
+            let hint_text = model.message_field_error().unwrap_or(
+                if matches!(model.active_route(), UiRoute::Conversation { .. }) {
+                    "Enter send · Ctrl-J/Shift-Enter newline · Tab/Esc read"
+                } else {
+                    "Enter send · Ctrl-J/Shift-Enter newline · Esc close"
+                },
             );
-            frame.render_widget(
-                Paragraph::new(content)
-                    .style(theme.style(UiThemeRole::Input))
-                    .wrap(Wrap { trim: false }),
-                text_area,
-            );
-            let hint_text = model
-                .message_field_error()
-                .unwrap_or("Enter send · Ctrl-J/Shift-Enter newline · Esc close");
             frame.render_widget(
                 Paragraph::new(hint_text).style(if model.message_field_error().is_some() {
                     theme.style(UiThemeRole::Error)
@@ -3485,6 +3521,88 @@ fn render_draft_pane(
             );
         }
     }
+}
+
+fn render_compact_draft(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    draft_pane: &UiMailboxDraftPane,
+    area: Rect,
+) -> bool {
+    if !model.draft_matches_active_conversation() {
+        let text = if model.last_failure().is_some() {
+            "Previous draft could not be saved"
+        } else {
+            "Saving previous draft…"
+        };
+        frame.render_widget(
+            Paragraph::new(text).style(theme.style(UiThemeRole::TextMuted)),
+            area,
+        );
+        return true;
+    }
+    if matches!(model.active_route(), UiRoute::Conversation { .. })
+        && model.focus() != UiFocus::Draft
+    {
+        let preview = match draft_pane {
+            UiMailboxDraftPane::Editing { draft, .. } => {
+                draft_source_text(theme, &draft.content, 0, false)
+                    .lines
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default()
+            }
+            UiMailboxDraftPane::Loading { .. } => Line::from("Loading draft…"),
+        };
+        let mut spans = vec![Span::styled(
+            "Message  ",
+            theme.style(UiThemeRole::TextMuted),
+        )];
+        spans.extend(preview.spans);
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(theme.style(UiThemeRole::Input)),
+            area,
+        );
+        return true;
+    }
+    if area.height < 2 {
+        match draft_pane {
+            UiMailboxDraftPane::Editing { draft, .. } => {
+                render_draft_editor(frame, model, theme, &draft.content, area);
+            }
+            UiMailboxDraftPane::Loading { .. } => {
+                frame.render_widget(Paragraph::new("Loading draft…"), area);
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn render_draft_editor(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    source: &str,
+    area: Rect,
+) {
+    let (content, cursor_row) = draft_editor_layout(
+        theme,
+        source,
+        model.message_field_cursor(source),
+        model.focus() == UiFocus::Draft,
+        Some(area.width),
+    );
+    let scroll =
+        u16::try_from(cursor_row.saturating_sub(usize::from(area.height.saturating_sub(1))))
+            .unwrap_or(u16::MAX);
+    frame.render_widget(
+        Paragraph::new(content)
+            .style(theme.style(UiThemeRole::Input))
+            .scroll((scroll, 0)),
+        area,
+    );
 }
 
 fn with_draft_context_title<'a>(
@@ -3530,37 +3648,86 @@ fn inert_draft_source(source: &str) -> String {
 }
 
 fn draft_source_text(theme: &UiTheme, source: &str, cursor: usize, focused: bool) -> Text<'static> {
+    draft_editor_layout(theme, source, cursor, focused, None).0
+}
+
+fn draft_editor_layout(
+    theme: &UiTheme,
+    source: &str,
+    cursor: usize,
+    focused: bool,
+    width: Option<u16>,
+) -> (Text<'static>, usize) {
     let input_style = theme.style(UiThemeRole::Input);
     let cursor_style = input_style.patch(theme.style(UiThemeRole::Cursor));
     let mut lines = Vec::new();
     let mut spans = Vec::new();
-    for (offset, character) in source.char_indices() {
-        if character == '\n' {
-            if focused && offset == cursor {
-                spans.push(Span::styled(" ", cursor_style));
+    let mut column = 0;
+    let mut cursor_row = 0;
+    for (offset, grapheme) in source.grapheme_indices(true) {
+        let at_cursor = focused && (offset..offset + grapheme.len()).contains(&cursor);
+        if grapheme.ends_with('\n') {
+            if at_cursor {
+                cursor_row = push_draft_span(
+                    &mut lines,
+                    &mut spans,
+                    &mut column,
+                    width,
+                    Span::styled(" ", cursor_style),
+                );
             }
             lines.push(Line::from(std::mem::take(&mut spans)));
+            column = 0;
             continue;
         }
-        let rendered = match character {
-            '\t' => "    ".to_owned(),
-            character if character.is_control() => " ".to_owned(),
-            character => character.to_string(),
+        let rendered = if grapheme == "\t" {
+            "    ".to_owned()
+        } else if grapheme.chars().any(char::is_control) {
+            " ".to_owned()
+        } else {
+            grapheme.to_owned()
         };
-        spans.push(Span::styled(
-            rendered,
-            if focused && offset == cursor {
-                cursor_style
-            } else {
-                input_style
-            },
-        ));
+        let row = push_draft_span(
+            &mut lines,
+            &mut spans,
+            &mut column,
+            width,
+            Span::styled(rendered, if at_cursor { cursor_style } else { input_style }),
+        );
+        if at_cursor {
+            cursor_row = row;
+        }
     }
     if focused && cursor == source.len() {
-        spans.push(Span::styled(" ", cursor_style));
+        cursor_row = push_draft_span(
+            &mut lines,
+            &mut spans,
+            &mut column,
+            width,
+            Span::styled(" ", cursor_style),
+        );
     }
     lines.push(Line::from(spans));
-    Text::from(lines)
+    (Text::from(lines), cursor_row)
+}
+
+fn push_draft_span(
+    lines: &mut Vec<Line<'static>>,
+    spans: &mut Vec<Span<'static>>,
+    column: &mut usize,
+    width: Option<u16>,
+    span: Span<'static>,
+) -> usize {
+    let cells = span.content.width();
+    if width.is_some_and(|width| {
+        *column > 0 && column.saturating_add(cells) > usize::from(width.max(1))
+    }) {
+        lines.push(Line::from(std::mem::take(spans)));
+        *column = 0;
+    }
+    *column = column.saturating_add(cells);
+    spans.push(span);
+    lines.len()
 }
 
 fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
@@ -3867,7 +4034,7 @@ fn render_project_setup(
         lines.extend([
             Line::default(),
             Line::styled(
-                "Press r or Enter to write the first message.",
+                "Press Tab to write the first message.",
                 theme.style(UiThemeRole::Accent),
             ),
             Line::from("Press c to choose a different available agent."),
@@ -4855,7 +5022,11 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     } else if model.focus() == UiFocus::Approval {
         " j/k choose · Enter confirm · Esc leave · Tab switch pane · ? help · q quit".to_owned()
     } else if model.focus() == UiFocus::Draft {
-        " Enter send · Ctrl-J/Shift-Enter newline · Esc close · ? help · q quit".to_owned()
+        if matches!(model.active_route(), UiRoute::Conversation { .. }) {
+            " Enter send · Ctrl-J/Shift-Enter newline · Tab/Esc read · ? help · q quit".to_owned()
+        } else {
+            " Enter send · Ctrl-J/Shift-Enter newline · Esc close · ? help · q quit".to_owned()
+        }
     } else if matches!(model.active_route(), UiRoute::ConversationEvidence { .. }) {
         " j/k scroll · Esc conversation · ? help · q quit".to_owned()
     } else if matches!(
@@ -4898,7 +5069,7 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     } else if model.conversation_setup().is_some()
         && matches!(model.active_route(), UiRoute::Conversation { .. })
     {
-        " r/Enter write first message · c change agent · Esc Inbox · ? help · q quit".to_owned()
+        " Tab write first message · c change agent · Esc Inbox · ? help · q quit".to_owned()
     } else if matches!(model.active_route(), UiRoute::Conversation { .. }) {
         conversation_footer(model)
     } else if model.selected_row_data().is_none() {
@@ -4911,7 +5082,9 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     let view_shortcuts_available = model.help_page().is_none()
         && model.new_modal().is_none()
         && model.mailbox_modal().is_none()
-        && (model.mailbox_draft().is_none() || model.draft_suspended_by_command_approval())
+        && (model.focus() != UiFocus::Draft
+            || model.mailbox_draft().is_none()
+            || model.draft_suspended_by_command_approval())
         && model.agent_modal().is_none()
         && model.project_interaction().is_none()
         && model.interaction_modal().is_none()

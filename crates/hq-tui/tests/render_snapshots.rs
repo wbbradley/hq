@@ -249,7 +249,7 @@ fn project_setup_is_distinct_from_a_conversation_in_wide_and_compact_layouts() {
             &rendered,
             "Alice will be assigned when you send the first message"
         ));
-        assert!(rendered.contains("r/Enter write first message"));
+        assert!(rendered.contains("Tab write first message"));
         assert!(!rendered.contains("No messages yet"));
         assert!(!rendered.contains("clear filter"));
     }
@@ -263,42 +263,21 @@ fn project_setup_instructions_only_render_while_conversation_is_focused() {
     };
     let focused = project_setup_model(size);
     let rendered = render_text(&focused);
-    assert!(rendered.contains("Press r or Enter to write the first message."));
+    assert!(rendered.contains("Press Tab to write the first message."));
     assert!(rendered.contains("Press c to choose a different available agent."));
 
     let list_focused = update(focused.clone(), UiEvent::Input(UiInput::Escape))
         .expect("return to the Inbox list")
         .model;
     let rendered = render_text(&list_focused);
-    assert!(!rendered.contains("Press r or Enter to write the first message."));
+    assert!(!rendered.contains("Press Tab to write the first message."));
     assert!(!rendered.contains("Press c to choose a different available agent."));
 
-    let opening =
-        update(focused, UiEvent::Input(UiInput::Character('r'))).expect("open first-message draft");
-    let (effect_id, target) = opening
-        .effects
-        .iter()
-        .find_map(|effect| match effect {
-            UiEffect::OpenDraft { id, target } => Some((*id, target.clone())),
-            _ => None,
-        })
-        .expect("draft request");
-    let composing = update(
-        opening.model,
-        UiEvent::DraftLoaded {
-            effect_id,
-            draft: UiMailboxDraft {
-                draft_id: [5; 32],
-                target,
-                content: String::new(),
-                version: 1,
-            },
-        },
-    )
-    .expect("first-message draft loaded")
-    .model;
+    let composing = update(focused, UiEvent::Input(UiInput::NextFocus))
+        .expect("focus persistent composer")
+        .model;
     let rendered = render_text(&composing);
-    assert!(!rendered.contains("Press r or Enter to write the first message."));
+    assert!(!rendered.contains("Press Tab to write the first message."));
     assert!(!rendered.contains("Press c to choose a different available agent."));
 }
 
@@ -2945,8 +2924,30 @@ fn project_setup_model(size: UiSize) -> UiModel {
         project_setups: vec![setup],
     };
     let model = loaded_snapshot_model(size, snapshot);
-    let model = update(model, UiEvent::Input(UiInput::Activate))
-        .expect("open setup conversation")
+    let opened = update(model, UiEvent::Input(UiInput::Activate)).expect("open setup conversation");
+    let (effect_id, target) = opened
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::OpenDraft { id, target } => Some((*id, target.clone())),
+            _ => None,
+        })
+        .expect("persistent setup composer");
+    let loaded = update(
+        opened.model,
+        UiEvent::DraftLoaded {
+            effect_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target,
+                content: String::new(),
+                version: 1,
+            },
+        },
+    )
+    .expect("load setup draft");
+    let model = update(loaded.model, UiEvent::Input(UiInput::Escape))
+        .expect("read setup")
         .model;
     assert!(
         matches!(model.active_route(), UiRoute::Conversation { .. }),
@@ -3463,5 +3464,83 @@ fn conversation_model_with_content(
     .expect("conversation page");
     let opened =
         update(observed.model, UiEvent::Input(UiInput::Activate)).expect("focus conversation");
-    opened.model
+    if let Some((effect_id, target)) = opened.effects.iter().find_map(|effect| match effect {
+        UiEffect::OpenDraft { id, target } => Some((*id, target.clone())),
+        _ => None,
+    }) {
+        let loaded = update(
+            opened.model,
+            UiEvent::DraftLoaded {
+                effect_id,
+                draft: UiMailboxDraft {
+                    draft_id: [99; 32],
+                    target,
+                    content: String::new(),
+                    version: 1,
+                },
+            },
+        )
+        .expect("load persistent composer");
+        update(loaded.model, UiEvent::Input(UiInput::Escape))
+            .expect("focus transcript")
+            .model
+    } else {
+        opened.model
+    }
+}
+
+#[test]
+fn persistent_composer_grows_collapses_and_keeps_the_caret_visible_at_its_height_cap() {
+    let reading = conversation_model(UiSize {
+        width: 64,
+        height: 24,
+    });
+    let reading_height = render_observation(&reading).height;
+    let composing = update(reading, UiEvent::Input(UiInput::NextFocus))
+        .expect("compose")
+        .model;
+    let empty_height = render_observation(&composing).height;
+    assert!(
+        reading_height > empty_height,
+        "collapsed composer must free transcript rows"
+    );
+    let text = (0..40)
+        .map(|line| format!("Editor line {line:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let composing = update(composing, UiEvent::Input(UiInput::Paste(text)))
+        .expect("long draft")
+        .model;
+    assert!(
+        render_observation(&composing).height < empty_height,
+        "editor grows up to its cap"
+    );
+    let rendered = render_text(&composing);
+    assert!(
+        rendered.contains("Editor line 39"),
+        "caret row must be visible:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Editor line 00"),
+        "editor must scroll internally:\n{rendered}"
+    );
+    let reading = update(composing.clone(), UiEvent::Input(UiInput::PreviousFocus))
+        .expect("read")
+        .model;
+    assert_eq!(render_observation(&reading).height, reading_height);
+    let small = update(
+        composing,
+        UiEvent::Resized(UiSize {
+            width: 40,
+            height: 10,
+        }),
+    )
+    .expect("small")
+    .model;
+    let rendered = render_text(&small);
+    assert!(
+        rendered.contains("Editor line 39"),
+        "small editor keeps the caret visible:\n{rendered}"
+    );
+    assert!(render_observation(&small).height > 0);
 }

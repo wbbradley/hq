@@ -38,16 +38,16 @@ use hq_tui::{
     UiAgentAttentionReason, UiAgentLifecycle, UiAgentMailbox, UiAgentProjectAssignment,
     UiAgentSession, UiAgentStatus, UiCompletedFileChange, UiCompletedItemPresentation,
     UiConfigField, UiConfiguration, UiConnectionState, UiConversationActivityKind,
-    UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationPage,
-    UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanIssue,
-    UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState,
-    UiInteraction, UiInteractionAnswerOutcome, UiInteractionChoice, UiInteractionKind,
-    UiInteractionResponse, UiInteractionTarget, UiInteractionTargetIssue, UiMailboxAction,
-    UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction,
-    UiManagedSessionOutcome, UiManagedSessionResult, UiMaterializedConversationView,
-    UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject, UiProjectAction,
-    UiProjectAssignment, UiProjectConversationSetup, UiProjectExternalWarning, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceCondition,
+    UiConversationAuthor, UiConversationEntry, UiConversationEntryPresentation, UiConversationId,
+    UiConversationPage, UiConversationTarget, UiDirectTarget, UiEffect, UiEvent, UiFailure,
+    UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence,
+    UiHumanState, UiInteraction, UiInteractionAnswerOutcome, UiInteractionChoice,
+    UiInteractionKind, UiInteractionResponse, UiInteractionTarget, UiInteractionTargetIssue,
+    UiMailboxAction, UiMailboxCommandResult, UiMailboxDraft, UiMailboxDraftTarget,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
+    UiMaterializedConversationView, UiMessageDelivery, UiMessageState, UiMessageTarget, UiProject,
+    UiProjectAction, UiProjectAssignment, UiProjectConversationSetup, UiProjectExternalWarning,
+    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceCondition,
     UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiProvider, UiReconnectCause,
     UiReconnectFailureKind, UiReconnectOperation, UiRow, UiRowKind, UiRowState, UiSection,
     UiSnapshot, UiTechnicalSection, UiTheme, UiThemeChoice, UiTimerKind,
@@ -1809,7 +1809,8 @@ impl TuiClientPort for LocalTuiClient {
         let command_id = Id32::new(random_identity()?);
         let authors_message = matches!(
             action,
-            UiMailboxAction::Reply { .. }
+            UiMailboxAction::Conversation { .. }
+                | UiMailboxAction::Reply { .. }
                 | UiMailboxAction::Direct { .. }
                 | UiMailboxAction::SelfNote
                 | UiMailboxAction::Project { .. }
@@ -1827,34 +1828,7 @@ impl TuiClientPort for LocalTuiClient {
         } else {
             Id32::new([0; 32])
         };
-        let action = match action {
-            UiMailboxAction::Reply { target_message } => MailboxCommandActionDto::Reply {
-                target_message: Id32::new(target_message),
-                message_id,
-            },
-            UiMailboxAction::Direct {
-                recipient_installation,
-                recipient_mailbox,
-            } => MailboxCommandActionDto::Direct {
-                recipient_installation: Id32::new(recipient_installation),
-                recipient_mailbox: Id32::new(recipient_mailbox),
-                message_id,
-            },
-            UiMailboxAction::SelfNote => MailboxCommandActionDto::SelfNote { message_id },
-            UiMailboxAction::Project {
-                project_id,
-                thread_id,
-            } => MailboxCommandActionDto::Project {
-                project_id: Id32::new(project_id),
-                thread_id: thread_id.map(Id32::new),
-                message_id,
-            },
-            UiMailboxAction::ArchiveConversation { conversation } => {
-                MailboxCommandActionDto::ArchiveConversation {
-                    conversation: conversation_key(&conversation),
-                }
-            }
-        };
+        let action = mailbox_action_to_wire(action, message_id);
         let authored_at_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| UiFailure {
@@ -2140,17 +2114,51 @@ impl TuiClientPort for LocalTuiClient {
     }
 }
 
-fn conversation_key(target: &UiConversationTarget) -> ConversationKeyDto {
-    match target {
-        UiConversationTarget::Project {
+fn mailbox_action_to_wire(action: UiMailboxAction, message_id: Id32) -> MailboxCommandActionDto {
+    match action {
+        UiMailboxAction::Conversation { conversation } => MailboxCommandActionDto::Conversation {
+            conversation: conversation_id_to_wire(&conversation),
+            message_id,
+        },
+        UiMailboxAction::Reply { target_message } => MailboxCommandActionDto::Reply {
+            target_message: Id32::new(target_message),
+            message_id,
+        },
+        UiMailboxAction::Direct {
+            recipient_installation,
+            recipient_mailbox,
+        } => MailboxCommandActionDto::Direct {
+            recipient_installation: Id32::new(recipient_installation),
+            recipient_mailbox: Id32::new(recipient_mailbox),
+            message_id,
+        },
+        UiMailboxAction::SelfNote => MailboxCommandActionDto::SelfNote { message_id },
+        UiMailboxAction::Project {
             project_id,
             thread_id,
-            ..
+        } => MailboxCommandActionDto::Project {
+            project_id: Id32::new(project_id),
+            thread_id: thread_id.map(Id32::new),
+            message_id,
+        },
+        UiMailboxAction::ArchiveConversation { conversation } => {
+            MailboxCommandActionDto::ArchiveConversation {
+                conversation: conversation_key(&conversation),
+            }
+        }
+    }
+}
+
+fn conversation_id_to_wire(conversation: &UiConversationId) -> ConversationKeyDto {
+    match conversation {
+        UiConversationId::Project {
+            project_id,
+            thread_id,
         } => ConversationKeyDto::ProjectThread {
             project: Id32::new(*project_id),
             thread: Id32::new(*thread_id),
         },
-        UiConversationTarget::Thread {
+        UiConversationId::Thread {
             counterparty_installation,
             counterparty_mailbox,
             thread_id,
@@ -2159,7 +2167,7 @@ fn conversation_key(target: &UiConversationTarget) -> ConversationKeyDto {
             counterparty_mailbox: Id32::new(*counterparty_mailbox),
             thread: Id32::new(*thread_id),
         },
-        UiConversationTarget::ProviderSession {
+        UiConversationId::ProviderSession {
             counterparty_installation,
             counterparty_mailbox,
             provider,
@@ -2171,6 +2179,39 @@ fn conversation_key(target: &UiConversationTarget) -> ConversationKeyDto {
             session: session.clone(),
         },
     }
+}
+
+fn conversation_id_from_wire(conversation: &ConversationKeyDto) -> UiConversationId {
+    match conversation {
+        ConversationKeyDto::ProjectThread { project, thread } => UiConversationId::Project {
+            project_id: project.bytes(),
+            thread_id: thread.bytes(),
+        },
+        ConversationKeyDto::Thread {
+            counterparty_installation,
+            counterparty_mailbox,
+            thread,
+        } => UiConversationId::Thread {
+            counterparty_installation: counterparty_installation.bytes(),
+            counterparty_mailbox: counterparty_mailbox.bytes(),
+            thread_id: thread.bytes(),
+        },
+        ConversationKeyDto::ProviderSession {
+            counterparty_installation,
+            counterparty_mailbox,
+            provider,
+            session,
+        } => UiConversationId::ProviderSession {
+            counterparty_installation: counterparty_installation.bytes(),
+            counterparty_mailbox: counterparty_mailbox.bytes(),
+            provider: provider.clone(),
+            session: session.clone(),
+        },
+    }
+}
+
+fn conversation_key(target: &UiConversationTarget) -> ConversationKeyDto {
+    conversation_id_to_wire(&target.conversation_id())
 }
 
 fn tui_configuration(configuration: &LocalConfiguration) -> Result<UiConfiguration, UiFailure> {
@@ -2348,6 +2389,11 @@ fn draft_protocol_error() -> TuiDraftError {
 
 fn mailbox_draft_target(target: &UiMailboxDraftTarget) -> MailboxDraftTargetDto {
     match target {
+        UiMailboxDraftTarget::Conversation { conversation } => {
+            MailboxDraftTargetDto::Conversation {
+                conversation: conversation_id_to_wire(conversation),
+            }
+        }
         UiMailboxDraftTarget::Reply { message_id } => MailboxDraftTargetDto::Reply {
             message_id: Id32::new(*message_id),
         },
@@ -2380,6 +2426,11 @@ fn mailbox_draft_target(target: &UiMailboxDraftTarget) -> MailboxDraftTargetDto 
 
 fn tui_draft_target(target: &MailboxDraftTargetDto) -> UiMailboxDraftTarget {
     match target {
+        MailboxDraftTargetDto::Conversation { conversation } => {
+            UiMailboxDraftTarget::Conversation {
+                conversation: conversation_id_from_wire(conversation),
+            }
+        }
         MailboxDraftTargetDto::Reply { message_id } => UiMailboxDraftTarget::Reply {
             message_id: message_id.bytes(),
         },

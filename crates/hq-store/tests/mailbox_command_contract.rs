@@ -377,3 +377,203 @@ fn seed_agent_mailbox(store: &hq_store::Store) -> (MailboxAddress, FactId) {
         fact_id,
     )
 }
+
+#[test]
+fn conversation_composition_keeps_successive_direct_messages_and_notes_in_the_same_thread() {
+    for personal in [true, false] {
+        let directory = TestDirectory::new();
+        let store = open_store(&directory.database_path());
+        seed_human_authority(&store);
+        let (agent, _) = seed_agent_mailbox(&store);
+        let gateway = StoreGateway::new(&store, authority_policy(), Arc::new(signer(1)));
+        let draft_id = OperationId::from_bytes([0xe1; 32]);
+        gateway
+            .save_mailbox_draft(MailboxDraftSaveRequest {
+                draft_id,
+                target: if personal {
+                    MailboxDraftTarget::SelfNote
+                } else {
+                    MailboxDraftTarget::Direct { recipient: agent }
+                },
+                content: "first note".to_owned(),
+                expected_version: None,
+            })
+            .expect("draft saves");
+        let mut first_request = self_note_request(draft_id, [0xe2; 32], [0xe3; 32]);
+        if !personal {
+            first_request.action = MailboxCommandAction::Direct {
+                recipient: agent,
+                message_id: MessageId::from_bytes([0xa1; 32]),
+            };
+        }
+        let first = gateway.control_mailbox(first_request).expect("first send");
+        assert!(
+            matches!(first, MutationAttempt::Completed(ref receipt) if receipt.outcome() == &MutationOutcome::Committed)
+        );
+        let snapshot = gateway.authoritative_snapshot().expect("snapshot");
+        assert_eq!(snapshot.conversations().len(), 1);
+        let conversation = snapshot.conversations()[0].key.clone();
+        for serial in [0xe4, 0xe5] {
+            let draft_id = OperationId::from_bytes([serial; 32]);
+            gateway
+                .save_mailbox_draft(MailboxDraftSaveRequest {
+                    draft_id,
+                    target: MailboxDraftTarget::Conversation {
+                        conversation: conversation.clone(),
+                    },
+                    content: format!("continuation {serial}"),
+                    expected_version: None,
+                })
+                .expect("conversation draft saves");
+            let request = MailboxCommandRequest {
+                command_id: CommandId::from_bytes([serial; 32]),
+                request_digest: CommandDigest::from_bytes([serial; 32]),
+                draft_id: Some(draft_id),
+                action: MailboxCommandAction::Conversation {
+                    conversation: conversation.clone(),
+                    message_id: MessageId::from_bytes([serial; 32]),
+                },
+                content: None,
+                authored_at: Timestamp::from_unix_millis(i64::from(serial)),
+                auxiliary_randomness: [serial; 32],
+            };
+            let result = gateway
+                .control_mailbox(request.clone())
+                .expect("conversation send");
+            assert!(
+                matches!(result, MutationAttempt::Completed(ref receipt) if receipt.outcome() == &MutationOutcome::Committed)
+            );
+            assert_eq!(gateway.control_mailbox(request).expect("replay"), result);
+            assert!(gateway.mailbox_drafts().expect("drafts").is_empty());
+        }
+        let snapshot = gateway.authoritative_snapshot().expect("snapshot");
+        assert_eq!(snapshot.conversations().len(), 1);
+        assert_eq!(snapshot.conversations()[0].key, conversation);
+        assert_eq!(snapshot.conversations()[0].sent_messages, 3);
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn provider_conversation_uses_unambiguous_question_context_and_preserves_ambiguous_drafts() {
+    use hq_domain::{
+        ContentText, ConversationId, OperationCorrelation, ProviderId, ProviderSessionId, ThreadId,
+    };
+    use hq_reducer::{ConversationProjection, ConversationProjectionKey};
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    seed_human_authority(&store);
+    let (agent, agent_fact) = seed_agent_mailbox(&store);
+    let policy = authority_policy();
+    let human = MailboxAddress::new(policy.local_installation(), policy.local_human_mailbox());
+    let root_id = FactId::from_bytes(verified_fact().verified_event().event_id());
+    let provider = ProviderId::new("provider").expect("provider");
+    let session = ProviderSessionId::new("session").expect("session");
+    let conversation = ConversationId::ProviderSession {
+        counterparty: agent,
+        provider: provider.clone(),
+        session: session.clone(),
+    };
+    let mut questions = Vec::new();
+    for serial in [0xf1, 0xf2] {
+        let plan = plan_question(
+            MessageAuthoringAuthority {
+                author: policy.local_installation(),
+                sender: agent,
+                scope: FactScope::InstallationPrivate(policy.local_installation()),
+                authority: AuthorityReference::new(AuthorityRole::LocalInstallation, root_id),
+                support: BTreeSet::from([root_id, agent_fact]),
+            },
+            LocalFactInputs {
+                authored_at: Timestamp::from_unix_millis(i64::from(255 - serial)),
+                auxiliary_randomness: [serial; 32],
+            },
+            NewMessageRequest {
+                message_id: MessageId::from_bytes([serial; 32]),
+                recipient: Some(human),
+                body: ContentText::new("same display question").expect("body"),
+                presentation: PresentationKind::Message,
+                project_id: None,
+            },
+        )
+        .expect("question plans");
+        let (author, time, scope, causal, mut payload, randomness) = plan.into_parts();
+        if let SemanticPayload::QuestionAsked(message) = &mut payload {
+            message.correlation = Some(OperationCorrelation::new(
+                provider.clone(),
+                session.clone(),
+                OperationId::from_bytes([serial; 32]),
+            ));
+        }
+        let fact = CanonicalEventPlan::new(author, time, scope, causal, payload)
+            .sign(&signer(1), randomness)
+            .expect("sign");
+        questions.push(ThreadId::from_bytes(fact.verified_event().event_id()));
+        store.append_verified(fact).expect("append");
+    }
+    let gateway = StoreGateway::new(&store, policy, Arc::new(signer(1)));
+    let draft_id = OperationId::from_bytes([0xf3; 32]);
+    gateway
+        .save_mailbox_draft(MailboxDraftSaveRequest {
+            draft_id,
+            target: MailboxDraftTarget::Conversation {
+                conversation: conversation.clone(),
+            },
+            content: "keep this response".to_owned(),
+            expected_version: None,
+        })
+        .expect("draft");
+    let request = MailboxCommandRequest {
+        command_id: CommandId::from_bytes([0xf4; 32]),
+        request_digest: CommandDigest::from_bytes([0xf4; 32]),
+        draft_id: Some(draft_id),
+        action: MailboxCommandAction::Conversation {
+            conversation,
+            message_id: MessageId::from_bytes([0xf5; 32]),
+        },
+        content: None,
+        authored_at: Timestamp::from_unix_millis(30),
+        auxiliary_randomness: [0xf5; 32],
+    };
+    let rejected = gateway
+        .control_mailbox(request.clone())
+        .expect("retained rejection");
+    assert!(
+        matches!(rejected, MutationAttempt::Completed(ref receipt) if matches!(receipt.outcome(), MutationOutcome::Rejected(error) if error.code().as_str() == "conversation_input_ambiguous"))
+    );
+    assert_eq!(
+        gateway.mailbox_drafts().expect("drafts")[0].content,
+        "keep this response"
+    );
+    let explicit_answer = MailboxCommandRequest {
+        command_id: CommandId::from_bytes([0xf6; 32]),
+        request_digest: CommandDigest::from_bytes([0xf6; 32]),
+        draft_id: None,
+        action: MailboxCommandAction::Reply {
+            target_message: MessageId::from_bytes([0xf1; 32]),
+            message_id: MessageId::from_bytes([0xf6; 32]),
+        },
+        content: Some("handled independently".to_owned()),
+        authored_at: Timestamp::from_unix_millis(31),
+        auxiliary_randomness: [0xf6; 32],
+    };
+    assert!(
+        matches!(gateway.control_mailbox(explicit_answer).expect("resolve one question"), MutationAttempt::Completed(ref receipt) if receipt.outcome() == &MutationOutcome::Committed)
+    );
+    let mut retry = request;
+    retry.command_id = CommandId::from_bytes([0xf7; 32]);
+    retry.request_digest = CommandDigest::from_bytes([0xf7; 32]);
+    assert!(
+        matches!(gateway.control_mailbox(retry).expect("unambiguous conversation send"), MutationAttempt::Completed(ref receipt) if receipt.outcome() == &MutationOutcome::Committed)
+    );
+    let snapshot = store
+        .load_conversation_snapshot()
+        .expect("canonical snapshot");
+    let Some(ConversationProjection::Message(message)) = snapshot.projection(
+        ConversationProjectionKey::Message(MessageId::from_bytes([0xf5; 32])),
+    ) else {
+        panic!("committed message");
+    };
+    assert_eq!(message.thread_id, questions[1]);
+    assert!(gateway.mailbox_drafts().expect("drafts").is_empty());
+}

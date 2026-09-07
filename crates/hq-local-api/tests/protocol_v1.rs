@@ -1880,3 +1880,56 @@ fn peer_route_snapshot_rejects_inconsistent_frontier_and_state() {
         Err(ValueError::InvalidValueCombination)
     );
 }
+
+#[test]
+fn conversation_send_digest_binds_exact_provider_session_and_message() {
+    let key = ConversationKeyDto::ProviderSession {
+        counterparty_installation: Id32::new([1; 32]),
+        counterparty_mailbox: Id32::new([2; 32]),
+        provider: "provider".to_owned(),
+        session: "session-a".to_owned(),
+    };
+    let request = MailboxCommandRequestDto::new(
+        Id32::new([3; 32]),
+        Some(Id32::new([4; 32])),
+        MailboxCommandActionDto::Conversation {
+            conversation: key,
+            message_id: Id32::new([5; 32]),
+        },
+        None,
+        10,
+        [6; 32],
+    );
+    let wire = WireMessage::Request(RequestEnvelope::new(
+        RequestId::new(1).expect("id"),
+        Request::ControlMailbox(Box::new(request.clone())),
+    ));
+    assert!(wire.encode_frame().is_ok());
+    let domain = hq_local_api::mailbox_command_from_v1(request.clone()).expect("convert");
+    assert_eq!(
+        hq_local_api::mailbox_command_request_to_v1(&domain),
+        request
+    );
+    for change_session in [true, false] {
+        let mut changed = request.clone();
+        if let MailboxCommandActionDto::Conversation {
+            conversation: ConversationKeyDto::ProviderSession { session, .. },
+            message_id,
+        } = &mut changed.action
+        {
+            if change_session {
+                *session = "session-b".to_owned();
+            } else {
+                *message_id = Id32::new([7; 32]);
+            }
+        }
+        assert!(
+            WireMessage::Request(RequestEnvelope::new(
+                RequestId::new(1).expect("id"),
+                Request::ControlMailbox(Box::new(changed))
+            ))
+            .encode_frame()
+            .is_err()
+        );
+    }
+}

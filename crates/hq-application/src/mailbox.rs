@@ -27,6 +27,8 @@ pub const MAX_MAILBOX_DRAFTS: usize = 128;
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MailboxDraftTarget {
+    /// Continue an exact conversation using authoritative source context.
+    Conversation { conversation: ConversationId },
     /// Answer one authoritative question message.
     Reply { message_id: MessageId },
     /// Send one asynchronous message to an exact mailbox.
@@ -99,6 +101,10 @@ pub enum MailboxDraftDeleteOutcome {
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MailboxCommandAction {
+    Conversation {
+        conversation: ConversationId,
+        message_id: MessageId,
+    },
     Reply {
         target_message: MessageId,
         message_id: MessageId,
@@ -153,6 +159,27 @@ pub fn plan_mailbox_command(
         auxiliary_randomness: request.auxiliary_randomness,
     };
     let planned = match &request.action {
+        MailboxCommandAction::Conversation {
+            conversation,
+            message_id,
+        } => content(
+            request,
+            draft,
+            &MailboxDraftTarget::Conversation {
+                conversation: conversation.clone(),
+            },
+        )
+        .and_then(|body| {
+            plan_conversation_message(
+                snapshot,
+                local_installation,
+                local_human,
+                inputs,
+                conversation,
+                *message_id,
+                body,
+            )
+        }),
         MailboxCommandAction::Reply {
             target_message,
             message_id,
@@ -348,6 +375,127 @@ pub fn plan_mailbox_command(
         }
     };
     planned.map_or_else(MutationDecision::reject, MutationDecision::commit)
+}
+
+fn plan_conversation_message(
+    snapshot: &DomainSnapshot,
+    local_installation: InstallationId,
+    local_human: MailboxAddress,
+    inputs: LocalFactInputs,
+    conversation: &ConversationId,
+    message_id: MessageId,
+    body: ContentText,
+) -> Result<crate::FactPlan, DomainError> {
+    let root = conversation_message_root(snapshot, conversation, local_human)?;
+    let (authority, scope) = match conversation {
+        ConversationId::ProjectThread { project_id, .. } => {
+            let (project, authority) =
+                project_authority(snapshot, local_installation, local_human, *project_id)?;
+            if root.content.recipient != Some(project.mailbox)
+                || root.account_id != Some(project.account_id)
+            {
+                return Err(stale_target());
+            }
+            (authority, FactScope::AccountAddressed(project.account_id))
+        }
+        ConversationId::Thread { .. } | ConversationId::ProviderSession { .. } => {
+            if root.account_id.is_some() {
+                return Err(stale_target());
+            }
+            (
+                local_human_authority(snapshot, local_installation, local_human)?,
+                FactScope::InstallationPrivate(local_installation),
+            )
+        }
+    };
+    match root.content.purpose {
+        hq_domain::MessagePurpose::Asynchronous => plan_asynchronous_message_continuation(
+            authority,
+            inputs,
+            ContinueAsynchronousMessageRequest {
+                thread_id: root.thread_id,
+                root_fact: root.fact_id,
+                root: root.content.clone(),
+                root_scope: scope,
+                message_id,
+                body,
+                presentation: PresentationKind::Message,
+            },
+        ),
+        hq_domain::MessagePurpose::Question => plan_reply(
+            authority,
+            inputs,
+            ReplyRequest {
+                thread_id: root.thread_id,
+                root_fact: root.fact_id,
+                root: root.content.clone(),
+                root_scope: scope,
+                message_id,
+                body,
+                presentation: PresentationKind::Message,
+            },
+        ),
+        hq_domain::MessagePurpose::ProjectOutput => return Err(stale_target()),
+    }
+    .map_err(|_| invalid_command())
+}
+
+fn conversation_message_root<'a>(
+    snapshot: &'a DomainSnapshot,
+    conversation: &ConversationId,
+    local_human: MailboxAddress,
+) -> Result<&'a hq_reducer::MessageView, DomainError> {
+    let report = snapshot.conversation();
+    let mut roots = Vec::new();
+    let mut unanswered = Vec::new();
+    for projection in report.projections().values() {
+        let ConversationProjection::Thread(thread) = projection else {
+            continue;
+        };
+        let root = message(snapshot, thread.root_message)?;
+        if root.fact_id != thread.root_fact
+            || message_conversation(root, local_human).as_ref() != Some(conversation)
+        {
+            continue;
+        }
+        if root.content.purpose == hq_domain::MessagePurpose::Question
+            && root.content.recipient == Some(local_human)
+            && !thread.cancelled
+            && thread.ready_answers.is_empty()
+        {
+            unanswered.push(root);
+        }
+        roots.push(root);
+    }
+    if matches!(conversation, ConversationId::ProviderSession { .. }) {
+        if let [root] = unanswered.as_slice() {
+            return Ok(root);
+        }
+        if unanswered.len() > 1 {
+            return Err(ambiguous_conversation());
+        }
+        let all_roots = roots.clone();
+        roots.retain(|root| {
+            !all_roots.iter().any(|other| {
+                other.fact_id != root.fact_id
+                    && report
+                        .support()
+                        .get(&ConversationProjectionKey::Message(
+                            other.content.message_id,
+                        ))
+                        .is_some_and(|support| support.contains(&root.fact_id))
+            })
+        });
+    }
+    match roots.as_slice() {
+        [root] => Ok(root),
+        [] => Err(stale_target()),
+        _ => Err(ambiguous_conversation()),
+    }
+}
+
+fn ambiguous_conversation() -> DomainError {
+    domain_error(ErrorCategory::InvalidInput, "conversation_input_ambiguous")
 }
 
 fn conversation_anchor(

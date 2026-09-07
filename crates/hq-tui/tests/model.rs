@@ -748,15 +748,15 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
     let closed = update(refreshed.model, UiEvent::Input(UiInput::Escape))
         .expect("close the first-message composer");
     assert!(closed.model.new_modal().is_none());
-    assert!(closed.model.mailbox_draft().is_none());
+    assert!(closed.model.mailbox_draft().is_some());
     assert_eq!(closed.model.focus(), UiFocus::Conversation);
     let unchanged = update(closed.model.clone(), UiEvent::Input(UiInput::NextFocus))
-        .expect("there is no inactive list pane to focus");
+        .expect("focus the retained composer");
     assert_eq!(
         unchanged.model.navigation_path(),
         closed.model.navigation_path()
     );
-    assert_eq!(unchanged.model.focus(), UiFocus::Conversation);
+    assert_eq!(unchanged.model.focus(), UiFocus::Draft);
 
     let changing = update(
         closed.model.clone(),
@@ -798,10 +798,7 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
         UiEvent::Input(UiInput::Character('r')),
     )
     .expect("r resumes the retained setup");
-    assert!(matches!(
-        open_draft_effect(&resumed_with_r.effects).1,
-        UiMailboxDraftTarget::ProjectSetup { project_id, .. } if *project_id == [5; 32]
-    ));
+    assert_eq!(resumed_with_r.model.focus(), UiFocus::Draft);
 
     let launcher = update(
         closed.model.clone(),
@@ -813,10 +810,7 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
     let resumed_with_n =
         update(projects.model, UiEvent::Input(UiInput::Activate)).expect("choose the same project");
     assert!(resumed_with_n.model.new_modal().is_none());
-    assert!(matches!(
-        open_draft_effect(&resumed_with_n.effects).1,
-        UiMailboxDraftTarget::ProjectSetup { project_id, .. } if *project_id == [5; 32]
-    ));
+    assert_eq!(resumed_with_n.model.focus(), UiFocus::Draft);
     assert_eq!(
         resumed_with_n
             .model
@@ -830,13 +824,17 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
     let activated =
         update(closed.model, UiEvent::Input(UiInput::Activate)).expect("resume the retained setup");
     assert!(activated.model.new_modal().is_none());
-    assert!(
-        matches!(activated.model.mailbox_draft(), Some(UiMailboxDraftPane::Loading { target: UiMailboxDraftTarget::ProjectSetup { project_id, .. } }) if *project_id == [5; 32])
-    );
-    assert!(activated.effects.iter().any(|effect| matches!(
-        effect,
-        UiEffect::OpenDraft { target: UiMailboxDraftTarget::ProjectSetup { project_id, .. }, .. } if *project_id == [5; 32]
-    )));
+    for resumed in [&resumed_with_r, &resumed_with_n, &activated] {
+        assert!(
+            matches!(resumed.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft: UiMailboxDraft { target: UiMailboxDraftTarget::ProjectSetup { project_id, .. }, .. }, .. }) if *project_id == [5; 32])
+        );
+        assert!(
+            resumed
+                .effects
+                .iter()
+                .all(|effect| !matches!(effect, UiEffect::OpenDraft { .. }))
+        );
+    }
 }
 
 #[test]
@@ -4345,7 +4343,7 @@ fn inbox_back_closes_technical_details_before_leaving_the_conversation() {
 }
 
 #[test]
-fn escape_pops_composer_and_conversation_without_an_invisible_navigation_level() {
+fn escape_focuses_transcript_then_returns_to_the_list_without_discarding_the_draft() {
     let model = opened_conversation(vec![actionable_entry("question", [4; 32])]);
     let opening =
         update(model, UiEvent::Input(UiInput::Character('r'))).expect("open reply composer");
@@ -4366,7 +4364,7 @@ fn escape_pops_composer_and_conversation_without_an_invisible_navigation_level()
 
     let conversation = update(composing.model, UiEvent::Input(UiInput::Escape))
         .expect("composer pops to conversation");
-    assert!(conversation.model.mailbox_draft().is_none());
+    assert!(conversation.model.mailbox_draft().is_some());
     assert_eq!(conversation.model.focus(), UiFocus::Conversation);
     assert!(conversation.model.conversation().is_some());
 
@@ -5577,7 +5575,7 @@ fn live_agent_status_stays_at_the_presentation_tail_after_new_authoritative_outp
 }
 
 #[test]
-fn terminal_agent_turn_automatically_opens_the_exact_project_continuation_draft() {
+fn project_composer_remains_open_when_the_agent_turn_finishes() {
     let project_id = [5; 32];
     let thread_id = [6; 32];
     let mut initial = snapshot(1, &["thread-a"]);
@@ -5648,22 +5646,17 @@ fn terminal_agent_turn_automatically_opens_the_exact_project_continuation_draft(
     assert!(matches!(
         finished.model.mailbox_draft(),
         Some(UiMailboxDraftPane::Loading {
-            target: UiMailboxDraftTarget::Project {
-                project_id: selected_project,
-                thread_id: Some(selected_thread),
-            },
+            target: UiMailboxDraftTarget::Conversation { conversation: hq_tui::UiConversationId::Project {
+                project_id: selected_project, thread_id: selected_thread,
+            }},
         }) if *selected_project == project_id && *selected_thread == thread_id
     ));
-    assert!(finished.effects.iter().any(|effect| matches!(
-        effect,
-        UiEffect::OpenDraft {
-            target: UiMailboxDraftTarget::Project {
-                project_id: selected_project,
-                thread_id: Some(selected_thread),
-            },
-            ..
-        } if *selected_project == project_id && *selected_thread == thread_id
-    )));
+    assert!(
+        finished
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::OpenDraft { .. }))
+    );
 }
 
 #[test]
@@ -7443,7 +7436,9 @@ fn project_primary_action_routes_zero_one_and_many_conversations_without_guessin
     .expect("filtered conversation observed");
     let conversation = update(observed.model, UiEvent::Input(UiInput::MoveCursorRight))
         .expect("enter filtered conversation");
-    let inbox = update(conversation.model, UiEvent::Input(UiInput::Escape))
+    let reading =
+        update(conversation.model, UiEvent::Input(UiInput::Escape)).expect("focus transcript");
+    let inbox = update(reading.model, UiEvent::Input(UiInput::Escape))
         .expect("leave conversation before clearing filter");
     assert_eq!(inbox.model.focus(), UiFocus::Content);
     assert!(inbox.model.project_filter().is_some());
@@ -9154,4 +9149,242 @@ fn direct_target(label: &str, byte: u8) -> UiDirectTarget {
         mailbox_id: [byte + 10; 32],
         label: label.to_owned(),
     }
+}
+
+#[test]
+fn conversation_opens_composer_and_cycles_focus_without_editing_the_transcript() {
+    let model = typed_conversation_composer("");
+    let typed = update(model, UiEvent::Input(UiInput::Character('j'))).expect("type");
+    let reading =
+        update(typed.model, UiEvent::Input(UiInput::NextFocus)).expect("focus transcript");
+    assert_eq!(reading.model.focus(), UiFocus::Conversation);
+    let reading = observe_conversation_viewport(reading.model, &[("question", 30)], 5);
+    let scrolled =
+        update(reading.model, UiEvent::Input(UiInput::Character('k'))).expect("scroll one line");
+    let position = scrolled.model.conversation_viewport_position().cloned();
+    assert!(!scrolled.model.conversation_follows_tail());
+    assert!(
+        matches!(scrolled.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.content == "j")
+    );
+    let composing =
+        update(scrolled.model, UiEvent::Input(UiInput::PreviousFocus)).expect("focus compose");
+    assert_eq!(composing.model.focus(), UiFocus::Draft);
+    assert_eq!(
+        composing.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+    let reading =
+        update(composing.model, UiEvent::Input(UiInput::Escape)).expect("escape to transcript");
+    assert_eq!(reading.model.focus(), UiFocus::Conversation);
+    assert!(reading.model.mailbox_draft().is_some());
+}
+
+fn typed_conversation_composer(content: &str) -> UiModel {
+    let mut source = snapshot(1, &["thread-a"]);
+    let target = UiConversationTarget::Thread {
+        counterparty_installation: [1; 32],
+        counterparty_mailbox: [2; 32],
+        thread_id: [3; 32],
+    };
+    source.inbox_rows[0].conversation_target = Some(target.clone());
+    let observed = materialized_transition(
+        source,
+        UiConversationPage {
+            window: None,
+            multiple_non_user_senders: false,
+            title: "Alice".to_owned(),
+            context: None,
+            row_id: "thread-a".to_owned(),
+            entries: vec![actionable_entry("question", [3; 32])],
+            next_cursor: None,
+        },
+    );
+    let opened = update(observed.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    assert_eq!(opened.model.focus(), UiFocus::Draft);
+    let (effect_id, draft_target) = open_draft_effect(&opened.effects);
+    assert_eq!(
+        *draft_target,
+        UiMailboxDraftTarget::Conversation {
+            conversation: target.conversation_id()
+        }
+    );
+    let loaded = update(
+        opened.model,
+        UiEvent::DraftLoaded {
+            effect_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target: draft_target.clone(),
+                content: content.to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("draft");
+    loaded.model
+}
+
+#[test]
+fn successful_conversation_send_keeps_compose_focused_and_ready_for_the_next_message() {
+    let model = typed_conversation_composer("first message");
+    let submitting = update(model, UiEvent::Input(UiInput::Activate)).expect("send");
+    assert_eq!(submitting.model.focus(), UiFocus::Draft);
+    let command_id = submitting
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitMailboxCommand {
+                id,
+                action: UiMailboxAction::Conversation { .. },
+                ..
+            } => Some(*id),
+            _ => None,
+        })
+        .expect("conversation command");
+    assert!(
+        matches!(submitting.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, submitting: true, .. }) if draft.content == "first message")
+    );
+    let committed = update(
+        submitting.model,
+        UiEvent::MailboxCommandCommitted {
+            effect_id: command_id,
+            revision: 2,
+            message_id: Some([4; 32]),
+        },
+    )
+    .expect("receipt");
+    assert_eq!(committed.model.focus(), UiFocus::Draft);
+    let (effect_id, target) = open_draft_effect(&committed.effects);
+    let ready = update(
+        committed.model,
+        UiEvent::DraftLoaded {
+            effect_id,
+            draft: UiMailboxDraft {
+                draft_id: [5; 32],
+                target: target.clone(),
+                content: String::new(),
+                version: 1,
+            },
+        },
+    )
+    .expect("next editor");
+    assert_eq!(ready.model.focus(), UiFocus::Draft);
+    assert!(
+        matches!(ready.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, submitting: false, .. }) if draft.content.is_empty())
+    );
+}
+
+#[test]
+fn reopening_a_conversation_preserves_its_draft_and_cursor_with_compose_focus() {
+    let model = typed_conversation_composer("retained draft");
+    let model = update(model, UiEvent::Input(UiInput::MoveCursorLeft))
+        .expect("move cursor")
+        .model;
+    let reading = update(model, UiEvent::Input(UiInput::Escape))
+        .expect("read")
+        .model;
+    let list = update(reading, UiEvent::Input(UiInput::Escape))
+        .expect("list")
+        .model;
+    let reopened = update(list, UiEvent::Input(UiInput::Activate)).expect("reopen");
+    assert_eq!(reopened.model.focus(), UiFocus::Draft);
+    let edited = update(reopened.model, UiEvent::Input(UiInput::Character('X')))
+        .expect("type at retained cursor")
+        .model;
+    assert!(
+        matches!(edited.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.content == "retained drafXt")
+    );
+}
+
+#[test]
+fn switching_conversations_saves_the_prior_draft_before_opening_the_new_target() {
+    let model = typed_conversation_composer("retained draft");
+    let edited = update(model, UiEvent::Input(UiInput::Character('X')))
+        .expect("edit")
+        .model;
+    let reading = update(edited, UiEvent::Input(UiInput::Escape))
+        .expect("read")
+        .model;
+    let list = update(reading, UiEvent::Input(UiInput::Escape))
+        .expect("list")
+        .model;
+    let mut source = snapshot(2, &["thread-a", "thread-b"]);
+    for (row, thread_id) in source.inbox_rows.iter_mut().zip([[3; 32], [7; 32]]) {
+        row.conversation_target = Some(UiConversationTarget::Thread {
+            counterparty_installation: [1; 32],
+            counterparty_mailbox: [2; 32],
+            thread_id,
+        });
+    }
+    let list = update(
+        list,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: source,
+                conversation: None,
+            },
+        },
+    )
+    .expect("new conversation arrives")
+    .model;
+    let selected = update(list, UiEvent::Input(UiInput::NextItem))
+        .expect("choose second")
+        .model;
+    let opening = update(selected, UiEvent::Input(UiInput::Activate)).expect("open second");
+    let (save_id, prior) = save_draft_effect(&opening.effects);
+    assert_eq!(prior.content, "retained draftX");
+    let protected = update(opening.model, UiEvent::Input(UiInput::Character('Z')))
+        .expect("input cannot affect another conversation")
+        .model;
+    assert!(
+        matches!(protected.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.content == "retained draftX")
+    );
+    let saved = update(
+        protected,
+        UiEvent::DraftSaved {
+            effect_id: save_id,
+            draft: UiMailboxDraft {
+                version: 2,
+                ..prior.clone()
+            },
+        },
+    )
+    .expect("save confirmed");
+    let (_, target) = open_draft_effect(&saved.effects);
+    assert_eq!(
+        *target,
+        UiMailboxDraftTarget::Conversation {
+            conversation: hq_tui::UiConversationId::Thread {
+                counterparty_installation: [1; 32],
+                counterparty_mailbox: [2; 32],
+                thread_id: [7; 32],
+            }
+        }
+    );
+    assert_eq!(saved.model.focus(), UiFocus::Draft);
+}
+
+#[test]
+fn compose_shortcut_cannot_retarget_or_replace_a_dirty_conversation_draft() {
+    let edited = update(
+        typed_conversation_composer("draft"),
+        UiEvent::Input(UiInput::Character('X')),
+    )
+    .expect("edit")
+    .model;
+    let reading = update(edited, UiEvent::Input(UiInput::NextFocus))
+        .expect("read")
+        .model;
+    let composing =
+        update(reading, UiEvent::Input(UiInput::Character('r'))).expect("focus composer");
+    assert_eq!(composing.model.focus(), UiFocus::Draft);
+    assert!(
+        composing
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::OpenDraft { .. }))
+    );
+    assert!(
+        matches!(composing.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, dirty: true, .. }) if draft.content == "draftX" && matches!(draft.target, UiMailboxDraftTarget::Conversation { .. }))
+    );
 }
