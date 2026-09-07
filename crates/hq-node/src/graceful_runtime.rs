@@ -304,6 +304,12 @@ impl LifecycleControl for CallLifecycle {
         patch: InstallationConfigurationPatchDto,
     ) -> Result<InstallationConfigurationDto, ApplicationError> {
         let patch = match patch {
+            InstallationConfigurationPatchDto::ConversationPageOverlap(value) => {
+                LocalConfigurationPatch::ConversationPageOverlap(value)
+            }
+            InstallationConfigurationPatchDto::ComposerHeightPercent(value) => {
+                LocalConfigurationPatch::ComposerHeightPercent(value)
+            }
             InstallationConfigurationPatchDto::DefaultProvider(value) => {
                 LocalConfigurationPatch::DefaultProvider(
                     value
@@ -336,6 +342,8 @@ impl LifecycleControl for CallLifecycle {
 
 fn configuration_to_dto(configuration: LocalConfiguration) -> InstallationConfigurationDto {
     InstallationConfigurationDto {
+        conversation_page_overlap: configuration.conversation_page_overlap,
+        composer_height_percent: configuration.composer_height_percent,
         default_provider: configuration
             .default_provider
             .map(|provider| provider.as_str().to_owned()),

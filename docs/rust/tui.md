@@ -30,6 +30,20 @@ Rendering borrows the model and performs no I/O or mutation. Resize changes geom
 route path, selection identities, viewport anchor, drafts, form fields, pending operations, and
 Back destinations remain unchanged.
 
+## Conversation display preferences
+
+Config exposes **Page overlap** and **Composer height limit** as numeric overrides.
+Page overlap accepts 0–65535 rendered lines; an empty value restores one line.
+Composer height accepts 1–99 percent; an empty value restores exactly one-third of
+available height. Invalid input stays in the editor with inline guidance, and
+Escape cancels the edit. Updates persist only the selected field and preserve
+provider, model, and theme defaults. `hq config get` includes both overrides;
+`null` in JSON means the default applies.
+
+These preferences are stored through installation configuration and the local API.
+Their transcript paging and editor-sizing consumers are tracked in the unfinished
+conversation reading and persistent composition tasks.
+
 ## Canonical navigation path
 
 One encapsulated typed route stack is the sole navigation history. It begins at exactly one root:

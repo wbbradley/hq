@@ -557,6 +557,12 @@ fn typed_lifecycle_request_round_trips_through_the_one_envelope() {
 #[test]
 fn installation_configuration_patches_are_field_specific_and_bounded() {
     for patch in [
+        InstallationConfigurationPatchDto::ConversationPageOverlap(None),
+        InstallationConfigurationPatchDto::ConversationPageOverlap(Some(0)),
+        InstallationConfigurationPatchDto::ConversationPageOverlap(Some(u16::MAX)),
+        InstallationConfigurationPatchDto::ComposerHeightPercent(None),
+        InstallationConfigurationPatchDto::ComposerHeightPercent(Some(1)),
+        InstallationConfigurationPatchDto::ComposerHeightPercent(Some(99)),
         InstallationConfigurationPatchDto::DefaultProvider(Some("codex".to_owned())),
         InstallationConfigurationPatchDto::Theme(None),
         InstallationConfigurationPatchDto::CodexModel(Some("gpt-test".to_owned())),
@@ -577,6 +583,18 @@ fn installation_configuration_patches_are_field_specific_and_bounded() {
         .encode_frame(),
         Err(EncodeError::InvalidValue(ValueError::InvalidText))
     ));
+    for value in [0, 100, 255] {
+        assert!(
+            WireMessage::Request(RequestEnvelope::new(
+                RequestId::new(45).expect("request id"),
+                Request::UpdateInstallationConfiguration(
+                    InstallationConfigurationPatchDto::ComposerHeightPercent(Some(value)),
+                ),
+            ))
+            .encode_frame()
+            .is_err()
+        );
+    }
 }
 
 fn round_trip(message: &WireMessage) {
@@ -1070,6 +1088,8 @@ fn every_success_and_error_response_family_interoperates() {
             .expect("stale defaults remain typed evidence"),
         ),
         ResponseResult::InstallationConfiguration(InstallationConfigurationDto {
+            conversation_page_overlap: None,
+            composer_height_percent: None,
             default_provider: Some("codex".to_owned()),
             theme: Some("gruvbox-dark-hard".to_owned()),
             codex_model: Some("gpt-test".to_owned()),

@@ -1643,6 +1643,8 @@ fn modal_and_text_entry_contexts_capture_number_shortcuts() {
         UiEvent::ConfigurationLoaded {
             effect_id: load_id,
             configuration: UiConfiguration {
+                conversation_page_overlap: None,
+                composer_height_percent: None,
                 default_provider: None,
                 theme: None,
                 codex_model: None,

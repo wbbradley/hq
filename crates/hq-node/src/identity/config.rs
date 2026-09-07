@@ -53,6 +53,11 @@ fn valid_theme_name(value: &str) -> bool {
 /// Versioned unsigned installation-local defaults.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalConfiguration {
+    /// Optional rendered-line page overlap; absence means one line.
+    pub conversation_page_overlap: Option<u16>,
+    /// Optional composer height percentage (1..99); absence means exactly one-third.
+    pub composer_height_percent: Option<u8>,
+
     /// Optional provider default.
     pub default_provider: Option<ProviderId>,
     /// Optional startup theme name or absolute file.
@@ -64,6 +69,11 @@ pub struct LocalConfiguration {
 /// One field-specific installation-configuration replacement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalConfigurationPatch {
+    /// Replace or clear the rendered-line page overlap.
+    ConversationPageOverlap(Option<u16>),
+    /// Replace or clear the focused composer height percentage (1..99).
+    ComposerHeightPercent(Option<u8>),
+
     /// Replace or clear the preferred provider.
     DefaultProvider(Option<ProviderId>),
     /// Replace or clear the terminal theme selector.
@@ -98,6 +108,20 @@ impl LocalCodexConfiguration {
 }
 
 impl LocalConfiguration {
+    /// Replaces validated conversation display overrides without changing other defaults.
+    pub fn with_conversation_display(
+        mut self,
+        page_overlap: Option<u16>,
+        height_percent: Option<u8>,
+    ) -> Result<Self, IdentityError> {
+        if height_percent.is_some_and(|value| !(1..100).contains(&value)) {
+            return Err(IdentityError::new(IdentityErrorClass::ConfigurationInvalid));
+        }
+        self.conversation_page_overlap = page_overlap;
+        self.composer_height_percent = height_percent;
+        Ok(self)
+    }
+
     /// Validates, sorts, and owns local defaults.
     pub fn new(default_provider: Option<ProviderId>) -> Result<Self, IdentityError> {
         Self::from_parts(default_provider, None, LocalCodexConfiguration::default())
@@ -111,6 +135,8 @@ impl LocalConfiguration {
     ) -> Result<Self, IdentityError> {
         let codex = LocalCodexConfiguration::new(codex.yolo, codex.model)?;
         Ok(Self {
+            conversation_page_overlap: None,
+            composer_height_percent: None,
             default_provider,
             theme,
             codex,
@@ -135,6 +161,10 @@ impl CodexConfigurationDto {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigurationDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conversation_page_overlap: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    composer_height_percent: Option<u8>,
     version: u64,
     default_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +175,8 @@ struct ConfigurationDto {
 
 pub(super) fn encode(value: &LocalConfiguration) -> Result<Vec<u8>, IdentityError> {
     let dto = ConfigurationDto {
+        conversation_page_overlap: value.conversation_page_overlap,
+        composer_height_percent: value.composer_height_percent,
         version: 1,
         default_provider: value
             .default_provider
@@ -178,7 +210,8 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LocalConfiguration, IdentityError> 
         provider,
         theme,
         LocalCodexConfiguration::new(dto.codex.yolo, dto.codex.model)?,
-    )?;
+    )?
+    .with_conversation_display(dto.conversation_page_overlap, dto.composer_height_percent)?;
     if encode(&configuration)?.as_slice() != bytes {
         return Err(IdentityError::new(
             IdentityErrorClass::ConfigurationMalformed,

@@ -89,6 +89,12 @@ impl ConfigurationManager {
             .map_err(|_| IdentityError::new(IdentityErrorClass::FileSystem))?;
         let mut candidate = state.current.clone();
         match patch {
+            LocalConfigurationPatch::ConversationPageOverlap(value) => {
+                candidate.conversation_page_overlap = value;
+            }
+            LocalConfigurationPatch::ComposerHeightPercent(value) => {
+                candidate.composer_height_percent = value;
+            }
             LocalConfigurationPatch::DefaultProvider(value) => candidate.default_provider = value,
             LocalConfigurationPatch::Theme(value) => candidate.theme = value,
             LocalConfigurationPatch::CodexModel(value) => candidate.codex.model = value,
@@ -98,6 +104,10 @@ impl ConfigurationManager {
             candidate.default_provider,
             candidate.theme,
             candidate.codex,
+        )?
+        .with_conversation_display(
+            candidate.conversation_page_overlap,
+            candidate.composer_height_percent,
         )?;
         reject_symlink(&state.path)?;
         let bytes = config::encode(&candidate)?;
@@ -241,6 +251,10 @@ impl StateDirectoryOwner {
             configuration.default_provider.clone(),
             configuration.theme.clone(),
             configuration.codex.clone(),
+        )?
+        .with_conversation_display(
+            configuration.conversation_page_overlap,
+            configuration.composer_height_percent,
         )?;
         let bytes = config::encode(&validated)?;
         atomic_write(self.paths.configuration_file(), &bytes, WriteMode::Replace)

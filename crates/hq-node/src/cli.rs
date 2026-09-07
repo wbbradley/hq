@@ -4155,6 +4155,12 @@ fn local_configuration_from_dto(
         LocalCodexConfiguration::new(configuration.codex_yolo, configuration.codex_model)
             .map_err(|_| CliError::ConfigurationUnavailable)?,
     )
+    .and_then(|value| {
+        value.with_conversation_display(
+            configuration.conversation_page_overlap,
+            configuration.composer_height_percent,
+        )
+    })
     .map_err(|_| CliError::ConfigurationUnavailable)
 }
 
@@ -7830,7 +7836,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             identity.fingerprint,
         )),
         (CliOutputFormat::Human, CliResult::Configuration(configuration)) => Ok(format!(
-            "default_provider={} theme={} codex.model={} codex.yolo={}\n",
+            "default_provider={} theme={} codex.model={} codex.yolo={} conversation_page_overlap={} composer_height_percent={}\n",
             configuration
                 .default_provider
                 .as_ref()
@@ -7841,6 +7847,12 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 .map_or("automatic", ThemeSelection::as_str),
             configuration.codex.model.as_deref().unwrap_or("default"),
             configuration.codex.yolo,
+            configuration
+                .conversation_page_overlap
+                .map_or_else(|| "default".to_owned(), |value| value.to_string()),
+            configuration
+                .composer_height_percent
+                .map_or_else(|| "default".to_owned(), |value| value.to_string()),
         )),
         (CliOutputFormat::Human, CliResult::ThemeCatalog(entries)) => {
             Ok(render_theme_catalog(entries))
@@ -7873,6 +7885,8 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         (CliOutputFormat::Json, CliResult::Configuration(configuration)) => machine_record(
             "configuration",
             &serde_json::json!({
+                "conversation_page_overlap": configuration.conversation_page_overlap,
+                "composer_height_percent": configuration.composer_height_percent,
                 "default_provider": configuration.default_provider.as_ref().map(ProviderId::as_str),
                 "theme": configuration.theme.as_ref().map(ThemeSelection::as_str),
                 "codex": {

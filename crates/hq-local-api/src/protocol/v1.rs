@@ -1746,6 +1746,11 @@ pub struct EvidenceIngestOutcomeDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstallationConfigurationDto {
+    /// Optional rendered-line page overlap; absence means one line.
+    pub conversation_page_overlap: Option<u16>,
+    /// Optional composer height percentage (1..99); absence means exactly one-third.
+    pub composer_height_percent: Option<u8>,
+
     /// Optional preferred provider namespace.
     pub default_provider: Option<String>,
     /// Optional terminal theme selector.
@@ -1760,6 +1765,11 @@ pub struct InstallationConfigurationDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "field", content = "value", rename_all = "snake_case")]
 pub enum InstallationConfigurationPatchDto {
+    /// Replace or clear the rendered-line page overlap.
+    ConversationPageOverlap(Option<u16>),
+    /// Replace or clear the focused composer height percentage (1..99).
+    ComposerHeightPercent(Option<u8>),
+
     /// Replace or clear the preferred provider.
     DefaultProvider(Option<String>),
     /// Replace or clear the terminal theme selector.
@@ -3381,6 +3391,7 @@ fn validate_optional_text(value: Option<&str>, maximum: usize) -> Result<(), Val
 }
 
 fn validate_configuration(configuration: &InstallationConfigurationDto) -> Result<(), ValueError> {
+    validate_composer_height(configuration.composer_height_percent)?;
     validate_optional_text(
         configuration.default_provider.as_deref(),
         PROVIDER_ID_MAX_BYTES,
@@ -3395,10 +3406,21 @@ fn validate_configuration(configuration: &InstallationConfigurationDto) -> Resul
     )
 }
 
+fn validate_composer_height(value: Option<u8>) -> Result<(), ValueError> {
+    if value.is_some_and(|value| !(1..100).contains(&value)) {
+        Err(ValueError::InvalidValueCombination)
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_configuration_patch(
     patch: &InstallationConfigurationPatchDto,
 ) -> Result<(), ValueError> {
     match patch {
+        InstallationConfigurationPatchDto::ComposerHeightPercent(value) => {
+            validate_composer_height(*value)
+        }
         InstallationConfigurationPatchDto::DefaultProvider(value) => {
             validate_optional_text(value.as_deref(), PROVIDER_ID_MAX_BYTES)
         }
@@ -3408,7 +3430,8 @@ fn validate_configuration_patch(
         InstallationConfigurationPatchDto::CodexModel(value) => {
             validate_optional_text(value.as_deref(), MAX_CONFIGURATION_MODEL_BYTES)
         }
-        InstallationConfigurationPatchDto::CodexYolo(_) => Ok(()),
+        InstallationConfigurationPatchDto::ConversationPageOverlap(_)
+        | InstallationConfigurationPatchDto::CodexYolo(_) => Ok(()),
     }
 }
 

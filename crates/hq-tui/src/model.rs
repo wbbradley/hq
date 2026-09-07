@@ -1240,6 +1240,11 @@ pub struct UiThemeChoice {
 /// Complete editable installation-local configuration.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UiConfiguration {
+    /// Optional rendered-line page overlap; absence means one line.
+    pub conversation_page_overlap: Option<u16>,
+    /// Optional composer height percentage (1..99); absence means exactly one-third.
+    pub composer_height_percent: Option<u8>,
+
     /// Optional preferred provider namespace.
     pub default_provider: Option<String>,
     /// Optional exact theme selector; absence means automatic.
@@ -1255,6 +1260,10 @@ pub struct UiConfiguration {
 /// Editable field on the configuration page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiConfigField {
+    /// Rendered lines retained between transcript pages.
+    ConversationPageOverlap,
+    /// Maximum focused composer share of available height.
+    ComposerHeightPercent,
     /// Active terminal theme.
     Theme,
     /// Preferred provider for new managed sessions.
@@ -1272,11 +1281,13 @@ enum ConfigurationFreshness {
 }
 
 impl UiConfigField {
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Theme,
         Self::DefaultProvider,
         Self::CodexModel,
         Self::CodexYolo,
+        Self::ConversationPageOverlap,
+        Self::ComposerHeightPercent,
     ];
 }
 
@@ -3338,6 +3349,7 @@ pub struct UiModel {
     configuration: Option<UiConfiguration>,
     config_field: UiConfigField,
     config_edit: Option<String>,
+    config_edit_error: Option<&'static str>,
     pending_configuration: Option<EffectId>,
     configuration_freshness: ConfigurationFreshness,
     home_directory: Option<String>,
@@ -3417,6 +3429,7 @@ impl UiModel {
             configuration: None,
             config_field: UiConfigField::Theme,
             config_edit: None,
+            config_edit_error: None,
             pending_configuration: None,
             configuration_freshness: ConfigurationFreshness::Current,
             home_directory: None,
@@ -3663,6 +3676,11 @@ impl UiModel {
     /// Borrows the active raw-text configuration edit, when present.
     pub fn config_edit(&self) -> Option<&str> {
         self.config_edit.as_deref()
+    }
+
+    /// Inline validation feedback for the active configuration editor.
+    pub fn config_edit_error(&self) -> Option<&str> {
+        self.config_edit.as_ref().and(self.config_edit_error)
     }
 
     /// Reports whether a configuration load or save is in flight.
@@ -7196,6 +7214,7 @@ fn apply_config_input(
     effects: &mut Vec<UiEffect>,
 ) -> Result<bool, UiError> {
     if let Some(mut edit) = model.config_edit.take() {
+        model.config_edit_error = None;
         match input {
             UiInput::Escape => return Ok(true),
             UiInput::Activate => {
@@ -7203,9 +7222,12 @@ fn apply_config_input(
                     model.config_edit = Some(edit);
                     return Ok(false);
                 };
-                if model.config_field == UiConfigField::CodexModel {
-                    let value = edit.trim();
-                    configuration.codex_model = (!value.is_empty()).then(|| value.to_owned());
+                if let Err(error) =
+                    apply_configuration_text(&mut configuration, model.config_field, &edit)
+                {
+                    model.config_edit_error = Some(error);
+                    model.config_edit = Some(edit);
+                    return Ok(true);
                 }
                 return save_configuration(model, configuration, false, effects);
             }
@@ -7300,10 +7322,65 @@ fn apply_config_input(
                     model.config_edit = Some(configuration.codex_model.unwrap_or_default());
                     Ok(true)
                 }
+                UiConfigField::ConversationPageOverlap => {
+                    model.config_edit = Some(
+                        configuration
+                            .conversation_page_overlap
+                            .map_or_else(String::new, |value| value.to_string()),
+                    );
+                    Ok(true)
+                }
+                UiConfigField::ComposerHeightPercent => {
+                    model.config_edit = Some(
+                        configuration
+                            .composer_height_percent
+                            .map_or_else(String::new, |value| value.to_string()),
+                    );
+                    Ok(true)
+                }
             }
         }
         _ => Ok(false),
     }
+}
+
+fn apply_configuration_text(
+    configuration: &mut UiConfiguration,
+    field: UiConfigField,
+    value: &str,
+) -> Result<(), &'static str> {
+    let value = value.trim();
+    match field {
+        UiConfigField::ConversationPageOverlap => {
+            configuration.conversation_page_overlap = if value.is_empty() {
+                None
+            } else {
+                Some(
+                    value
+                        .parse()
+                        .map_err(|_| "Enter 0–65535 lines, or leave blank for one line.")?,
+                )
+            };
+        }
+        UiConfigField::ComposerHeightPercent => {
+            configuration.composer_height_percent = if value.is_empty() {
+                None
+            } else {
+                Some(
+                    value
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|value| (1..100).contains(value))
+                        .ok_or("Enter 1–99 percent, or leave blank for one-third.")?,
+                )
+            };
+        }
+        UiConfigField::CodexModel => {
+            configuration.codex_model = (!value.is_empty()).then(|| value.to_owned());
+        }
+        UiConfigField::Theme | UiConfigField::DefaultProvider | UiConfigField::CodexYolo => {}
+    }
+    Ok(())
 }
 
 fn save_configuration(
@@ -13758,6 +13835,58 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn conversation_config_editors_validate_and_preserve_unrelated_fields() {
+        for (field, text, valid) in [
+            (UiConfigField::ConversationPageOverlap, "0", true),
+            (UiConfigField::ConversationPageOverlap, "65535", true),
+            (UiConfigField::ConversationPageOverlap, "65536", false),
+            (UiConfigField::ConversationPageOverlap, "-1", false),
+            (UiConfigField::ComposerHeightPercent, "45", true),
+            (UiConfigField::ComposerHeightPercent, "0", false),
+            (UiConfigField::ComposerHeightPercent, "100", false),
+            (UiConfigField::ComposerHeightPercent, "abc", false),
+            (UiConfigField::ComposerHeightPercent, "", true),
+        ] {
+            let mut model = model();
+            model.change_section(UiSection::Config);
+            model.focus = UiFocus::Content;
+            model.config_field = field;
+            let mut settings = configuration();
+            settings.codex_model = Some("keep-model".to_owned());
+            model.configuration = Some(settings);
+            model.configuration_freshness = ConfigurationFreshness::Current;
+            let editing = update(model, UiEvent::Input(UiInput::Activate)).expect("editor");
+            let typed = update(
+                editing.model,
+                UiEvent::Input(UiInput::Paste(text.to_owned())),
+            )
+            .expect("text");
+            let submitted = update(typed.model, UiEvent::Input(UiInput::Activate)).expect("submit");
+            let saved = submitted.effects.iter().find_map(|effect| match effect {
+                UiEffect::SaveConfiguration { configuration, .. } => Some(configuration),
+                _ => None,
+            });
+            assert_eq!(saved.is_some(), valid, "{field:?}: {text}");
+            if let Some(saved) = saved {
+                assert_eq!(saved.codex_model.as_deref(), Some("keep-model"));
+                match field {
+                    UiConfigField::ConversationPageOverlap => {
+                        assert_eq!(saved.conversation_page_overlap, text.parse().ok());
+                    }
+                    UiConfigField::ComposerHeightPercent => {
+                        assert_eq!(saved.composer_height_percent, text.parse().ok());
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(submitted.model.config_edit_error().is_none());
+            } else {
+                assert_eq!(submitted.model.config_edit(), Some(text));
+                assert!(submitted.model.config_edit_error().is_some());
+            }
+        }
     }
 
     #[test]

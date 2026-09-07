@@ -2857,6 +2857,16 @@ fn render_config(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         return;
     };
     let value = |field| match field {
+        UiConfigField::ConversationPageOverlap => {
+            configuration.conversation_page_overlap.map_or_else(
+                || "1 line (default)".to_owned(),
+                |value| format!("{value} lines"),
+            )
+        }
+        UiConfigField::ComposerHeightPercent => configuration.composer_height_percent.map_or_else(
+            || "one-third (default)".to_owned(),
+            |value| format!("{value}%"),
+        ),
         UiConfigField::Theme => configuration
             .theme
             .clone()
@@ -2878,6 +2888,8 @@ fn render_config(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         }
     };
     let label = |field| match field {
+        UiConfigField::ConversationPageOverlap => "Page overlap",
+        UiConfigField::ComposerHeightPercent => "Composer height limit",
         UiConfigField::Theme => "Theme",
         UiConfigField::DefaultProvider => "Default provider",
         UiConfigField::CodexModel => "Codex model",
@@ -2908,6 +2920,14 @@ fn render_config(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
             )
         })
         .collect::<Vec<_>>();
+    if let Some(error) = model.config_edit_error() {
+        lines.push(Line::styled(error, theme.style(UiThemeRole::Error)));
+    } else if model.config_edit().is_some() {
+        lines.push(Line::styled(
+            "Leave blank to restore the default.",
+            theme.style(UiThemeRole::TextMuted),
+        ));
+    }
     lines.push(Line::default());
     lines.push(Line::styled(
         "Supported themes",

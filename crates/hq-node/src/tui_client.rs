@@ -1464,6 +1464,16 @@ impl TuiClientPort for LocalTuiClient {
         apply_theme: bool,
     ) -> Result<(UiConfiguration, Option<UiTheme>), UiFailure> {
         let patch = match field {
+            UiConfigField::ConversationPageOverlap => {
+                InstallationConfigurationPatchDto::ConversationPageOverlap(
+                    configuration.conversation_page_overlap,
+                )
+            }
+            UiConfigField::ComposerHeightPercent => {
+                InstallationConfigurationPatchDto::ComposerHeightPercent(
+                    configuration.composer_height_percent,
+                )
+            }
             UiConfigField::Theme => {
                 InstallationConfigurationPatchDto::Theme(configuration.theme.clone())
             }
@@ -2091,6 +2101,8 @@ fn tui_configuration(configuration: &LocalConfiguration) -> Result<UiConfigurati
             }),
     );
     Ok(UiConfiguration {
+        conversation_page_overlap: configuration.conversation_page_overlap,
+        composer_height_percent: configuration.composer_height_percent,
         default_provider: configuration
             .default_provider
             .as_ref()
@@ -2120,7 +2132,14 @@ fn local_configuration(
         .map_err(|_| configuration_failure())?;
     let codex = LocalCodexConfiguration::new(configuration.codex_yolo, configuration.codex_model)
         .map_err(|_| configuration_failure())?;
-    LocalConfiguration::from_parts(provider, theme, codex).map_err(|_| configuration_failure())
+    LocalConfiguration::from_parts(provider, theme, codex)
+        .and_then(|value| {
+            value.with_conversation_display(
+                configuration.conversation_page_overlap,
+                configuration.composer_height_percent,
+            )
+        })
+        .map_err(|_| configuration_failure())
 }
 
 fn configuration_failure() -> UiFailure {

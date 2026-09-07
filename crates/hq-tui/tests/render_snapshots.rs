@@ -24,6 +24,61 @@ use ratatui::{
 };
 
 #[test]
+fn conversation_preferences_show_defaults_and_inline_numeric_feedback() {
+    for width in [48, 104] {
+        let opening = update(
+            ready_model(UiSize { width, height: 24 }),
+            UiEvent::Input(UiInput::Character('6')),
+        )
+        .expect("Config");
+        let effect_id = opening
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::LoadConfiguration { id } => Some(*id),
+                _ => None,
+            })
+            .expect("configuration request");
+        let mut model = update(
+            opening.model,
+            UiEvent::ConfigurationLoaded {
+                effect_id,
+                configuration: hq_tui::UiConfiguration::default(),
+            },
+        )
+        .expect("configuration")
+        .model;
+        let text = render_text(&model);
+        assert!(text.contains("Page overlap: 1 line (default)"), "{text}");
+        assert!(text.contains("Composer height limit: one-third"), "{text}");
+        for _ in 0..4 {
+            model = update(model, UiEvent::Input(UiInput::NextItem))
+                .expect("select overlap")
+                .model;
+        }
+        model = update(model, UiEvent::Input(UiInput::Activate))
+            .expect("edit")
+            .model;
+        model = update(model, UiEvent::Input(UiInput::Paste("-1".to_owned())))
+            .expect("invalid value")
+            .model;
+        model = update(model, UiEvent::Input(UiInput::Activate))
+            .expect("validate")
+            .model;
+        let text = render_text(&model);
+        assert!(text.contains("Page overlap: -1"), "{text}");
+        assert!(text.contains("Enter 0–65535 lines"), "{text}");
+        assert_eq!(
+            model.active_route(),
+            &UiRoute::Form {
+                capability: hq_tui::UiWorkflowCapability::EditConfiguration,
+                target: hq_tui::UiRouteTarget::Global,
+            }
+        );
+    }
+}
+
+#[test]
 fn wide_layout_matches_snapshot_without_mutating_the_model() {
     assert_snapshot(
         &ready_model(UiSize {

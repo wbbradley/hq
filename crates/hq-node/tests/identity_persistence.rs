@@ -236,6 +236,8 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
     );
 
     let invalid = LocalConfiguration {
+        conversation_page_overlap: None,
+        composer_height_percent: None,
         default_provider: None,
         theme: None,
         codex: LocalCodexConfiguration {
@@ -256,6 +258,56 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
             .expect("invalid replacement leaves prior value intact"),
         replacement
     );
+}
+
+#[test]
+fn conversation_display_overrides_persist_without_replacing_other_defaults() {
+    let directory = TestDirectory::new();
+    let paths = StatePaths::new(directory.path().join("state")).expect("path");
+    let owner = StateDirectoryOwner::acquire(paths.clone()).expect("owner");
+    let manager = owner.configuration_manager().expect("manager");
+    let defaults = manager.snapshot().expect("defaults");
+    assert_eq!(defaults.conversation_page_overlap, None);
+    assert_eq!(defaults.composer_height_percent, None);
+    manager
+        .replace(LocalConfigurationPatch::ConversationPageOverlap(Some(0)))
+        .expect("no overlap");
+    manager
+        .replace(LocalConfigurationPatch::ComposerHeightPercent(Some(45)))
+        .expect("height");
+    manager
+        .replace(LocalConfigurationPatch::CodexYolo(true))
+        .expect("unrelated field");
+    let expected = manager.snapshot().expect("snapshot");
+    assert_eq!(expected.conversation_page_overlap, Some(0));
+    assert_eq!(expected.composer_height_percent, Some(45));
+    assert!(expected.codex.yolo);
+    for invalid in [0, 100, 255] {
+        assert!(
+            manager
+                .replace(LocalConfigurationPatch::ComposerHeightPercent(Some(
+                    invalid
+                )))
+                .is_err()
+        );
+        assert_eq!(manager.snapshot().expect("unchanged"), expected);
+    }
+    assert_eq!(paths.load_configuration().expect("persisted"), expected);
+    manager
+        .replace(LocalConfigurationPatch::ConversationPageOverlap(Some(
+            u16::MAX,
+        )))
+        .expect("large overlap is clamped at rendering");
+    manager
+        .replace(LocalConfigurationPatch::ConversationPageOverlap(None))
+        .expect("reset overlap");
+    manager
+        .replace(LocalConfigurationPatch::ComposerHeightPercent(None))
+        .expect("reset height");
+    let reset = paths.load_configuration().expect("reset persisted");
+    assert_eq!(reset.conversation_page_overlap, None);
+    assert_eq!(reset.composer_height_percent, None);
+    assert!(reset.codex.yolo);
 }
 
 #[test]

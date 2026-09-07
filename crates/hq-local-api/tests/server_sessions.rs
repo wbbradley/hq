@@ -414,6 +414,12 @@ impl LifecycleControl for ConfigurationLifecycle {
     ) -> Result<InstallationConfigurationDto, ApplicationError> {
         let mut current = self.0.borrow_mut();
         match patch {
+            InstallationConfigurationPatchDto::ConversationPageOverlap(value) => {
+                current.conversation_page_overlap = value;
+            }
+            InstallationConfigurationPatchDto::ComposerHeightPercent(value) => {
+                current.composer_height_percent = value;
+            }
             InstallationConfigurationPatchDto::DefaultProvider(value) => {
                 current.default_provider = value;
             }
@@ -546,6 +552,8 @@ fn configuration_queries_and_field_updates_route_through_node_control() {
     let hub = RevisionHub::new(4).expect("capacity");
     let (mut server, application) = session(hub);
     let lifecycle = ConfigurationLifecycle(RefCell::new(InstallationConfigurationDto {
+        conversation_page_overlap: None,
+        composer_height_percent: None,
         default_provider: None,
         theme: None,
         codex_model: None,
