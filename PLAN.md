@@ -2,33 +2,6 @@
 
 ## Next Up
 
-### Persistent conversation composition
-
-Keep transcript and composer visible as two surfaces, even on small terminals.
-Tab/Shift-Tab cycle focus. Open conversations with composer focus; route typing and
-caret movement only to the focused editor. Grow that editor with content up to the
-persisted height cap (default one-third of available height), then scroll internally.
-Collapse the unfocused composer to one line, retaining draft and cursor. Geometry
-changes preserve the logical reading position and both surfaces remain usable.
-
-The composer sends to the current conversation. Message-specific replies and forking
-are outside scope: do not add reply targeting or a “Replying to” workflow. Resolve
-direct-message send requirements using authoritative conversation context, never a
-visible/selected message; preserve distinct direct/project conversation semantics.
-Escape from compose focuses the transcript; Escape from ordinary reading returns to
-the conversation list. Successful send leaves compose focused and ready for another
-message. Preserve autosave, failures, pending sends, and exact receipt guarantees;
-only committed evidence consumes sent text.
-
-Touch TUI draft/focus/input/layout state, shell/configuration plumbing, and typed
-application/local API draft targets or message-continuation validation as necessary.
-Update conversation documentation and contextual hints. Dependencies: display
-preferences, conversation reading, and asynchronous continuation. Complete when tests cover both focus
-directions, editing isolation, small-screen sizing, successive sends in the same
-conversation, navigation and draft restoration, failed and uncertain sends, and
-reading-position preservation while composing. The later global-footer task keeps
-its standalone-composer and validation scope.
-
 ### Composer approval handoff
 
 Use the conversation's lower surface for pending command approval, replacing the

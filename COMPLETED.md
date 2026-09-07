@@ -13724,3 +13724,36 @@ messages project consistently across arrival orders, self-notes remain one threa
 and invalid scope/address/project/correlation changes fail closed. This is a semantic
 prerequisite: conversation-level draft targets, API/store plumbing, and the complete
 persistent composer remain in the following task.
+
+## Persistent conversation composition
+
+Implemented across `f67a83a`, `b5bf07b`, `49ac935`, `8a2c212`, and `8d582f3`. Conversations now open with a persistent, conversation-scoped editor and transcript; Tab/Shift-Tab and Escape route by surface focus. The editor grows to the persisted cap, scrolls internally, and collapses to one line; grapheme-aware rendering keeps the caret visible and transcript measurements retain the logical reading position. Typed conversation draft/action identities cross the application, local API, client, and store; authoritative context resolves direct, personal-note, and project sends without selected-message reply targeting. Empty editors do not consume stored-draft capacity. Draft text/carets survive focus changes and navigation; load/save failures offer retry, late outcomes preserve focus, queued new-draft choices wait for exact completion, and only committed receipts consume sent text. Standalone new messages remain distinct from conversation composition. Updated contextual guidance and conversation documentation. Tests cover focus/edit isolation, caps and small screens, Unicode carets, geometry anchoring, draft persistence/restoration, rejection/uncertainty/correlation, and repeated sends. The installed project journey proves three messages in one conversation across node restart, using one initial provider session and one exact resume. Formatting, strict workspace all-targets Clippy, and the full serial workspace suite passed against the unchanged final worktree.
+
+Original task:
+
+### Persistent conversation composition
+
+Keep transcript and composer visible as two surfaces, even on small terminals.
+Tab/Shift-Tab cycle focus. Open conversations with composer focus; route typing and
+caret movement only to the focused editor. Grow that editor with content up to the
+persisted height cap (default one-third of available height), then scroll internally.
+Collapse the unfocused composer to one line, retaining draft and cursor. Geometry
+changes preserve the logical reading position and both surfaces remain usable.
+
+The composer sends to the current conversation. Message-specific replies and forking
+are outside scope: do not add reply targeting or a “Replying to” workflow. Resolve
+direct-message send requirements using authoritative conversation context, never a
+visible/selected message; preserve distinct direct/project conversation semantics.
+Escape from compose focuses the transcript; Escape from ordinary reading returns to
+the conversation list. Successful send leaves compose focused and ready for another
+message. Preserve autosave, failures, pending sends, and exact receipt guarantees;
+only committed evidence consumes sent text.
+
+Touch TUI draft/focus/input/layout state, shell/configuration plumbing, and typed
+application/local API draft targets or message-continuation validation as necessary.
+Update conversation documentation and contextual hints. Dependencies: display
+preferences, conversation reading, and asynchronous continuation. Complete when tests cover both focus
+directions, editing isolation, small-screen sizing, successive sends in the same
+conversation, navigation and draft restoration, failed and uncertain sends, and
+reading-position preservation while composing. The later global-footer task keeps
+its standalone-composer and validation scope.
