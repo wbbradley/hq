@@ -13643,3 +13643,58 @@ Complete when defaults, persisted round trips, invalid values, isolated field
 updates, and editable Config controls are covered by tests. These settings are
 consumed by the following reading and composition tasks; their behavior remains
 unfinished until those tasks land.
+
+## Conversation reading, inspection, and history paging
+
+Implemented wrapped-line reading for arrows and j/k, configurable overlapping pages,
+explicit Inspect mode with restored reading position, and tail-aware updates with an
+End-to-latest indicator. Bounded canonical windows now refresh around the reading fact
+across Inbox, Sent, and Archived, with scoped retries, stale-response suppression,
+older/newer traversal, and progress through windows smaller than the viewport.
+Superseded live facts resolve through their exact original activity identity and
+recorded source support; stable activity presentation IDs retain wrapped-row position
+without losing current canonical evidence. Partial-history sends do not insert tail
+receipts among older entries, and approval routing follows the active mailbox alias.
+
+Verified model and rendered-buffer behavior, source order and streaming-anchor repair,
+configuration consumption, and a 120-entry installed conversation journey that keeps
+old reading during completion and reaches the new reply on End. The full workspace
+suite, including all 21 installed terminal tests and doc tests, passed with one test
+thread; strict workspace Clippy, formatting, and diff checks passed. Serial testing
+avoided an existing intermittent resource-test executable-launch failure; no resource
+behavior was changed. Persistent composition and approval handoff remain queued.
+
+### Conversation reading, inspection, and history paging
+
+Ordinary conversation navigation must be a wrapped-line scroll position rather
+than message selection. Reuse renderer-measured entry geometry and stable entry
+identity plus wrapped-row position.
+
+- In transcript reading, `j`/`k` and up/down scroll one rendered line, including
+  wrapping and explicit line breaks. Remove ordinary message-selection highlights.
+- PageUp/PageDown scroll a viewport using the persisted page-overlap preference;
+  clamp overlap so small viewports still advance. Open at the latest history and
+  load older history automatically near the top without moving the content being
+  read. Prevent duplicate requests, retain explicit retry after failure, and stop
+  at exhausted history. Home reaches oldest loaded content; End reaches the bottom
+  and enables tail mode. Editor navigation retains editing meanings.
+- Follow incoming content only while already at the tail. Otherwise preserve the
+  prior reading position across append, streaming updates, history prepend, resize,
+  and redraw. Show a new-content indicator and discoverable jump-to-latest action.
+  Typing or switching focus must not independently enable tail mode.
+- Provide explicit Inspect mode, provisionally activated by Enter. Highlight a
+  visible entry; `j`/`k` choose entries there and typed details remain accessible.
+  Escape returns to the unchanged reading position. Keep activation separate from
+  capability for later remapping; scrolling never silently retargets evidence.
+
+Touch `crates/hq-tui/src/model.rs`, `render.rs`, shell input normalization, and the
+application/local API/store history paging path. Preserve canonical source order
+and conversation identity across pages and refreshes, rather than deriving order
+from names, timestamps, or arrival position. Update footer/help and
+`docs/rust/inbox-conversation-surface.md`.
+
+Dependencies: conversation display preferences. Complete when model, rendered-buffer,
+store pagination, and installed terminal tests cover oversized Markdown, both key
+families, configurable paging, history loading without jumps, tail/End, resize,
+new-content indication, and inspection entry/exit. Replace tests that deliberately
+encode the old distinction between arrow scrolling and `j`/`k` selection.

@@ -2,41 +2,6 @@
 
 ## Next Up
 
-### Conversation reading, inspection, and history paging
-
-Ordinary conversation navigation must be a wrapped-line scroll position rather
-than message selection. Reuse renderer-measured entry geometry and stable entry
-identity plus wrapped-row position.
-
-- In transcript reading, `j`/`k` and up/down scroll one rendered line, including
-  wrapping and explicit line breaks. Remove ordinary message-selection highlights.
-- PageUp/PageDown scroll a viewport using the persisted page-overlap preference;
-  clamp overlap so small viewports still advance. Open at the latest history and
-  load older history automatically near the top without moving the content being
-  read. Prevent duplicate requests, retain explicit retry after failure, and stop
-  at exhausted history. Home reaches oldest loaded content; End reaches the bottom
-  and enables tail mode. Editor navigation retains editing meanings.
-- Follow incoming content only while already at the tail. Otherwise preserve the
-  prior reading position across append, streaming updates, history prepend, resize,
-  and redraw. Show a new-content indicator and discoverable jump-to-latest action.
-  Typing or switching focus must not independently enable tail mode.
-- Provide explicit Inspect mode, provisionally activated by Enter. Highlight a
-  visible entry; `j`/`k` choose entries there and typed details remain accessible.
-  Escape returns to the unchanged reading position. Keep activation separate from
-  capability for later remapping; scrolling never silently retargets evidence.
-
-Touch `crates/hq-tui/src/model.rs`, `render.rs`, shell input normalization, and the
-application/local API/store history paging path. Preserve canonical source order
-and conversation identity across pages and refreshes, rather than deriving order
-from names, timestamps, or arrival position. Update footer/help and
-`docs/rust/inbox-conversation-surface.md`.
-
-Dependencies: conversation display preferences. Complete when model, rendered-buffer,
-store pagination, and installed terminal tests cover oversized Markdown, both key
-families, configurable paging, history loading without jumps, tail/End, resize,
-new-content indication, and inspection entry/exit. Replace tests that deliberately
-encode the old distinction between arrow scrolling and `j`/`k` selection.
-
 ### Persistent conversation composition
 
 Keep transcript and composer visible as two surfaces, even on small terminals.
