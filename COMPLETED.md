@@ -13560,3 +13560,57 @@ a second worker, exact-session mismatch, stale project records left undrained, f
 validation, eligibility changes during resume, and acceptance-response loss without resubmission.
 Project dispatch automatically resumes the exact session and submits once; related runtime contract
 docs describe the behavior. Persisted retries and the client runtime-state projection follow below.
+
+## Conversation sender attribution
+
+Implemented conversation-wide non-user sender evidence through the store snapshot,
+application/local API, and TUI. Canonical typed mailbox identities now drive sender
+grouping; one-counterpart conversations and local-user messages omit sender headings.
+Status-only rows retain delivery and failure feedback without empty rules. Added
+store pagination, protocol/mapper, refresh, grouping, geometry, and rendering coverage;
+adjusted the installed adversarial Markdown fixture to stay explicitly oversized.
+Verified formatting, strict workspace Clippy, and the full workspace test suite.
+
+### Show conversation sender names only when needed
+
+Conversation messages now use sender-rule headings, suppressing repeated headings
+for consecutive messages from the same sender even across activity entries. They
+still show names in a one-counterpart conversation. Hide ordinary sender names
+unless more than one distinct non-user sender has authored messages in the
+conversation; retain consecutive-sender grouping where attribution is needed.
+
+- Determine distinct senders from typed mailbox addresses across the authoritative
+  conversation, excluding the local human mailbox. Count actual message senders,
+  not display names, activity entries, provider sessions, or only the loaded/visible
+  page. Preserve conversation-wide evidence through pagination and refresh.
+- Hide non-user names for zero or one other sender; show them for multiple other
+  senders. Omit the local user's name, which the incoming sender-rule implementation
+  now renders as `You`. Distinct senders
+  with identical display names still trigger attribution. When labels are shown,
+  use honest fallbacks for unresolved names; retain exact sender evidence in details.
+- Omit the message header row when neither a sender label nor delivery/exceptional
+  status remains. Preserve Pending, Received, Archived, and delivery-failure
+  feedback without dangling separators, along with body styling and message spacing.
+  Reuse the existing status-only/no-header layout instead of duplicating it; do not
+  leave empty decorative sender rules when names are suppressed.
+- Carry conversation-wide sender evidence through
+  `crates/hq-application/src/snapshot.rs`, local API conversion/protocol, and
+  `crates/hq-node/src/tui_client.rs` as needed. Update presentation and measured
+  header geometry in `crates/hq-tui/src/model.rs` and `render.rs`.
+  `UiConversationAuthor` currently retains only `You`, `Participant(String)`, or
+  `Unknown`; do not infer distinct sender identities from these presentation values.
+  Replace `same_message_sender`'s dependence on technical routing strings with the
+  typed sender evidence used for conversation-wide attribution and grouping.
+- Cover personal notes, one counterpart, multiple counterparts, duplicate display
+  names, unresolved names, a second sender outside the loaded page, refresh adding
+  a second sender, and status-only headers in mapper and rendered-buffer tests.
+  Update affected conversation documentation and rendering expectations.
+
+Dependencies: none. Coordinate measured header heights with the following
+conversation-scrolling task so removal or appearance of sender rows participates
+in stable viewport anchoring; preserve that task's scope.
+
+Complete when one-counterpart conversations omit repetitive sender names and unused
+header rows, while multiple-sender conversations retain attribution based on
+conversation-wide typed evidence regardless of pagination, without losing delivery
+feedback or message details.
