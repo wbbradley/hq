@@ -3979,3 +3979,182 @@ fn approval_surface_changes_preserve_observed_reading_position_and_tail_mode() {
         }
     }
 }
+
+fn saved_composer_model(size: UiSize, standalone: bool, content: &str) -> UiModel {
+    let opened = update(
+        ready_model(size),
+        UiEvent::Input(if standalone {
+            UiInput::Character('N')
+        } else {
+            UiInput::Activate
+        }),
+    )
+    .expect("open composer");
+    let (effect_id, target) = opened
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::OpenDraft { id, target } => Some((*id, target.clone())),
+            _ => None,
+        })
+        .expect("load draft effect");
+    update(
+        opened.model,
+        UiEvent::DraftLoaded {
+            effect_id,
+            draft: UiMailboxDraft {
+                draft_id: [99; 32],
+                target,
+                content: content.to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("saved draft")
+    .model
+}
+
+#[test]
+fn composer_shortcuts_appear_once_in_the_global_footer() {
+    for width in [40, 104] {
+        for standalone in [false, true] {
+            let size = UiSize { width, height: 24 };
+            let model = saved_composer_model(size, standalone, "saved text");
+            let buffer = render_buffer_with_theme(&model, &UiTheme::terminal());
+            let screen = snapshot_text(&buffer);
+            let positions = find_text_starts(&buffer, "Enter send");
+            assert_eq!(
+                positions.len(),
+                1,
+                "{width}, standalone={standalone}: {screen}"
+            );
+            assert_eq!(
+                positions[0].1,
+                size.height - 1,
+                "shortcuts belong to global footer: {screen}"
+            );
+            assert!(screen.contains("saved"), "{screen}");
+            assert!(screen.contains("10/"), "byte count: {screen}");
+            assert!(screen.contains("saved text"), "{screen}");
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .any(|cell| cell.modifier.contains(Modifier::REVERSED)),
+                "caret: {screen}"
+            );
+        }
+    }
+}
+
+#[test]
+fn inline_composer_validation_reserves_a_row_only_until_corrected() {
+    for width in [40, 104] {
+        for standalone in [false, true] {
+            let model = saved_composer_model(UiSize { width, height: 24 }, standalone, "");
+            let invalid =
+                update(model, UiEvent::Input(UiInput::Activate)).expect("empty send validation");
+            let theme = UiTheme::terminal()
+                .with_style(UiThemeRole::Input, Style::new().bg(Color::Rgb(13, 23, 37)))
+                .with_style(UiThemeRole::Error, Style::new().fg(Color::Magenta));
+            let buffer = render_buffer_with_theme(&invalid.model, &theme);
+            let (x, y) = find_text_start(&buffer, "Enter a message before sending");
+            assert_eq!(buffer[(x, y)].fg, Color::Magenta);
+            assert!(y < 22, "validation is inline, not the footer");
+            let corrected = update(invalid.model, UiEvent::Input(UiInput::Character('x')))
+                .expect("correct draft");
+            let buffer = render_buffer_with_theme(&corrected.model, &theme);
+            let screen = snapshot_text(&buffer);
+            assert_eq!(
+                buffer[(0, y)].bg,
+                Color::Rgb(13, 23, 37),
+                "validation row returns to editor: {screen}"
+            );
+            assert!(
+                !screen.contains("Enter a message before sending"),
+                "{screen}"
+            );
+            assert_eq!(find_text_starts(&buffer, "Enter send").len(), 1, "{screen}");
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .any(|cell| cell.modifier.contains(Modifier::REVERSED))
+            );
+        }
+    }
+}
+
+#[test]
+fn long_composers_use_the_former_shortcut_row_for_text() {
+    let content = (0..30)
+        .map(|row| format!("Draft row {row:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for width in [40, 104] {
+        for standalone in [false, true] {
+            let size = UiSize { width, height: 24 };
+            let model = saved_composer_model(size, standalone, &content);
+            let buffer = render_buffer_with_theme(&model, &UiTheme::terminal());
+            let (_, y) = find_text_start(&buffer, "Draft row 29");
+            assert_eq!(
+                y,
+                size.height - 3,
+                "last editor row touches global footer border: {}",
+                snapshot_text(&buffer)
+            );
+        }
+    }
+}
+
+#[test]
+fn tiny_composer_keeps_validation_and_caret_visible_together() {
+    let model = saved_composer_model(
+        UiSize {
+            width: 40,
+            height: 10,
+        },
+        false,
+        "",
+    );
+    let invalid = update(model, UiEvent::Input(UiInput::Activate)).expect("empty validation");
+    let buffer = render_buffer_with_theme(&invalid.model, &UiTheme::terminal());
+    assert!(snapshot_text(&buffer).contains("Enter a message before sending"));
+    assert!(
+        buffer
+            .content
+            .iter()
+            .any(|cell| cell.modifier.contains(Modifier::REVERSED))
+    );
+}
+
+#[test]
+fn tiny_composer_validation_and_approval_notice_remain_independent() {
+    let model = saved_composer_model(
+        UiSize {
+            width: 40,
+            height: 10,
+        },
+        false,
+        "",
+    );
+    let invalid = update(model, UiEvent::Input(UiInput::Activate)).expect("empty validation");
+    let pending = update(
+        invalid.model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![conversation_command_approval()],
+        },
+    )
+    .expect("pending approval");
+    let buffer = render_buffer_with_theme(&pending.model, &UiTheme::terminal());
+    let screen = snapshot_text(&buffer);
+    assert!(screen.contains("Enter a message"), "{screen}");
+    assert!(screen.contains("Approval needed"), "{screen}");
+    assert_eq!(find_text_starts(&buffer, "Enter send").len(), 1, "{screen}");
+    assert!(
+        buffer
+            .content
+            .iter()
+            .any(|cell| cell.modifier.contains(Modifier::REVERSED))
+    );
+}

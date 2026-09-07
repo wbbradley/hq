@@ -89,6 +89,12 @@ autosave, stale-context recovery, and response-loss handling preserve content. O
 canonical receipt consumes the draft. Inspection never supplies a send target: composing from
 inspection returns to the retained conversation editor, and agent completion does not retarget it.
 
+Composer shortcuts appear once in the global footer for both conversation messages and
+standalone notes or messages. The editor uses its full inner area for text; inline validation
+reserves a row only while an error exists. At small sizes, compact feedback keeps the error and
+caret visible together. Recipient/project context, save status, and byte count remain in the
+composer heading when space permits. Approval-needed status is independent of ordinary shortcuts.
+
 The other permitted adjacent view is a command approval proven to belong to this conversation by
 exact project, agent, provider, session, and operation evidence. An unresolved, ambiguous, or
 mismatched request becomes recovery evidence with refresh guidance; it is never assigned by label,

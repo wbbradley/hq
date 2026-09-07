@@ -3363,7 +3363,16 @@ fn conversation_composer_height(
         .len(),
         _ => 1,
     };
-    u16::try_from(rows.saturating_add(2))
+    let chrome = usize::from(
+        area.height.saturating_sub(
+            Block::new()
+                .borders(Borders::TOP | borders)
+                .inner(area)
+                .height,
+        ),
+    ) + usize::from(model.message_field_error().is_some())
+        + usize::from(model.current_command_approval().is_some());
+    u16::try_from(rows.saturating_add(chrome))
         .unwrap_or(u16::MAX)
         .min(cap)
 }
@@ -3451,10 +3460,15 @@ fn render_pending_approval_notice(
         let [editor, alert] = if area.height > 1 {
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area)
         } else {
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(15)]).areas(area)
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(16)]).areas(area)
         };
         frame.render_widget(
-            Paragraph::new("Approval needed").style(theme.style(UiThemeRole::Attention)),
+            Paragraph::new(if area.height > 1 {
+                "Approval needed"
+            } else {
+                " Approval needed"
+            })
+            .style(theme.style(UiThemeRole::Attention)),
             alert,
         );
         editor
@@ -3533,28 +3547,17 @@ fn render_draft_pane(
             );
             let inner = block.inner(area);
             frame.render_widget(block, area);
-            let hint_height = u16::from(inner.height > 1);
-            let [text_area, hint] =
-                Layout::vertical([Constraint::Min(1), Constraint::Length(hint_height)])
+            let error_height = u16::from(model.message_field_error().is_some() && inner.height > 1);
+            let [text_area, error_area] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(error_height)])
                     .areas(inner);
             render_draft_editor(frame, model, theme, &draft.content, text_area);
-            let hint_text = model.message_field_error().unwrap_or(
-                if model.current_command_approval().is_some() {
-                    "Tab approval · Enter send · Esc read"
-                } else if matches!(model.active_route(), UiRoute::Conversation { .. }) {
-                    "Enter send · Ctrl-J/Shift-Enter newline · Tab/Esc read"
-                } else {
-                    "Enter send · Ctrl-J/Shift-Enter newline · Esc close"
-                },
-            );
-            frame.render_widget(
-                Paragraph::new(hint_text).style(if model.message_field_error().is_some() {
-                    theme.style(UiThemeRole::Error)
-                } else {
-                    theme.style(UiThemeRole::Footer)
-                }),
-                hint,
-            );
+            if let Some(error) = model.message_field_error() {
+                frame.render_widget(
+                    Paragraph::new(error).style(theme.style(UiThemeRole::Error)),
+                    error_area,
+                );
+            }
         }
     }
 }
@@ -3618,6 +3621,9 @@ fn render_compact_draft(
         );
         return true;
     }
+    if render_compact_draft_error(frame, model, theme, draft_pane, area) {
+        return true;
+    }
     if area.height < 2 {
         match draft_pane {
             UiMailboxDraftPane::Editing { draft, .. } => {
@@ -3630,6 +3636,38 @@ fn render_compact_draft(
         return true;
     }
     false
+}
+
+fn render_compact_draft_error(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    draft_pane: &UiMailboxDraftPane,
+    area: Rect,
+) -> bool {
+    let (Some(error), UiMailboxDraftPane::Editing { draft, .. }) =
+        (model.message_field_error(), draft_pane)
+    else {
+        return false;
+    };
+    if area.height > 2 {
+        return false;
+    }
+    let [editor, feedback] = if area.height > 1 {
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area)
+    } else {
+        let error_width = u16::try_from(UnicodeWidthStr::width(error))
+            .unwrap_or(u16::MAX)
+            .min(area.width.saturating_sub(1));
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(error_width)]).areas(area)
+    };
+    render_draft_editor(frame, model, theme, &draft.content, editor);
+    frame.render_widget(
+        Paragraph::new(clipped_preview_line(error, usize::from(feedback.width)))
+            .style(theme.style(UiThemeRole::Error)),
+        feedback,
+    );
+    true
 }
 
 fn render_draft_editor(
@@ -5052,7 +5090,16 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         }
     } else if matches!(model.active_route(), UiRoute::Choice { .. }) {
         " j/k choose · Enter continue · Esc back · F1 help · q quit".to_owned()
-    } else if matches!(model.active_route(), UiRoute::Form { .. }) {
+    } else if matches!(model.active_route(), UiRoute::Form { .. })
+        && !(matches!(
+            model.active_route(),
+            UiRoute::Form {
+                capability: UiWorkflowCapability::StartNewWork,
+                ..
+            }
+        ) && model.focus() == UiFocus::Draft
+            && model.mailbox_draft().is_some())
+    {
         " Tab next field · Enter continue · Esc back · F1 help · q quit".to_owned()
     } else if matches!(model.active_route(), UiRoute::Confirmation { .. }) {
         " Enter confirm · Esc cancel · F1 help · q quit".to_owned()
