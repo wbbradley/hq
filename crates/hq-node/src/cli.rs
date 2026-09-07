@@ -3165,6 +3165,10 @@ fn project_operation_view(
 ) -> Result<ProjectOperationView, CliError> {
     let (operation_id, status, stage, project_head, error, runtime, external_state_warning) =
         match outcome {
+            ProjectCommandOutcomeDto::Queued {
+                operation_id,
+                stage,
+            } => (operation_id, "queued", Some(stage), None, None, None, None),
             ProjectCommandOutcomeDto::Accepted {
                 operation_id,
                 stage,
@@ -10505,6 +10509,31 @@ mod tests {
         assert_eq!(first.1, changed.1);
         assert_eq!(first.2, changed.2);
         assert_ne!(first.0.request_digest, changed.0.request_digest);
+    }
+
+    #[test]
+    fn queued_project_result_reports_waiting_without_runtime_or_acceptance_claims() {
+        let operation_id = OperationId::from_bytes([2; 32]);
+        let view = project_operation_view(
+            "dispatch",
+            hq_domain::CommandId::from_bytes([1; 32]),
+            ProjectId::from_bytes([3; 32]),
+            InstallationId::from_bytes([4; 32]),
+            operation_id,
+            ProjectCommandOutcomeDto::Queued {
+                operation_id: Id32::new(*operation_id.as_bytes()),
+                stage: ProjectCommandStageDto::DispatchingInputs,
+            },
+        )
+        .expect("queued view");
+        let result = super::CliResult::ProjectOperation(view);
+        let output = render_result(CliOutputFormat::Json, &result).expect("JSON result");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("JSON");
+        assert_eq!(value["data"]["status"], "queued");
+        assert_eq!(value["data"]["stage"], "dispatching_inputs");
+        assert!(value["data"]["runtime_state"].is_null());
+        assert!(value["data"]["error_code"].is_null());
+        assert!(value["data"]["project_head"].is_null());
     }
 
     #[test]

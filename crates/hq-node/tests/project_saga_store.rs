@@ -101,3 +101,58 @@ fn exact_command_checkpoint_survives_store_and_adapter_restart() {
         vec![checkpoint]
     );
 }
+
+#[test]
+fn queued_dispatch_survives_reopen_and_keeps_the_project_reserved() {
+    let directory = TestDirectory::new();
+    let database = directory.path().join("state").join("queued.sqlite3");
+    let store = Store::open(&database, NonZeroUsize::MIN).expect("open");
+    let adapter = ProjectSagaStoreAdapter::new(store.project_saga_state_handle());
+    let manager = ProjectSagaManager::new(adapter.clone());
+    let mut request = request();
+    request.action = ProjectCommandAction::DispatchPending;
+    manager.accept(request.clone()).expect("accept");
+    let mut queued = adapter
+        .find(request.operation_id)
+        .expect("find")
+        .expect("record");
+    queued.state = ProjectSagaState::Queued(ProjectCommandStage::DispatchingInputs);
+    queued.dispatch_operation_id = Some(OperationId::from_bytes([90; 32]));
+    queued.dispatch_effect = SagaEffectState::Pending;
+    queued.updated_at_millis += 1;
+    adapter.replace(queued.clone()).expect("persist queued");
+    drop(manager);
+    store.close().expect("close");
+    let store = Store::open(&database, NonZeroUsize::MIN).expect("reopen");
+    let adapter = ProjectSagaStoreAdapter::new(store.project_saga_state_handle());
+    assert_eq!(
+        adapter.find(request.operation_id).expect("find reopened"),
+        Some(queued.clone())
+    );
+    assert_eq!(
+        adapter.runnable(16).expect("runnable"),
+        vec![queued.clone()]
+    );
+    let manager = ProjectSagaManager::new(adapter.clone());
+    assert!(matches!(
+        manager.accept(request.clone()).expect("same command"),
+        ProjectCommandOutcome::Queued { .. }
+    ));
+    let mut competing = request;
+    competing.command_id = CommandId::from_bytes([91; 32]);
+    competing.operation_id = OperationId::from_bytes([92; 32]);
+    assert!(
+        matches!(manager.accept(competing).expect("competing command"), ProjectCommandOutcome::Rejected { error, .. } if error.code().as_str() == "project_command_in_progress")
+    );
+    let mut regression = queued.clone();
+    regression.state = ProjectSagaState::Running(ProjectCommandStage::Accepted);
+    assert!(adapter.replace(regression).is_err());
+    queued.state = ProjectSagaState::Completed {
+        project_head: FactId::from_bytes([93; 32]),
+    };
+    queued.dispatch_effect = SagaEffectState::Accepted;
+    queued.updated_at_millis += 1;
+    adapter.replace(queued).expect("acceptance completes");
+    assert!(adapter.runnable(16).expect("no remaining work").is_empty());
+    store.close().expect("close reopened");
+}

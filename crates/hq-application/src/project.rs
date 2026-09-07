@@ -285,6 +285,13 @@ pub enum ProjectCommandOutcome {
         /// Current durable checkpoint.
         stage: ProjectCommandStage,
     },
+    /// An exact input is durably queued without unknown provider acceptance.
+    Queued {
+        /// Stable workflow identity.
+        operation_id: OperationId,
+        /// Durable checkpoint awaiting delivery.
+        stage: ProjectCommandStage,
+    },
     /// The command reached a canonical stable state.
     Completed {
         /// Stable workflow identity.

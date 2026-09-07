@@ -4158,3 +4158,61 @@ fn tiny_composer_validation_and_approval_notice_remain_independent() {
             .any(|cell| cell.modifier.contains(Modifier::REVERSED))
     );
 }
+
+#[test]
+fn queued_project_delivery_shows_saved_waiting_feedback_without_recovery_or_success() {
+    for width in [40, 104] {
+        let form = open_project_management_action(
+            project_model(UiSize { width, height: 24 }),
+            UiProjectManagementAction::AssignAgent,
+        );
+        let submitted = update(form, UiEvent::Input(UiInput::Activate)).expect("activate");
+        let (effect_id, action) = submitted
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::SubmitProjectCommand { id, action } => Some((*id, action.clone())),
+                _ => None,
+            })
+            .expect("activation effect");
+        let queued = update(
+            submitted.model,
+            UiEvent::ProjectCommandCompleted {
+                effect_id,
+                result: UiProjectResult {
+                    action,
+                    command_id: [12; 32],
+                    operation_id: [13; 32],
+                    project_id: [1; 32],
+                    runtime_state: None,
+                    runtime_code: None,
+                    outcome: UiProjectOutcome::Queued {
+                        stage: "dispatching_inputs".to_owned(),
+                    },
+                },
+            },
+        )
+        .expect("queued delivery");
+        let screen = render_text(&queued.model);
+        assert!(
+            contains_visible_words_in_order(
+                &screen,
+                "Your message is saved and waiting for the agent"
+            ),
+            "{screen}"
+        );
+        assert!(!screen.contains("Done"), "{screen}");
+        assert!(!screen.contains("could not confirm"), "{screen}");
+        assert!(!screen.contains("Enter retry"), "{screen}");
+        assert!(queued.model.last_failure().is_none());
+        assert!(
+            !queued
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::ContinueProjectCommand { .. }))
+        );
+        let closed =
+            update(queued.model, UiEvent::Input(UiInput::Escape)).expect("close waiting view");
+        assert!(closed.model.project_interaction().is_none());
+    }
+}

@@ -180,7 +180,7 @@ const OPERATIONAL_TABLE_COUNT: usize = 19;
 const SCHEMA_INDEXES: [&str; 3] = [
     "conversation_messages_by_fact_id",
     "conversation_activities_by_fact_id",
-    "project_sagas_one_unresolved",
+    "project_sagas_one_active",
 ];
 const MAXIMUM_CORPUS_FACTS: i64 = 1_000_000;
 
@@ -1440,7 +1440,7 @@ CREATE TABLE project_sagas (
         CHECK(typeof(issued_at_millis) = 'blob' AND length(issued_at_millis) = 8),
     command_body BLOB NOT NULL
         CHECK(typeof(command_body) = 'blob' AND length(command_body) BETWEEN 1 AND 65536),
-    state_kind INTEGER NOT NULL CHECK(state_kind BETWEEN 1 AND 4),
+    state_kind INTEGER NOT NULL CHECK(state_kind BETWEEN 1 AND 5),
     stage INTEGER NOT NULL CHECK(stage BETWEEN 1 AND 23),
     project_head BLOB
         CHECK(project_head IS NULL OR (typeof(project_head) = 'blob' AND length(project_head) = 32)),
@@ -1514,8 +1514,8 @@ CREATE TABLE project_sagas (
     CHECK((resource_effect IN (4, 5)) = (resource_error_code IS NOT NULL))
 ) STRICT, WITHOUT ROWID;
 
-CREATE UNIQUE INDEX project_sagas_one_unresolved
-    ON project_sagas(project_id) WHERE state_kind IN (1, 4);
+CREATE UNIQUE INDEX project_sagas_one_active
+    ON project_sagas(project_id) WHERE state_kind IN (1, 4, 5);
 
 CREATE TABLE project_saga_reservations (
     home BLOB NOT NULL CHECK(typeof(home) = 'blob' AND length(home) = 32),
@@ -4230,6 +4230,31 @@ pub(crate) mod tests {
         assert_eq!(
             verify_schema(&connection)
                 .expect_err("earlier layout rejects")
+                .class(),
+            StoreErrorClass::IncompatibleSchema
+        );
+    }
+
+    #[test]
+    fn saga_layout_without_queued_reservations_is_rejected() {
+        let old_schema = SCHEMA
+            .replace("project_sagas_one_active", "project_sagas_one_unresolved")
+            .replace("state_kind IN (1, 4, 5)", "state_kind IN (1, 4)")
+            .replace("state_kind BETWEEN 1 AND 5", "state_kind BETWEEN 1 AND 4");
+        assert_ne!(old_schema, SCHEMA);
+        let connection = Connection::open_in_memory().expect("memory database opens");
+        connection
+            .execute_batch(&old_schema)
+            .expect("old layout creates");
+        connection
+            .execute(
+                "INSERT INTO storage_metadata(singleton, schema_marker) VALUES (1, ?1)",
+                [SCHEMA_MARKER],
+            )
+            .expect("marker inserts");
+        assert_eq!(
+            verify_schema_objects(&connection)
+                .expect_err("old queue layout rejects")
                 .class(),
             StoreErrorClass::IncompatibleSchema
         );

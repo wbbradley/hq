@@ -138,6 +138,12 @@ pub enum BoundaryKind {
     StoreCommitted,
     /// Project reconciliation became ready.
     ProjectWoken,
+    /// The project workflow requested an exact delivery attempt; acceptance is not implied.
+    ProjectDeliveryRequested,
+    /// Exact runtime ledger evidence shows an input queued before provider submission.
+    ProjectDeliveryQueued,
+    /// Exact runtime ledger evidence requires acceptance lookup before resubmission.
+    ProjectDeliveryAcceptanceUnknown,
     /// The runtime ledger confirmed acceptance of one project dispatch.
     ProjectDispatched,
     /// The runtime ledger confirmed provider acceptance of a normalized instruction.

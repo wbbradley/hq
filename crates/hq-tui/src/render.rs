@@ -1452,6 +1452,14 @@ fn render_project_interaction(
         UiProjectInteraction::Outcome { result } => {
             let mut lines = vec![Line::from(project_action_label(&result.action))];
             match &result.outcome {
+                UiProjectOutcome::Queued { .. } => {
+                    lines.push(Line::from(
+                        "Your message is saved and waiting for the agent.",
+                    ));
+                    lines.push(Line::from(
+                        "You can close this view while delivery remains queued.",
+                    ));
+                }
                 UiProjectOutcome::Completed { .. } => lines.push(Line::from("Done")),
                 UiProjectOutcome::Running { stage } => {
                     lines.push(Line::from(match &result.action {
@@ -5105,6 +5113,10 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         " Enter confirm · Esc cancel · F1 help · q quit".to_owned()
     } else if matches!(model.active_route(), UiRoute::Progress { .. }) {
         " Working… · this operation cannot be cancelled · F1 help · q quit".to_owned()
+    } else if matches!(model.project_interaction(), Some(UiProjectInteraction::Outcome { result })
+        if matches!(result.outcome, UiProjectOutcome::Queued { .. }))
+    {
+        " Esc close · ? details".to_owned()
     } else if matches!(model.active_route(), UiRoute::Outcome { .. }) {
         " Enter finish · Esc back · F1 help · q quit".to_owned()
     } else if matches!(model.active_route(), UiRoute::Recovery { .. }) {

@@ -150,6 +150,7 @@ fn decode_record(record: StoredProjectSaga) -> Result<ProjectSagaRecord, SagaSto
 
 fn encode_state(workflow_state: ProjectSagaState) -> StoredProjectSagaState {
     match workflow_state {
+        ProjectSagaState::Queued(checkpoint) => StoredProjectSagaState::Queued(checkpoint),
         ProjectSagaState::Running(checkpoint) => StoredProjectSagaState::Running(checkpoint),
         ProjectSagaState::Completed { project_head } => {
             StoredProjectSagaState::Completed(project_head)
@@ -163,6 +164,7 @@ fn encode_state(workflow_state: ProjectSagaState) -> StoredProjectSagaState {
 
 fn decode_state(workflow_state: StoredProjectSagaState) -> ProjectSagaState {
     match workflow_state {
+        StoredProjectSagaState::Queued(checkpoint) => ProjectSagaState::Queued(checkpoint),
         StoredProjectSagaState::Running(checkpoint) => ProjectSagaState::Running(checkpoint),
         StoredProjectSagaState::Completed(project_head) => {
             ProjectSagaState::Completed { project_head }

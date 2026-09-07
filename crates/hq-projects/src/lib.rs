@@ -77,6 +77,8 @@ pub enum SagaEffectState {
 pub enum ProjectSagaState {
     /// Intake committed before any further boundary.
     Running(ProjectCommandStage),
+    /// Exact input is durably queued without uncertain provider acceptance.
+    Queued(ProjectCommandStage),
     /// The canonical project transition committed at this head.
     Completed {
         /// Resulting authoritative project head.
@@ -286,6 +288,10 @@ impl<S: ProjectSagaStore> ProjectSagaManager<S> {
 
 fn outcome(record: &ProjectSagaRecord) -> ProjectCommandOutcome {
     match &record.state {
+        ProjectSagaState::Queued(stage) => ProjectCommandOutcome::Queued {
+            operation_id: record.operation_id,
+            stage: *stage,
+        },
         ProjectSagaState::Running(ProjectCommandStage::Accepted) => {
             ProjectCommandOutcome::Accepted {
                 operation_id: record.operation_id,

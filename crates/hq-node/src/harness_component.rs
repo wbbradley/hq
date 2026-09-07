@@ -1006,7 +1006,16 @@ impl ProjectRuntimePort for HarnessNodeComponent {
     fn deliver(
         &self,
         request: &EffectRequest<ProjectRuntimeDelivery>,
-    ) -> Result<EffectOutcome<()>, ApplicationError> {
+    ) -> Result<hq_projects::ProjectDeliveryOutcome, ApplicationError> {
+        let ids = BoundaryIds {
+            message: Some(*request.body.submission_id.as_bytes()),
+            dispatch: Some(*request.body.dispatch_id.as_bytes()),
+            operation: Some(*request.operation_id.as_bytes()),
+            ..BoundaryIds::default()
+        };
+        self.inner
+            .trace
+            .record(BoundaryKind::ProjectDeliveryRequested, ids);
         let outcome = self.with_supervisor(|supervisor| {
             let delivery = HarnessDeliveryRecord {
                 agent_id: request.body.binding.agent_id,
@@ -1036,9 +1045,9 @@ impl ProjectRuntimePort for HarnessNodeComponent {
                         | HarnessErrorClass::PersistenceCollision
                 )
             }) {
-                return Ok(EffectOutcome::Rejected(harness_domain_error(
-                    "project_delivery_identity_conflict",
-                )));
+                return Ok(hq_projects::ProjectDeliveryOutcome::Rejected(
+                    harness_domain_error("project_delivery_identity_conflict"),
+                ));
             }
             let retained =
                 supervisor.delivery(request.body.binding.agent_id, request.body.submission_id)?;
@@ -1046,40 +1055,44 @@ impl ProjectRuntimePort for HarnessNodeComponent {
                 .as_ref()
                 .is_some_and(|delivery| !same_project_delivery(request, delivery))
             {
-                return Ok(EffectOutcome::Rejected(harness_domain_error(
-                    "project_delivery_identity_conflict",
-                )));
+                return Ok(hq_projects::ProjectDeliveryOutcome::Rejected(
+                    harness_domain_error("project_delivery_identity_conflict"),
+                ));
             }
             match retained.map(|delivery| delivery.state) {
-                Some(HarnessDeliveryState::Accepted) => Ok(EffectOutcome::Accepted(())),
-                Some(HarnessDeliveryState::Rejected) => Ok(EffectOutcome::Rejected(
-                    harness_domain_error("project_delivery_rejected"),
-                )),
-                Some(HarnessDeliveryState::Pending | HarnessDeliveryState::Uncertain) => {
-                    Ok(EffectOutcome::Uncertain(request.operation_id))
+                Some(HarnessDeliveryState::Accepted) => {
+                    Ok(hq_projects::ProjectDeliveryOutcome::Accepted)
                 }
-                None => attempt.map(|()| EffectOutcome::Uncertain(request.operation_id)),
+                Some(HarnessDeliveryState::Rejected) => {
+                    Ok(hq_projects::ProjectDeliveryOutcome::Rejected(
+                        harness_domain_error("project_delivery_rejected"),
+                    ))
+                }
+                Some(HarnessDeliveryState::Pending) => {
+                    Ok(hq_projects::ProjectDeliveryOutcome::Queued)
+                }
+                Some(HarnessDeliveryState::Uncertain) => {
+                    Ok(hq_projects::ProjectDeliveryOutcome::AcceptanceUnknown)
+                }
+                None => attempt.map(|()| hq_projects::ProjectDeliveryOutcome::AcceptanceUnknown),
             }
         });
-        if matches!(&outcome, Ok(EffectOutcome::Accepted(()))) {
-            self.inner.trace.record(
-                BoundaryKind::ProjectDispatched,
-                BoundaryIds {
-                    message: Some(*request.body.submission_id.as_bytes()),
-                    dispatch: Some(*request.body.dispatch_id.as_bytes()),
-                    operation: Some(*request.operation_id.as_bytes()),
-                    ..BoundaryIds::default()
-                },
-            );
-            self.inner.trace.record(
-                BoundaryKind::CodexSubmitted,
-                BoundaryIds {
-                    message: Some(*request.body.submission_id.as_bytes()),
-                    dispatch: Some(*request.body.dispatch_id.as_bytes()),
-                    operation: Some(*request.operation_id.as_bytes()),
-                    ..BoundaryIds::default()
-                },
-            );
+        match &outcome {
+            Ok(hq_projects::ProjectDeliveryOutcome::Queued) => self
+                .inner
+                .trace
+                .record(BoundaryKind::ProjectDeliveryQueued, ids),
+            Ok(hq_projects::ProjectDeliveryOutcome::AcceptanceUnknown) => self
+                .inner
+                .trace
+                .record(BoundaryKind::ProjectDeliveryAcceptanceUnknown, ids),
+            _ => {}
+        }
+        if matches!(&outcome, Ok(hq_projects::ProjectDeliveryOutcome::Accepted)) {
+            self.inner
+                .trace
+                .record(BoundaryKind::ProjectDispatched, ids);
+            self.inner.trace.record(BoundaryKind::CodexSubmitted, ids);
         }
         self.wake_event_task();
         outcome
@@ -1204,12 +1217,60 @@ mod tests {
         component.start(cancellation.child()).expect("start");
         let request = delivery_request();
         assert_eq!(
-            component.deliver(&request).expect("queued"),
-            EffectOutcome::Uncertain(request.operation_id)
+            component
+                .deliver(&request)
+                .expect("durably queued without a worker"),
+            hq_projects::ProjectDeliveryOutcome::Queued
         );
         let records = fs::read_to_string(&trace_path).expect("trace");
+        assert!(records.contains("project_delivery_requested"));
+        assert!(records.contains("project_delivery_queued"));
+        assert!(!records.contains("project_delivery_acceptance_unknown"));
         assert!(!records.contains("codex_submitted"));
         assert!(!records.contains("project_dispatched"));
+        let state = &component.inner.dependencies.state;
+        let token = hq_harness::HarnessOwnerToken::from_bytes([99; 32]).expect("owner token");
+        let now = component.inner.dependencies.clock.now_millis();
+        state
+            .apply(hq_harness::HarnessStateMutation::ClaimLease {
+                agent_id: request.body.binding.agent_id,
+                owner_token: token,
+                now_millis: now,
+                expires_at_millis: now + 60_000,
+            })
+            .expect("prior submission owner");
+        state
+            .apply(hq_harness::HarnessStateMutation::SetDeliveryState {
+                agent_id: request.body.binding.agent_id,
+                submission_id: request.body.submission_id,
+                owner_token: token,
+                state: HarnessDeliveryState::Uncertain,
+            })
+            .expect("submission crossed boundary before worker loss");
+        assert_eq!(
+            component.deliver(&request).expect("unknown acceptance"),
+            hq_projects::ProjectDeliveryOutcome::AcceptanceUnknown
+        );
+        assert!(!component.delivery_accepted(&request).expect("not accepted"));
+        state
+            .apply(hq_harness::HarnessStateMutation::SetDeliveryState {
+                agent_id: request.body.binding.agent_id,
+                submission_id: request.body.submission_id,
+                owner_token: token,
+                state: HarnessDeliveryState::Accepted,
+            })
+            .expect("exact acceptance reconciled");
+        assert_eq!(
+            component.deliver(&request).expect("accepted ledger"),
+            hq_projects::ProjectDeliveryOutcome::Accepted
+        );
+        assert!(component.delivery_accepted(&request).expect("accepted"));
+        state
+            .apply(hq_harness::HarnessStateMutation::ReleaseLease {
+                agent_id: request.body.binding.agent_id,
+                owner_token: token,
+            })
+            .expect("release test owner");
         component.stop_intake().expect("close intake");
         cancellation.cancel();
         component.drain().expect("drain");

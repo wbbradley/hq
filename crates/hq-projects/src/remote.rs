@@ -213,6 +213,7 @@ where
             ),
             ProjectCommandOutcome::Accepted { .. }
             | ProjectCommandOutcome::Running { .. }
+            | ProjectCommandOutcome::Queued { .. }
             | ProjectCommandOutcome::Reconcilable { .. } => return Ok(outcome),
         };
         match self

@@ -11,7 +11,7 @@ use std::{
 use hq_application::{
     AgentRetirementOutcome, AgentRetirementRequest, ApplicationError, ApplicationErrorCode,
     EffectOutcome, EffectRequest, MutationAttempt, MutationOutcome, MutationReceipt,
-    ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,
+    ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage,
 };
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, BoundedText, CommandDigest, CommandId, DomainError,
@@ -615,6 +615,9 @@ struct RuntimeState {
     unavailable_start_once: bool,
     uncertain_start_once: bool,
     uncertain_delivery_once: bool,
+    queue_delivery: bool,
+    queue_submission: Option<MessageId>,
+    delivery_operations: Vec<OperationId>,
     reject_stop: bool,
     uncertain_stop_once: bool,
     deliveries: BTreeMap<MessageId, CommandDigest>,
@@ -733,15 +736,22 @@ impl ProjectRuntimePort for ScriptedRuntime {
     fn deliver(
         &self,
         request: &EffectRequest<ProjectRuntimeDelivery>,
-    ) -> Result<EffectOutcome<()>, ApplicationError> {
+    ) -> Result<hq_projects::ProjectDeliveryOutcome, ApplicationError> {
         let mut state = self.0.lock().expect("runtime lock");
         state.delivery_calls += 1;
         state.delivery_requests.push(request.body.clone());
+        state.delivery_operations.push(request.operation_id);
+        if state.queue_delivery || state.queue_submission == Some(request.body.submission_id) {
+            return Ok(hq_projects::ProjectDeliveryOutcome::Queued);
+        }
         if let Some(retained) = state.deliveries.get(&request.body.submission_id) {
             return Ok(if retained == &request.request_digest {
-                EffectOutcome::Accepted(())
+                hq_projects::ProjectDeliveryOutcome::Accepted
             } else {
-                EffectOutcome::Rejected(domain_error(ErrorCategory::Conflict, "delivery-collision"))
+                hq_projects::ProjectDeliveryOutcome::Rejected(domain_error(
+                    ErrorCategory::Conflict,
+                    "delivery-collision",
+                ))
             });
         }
         state
@@ -750,9 +760,9 @@ impl ProjectRuntimePort for ScriptedRuntime {
         state.delivery_order.push(request.body.submission_id);
         if state.uncertain_delivery_once {
             state.uncertain_delivery_once = false;
-            Ok(EffectOutcome::Uncertain(request.operation_id))
+            Ok(hq_projects::ProjectDeliveryOutcome::AcceptanceUnknown)
         } else {
-            Ok(EffectOutcome::Accepted(()))
+            Ok(hq_projects::ProjectDeliveryOutcome::Accepted)
         }
     }
 
@@ -3153,4 +3163,149 @@ fn locator(path: &str) -> ResourceLocator {
 
 fn domain_error(category: ErrorCategory, code: &str) -> DomainError {
     DomainError::new(category, ErrorCode::new(code).expect("error code"))
+}
+
+#[test]
+fn queued_delivery_replays_without_spinning_or_consuming_unaccepted_input() {
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::default();
+    runtime.0.lock().expect("runtime").queue_delivery = true;
+    let store = MemorySagaStore::default();
+    let manager = ProjectWorkflowManager::new(
+        store.clone(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    );
+    let request = dispatch_request();
+    for expected_calls in 1..=2 {
+        let outcome = manager.control(request.clone()).expect("queue outcome");
+        assert!(
+            matches!(outcome, ProjectCommandOutcome::Queued { operation_id, stage: ProjectCommandStage::DispatchingInputs } if operation_id == request.operation_id)
+        );
+        assert_eq!(
+            runtime.0.lock().expect("runtime").delivery_calls,
+            expected_calls
+        );
+        assert_eq!(canonical.snapshot_value().pending_inputs.len(), 1);
+        assert!(!canonical.mutations().iter().any(|mutation| matches!(
+            mutation,
+            CanonicalProjectMutationAction::RecordDispatch { .. }
+        )));
+        let retained = store
+            .find(request.operation_id)
+            .expect("stored")
+            .expect("record");
+        assert_eq!(
+            retained.state,
+            hq_projects::ProjectSagaState::Queued(ProjectCommandStage::DispatchingInputs)
+        );
+        assert_eq!(
+            retained.dispatch_effect,
+            hq_projects::SagaEffectState::Pending
+        );
+    }
+    runtime.0.lock().expect("runtime").queue_delivery = false;
+    let outcomes = manager.repair(16).expect("repair queue");
+    assert!(matches!(
+        outcomes.as_slice(),
+        [ProjectCommandOutcome::Completed { .. }]
+    ));
+    assert!(canonical.snapshot_value().pending_inputs.is_empty());
+    assert_eq!(
+        canonical
+            .mutations()
+            .iter()
+            .filter(|mutation| matches!(
+                mutation,
+                CanonicalProjectMutationAction::RecordDispatch { .. }
+            ))
+            .count(),
+        1
+    );
+    let state = runtime.0.lock().expect("runtime");
+    assert_eq!(state.delivery_calls, 3);
+    assert!(
+        state
+            .delivery_requests
+            .iter()
+            .all(|delivery| delivery == &state.delivery_requests[0])
+    );
+    assert!(
+        state
+            .delivery_operations
+            .iter()
+            .all(|operation| operation == &state.delivery_operations[0])
+    );
+}
+
+#[test]
+fn accepted_input_does_not_authorize_a_later_queued_input() {
+    let mut initial = runnable_snapshot();
+    let first_id = initial.pending_inputs[0].message_id;
+    let mut second = pending_input();
+    second.message_id = MessageId::from_bytes([25; 32]);
+    second.input_fact_id = FactId::from_bytes([26; 32]);
+    second.accepted_fact = FactId::from_bytes([27; 32]);
+    second.sequence = NonZeroU64::new(2).expect("nonzero");
+    let second_id = second.message_id;
+    initial.pending_inputs.push(second);
+    let canonical = ScriptedCanonical::new(initial);
+    let runtime = ScriptedRuntime::default();
+    runtime.0.lock().expect("runtime").queue_submission = Some(second_id);
+    let store = MemorySagaStore::default();
+    let manager = ProjectWorkflowManager::new(
+        store.clone(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    );
+    let request = dispatch_request();
+    for _ in 0..2 {
+        assert!(matches!(
+            manager.control(request.clone()).expect("queued"),
+            ProjectCommandOutcome::Queued { .. }
+        ));
+        let pending = canonical.snapshot_value().pending_inputs;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, second_id);
+        let retained = store
+            .find(request.operation_id)
+            .expect("stored")
+            .expect("record");
+        assert_eq!(
+            retained.dispatch_effect,
+            hq_projects::SagaEffectState::Accepted
+        );
+        assert_eq!(
+            runtime.0.lock().expect("runtime").delivery_order,
+            vec![first_id]
+        );
+    }
+    runtime.0.lock().expect("runtime").queue_submission = None;
+    assert!(matches!(
+        manager.repair(16).expect("repair").as_slice(),
+        [ProjectCommandOutcome::Completed { .. }]
+    ));
+    assert!(canonical.snapshot_value().pending_inputs.is_empty());
+    let state = runtime.0.lock().expect("runtime");
+    assert_eq!(state.delivery_order, vec![first_id, second_id]);
+    assert_eq!(state.delivery_calls, 4);
+    assert_ne!(state.delivery_operations[0], state.delivery_operations[1]);
+    assert!(
+        state.delivery_operations[1..]
+            .iter()
+            .all(|id| *id == state.delivery_operations[1])
+    );
+    assert_eq!(
+        canonical
+            .mutations()
+            .iter()
+            .filter(|mutation| matches!(
+                mutation,
+                CanonicalProjectMutationAction::RecordDispatch { .. }
+            ))
+            .count(),
+        2
+    );
 }

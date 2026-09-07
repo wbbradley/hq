@@ -1557,6 +1557,10 @@ pub enum RuntimeObservationDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ProjectCommandOutcomeDto {
+    Queued {
+        operation_id: Id32,
+        stage: ProjectCommandStageDto,
+    },
     Accepted {
         operation_id: Id32,
         stage: ProjectCommandStageDto,
@@ -3795,9 +3799,9 @@ fn validate_runtime(runtime: &RuntimeObservationDto) -> Result<(), ValueError> {
 
 fn validate_project_outcome(outcome: &ProjectCommandOutcomeDto) -> Result<(), ValueError> {
     match outcome {
-        ProjectCommandOutcomeDto::Accepted { .. } | ProjectCommandOutcomeDto::Running { .. } => {
-            Ok(())
-        }
+        ProjectCommandOutcomeDto::Accepted { .. }
+        | ProjectCommandOutcomeDto::Running { .. }
+        | ProjectCommandOutcomeDto::Queued { .. } => Ok(()),
         ProjectCommandOutcomeDto::Completed { runtime, .. } => {
             runtime.as_ref().map_or(Ok(()), validate_runtime)
         }

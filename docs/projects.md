@@ -338,6 +338,15 @@ drains project records on its own: only the current workflow grants delivery eli
 node restart can leave an idle assignment stopped without preventing the next message from resuming
 its saved conversation. Failed readiness leaves the input saved with a resume diagnostic.
 
+The project runtime preserves the exact delivery ledger's distinction between known queued input
+and unknown provider acceptance. A pending ledger record returns a durable, nonterminal queued
+command outcome; the client shows “Your message is saved and waiting for the agent.” It does not
+immediately continue that command in a foreground loop. Later workflow repair reuses the same
+submission and operation identity and records canonical dispatch only after proven acceptance.
+Uncertain ledger evidence instead retains acceptance reconciliation. Missing evidence establishes
+neither queued delivery nor acceptance. Queued commands retain their project reservation across
+restart until a terminal result releases it.
+
 Manual dispatch is not an ordinary messaging step; it is a typed recovery
 action exposed only when stalled-delivery evidence requires intervention.
 

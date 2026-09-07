@@ -1587,6 +1587,13 @@ fn project_action_to_v1(action: &ProjectCommandAction) -> ProjectCommandActionDt
 /// Converts one typed project result into its local API representation.
 pub fn project_command_to_v1(outcome: &ProjectCommandOutcome) -> ProjectCommandOutcomeDto {
     match outcome {
+        ProjectCommandOutcome::Queued {
+            operation_id,
+            stage,
+        } => ProjectCommandOutcomeDto::Queued {
+            operation_id: id32(operation_id.as_bytes()),
+            stage: project_stage_to_v1(*stage),
+        },
         ProjectCommandOutcome::Accepted {
             operation_id,
             stage,

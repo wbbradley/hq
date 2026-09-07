@@ -250,7 +250,7 @@ pub(super) fn load_runnable(
              resource_error_category, resource_error_code, reservation_scheme, reservation_value, \
              updated_at_millis, runtime_session, selected_thread, opened_by_workflow, \
              failure_category, failure_code, pending_canonical_mutation \
-             FROM project_sagas WHERE state_kind IN (1, 4) \
+             FROM project_sagas WHERE state_kind IN (1, 4, 5) \
              ORDER BY updated_at_millis, operation_id LIMIT ?1",
         )
         .map_err(database)?;
@@ -534,7 +534,9 @@ fn release_terminal_reservation(
     let predicate = match &record.state {
         StoredProjectSagaState::Completed(_) => "operation_id = ?1",
         StoredProjectSagaState::Rejected(_) => "operation_id = ?1 AND protects_external_state = 0",
-        StoredProjectSagaState::Running(_) | StoredProjectSagaState::Reconcilable { .. } => {
+        StoredProjectSagaState::Running(_)
+        | StoredProjectSagaState::Queued(_)
+        | StoredProjectSagaState::Reconcilable { .. } => {
             return Ok(());
         }
     };
@@ -561,7 +563,7 @@ fn command_exists(connection: &Connection, command_id: CommandId) -> Result<bool
 fn project_is_busy(connection: &Connection, project_id: ProjectId) -> Result<bool, StoreError> {
     connection
         .query_row(
-            "SELECT count(*) FROM project_sagas WHERE project_id = ?1 AND state_kind IN (1, 4)",
+            "SELECT count(*) FROM project_sagas WHERE project_id = ?1 AND state_kind IN (1, 4, 5)",
             [project_id.as_bytes().as_slice()],
             |row| row.get::<_, i64>(0),
         )
@@ -607,19 +609,21 @@ fn same_request(left: &StoredProjectSaga, right: &StoredProjectSaga) -> bool {
 
 fn state_advances(old: &StoredProjectSagaState, new: &StoredProjectSagaState) -> bool {
     match (old, new) {
-        (StoredProjectSagaState::Running(old), StoredProjectSagaState::Running(new)) => {
-            encode_stage(*new) >= encode_stage(*old)
-        }
         (
-            StoredProjectSagaState::Reconcilable { stage: old, .. },
-            StoredProjectSagaState::Reconcilable { stage: new, .. },
+            StoredProjectSagaState::Queued(old)
+            | StoredProjectSagaState::Reconcilable { stage: old, .. },
+            StoredProjectSagaState::Queued(new)
+            | StoredProjectSagaState::Running(new)
+            | StoredProjectSagaState::Reconcilable { stage: new, .. },
         )
         | (
-            StoredProjectSagaState::Reconcilable { stage: old, .. },
-            StoredProjectSagaState::Running(new),
+            StoredProjectSagaState::Running(old),
+            StoredProjectSagaState::Queued(new) | StoredProjectSagaState::Running(new),
         ) => encode_stage(*new) >= encode_stage(*old),
         (
-            StoredProjectSagaState::Running(_) | StoredProjectSagaState::Reconcilable { .. },
+            StoredProjectSagaState::Running(_)
+            | StoredProjectSagaState::Queued(_)
+            | StoredProjectSagaState::Reconcilable { .. },
             StoredProjectSagaState::Completed(_) | StoredProjectSagaState::Rejected(_),
         )
         | (StoredProjectSagaState::Running(_), StoredProjectSagaState::Reconcilable { .. }) => true,
@@ -679,6 +683,7 @@ fn encode_state(
     workflow_state: &StoredProjectSagaState,
 ) -> (i64, i64, Option<FactId>, Option<i64>, Option<&str>) {
     match workflow_state {
+        StoredProjectSagaState::Queued(stage) => (5, encode_stage(*stage), None, None, None),
         StoredProjectSagaState::Running(stage) => (1, encode_stage(*stage), None, None, None),
         StoredProjectSagaState::Completed(head) => (
             2,
@@ -712,6 +717,7 @@ fn decode_state(
     error_code: Option<String>,
 ) -> rusqlite::Result<StoredProjectSagaState> {
     match (kind, head, error_category, error_code) {
+        (5, None, None, None) => Ok(StoredProjectSagaState::Queued(stage)),
         (1, None, None, None) => Ok(StoredProjectSagaState::Running(stage)),
         (2, Some(head), None, None) if stage == ProjectCommandStage::Complete => {
             Ok(StoredProjectSagaState::Completed(head))

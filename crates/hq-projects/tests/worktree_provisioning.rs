@@ -369,7 +369,7 @@ impl ProjectRuntimePort for UnusedRuntime {
     fn deliver(
         &self,
         _request: &EffectRequest<ProjectRuntimeDelivery>,
-    ) -> Result<EffectOutcome<()>, ApplicationError> {
+    ) -> Result<hq_projects::ProjectDeliveryOutcome, ApplicationError> {
         unavailable()
     }
 

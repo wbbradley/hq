@@ -438,6 +438,9 @@ pub(crate) struct LocalProjectResourceCheck {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum LocalProjectOutcome {
+    Queued {
+        stage: String,
+    },
     Completed {
         project_head: Option<[u8; 32]>,
     },
@@ -665,6 +668,17 @@ pub(crate) fn continue_project_command(
         return Err(CliError::ProjectState);
     }
     let (operation_id, outcome, runtime_state, runtime_code) = match outcome {
+        ProjectCommandOutcomeDto::Queued {
+            operation_id,
+            stage,
+        } => (
+            operation_id.bytes(),
+            LocalProjectOutcome::Queued {
+                stage: project_stage_label(stage).to_owned(),
+            },
+            None,
+            None,
+        ),
         ProjectCommandOutcomeDto::Accepted {
             operation_id,
             stage,
@@ -852,6 +866,9 @@ fn project_result(
             let runtime_state = view.runtime_state.map(str::to_owned);
             let runtime_code = view.runtime_code;
             let outcome = match view.status {
+                "queued" => LocalProjectOutcome::Queued {
+                    stage: view.stage.ok_or(CliError::ProjectState)?.to_owned(),
+                },
                 "accepted" | "running" => LocalProjectOutcome::Running {
                     stage: view.stage.ok_or(CliError::ProjectState)?.to_owned(),
                 },

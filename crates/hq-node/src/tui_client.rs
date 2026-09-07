@@ -1939,7 +1939,8 @@ impl TuiClientPort for LocalTuiClient {
                                 .to_owned(),
                         });
                     }
-                    UiProjectOutcome::ResourcePreview { .. }
+                    UiProjectOutcome::Queued { .. }
+                    | UiProjectOutcome::ResourcePreview { .. }
                     | UiProjectOutcome::ResourceChecks { .. } => {
                         return Err(UiFailure {
                             code: "conversation_stop_response_invalid".to_owned(),
@@ -4211,6 +4212,7 @@ fn local_project_command(action: &UiProjectAction) -> LocalProjectCommand {
 
 fn ui_project_outcome(outcome: LocalProjectOutcome) -> UiProjectOutcome {
     match outcome {
+        LocalProjectOutcome::Queued { stage } => UiProjectOutcome::Queued { stage },
         LocalProjectOutcome::Completed { project_head } => {
             UiProjectOutcome::Completed { project_head }
         }

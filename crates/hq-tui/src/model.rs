@@ -2100,6 +2100,9 @@ pub struct UiProjectResourceCheck {
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiProjectOutcome {
+    Queued {
+        stage: String,
+    },
     Completed {
         project_head: Option<[u8; 32]>,
     },
@@ -13900,7 +13903,8 @@ fn project_command_completed(
             });
             model.project_interaction = Some(UiProjectInteraction::Outcome { result });
         }
-        UiProjectOutcome::Running { .. }
+        UiProjectOutcome::Queued { .. }
+        | UiProjectOutcome::Running { .. }
         | UiProjectOutcome::ResourcePreview { .. }
         | UiProjectOutcome::ResourceChecks { .. } => {
             model.last_failure = None;

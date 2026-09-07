@@ -514,6 +514,19 @@ pub struct ProjectRuntimeDelivery {
     pub body: ContentText,
 }
 
+/// Exact disposition from the sole durable delivery ledger for one project input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProjectDeliveryOutcome {
+    /// The exact provider submission is durably accepted.
+    Accepted,
+    /// The input is durably queued and has not crossed the provider submit boundary.
+    Queued,
+    /// Provider acceptance is unknown and must be looked up before resubmission.
+    AcceptanceUnknown,
+    /// The exact input was definitely rejected.
+    Rejected(DomainError),
+}
+
 /// Project-bound runtime and durable exact-delivery capability.
 pub trait ProjectRuntimePort {
     /// Starts or exactly resumes one project-bound logical worker.
@@ -539,7 +552,7 @@ pub trait ProjectRuntimePort {
     fn deliver(
         &self,
         request: &EffectRequest<ProjectRuntimeDelivery>,
-    ) -> Result<EffectOutcome<()>, hq_application::ApplicationError>;
+    ) -> Result<ProjectDeliveryOutcome, hq_application::ApplicationError>;
 
     /// Stops a non-runnable project worker during compensation using a stable identity.
     fn stop(
@@ -728,7 +741,10 @@ where
             if let Some(outcome) = terminal_outcome(&record) {
                 return Ok(outcome);
             }
-            if matches!(record.state, ProjectSagaState::Reconcilable { .. }) {
+            if matches!(
+                record.state,
+                ProjectSagaState::Reconcilable { .. } | ProjectSagaState::Queued(_)
+            ) {
                 return Ok(progress_outcome(&record));
             }
         }
@@ -2832,7 +2848,7 @@ where
             return Ok(());
         };
         match self.runtime.deliver(&request)? {
-            EffectOutcome::Accepted(()) => match self.mutate(
+            ProjectDeliveryOutcome::Accepted => match self.mutate(
                 record,
                 dispatch_head,
                 b"record-dispatch",
@@ -2859,8 +2875,18 @@ where
                     EffectKind::None,
                 ),
             },
-            EffectOutcome::Rejected(error) => reject(&self.store, record, error),
-            EffectOutcome::Uncertain(_) => {
+            ProjectDeliveryOutcome::Queued => {
+                // Preserve cumulative saga evidence; acceptance of this input is established
+                // only by its exact runtime delivery ledger, never a prior dispatch effect.
+                record.dispatch_operation_id.get_or_insert(operation);
+                if record.dispatch_effect == SagaEffectState::NotStarted {
+                    record.dispatch_effect = SagaEffectState::Pending;
+                }
+                record.state = ProjectSagaState::Queued(ProjectCommandStage::DispatchingInputs);
+                persist(&self.store, record)
+            }
+            ProjectDeliveryOutcome::Rejected(error) => reject(&self.store, record, error),
+            ProjectDeliveryOutcome::AcceptanceUnknown => {
                 record.dispatch_operation_id.get_or_insert(operation);
                 reconcile(
                     &self.store,
@@ -3230,6 +3256,10 @@ fn retirement_from_project(
             operation_id,
             stage,
         }
+        | ProjectCommandOutcome::Queued {
+            operation_id,
+            stage,
+        }
         | ProjectCommandOutcome::Running {
             operation_id,
             stage,
@@ -3524,7 +3554,9 @@ fn select_thread(
 
 fn current_stage(record: &ProjectSagaRecord) -> ProjectCommandStage {
     match &record.state {
-        ProjectSagaState::Running(stage) | ProjectSagaState::Reconcilable { stage, .. } => *stage,
+        ProjectSagaState::Running(stage)
+        | ProjectSagaState::Queued(stage)
+        | ProjectSagaState::Reconcilable { stage, .. } => *stage,
         ProjectSagaState::Completed { .. } | ProjectSagaState::Rejected(_) => {
             ProjectCommandStage::Complete
         }
@@ -3590,12 +3622,18 @@ fn terminal_outcome(record: &ProjectSagaRecord) -> Option<ProjectCommandOutcome>
             runtime: reported_runtime(record),
             external_state_warning: external_state_warning(record),
         }),
-        ProjectSagaState::Running(_) | ProjectSagaState::Reconcilable { .. } => None,
+        ProjectSagaState::Running(_)
+        | ProjectSagaState::Queued(_)
+        | ProjectSagaState::Reconcilable { .. } => None,
     }
 }
 
 fn progress_outcome(record: &ProjectSagaRecord) -> ProjectCommandOutcome {
     match &record.state {
+        ProjectSagaState::Queued(stage) => ProjectCommandOutcome::Queued {
+            operation_id: record.operation_id,
+            stage: *stage,
+        },
         ProjectSagaState::Reconcilable { stage, error } => ProjectCommandOutcome::Reconcilable {
             operation_id: record.operation_id,
             stage: *stage,

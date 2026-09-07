@@ -31,6 +31,8 @@ pub enum StoredProjectEffectState {
 pub enum StoredProjectSagaState {
     /// Bounded execution may continue from this checkpoint.
     Running(ProjectCommandStage),
+    /// Delivery is durably queued without unknown provider acceptance.
+    Queued(ProjectCommandStage),
     /// A canonical stable state committed at this project head.
     Completed(FactId),
     /// The command definitely failed without unknown external truth.

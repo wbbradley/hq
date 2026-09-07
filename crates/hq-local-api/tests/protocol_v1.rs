@@ -1933,3 +1933,23 @@ fn conversation_send_digest_binds_exact_provider_session_and_message() {
         );
     }
 }
+
+#[test]
+fn queued_project_delivery_round_trips_separately_from_uncertain_acceptance() {
+    let outcome = hq_application::ProjectCommandOutcome::Queued {
+        operation_id: OperationId::from_bytes([42; 32]),
+        stage: hq_application::ProjectCommandStage::DispatchingInputs,
+    };
+    let dto = hq_local_api::project_command_to_v1(&outcome);
+    assert_eq!(
+        dto,
+        ProjectCommandOutcomeDto::Queued {
+            operation_id: Id32::new([42; 32]),
+            stage: hq_local_api::protocol::v1::ProjectCommandStageDto::DispatchingInputs,
+        }
+    );
+    round_trip(&WireMessage::Response(ResponseEnvelope::success(
+        RequestId::new(19).expect("request"),
+        ResponseResult::ProjectCommand(dto),
+    )));
+}

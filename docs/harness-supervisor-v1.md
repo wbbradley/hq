@@ -51,6 +51,18 @@ wake/recovery: the project workflow must revalidate current eligibility and expl
 input. Ordinary repair wakes may safely repeat because terminal records are excluded and all
 transitions are idempotent.
 
+The project runtime adapter exposes `Pending` as `Queued`, `Uncertain` as
+`AcceptanceUnknown`, and terminal ledger records as accepted or rejected only after checking the
+complete delivery identity. Project sagas persist queued progress separately from uncertainty and
+return control without immediately retrying. Repair still checks exact acceptance before resume
+and canonical attribution. The saga's cumulative dispatch effect is not proof that a later input
+was accepted: every input requires its own exact ledger evidence.
+
+Body-free project delivery traces distinguish `project_delivery_requested`,
+`project_delivery_queued`, and `project_delivery_acceptance_unknown`. Existing `project_dispatched`
+and `codex_submitted` boundaries report ledger-confirmed acceptance, including replayed receipts;
+they do not count fresh physical provider submissions.
+
 Project dispatch uses `ensure_resumed` to reuse a matching live worker or resume the exact saved
 session without replaying inputs. The worker lock serializes readiness with concurrent launch and
 stop. A live worker for a different project, provider or session rejects the request; a retained
