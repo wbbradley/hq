@@ -1059,6 +1059,9 @@ fn installed_fake_codex_approval_round_trips_through_the_tui() {
         "approval prompt was not rendered: {:?}",
         run.bytes
     );
+    assert!(text_without_csi_sequences(&run.bytes).contains("Approval needed"));
+    assert!(text_without_csi_sequences(&run.bytes).contains("restored-edit"));
+    assert!(!mailbox_contains(&state_root, "unsent approval draft"));
     assert!(mailbox_contains(&state_root, content));
     assert!(mailbox_contains(&state_root, "finished-turn-1"));
     let calls = std::fs::read_to_string(provider_bin.join("calls.log"))
@@ -1545,6 +1548,8 @@ fn run_in_pty_with_trace(
     let mut resource_commit_sent = false;
     let mut provider_completion_released = false;
     let mut interaction_answer_sent = false;
+    let mut approval_draft_typed = false;
+    let mut approval_restoration_probe_sent = false;
     let mut exit_sent = false;
     let mut oversized_to_before_keys = Vec::new();
     let mut before_to_after_keys = Vec::new();
@@ -2351,18 +2356,30 @@ fn run_in_pty_with_trace(
         }
         if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
             && resource_commit_sent
+            && !approval_draft_typed
+            && text_without_csi_sequences(&bytes).contains("Approval needed")
+        {
+            master
+                .write_all(b"unsent approval draft\t")
+                .expect("type draft and hand off");
+            master.flush().expect("draft handoff flushes");
+            approval_draft_typed = true;
+        }
+        if let PtyInteraction::CreateGuidedProjectWork { approval: true, .. } = interaction
+            && resource_commit_sent
+            && approval_draft_typed
             && !interaction_answer_sent
             && {
                 let rendered = text_without_csi_sequences(&bytes);
                 let prompt = "Command for approval-agent";
                 rendered.find(prompt).is_some_and(|position| {
-                    rendered[position + prompt.len()..].contains("approval-agent")
+                    rendered[position + prompt.len()..].contains("Allow once")
                 })
             }
         {
             master
-                .write_all(b"\t\r")
-                .expect("approval focus and confirmation write");
+                .write_all(b"\r")
+                .expect("approval confirmation write");
             master.flush().expect("approval focus flushes");
             interaction_answer_sent = true;
             completion_offset = Some(bytes.len());
@@ -2672,9 +2689,25 @@ fn run_in_pty_with_trace(
         {
             next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
             if mailbox_contains(state_root, "finished-turn-1") {
-                master.write_all(&[0x03]).expect("Ctrl-C writes");
-                master.flush().expect("Ctrl-C flushes");
-                exit_sent = true;
+                let restored = completion_offset.is_some_and(|offset| {
+                    text_without_csi_sequences(&bytes[offset..]).contains("unsent approval draft")
+                });
+                if restored && !approval_restoration_probe_sent {
+                    master
+                        .write_all(b"\x1b[200~ restored-edit\x1b[201~")
+                        .expect("edit restored composer");
+                    master.flush().expect("restored edit flushes");
+                    approval_restoration_probe_sent = true;
+                    completion_offset = Some(bytes.len());
+                } else if approval_restoration_probe_sent
+                    && completion_offset.is_some_and(|offset| {
+                        text_without_csi_sequences(&bytes[offset..]).contains("restored-edit")
+                    })
+                {
+                    master.write_all(&[0x03]).expect("Ctrl-C writes");
+                    master.flush().expect("Ctrl-C flushes");
+                    exit_sent = true;
+                }
             }
         }
         if matches!(interaction, PtyInteraction::CreateExistingProject { .. })

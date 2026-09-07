@@ -94,6 +94,19 @@ exact project, agent, provider, session, and operation evidence. An unresolved, 
 mismatched request becomes recovery evidence with refresh guidance; it is never assigned by label,
 timestamp, arrival order, or selection.
 
+Pending approval does not interrupt typing. The editor shows **Approval needed** in the alert
+color near its bottom. Tab or Shift-Tab preserves the draft and caret and replaces the lower
+editor with the approval choices. From then on, Tab and Shift-Tab cycle between the transcript
+and approval; Escape returns to reading. Enter in the editor still sends a message and cannot
+approve a command. After the presented request resolves, the composer regains focus with its
+exact text and caret, including when the user was reading the transcript. A further request
+requires another explicit handoff. Reading position and tail mode survive these surface changes.
+
+Approval state and in-flight answers retain the complete request correlation, including its
+conversation target. A reused request ID with a different agent, project, provider, session, or
+operation cannot inherit an earlier response or presentation. Background requests do not suspend
+an unrelated editor or take focus when they resolve.
+
 Global questions, forms, confirmations, progress, outcomes, help, and recovery are typed full-pane
 routes rather than overlays.
 

@@ -1411,6 +1411,19 @@ pub struct UiInteraction {
     pub target: UiInteractionTarget,
 }
 
+impl UiInteraction {
+    fn has_same_correlation(&self, other: &Self) -> bool {
+        self.agent_id == other.agent_id
+            && self.project_id == other.project_id
+            && self.provider == other.provider
+            && self.session == other.session
+            && self.request_id == other.request_id
+            && self.operation_id == other.operation_id
+            && self.kind == other.kind
+            && self.target == other.target
+    }
+}
+
 /// Typed placement or recovery result for one provider interaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiInteractionTarget {
@@ -1450,8 +1463,8 @@ pub struct UiCommandApproval {
     pub submitting: Option<EffectId>,
     /// Last scoped answer failure, retained for retry.
     pub failure: Option<UiFailure>,
-    /// Focus restored after this approval disappears.
-    restore_focus: UiFocus,
+    /// Whether the user has handed the lower surface to this request.
+    presented: bool,
 }
 
 /// Closed typed terminal response emitted by the pure model.
@@ -3442,7 +3455,7 @@ pub struct UiModel {
     interaction_modal: Option<UiInteractionModal>,
     command_approvals: BTreeMap<[u8; 32], UiCommandApproval>,
     command_approval_order: VecDeque<[u8; 32]>,
-    pending_interactions: BTreeMap<EffectId, [u8; 32]>,
+    pending_interactions: BTreeMap<EffectId, UiInteraction>,
     project_interaction: Option<UiProjectInteraction>,
     project_summary: Option<UiProjectSummary>,
     project_workspace_level: UiProjectWorkspaceLevel,
@@ -4204,7 +4217,7 @@ impl UiModel {
 
     /// Borrows the first source-ordered command approval for the open conversation.
     pub fn current_command_approval(&self) -> Option<&UiCommandApproval> {
-        let row_id = self.conversation.as_ref()?.row_id.as_str();
+        let row_id = self.active_conversation_row()?;
         self.command_approval_order.iter().find_map(|request_id| {
             let state = self.command_approvals.get(request_id)?;
             matches!(
@@ -4240,13 +4253,25 @@ impl UiModel {
         })
     }
 
+    /// Borrows the approval explicitly presented in the lower surface.
+    pub fn presented_command_approval(&self) -> Option<&UiCommandApproval> {
+        self.current_command_approval()
+            .filter(|state| state.presented)
+    }
+
+    fn present_command_approval(&mut self) {
+        if let Some(request_id) = self
+            .current_command_approval()
+            .map(|state| state.interaction.request_id)
+            && let Some(state) = self.command_approvals.get_mut(&request_id)
+        {
+            state.presented = true;
+        }
+    }
+
     /// Reports whether a retained draft is temporarily replaced by its command approval.
     pub fn draft_suspended_by_command_approval(&self) -> bool {
-        self.mailbox_draft.is_some()
-            && self
-                .command_approvals
-                .values()
-                .any(|state| state.restore_focus == UiFocus::Draft)
+        self.mailbox_draft.is_some() && self.presented_command_approval().is_some()
     }
 
     /// Borrows the current project interaction.
@@ -6339,8 +6364,10 @@ fn synchronize_global_route(model: &mut UiModel) {
                 effect_id: model
                     .pending_interactions
                     .iter()
-                    .find_map(|(effect_id, request_id)| {
-                        (*request_id == interaction.request_id).then_some(*effect_id)
+                    .find_map(|(effect_id, pending)| {
+                        pending
+                            .has_same_correlation(interaction)
+                            .then_some(*effect_id)
                     })
                     .unwrap_or(EffectId(NonZeroU64::MIN)),
             },
@@ -6749,9 +6776,7 @@ fn interactions_observed(
     interactions: Vec<UiInteraction>,
     effects: &mut Vec<UiEffect>,
 ) {
-    let prior_inline_restore = model
-        .current_command_approval()
-        .map(|state| state.restore_focus);
+    let prior_inline_restore = model.current_command_approval().cloned();
     let (commands, modals): (Vec<_>, Vec<_>) = interactions
         .into_iter()
         .partition(|interaction| interaction.kind == UiInteractionKind::CommandApproval);
@@ -6762,33 +6787,44 @@ fn interactions_observed(
     for interaction in commands {
         let request_id = interaction.request_id;
         order.push_back(request_id);
-        let mut state = previous.get(&request_id).cloned().unwrap_or_else(|| {
-            let restore_focus = if model.mailbox_draft.is_some() {
-                UiFocus::Draft
-            } else {
-                UiFocus::Conversation
-            };
-            UiCommandApproval {
+        let mut state = previous
+            .get(&request_id)
+            .filter(|state| state.interaction.has_same_correlation(&interaction))
+            .cloned()
+            .unwrap_or_else(|| UiCommandApproval {
                 interaction: interaction.clone(),
                 selected: 0,
                 submitting: None,
                 failure: None,
-                restore_focus,
-            }
-        });
-        state.selected = state
-            .selected
-            .min(interaction.choices.len().saturating_sub(1));
+                presented: false,
+            });
+        let selected = state
+            .interaction
+            .choices
+            .get(state.selected)
+            .and_then(|chosen| {
+                interaction
+                    .choices
+                    .iter()
+                    .position(|choice| choice.value == chosen.value)
+            });
+        if selected.is_none() && state.submitting.is_none() {
+            state.presented = false;
+        }
+        state.selected = selected.unwrap_or(0);
         state.interaction = interaction;
         model.command_approvals.insert(request_id, state);
     }
     model.command_approval_order = order;
-    model.pending_interactions.retain(|_, request_id| {
-        model.command_approvals.contains_key(request_id)
+    model.pending_interactions.retain(|_, pending| {
+        model
+            .command_approvals
+            .get(&pending.request_id)
+            .is_some_and(|state| state.interaction.has_same_correlation(pending))
             || model
                 .interactions
                 .iter()
-                .any(|interaction| interaction.request_id == *request_id)
+                .any(|interaction| interaction.has_same_correlation(pending))
     });
 
     match model.interaction_modal.take() {
@@ -6829,23 +6865,17 @@ fn interactions_observed(
     effects.push(UiEffect::RequestRedraw);
 }
 
-fn reconcile_command_approval_focus(model: &mut UiModel, prior_restore: Option<UiFocus>) {
+fn reconcile_command_approval_focus(model: &mut UiModel, prior_restore: Option<UiCommandApproval>) {
     if model.interaction_modal.is_some() {
         return;
     }
-    if model.current_command_approval().is_some() {
-        if matches!(model.focus, UiFocus::Draft) {
+    let prior_presented = prior_restore.is_some_and(|state| state.presented);
+    if model.presented_command_approval().is_some() {
+        if model.focus == UiFocus::Draft {
             model.focus = UiFocus::Approval;
         }
-    } else if model.focus == UiFocus::Approval
-        && !model.command_approvals.values().any(|state| {
-            matches!(
-                state.interaction.target,
-                UiInteractionTarget::Unresolved { .. }
-            )
-        })
-    {
-        model.focus = if prior_restore == Some(UiFocus::Draft) && model.mailbox_draft.is_some() {
+    } else if model.focus == UiFocus::Approval || prior_presented {
+        model.focus = if model.mailbox_draft.is_some() {
             UiFocus::Draft
         } else {
             UiFocus::Conversation
@@ -6873,7 +6903,11 @@ fn interaction_answered(
     outcome: UiInteractionAnswerOutcome,
     effects: &mut Vec<UiEffect>,
 ) {
-    if model.pending_interactions.get(&effect_id) != Some(&request_id) {
+    if model
+        .pending_interactions
+        .get(&effect_id)
+        .is_none_or(|pending| pending.request_id != request_id)
+    {
         return;
     }
     model.pending_interactions.remove(&effect_id);
@@ -6904,14 +6938,11 @@ fn interaction_answered(
         });
     }
     if let Some(command) = removed_command
-        && model.focus == UiFocus::Approval
-        && model.current_command_approval().is_none()
+        && command.presented
+        && matches!(&command.interaction.target, UiInteractionTarget::Conversation { row_id }
+            if model.active_conversation_row() == Some(row_id.as_str()))
     {
-        model.focus = if command.restore_focus == UiFocus::Draft && model.mailbox_draft.is_some() {
-            UiFocus::Draft
-        } else {
-            UiFocus::Conversation
-        };
+        reconcile_command_approval_focus(model, Some(command));
     }
     effects.push(UiEffect::RequestRedraw);
 }
@@ -6923,7 +6954,11 @@ fn interaction_answer_failed(
     failure: UiFailure,
     effects: &mut Vec<UiEffect>,
 ) {
-    if model.pending_interactions.get(&effect_id) != Some(&request_id) {
+    if model
+        .pending_interactions
+        .get(&effect_id)
+        .is_none_or(|pending| pending.request_id != request_id)
+    {
         return;
     }
     model.pending_interactions.remove(&effect_id);
@@ -7110,6 +7145,9 @@ fn apply_input(
                 UiFocus::Conversation | UiFocus::Approval => UiFocus::Conversation,
                 UiFocus::Draft => UiFocus::Draft,
             };
+            if next == UiFocus::Approval {
+                model.present_command_approval();
+            }
             let changed = next != model.focus;
             model.focus = next;
             changed
@@ -8111,9 +8149,7 @@ fn apply_interaction_modal_input(
     };
     if let Some(response) = response {
         let id = model.allocate_effect()?;
-        model
-            .pending_interactions
-            .insert(id, interaction.request_id);
+        model.pending_interactions.insert(id, interaction.clone());
         model.interaction_modal = Some(UiInteractionModal::Submitting {
             interaction: interaction.clone(),
             selected,
@@ -8150,17 +8186,18 @@ fn apply_command_approval_input(
     let Some(mut state) = model.command_approvals.remove(&request_id) else {
         return Ok(false);
     };
-    if state.submitting.is_some() {
+    if state.submitting.is_some()
+        && !matches!(
+            input,
+            UiInput::Escape | UiInput::NextFocus | UiInput::PreviousFocus
+        )
+    {
         model.command_approvals.insert(request_id, state);
         return Ok(false);
     }
     let changed = match input {
-        UiInput::Escape | UiInput::PreviousFocus => {
+        UiInput::Escape | UiInput::PreviousFocus | UiInput::NextFocus => {
             model.focus = UiFocus::Conversation;
-            true
-        }
-        UiInput::NextFocus => {
-            model.focus = UiFocus::Content;
             true
         }
         UiInput::NextItem if !state.interaction.choices.is_empty() => {
@@ -8191,7 +8228,9 @@ fn apply_command_approval_input(
                 .map(|choice| UiInteractionResponse::Choice(choice.value.clone()))
             {
                 let id = model.allocate_effect()?;
-                model.pending_interactions.insert(id, request_id);
+                model
+                    .pending_interactions
+                    .insert(id, state.interaction.clone());
                 state.submitting = Some(id);
                 state.failure = None;
                 effects.push(UiEffect::AnswerInteraction {
@@ -9153,7 +9192,12 @@ fn apply_draft_input(
             UiInput::Escape | UiInput::NextFocus | UiInput::PreviousFocus
         )
     {
-        model.focus = UiFocus::Conversation;
+        if !matches!(input, UiInput::Escape) && model.current_command_approval().is_some() {
+            model.present_command_approval();
+            model.focus = UiFocus::Approval;
+        } else {
+            model.focus = UiFocus::Conversation;
+        }
         return Ok(true);
     }
     if matches!(input, UiInput::Escape) {
@@ -11828,7 +11872,7 @@ fn mailbox_shortcut(
             Ok(false)
         }
         'r' => {
-            if model.current_command_approval().is_some() {
+            if model.presented_command_approval().is_some() {
                 return Ok(false);
             }
             if let Some(setup) = model.selected_setup().cloned() {
@@ -12513,7 +12557,7 @@ fn open_conversation_composer(
     entering: bool,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
-    if model.current_command_approval().is_some() {
+    if model.presented_command_approval().is_some() {
         return Ok(());
     }
     let target = selected_conversation_target(model)

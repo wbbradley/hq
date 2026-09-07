@@ -181,6 +181,11 @@ fn command_approval_renders_inline_without_covering_the_workspace() {
             },
         )
         .expect("approval appears inline");
+        let pending = render_text(&observed.model);
+        assert!(pending.contains("Approval needed"), "{size:?}\n{pending}");
+        assert!(!pending.contains("Run cargo test?"));
+        let observed = update(observed.model, UiEvent::Input(UiInput::NextFocus))
+            .expect("explicit approval handoff");
         let rendered = render_text(&observed.model);
         assert!(rendered.contains("Command for Alice · HQ"));
         assert!(rendered.contains("Run cargo test?"));
@@ -3812,5 +3817,165 @@ fn failed_conversation_draft_load_shows_retry_instead_of_send() {
         assert!(screen.contains("Could not load draft"), "{screen}");
         assert!(screen.contains("Enter retry"), "{screen}");
         assert!(!screen.contains("Enter send"), "{screen}");
+    }
+}
+
+fn conversation_command_approval() -> UiInteraction {
+    UiInteraction {
+        agent_id: [1; 32],
+        agent_name: "Alice".to_owned(),
+        project_id: None,
+        project_name: None,
+        provider: "codex".to_owned(),
+        session: "session".to_owned(),
+        request_id: [3; 32],
+        operation_id: [4; 32],
+        kind: UiInteractionKind::CommandApproval,
+        prompt: "Run cargo test?".to_owned(),
+        choices: vec![UiInteractionChoice {
+            value: "accept".to_owned(),
+            label: "Allow once".to_owned(),
+        }],
+        allow_text: false,
+        target: UiInteractionTarget::Conversation {
+            row_id: "deploy-9".to_owned(),
+        },
+    }
+}
+
+#[test]
+fn pending_approval_alert_retains_editable_caret_and_restores_exact_cursor() {
+    for size in [
+        UiSize {
+            width: 104,
+            height: 24,
+        },
+        UiSize {
+            width: 72,
+            height: 20,
+        },
+        UiSize {
+            width: 40,
+            height: 10,
+        },
+    ] {
+        let model = conversation_model(size);
+        let composing =
+            update(model, UiEvent::Input(UiInput::NextFocus)).expect("approval rendering scenario");
+        let pasted = update(
+            composing.model,
+            UiEvent::Input(UiInput::Paste("draft retained".to_owned())),
+        )
+        .expect("approval rendering scenario");
+        let home = update(pasted.model, UiEvent::Input(UiInput::MoveCursorHome))
+            .expect("approval rendering scenario");
+        let moved = update(home.model, UiEvent::Input(UiInput::MoveCharacterForward))
+            .expect("approval rendering scenario");
+        let observed = update(
+            moved.model,
+            UiEvent::InteractionsObserved {
+                interactions: vec![conversation_command_approval()],
+            },
+        )
+        .expect("approval rendering scenario");
+        let alert_color = Color::Rgb(17, 29, 43);
+        let caret_color = Color::Rgb(83, 97, 101);
+        let theme = UiTheme::terminal()
+            .with_style(UiThemeRole::Attention, Style::new().fg(alert_color))
+            .with_style(UiThemeRole::Cursor, Style::new().bg(caret_color));
+        let buffer = render_buffer_with_theme(&observed.model, &theme);
+        let (x, y) = find_text_start(&buffer, "Approval needed");
+        assert_eq!(buffer[(x, y)].fg, alert_color);
+        assert!(
+            buffer
+                .content
+                .iter()
+                .any(|cell| cell.symbol() == "r" && cell.bg == caret_color),
+            "{size:?}: {}",
+            snapshot_text(&buffer)
+        );
+        assert!(render_text(&observed.model).contains("Tab approval"));
+        let handed = update(observed.model, UiEvent::Input(UiInput::NextFocus))
+            .expect("approval rendering scenario");
+        let shown = render_text(&handed.model);
+        assert!(shown.contains("Run cargo test?"), "{size:?}: {shown}");
+        assert!(!shown.contains("draft retained"));
+        assert!(!shown.contains("Approval needed"));
+        let resolved = update(
+            handed.model,
+            UiEvent::InteractionsObserved {
+                interactions: vec![],
+            },
+        )
+        .expect("approval rendering scenario");
+        let typed = update(resolved.model, UiEvent::Input(UiInput::Character('X')))
+            .expect("approval rendering scenario");
+        assert!(
+            matches!(typed.model.mailbox_draft(), Some(hq_tui::UiMailboxDraftPane::Editing { draft, .. }) if draft.content == "dXraft retained")
+        );
+        assert!(!render_text(&typed.model).contains("Approval needed"));
+    }
+}
+
+#[test]
+fn approval_surface_changes_preserve_observed_reading_position_and_tail_mode() {
+    for follow_tail in [false, true] {
+        let body = (0..80)
+            .map(|row| format!("History paragraph {row:02}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut model = conversation_model_with_content(
+            UiSize {
+                width: 48,
+                height: 20,
+            },
+            UiMessageState::Open,
+            None,
+            &body,
+            "Still working",
+        );
+        let observation = render_observation(&model);
+        model = update(model, UiEvent::ConversationViewportObserved { observation })
+            .expect("approval rendering scenario")
+            .model;
+        if !follow_tail {
+            model = update(model, UiEvent::Input(UiInput::PreviousItem))
+                .expect("approval rendering scenario")
+                .model;
+        }
+        let position = model.conversation_viewport_position().cloned();
+        model = update(model, UiEvent::Input(UiInput::NextFocus))
+            .expect("approval rendering scenario")
+            .model;
+        model = update(
+            model,
+            UiEvent::Input(UiInput::Paste("draft line\n".repeat(12))),
+        )
+        .expect("approval rendering scenario")
+        .model;
+        let events = [
+            UiEvent::InteractionsObserved {
+                interactions: vec![conversation_command_approval()],
+            },
+            UiEvent::Input(UiInput::NextFocus),
+            UiEvent::Input(UiInput::PreviousFocus),
+            UiEvent::Input(UiInput::NextFocus),
+            UiEvent::InteractionsObserved {
+                interactions: vec![],
+            },
+        ];
+        for event in events {
+            model = update(model, event)
+                .expect("approval rendering scenario")
+                .model;
+            let observation = render_observation(&model);
+            model = update(model, UiEvent::ConversationViewportObserved { observation })
+                .expect("approval rendering scenario")
+                .model;
+            assert_eq!(model.conversation_follows_tail(), follow_tail);
+            if !follow_tail {
+                assert_eq!(model.conversation_viewport_position(), position.as_ref());
+            }
+        }
     }
 }

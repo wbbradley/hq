@@ -279,11 +279,13 @@ fn retained_subscription_view_is_drawn_without_refetching_startup_state() {
 #[test]
 fn idle_shell_wakes_and_draws_a_provider_interaction_without_terminal_polling() {
     let (notify_observer, observer_wake) = mpsc::channel();
-    let dialog_drawn = Arc::new(AtomicBool::new(false));
+    let approval_drawn = Arc::new(AtomicBool::new(false));
     let terminal = WakeDrivenTerminal {
         notify_observer: notify_observer.clone(),
         observer_notified: false,
-        dialog_drawn: Arc::clone(&dialog_drawn),
+        conversation_ready: false,
+        conversation_opened: false,
+        approval_drawn: Arc::clone(&approval_drawn),
     };
     let observer = InteractionObserver {
         wake: observer_wake,
@@ -328,7 +330,7 @@ fn idle_shell_wakes_and_draws_a_provider_interaction_without_terminal_polling() 
         Err(hq_node::TuiShellError::Terminal(TuiTerminalError::Poll))
     );
 
-    assert!(dialog_drawn.load(Ordering::SeqCst));
+    assert!(approval_drawn.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -526,7 +528,9 @@ struct ScriptedTerminal {
 struct WakeDrivenTerminal {
     notify_observer: mpsc::Sender<()>,
     observer_notified: bool,
-    dialog_drawn: Arc<AtomicBool>,
+    conversation_ready: bool,
+    conversation_opened: bool,
+    approval_drawn: Arc<AtomicBool>,
 }
 
 impl TuiTerminalPort for WakeDrivenTerminal {
@@ -546,10 +550,13 @@ impl TuiTerminalPort for WakeDrivenTerminal {
         executor_wake: BorrowedFd<'_>,
         wait: Option<Duration>,
     ) -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
-        if self.dialog_drawn.load(Ordering::SeqCst) {
+        if self.approval_drawn.load(Ordering::SeqCst) {
             return Err(TuiTerminalError::Poll);
         }
-        if !self.observer_notified {
+        if self.conversation_ready && !self.conversation_opened {
+            return Ok(Some(TuiTerminalEvent::Input(UiInput::Activate)));
+        }
+        if self.conversation_opened && !self.observer_notified {
             self.observer_notified = true;
             self.notify_observer.send(()).expect("wake observer");
         }
@@ -570,8 +577,10 @@ impl TuiTerminalPort for WakeDrivenTerminal {
         &mut self,
         model: &UiModel,
     ) -> Result<Option<UiConversationViewportObservation>, TuiTerminalError> {
+        self.conversation_ready = model.selected_row().is_some();
+        self.conversation_opened = matches!(model.active_route(), UiRoute::Conversation { .. });
         if model.current_command_approval().is_some() {
-            self.dialog_drawn.store(true, Ordering::SeqCst);
+            self.approval_drawn.store(true, Ordering::SeqCst);
         }
         Ok(None)
     }

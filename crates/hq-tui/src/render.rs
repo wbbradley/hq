@@ -3299,7 +3299,7 @@ fn render_inbox_detail(
     outer_border: Borders,
     cache: &mut UiRenderCache,
 ) {
-    if let Some(approval) = model.current_command_approval() {
+    if let Some(approval) = model.presented_command_approval() {
         let approval_height = (area.height / 3).max(7).min(area.height.saturating_sub(2));
         let [conversation, approval_area] =
             Layout::vertical([Constraint::Min(2), Constraint::Length(approval_height)]).areas(area);
@@ -3318,6 +3318,15 @@ fn render_inbox_detail(
             Layout::vertical([Constraint::Min(1), Constraint::Length(draft_height)]).areas(area);
         render_conversation(frame, model, theme, conversation, outer_border, cache);
         render_draft_pane(frame, model, theme, draft, Borders::TOP | outer_border);
+    } else if model.current_command_approval().is_some() {
+        let [transcript, alert] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+        render_conversation(frame, model, theme, transcript, outer_border, cache);
+        frame.render_widget(
+            Paragraph::new("Approval needed · Tab review")
+                .style(theme.style(UiThemeRole::Attention)),
+            alert,
+        );
     } else {
         render_conversation(frame, model, theme, area, outer_border, cache);
     }
@@ -3432,6 +3441,28 @@ fn render_command_approval(
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+fn render_pending_approval_notice(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+) -> Rect {
+    if model.current_command_approval().is_some() && model.presented_command_approval().is_none() {
+        let [editor, alert] = if area.height > 1 {
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area)
+        } else {
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(15)]).areas(area)
+        };
+        frame.render_widget(
+            Paragraph::new("Approval needed").style(theme.style(UiThemeRole::Attention)),
+            alert,
+        );
+        editor
+    } else {
+        area
+    }
+}
+
 fn render_draft_pane(
     frame: &mut Frame<'_>,
     model: &UiModel,
@@ -3442,6 +3473,7 @@ fn render_draft_pane(
     let Some(draft_pane) = model.mailbox_draft() else {
         return;
     };
+    let area = render_pending_approval_notice(frame, model, theme, area);
     if render_compact_draft(frame, model, theme, draft_pane, area) {
         return;
     }
@@ -3507,7 +3539,9 @@ fn render_draft_pane(
                     .areas(inner);
             render_draft_editor(frame, model, theme, &draft.content, text_area);
             let hint_text = model.message_field_error().unwrap_or(
-                if matches!(model.active_route(), UiRoute::Conversation { .. }) {
+                if model.current_command_approval().is_some() {
+                    "Tab approval · Enter send · Esc read"
+                } else if matches!(model.active_route(), UiRoute::Conversation { .. }) {
                     "Enter send · Ctrl-J/Shift-Enter newline · Tab/Esc read"
                 } else {
                     "Enter send · Ctrl-J/Shift-Enter newline · Esc close"
@@ -5044,7 +5078,9 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     } else if model.focus() == UiFocus::Approval {
         " j/k choose · Enter confirm · Esc leave · Tab switch pane · ? help · q quit".to_owned()
     } else if model.focus() == UiFocus::Draft {
-        if matches!(model.active_route(), UiRoute::Conversation { .. }) {
+        if model.current_command_approval().is_some() {
+            " Tab approval · Enter send · Ctrl-J/Shift-Enter newline · Esc read".to_owned()
+        } else if matches!(model.active_route(), UiRoute::Conversation { .. }) {
             " Enter send · Ctrl-J/Shift-Enter newline · Tab/Esc read · ? help · q quit".to_owned()
         } else {
             " Enter send · Ctrl-J/Shift-Enter newline · Esc close · ? help · q quit".to_owned()
@@ -5150,7 +5186,9 @@ fn conversation_footer(model: &UiModel) -> String {
         "End latest",
         "Enter inspect",
     ];
-    if model.mailbox_draft().is_some() {
+    if model.current_command_approval().is_some() {
+        controls.push("Tab approval");
+    } else if model.mailbox_draft().is_some() {
         controls.push("Tab compose");
     }
     if matches!(

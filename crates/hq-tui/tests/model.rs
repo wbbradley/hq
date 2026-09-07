@@ -3382,6 +3382,9 @@ fn workspace_replacement_retains_draft_data_without_restoring_hidden_input_focus
         },
     )
     .expect("approval observed");
+    assert_eq!(observed.model.focus(), UiFocus::Draft);
+    let observed = update(observed.model, UiEvent::Input(UiInput::NextFocus))
+        .expect("explicit approval handoff");
     assert_eq!(observed.model.focus(), UiFocus::Approval);
     assert!(matches!(
         observed.model.mailbox_draft(),
@@ -3468,6 +3471,9 @@ fn simultaneous_command_approvals_follow_only_the_selected_conversation() {
         },
     )
     .expect("second conversation loads");
+    assert!(switched.model.current_command_approval().is_none());
+    let switched = update(switched.model, UiEvent::Input(UiInput::Activate))
+        .expect("open second conversation");
     assert_eq!(
         switched
             .model
@@ -3478,7 +3484,7 @@ fn simultaneous_command_approvals_follow_only_the_selected_conversation() {
 }
 
 #[test]
-fn approval_focus_survives_a_transient_unresolved_alias_remap() {
+fn unresolved_approval_remap_requires_fresh_handoff_after_resolution() {
     let opened = opened_conversation(vec![entry("activity-a", true)]);
     let observed = update(
         opened,
@@ -3502,7 +3508,7 @@ fn approval_focus_survives_a_transient_unresolved_alias_remap() {
         },
     )
     .expect("transient remap retained");
-    assert_eq!(remapping.model.focus(), UiFocus::Approval);
+    assert_eq!(remapping.model.focus(), UiFocus::Conversation);
 
     let resolved = update(
         remapping.model,
@@ -3511,8 +3517,12 @@ fn approval_focus_survives_a_transient_unresolved_alias_remap() {
         },
     )
     .expect("alias remap resolves");
-    assert_eq!(resolved.model.focus(), UiFocus::Approval);
+    assert_eq!(resolved.model.focus(), UiFocus::Conversation);
     assert!(resolved.model.current_command_approval().is_some());
+    assert!(resolved.model.presented_command_approval().is_none());
+    let handed =
+        update(resolved.model, UiEvent::Input(UiInput::NextFocus)).expect("approval scenario");
+    assert_eq!(handed.model.focus(), UiFocus::Approval);
 }
 
 #[test]
@@ -3546,6 +3556,10 @@ fn materialized_view_and_approval_alias_reconcile_atomically() {
     )
     .expect("view and approval alias reconcile together");
     assert_eq!(reconciled.model.selected_row(), Some("agent-id"));
+    // An untyped replacement row does not prove this is the same open conversation.
+    assert!(reconciled.model.current_command_approval().is_none());
+    let reconciled = update(reconciled.model, UiEvent::Input(UiInput::Activate))
+        .expect("open replacement conversation");
     assert!(reconciled.model.current_command_approval().is_some());
 }
 
@@ -9990,7 +10004,7 @@ fn starting_a_personal_note_from_a_conversation_uses_a_standalone_editor() {
 }
 
 #[test]
-fn retained_standalone_draft_does_not_block_opening_the_conversations_own_composer() {
+fn background_approval_keeps_standalone_editing_scoped_before_opening_a_conversation() {
     let source = typed_conversation_snapshot(1);
     let opening = update(
         loaded_model(source),
@@ -10011,7 +10025,7 @@ fn retained_standalone_draft_does_not_block_opening_the_conversations_own_compos
         },
     )
     .expect("note");
-    // Workspace replacement can occur while an interaction temporarily owns focus.
+    // A background conversation request cannot commandeer a standalone note.
     let approval = update(
         loaded.model,
         UiEvent::InteractionsObserved {
@@ -10019,6 +10033,21 @@ fn retained_standalone_draft_does_not_block_opening_the_conversations_own_compos
         },
     )
     .expect("request");
+    assert_eq!(approval.model.focus(), UiFocus::Draft);
+    assert!(approval.model.current_command_approval().is_none());
+    assert!(!approval.model.draft_suspended_by_command_approval());
+    let typed = update(
+        approval.model.clone(),
+        UiEvent::Input(UiInput::Character('4')),
+    )
+    .expect("approval scenario");
+    assert_eq!(typed.model.focus(), UiFocus::Draft);
+    assert!(
+        matches!(typed.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, .. })
+        if draft.content.contains('4'))
+    );
+    let approval =
+        update(approval.model, UiEvent::Input(UiInput::Escape)).expect("close saved note");
     let workspace =
         update(approval.model, UiEvent::Input(UiInput::Character('4'))).expect("Agents");
     let inbox = update(workspace.model, UiEvent::Input(UiInput::Character('1'))).expect("Inbox");
@@ -10151,5 +10180,342 @@ fn returning_from_a_standalone_note_restores_the_conversation_draft_caret() {
         .expect("type at retained caret");
     assert!(
         matches!(edited.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.content == "drafXt")
+    );
+}
+
+#[test]
+fn approval_arrival_keeps_composer_editable_until_explicit_handoff() {
+    for handoff in [UiInput::NextFocus, UiInput::PreviousFocus] {
+        let model = typed_conversation_composer("unsent draft");
+        let observed = update(
+            model,
+            UiEvent::InteractionsObserved {
+                interactions: vec![command_approval(7, "thread-a")],
+            },
+        )
+        .expect("observe approval");
+        assert_eq!(observed.model.focus(), UiFocus::Draft);
+        assert!(!observed.model.draft_suspended_by_command_approval());
+        let typed = update(observed.model, UiEvent::Input(UiInput::Character('!')))
+            .expect("continue typing");
+        assert!(
+            typed
+                .effects
+                .iter()
+                .all(|effect| !matches!(effect, UiEffect::AnswerInteraction { .. }))
+        );
+        let handed = update(typed.model, UiEvent::Input(handoff)).expect("handoff");
+        assert_eq!(handed.model.focus(), UiFocus::Approval);
+        assert!(handed.model.draft_suspended_by_command_approval());
+        let reading = update(handed.model, UiEvent::Input(UiInput::NextFocus)).expect("read");
+        assert_eq!(reading.model.focus(), UiFocus::Conversation);
+        let approval =
+            update(reading.model, UiEvent::Input(UiInput::PreviousFocus)).expect("approval");
+        assert_eq!(approval.model.focus(), UiFocus::Approval);
+    }
+}
+
+#[test]
+fn reused_approval_request_with_new_operation_drops_old_submission_state() {
+    let observed = update(
+        typed_conversation_composer("keep"),
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("approval scenario");
+    let handed =
+        update(observed.model, UiEvent::Input(UiInput::NextFocus)).expect("approval scenario");
+    let submitted =
+        update(handed.model, UiEvent::Input(UiInput::Activate)).expect("approval scenario");
+    assert!(
+        submitted
+            .model
+            .current_command_approval()
+            .expect("approval scenario")
+            .submitting
+            .is_some()
+    );
+    let mut replacement = command_approval(7, "thread-a");
+    replacement.operation_id = [42; 32];
+    let replaced = update(
+        submitted.model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![replacement],
+        },
+    )
+    .expect("approval scenario");
+    assert!(
+        replaced
+            .model
+            .current_command_approval()
+            .expect("approval scenario")
+            .submitting
+            .is_none()
+    );
+    assert!(!replaced.model.draft_suspended_by_command_approval());
+}
+
+#[test]
+fn presented_approval_resolution_restores_composer_even_while_reading() {
+    let observed = update(
+        typed_conversation_composer("retain me"),
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("approval scenario");
+    let handed =
+        update(observed.model, UiEvent::Input(UiInput::NextFocus)).expect("approval scenario");
+    let reading =
+        update(handed.model, UiEvent::Input(UiInput::PreviousFocus)).expect("approval scenario");
+    assert_eq!(reading.model.focus(), UiFocus::Conversation);
+    let resolved = update(
+        reading.model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![],
+        },
+    )
+    .expect("approval scenario");
+    assert_eq!(resolved.model.focus(), UiFocus::Draft);
+    assert!(
+        matches!(resolved.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.content == "retain me")
+    );
+}
+
+#[test]
+fn answering_one_of_multiple_approvals_returns_to_composition_before_next_handoff() {
+    let observed = update(
+        typed_conversation_composer("retained"),
+        UiEvent::InteractionsObserved {
+            interactions: vec![
+                command_approval(7, "thread-a"),
+                command_approval(8, "thread-a"),
+            ],
+        },
+    )
+    .expect("approval scenario");
+    let handed =
+        update(observed.model, UiEvent::Input(UiInput::NextFocus)).expect("approval scenario");
+    let submitted =
+        update(handed.model, UiEvent::Input(UiInput::Activate)).expect("approval scenario");
+    let effect_id = submitted
+        .model
+        .current_command_approval()
+        .expect("approval scenario")
+        .submitting
+        .expect("approval scenario");
+    let answered = update(
+        submitted.model,
+        UiEvent::InteractionAnswered {
+            effect_id,
+            request_id: [7; 32],
+            outcome: hq_tui::UiInteractionAnswerOutcome::Answered,
+        },
+    )
+    .expect("approval scenario");
+    assert_eq!(answered.model.focus(), UiFocus::Draft);
+    assert!(!answered.model.draft_suspended_by_command_approval());
+    assert_eq!(
+        answered
+            .model
+            .current_command_approval()
+            .expect("approval scenario")
+            .interaction
+            .request_id,
+        [8; 32]
+    );
+}
+
+#[test]
+fn old_approval_callbacks_cannot_mutate_replacement_correlation() {
+    let request = command_approval(7, "thread-a");
+    let observed = update(
+        typed_conversation_composer("preserve"),
+        UiEvent::InteractionsObserved {
+            interactions: vec![request.clone()],
+        },
+    )
+    .expect("approval scenario");
+    let handed =
+        update(observed.model, UiEvent::Input(UiInput::NextFocus)).expect("approval scenario");
+    let submitted =
+        update(handed.model, UiEvent::Input(UiInput::Activate)).expect("approval scenario");
+    let effect_id = submitted
+        .model
+        .current_command_approval()
+        .expect("approval scenario")
+        .submitting
+        .expect("approval scenario");
+    let mut replacements = vec![];
+    let mut changed = request.clone();
+    changed.agent_id = [33; 32];
+    replacements.push(changed);
+    let mut changed = request.clone();
+    changed.project_id = Some([33; 32]);
+    replacements.push(changed);
+    let mut changed = request.clone();
+    changed.provider = "other".to_owned();
+    replacements.push(changed);
+    let mut changed = request.clone();
+    changed.session = "other".to_owned();
+    replacements.push(changed);
+    let mut changed = request.clone();
+    changed.operation_id = [33; 32];
+    replacements.push(changed);
+    let mut changed = request;
+    changed.target = UiInteractionTarget::Conversation {
+        row_id: "thread-b".to_owned(),
+    };
+    replacements.push(changed);
+    for replacement in replacements {
+        let observed = update(
+            submitted.model.clone(),
+            UiEvent::InteractionsObserved {
+                interactions: vec![replacement.clone()],
+            },
+        )
+        .expect("approval scenario");
+        let expected = observed.model.current_command_approval().cloned();
+        for event in [
+            UiEvent::InteractionAnswered {
+                effect_id,
+                request_id: [7; 32],
+                outcome: hq_tui::UiInteractionAnswerOutcome::Stale,
+            },
+            UiEvent::InteractionAnswerFailed {
+                effect_id,
+                request_id: [7; 32],
+                failure: UiFailure {
+                    code: "old".to_owned(),
+                    action: "old".to_owned(),
+                },
+            },
+        ] {
+            let ignored = update(observed.model.clone(), event).expect("approval scenario");
+            assert_eq!(ignored.model.current_command_approval(), expected.as_ref());
+            assert!(ignored.model.last_failure().is_none(), "{replacement:?}");
+            assert!(!ignored.model.draft_suspended_by_command_approval());
+        }
+    }
+}
+
+#[test]
+fn enter_in_composer_with_pending_approval_sends_only_the_draft() {
+    let observed = update(
+        typed_conversation_composer("send this"),
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("approval scenario");
+    let sent =
+        update(observed.model, UiEvent::Input(UiInput::Activate)).expect("approval scenario");
+    assert!(
+        !sent
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::AnswerInteraction { .. }))
+    );
+    assert!(
+        sent.effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::SubmitMailboxCommand { .. }))
+    );
+    assert_eq!(sent.model.focus(), UiFocus::Draft);
+    assert!(sent.model.current_command_approval().is_some());
+}
+
+#[test]
+fn opening_a_conversation_with_pending_approval_still_opens_its_composer() {
+    let observed = update(
+        loaded_model(typed_conversation_snapshot(1)),
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("approval scenario");
+    let opened =
+        update(observed.model, UiEvent::Input(UiInput::Activate)).expect("approval scenario");
+    assert_eq!(
+        open_draft_effect(&opened.effects).1,
+        &conversation_draft_target()
+    );
+    assert_eq!(opened.model.focus(), UiFocus::Draft);
+    assert!(!opened.model.draft_suspended_by_command_approval());
+}
+
+#[test]
+fn approval_choice_refresh_preserves_the_selected_typed_value() {
+    let mut request = command_approval(7, "thread-a");
+    request.choices.push(UiInteractionChoice {
+        value: "decline".to_owned(),
+        label: "Deny".to_owned(),
+    });
+    let observed = update(
+        typed_conversation_composer("keep"),
+        UiEvent::InteractionsObserved {
+            interactions: vec![request.clone()],
+        },
+    )
+    .expect("approval scenario");
+    let handed =
+        update(observed.model, UiEvent::Input(UiInput::NextFocus)).expect("approval scenario");
+    let selected =
+        update(handed.model, UiEvent::Input(UiInput::NextItem)).expect("approval scenario");
+    let chosen = selected
+        .model
+        .current_command_approval()
+        .expect("approval scenario");
+    let expected = chosen.interaction.choices[chosen.selected].value.clone();
+    let mut reordered = request;
+    reordered.choices.reverse();
+    let refreshed = update(
+        selected.model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![reordered],
+        },
+    )
+    .expect("approval scenario");
+    let submitted =
+        update(refreshed.model, UiEvent::Input(UiInput::Activate)).expect("approval scenario");
+    assert!(submitted.effects.iter().any(|effect| matches!(effect, UiEffect::AnswerInteraction { response: UiInteractionResponse::Choice(value), .. } if value == &expected)));
+}
+
+#[test]
+fn background_approval_completion_cannot_restore_focus_on_another_route() {
+    let observed = update(
+        typed_conversation_composer("keep"),
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("approval scenario");
+    let handed =
+        update(observed.model, UiEvent::Input(UiInput::NextFocus)).expect("approval scenario");
+    let submitted =
+        update(handed.model, UiEvent::Input(UiInput::Activate)).expect("approval scenario");
+    let effect_id = submitted
+        .model
+        .current_command_approval()
+        .expect("approval scenario")
+        .submitting
+        .expect("approval scenario");
+    let elsewhere = update(submitted.model, UiEvent::Input(UiInput::Character('4')))
+        .expect("approval scenario");
+    assert_eq!(elsewhere.model.section(), UiSection::Agents);
+    let answered = update(
+        elsewhere.model,
+        UiEvent::InteractionAnswered {
+            effect_id,
+            request_id: [7; 32],
+            outcome: hq_tui::UiInteractionAnswerOutcome::Answered,
+        },
+    )
+    .expect("approval scenario");
+    assert_eq!(answered.model.focus(), UiFocus::Content);
+    assert_eq!(answered.model.section(), UiSection::Agents);
+    assert!(
+        matches!(answered.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.content == "keep")
     );
 }
