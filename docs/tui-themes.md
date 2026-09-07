@@ -105,7 +105,7 @@ Every configurable role is listed below. A resolved theme always has a style for
 | `ui.text.technical` | IDs and technical evidence |
 | `ui.heading` | Section headings |
 | `ui.accent` | Primary interactive accent |
-| `conversation.message.self` | Persistent full-width band for your messages, including whitespace and delivery labels |
+| `conversation.author.self` | Your sender name and horizontal separator |
 | `conversation.author.participant` | Named or fallback participant author label |
 | `conversation.project.context` | Project name on project-bound composition surfaces |
 | `conversation.activity` | Neutral or running compact transcript activity |
@@ -188,11 +188,14 @@ may approximate them; HQ does not silently rewrite the theme. Prefer `terminal`,
 `ansi:N` when terminal-native colors are important. The `no-color` theme retains bold, dim, reverse,
 labels, borders, and selection markers so focus and state remain understandable without color.
 
-Your messages use `conversation.message.self` even when unselected and omit the `You` label.
-The terminal theme uses a bright background; no-color uses reverse video; Base16 uses base05
-as the background and base00 as the foreground. Native themes can override this role.
-Selection patches the band with `conversation.selection.focused` or
-`conversation.selection.unfocused`. Markdown retains structural emphasis, links, and layout
-while sharing the resulting band foreground/background so headings, quotes, and code remain
-legible. Successful commands have no completion line; failed and interrupted command footers
-use the activity error and warning roles respectively.
+Your messages use `conversation.author.self` for a `You` label embedded in a full-width
+horizontal rule. Other senders use `conversation.author.participant`. A sender heading appears
+only when the sender changes; grouping uses exact routing identity, not display names.
+Delivery notices remain visible on subsequent messages in the same group.
+Message bodies retain their ordinary Markdown colors. Selection uses
+`conversation.selection.focused` or `conversation.selection.unfocused`.
+
+The built-in Gruvbox dark medium and hard themes use base09 (orange) for successful
+conversation activity, leaving general success indicators green. Successful commands have no
+completion line; failed and interrupted command footers use the activity error and warning
+roles respectively.

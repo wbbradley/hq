@@ -304,7 +304,7 @@ fn locally_authored_messages_only_show_delivery_state_while_it_is_useful() {
             delivery,
         ));
         assert!(rendered.contains(label), "{rendered}");
-        assert!(!rendered.contains("You"), "{rendered}");
+        assert!(rendered.contains("── You"), "{rendered}");
         if delivery == UiMessageDelivery::Sent {
             assert!(!rendered.contains("You · Sent"), "{rendered}");
         }
@@ -312,9 +312,9 @@ fn locally_authored_messages_only_show_delivery_state_while_it_is_useful() {
 }
 
 #[test]
-fn self_message_bands_fill_the_width_and_keep_markdown_legible_across_themes() {
+fn sender_rules_fill_the_width_without_inverting_message_bodies() {
     let native = UiTheme::terminal().with_style(
-        UiThemeRole::ConversationMessageSelf,
+        UiThemeRole::ConversationAuthorSelf,
         Style::new().fg(Color::Black).bg(Color::Yellow),
     );
     let base16 = UiTheme::from_base16(
@@ -375,16 +375,13 @@ fn self_message_bands_fill_the_width_and_keep_markdown_legible_across_themes() {
                 };
                 let buffer = render_buffer_with_theme(&model, &theme);
                 let (_, y) = find_text_start(&buffer, "Can we ship?");
-                let mut surface = theme.style(UiThemeRole::ConversationMessageSelf);
+                let mut surface = theme.style(UiThemeRole::Text);
                 if let Some(role) = selection_role {
                     surface = surface.patch(theme.style(role));
                 }
-                for row in [y - 1, y, y + 1] {
+                for row in [y, y + 1] {
                     for x in 0..width {
                         let cell = buffer.cell((x, row)).expect("band cell");
-                        if let Some(fg) = surface.fg {
-                            assert_eq!(cell.fg, fg);
-                        }
                         if let Some(bg) = surface.bg {
                             assert_eq!(cell.bg, bg);
                         }
@@ -398,7 +395,20 @@ fn self_message_bands_fill_the_width_and_keep_markdown_legible_across_themes() {
                         .modifier
                         .contains(Modifier::BOLD)
                 );
-                assert!(!snapshot_text(&buffer).contains("You"));
+                assert!(snapshot_text(&buffer).contains("── You"));
+                assert_eq!(
+                    buffer.cell((width - 1, y - 1)).expect("rule end").symbol(),
+                    "─"
+                );
+                if selection_role.is_none() {
+                    assert!(
+                        !buffer
+                            .cell((0, y))
+                            .expect("message body")
+                            .modifier
+                            .contains(Modifier::REVERSED)
+                    );
+                }
             }
         }
     }

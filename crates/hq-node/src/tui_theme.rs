@@ -801,7 +801,14 @@ fn builtin_theme(name: &str) -> Result<Option<UiTheme>, TuiThemeError> {
         _ => BUILTIN_BASE16
             .iter()
             .find(|(selector, _)| *selector == name)
-            .map(|(_, bytes)| parse_base16(bytes, Path::new(name)))
+            .map(|(_, bytes)| {
+                let mut theme = parse_base16(bytes, Path::new(name))?;
+                if matches!(name, "gruvbox-dark-medium" | "gruvbox-dark-hard") {
+                    let orange = theme.style(UiThemeRole::ConversationProjectContext);
+                    theme = theme.with_style(UiThemeRole::ConversationActivitySuccess, orange);
+                }
+                Ok(theme)
+            })
             .transpose(),
     }
 }
@@ -850,6 +857,21 @@ mod tests {
         BUILTIN_NAMES, NativeThemeDto, StyleDto, ThemeResolver, TuiThemeEnvironment, builtin_theme,
         parse_base16, parse_literal_color,
     };
+
+    #[test]
+    fn dark_medium_and_hard_use_orange_for_completed_activity() {
+        for name in ["gruvbox-dark-medium", "gruvbox-dark-hard"] {
+            let theme = builtin_theme(name).expect("valid theme").expect("builtin");
+            assert_eq!(
+                theme.style(UiThemeRole::ConversationActivitySuccess).fg,
+                Some(Color::Rgb(254, 128, 25))
+            );
+            assert_eq!(
+                theme.style(UiThemeRole::Success).fg,
+                Some(Color::Rgb(184, 187, 38))
+            );
+        }
+    }
 
     #[test]
     fn color_vocabulary_is_exact() {
@@ -902,12 +924,12 @@ mod tests {
     }
 
     #[test]
-    fn native_theme_configures_the_self_message_surface() {
+    fn native_theme_configures_the_self_sender_heading() {
         let resolver = ThemeResolver::new(None);
         let definition: NativeThemeDto = toml::from_str(
             r##"
             inherits = "terminal"
-            [styles."conversation.message.self"]
+            [styles."conversation.author.self"]
             fg = "#112233"
             bg = "#ddeeff"
             modifiers = []
@@ -922,8 +944,8 @@ mod tests {
                 0,
                 &mut Vec::new(),
             )
-            .expect("self surface role");
-        let surface = theme.style(UiThemeRole::ConversationMessageSelf);
+            .expect("self sender role");
+        let surface = theme.style(UiThemeRole::ConversationAuthorSelf);
         assert_eq!(surface.fg, Some(Color::Rgb(17, 34, 51)));
         assert_eq!(surface.bg, Some(Color::Rgb(221, 238, 255)));
     }

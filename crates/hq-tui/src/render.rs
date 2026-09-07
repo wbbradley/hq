@@ -4062,9 +4062,20 @@ fn render_conversation_entries(
     if visible_entries.is_empty() {
         return;
     }
+    let mut previous_message = None;
     let layouts = visible_entries
         .iter()
-        .map(|entry| conversation_entry_layout(entry, area.width, theme, cache))
+        .map(|entry| {
+            let show_sender =
+                !previous_message.is_some_and(|previous| same_message_sender(previous, entry));
+            if matches!(
+                entry.presentation,
+                UiConversationEntryPresentation::Message { .. }
+            ) {
+                previous_message = Some(*entry);
+            }
+            conversation_entry_layout(entry, area.width, theme, cache, show_sender)
+        })
         .collect::<Vec<_>>();
     let heights = layouts
         .iter()
@@ -4139,18 +4150,50 @@ struct ConversationEntryLayout {
     height: u16,
 }
 
+// Routing contains the exact sender address, independently of the display name.
+// Activity rows do not introduce a new message sender. Missing sender evidence
+// never causes unrelated participants with identical labels to be grouped.
+fn same_message_sender(left: &UiConversationEntry, right: &UiConversationEntry) -> bool {
+    fn sender(entry: &UiConversationEntry) -> Option<&str> {
+        entry.technical.iter().find_map(|section| match section {
+            UiTechnicalSection::Routing { sender, .. } => Some(sender.as_str()),
+            _ => None,
+        })
+    }
+    match (&left.presentation, &right.presentation) {
+        (
+            UiConversationEntryPresentation::Message {
+                author: left_author,
+                ..
+            },
+            UiConversationEntryPresentation::Message {
+                author: right_author,
+                ..
+            },
+        ) => match (sender(left), sender(right)) {
+            (Some(left), Some(right)) => left == right,
+            (None, None) => matches!(
+                (left_author, right_author),
+                (UiConversationAuthor::You, UiConversationAuthor::You)
+            ),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 fn conversation_entry_layout(
     entry: &UiConversationEntry,
     width: u16,
     theme: &UiTheme,
     cache: &mut UiRenderCache,
+    show_sender: bool,
 ) -> ConversationEntryLayout {
     match &entry.presentation {
         UiConversationEntryPresentation::Message { author, body } => {
             let message = cache.messages.render(&entry.id, body, width, theme);
-            let self_authored = matches!(author, UiConversationAuthor::You);
             let (author, author_role) = match author {
-                UiConversationAuthor::You => ("", UiThemeRole::ConversationMessageSelf),
+                UiConversationAuthor::You => ("You", UiThemeRole::ConversationAuthorSelf),
                 UiConversationAuthor::Participant(label) => {
                     (label.as_str(), UiThemeRole::ConversationAuthorParticipant)
                 }
@@ -4173,15 +4216,23 @@ fn conversation_entry_layout(
                 Some(UiMessageState::Open) | None => "",
             };
             let mut rows = Vec::with_capacity(usize::from(message.body_height()).saturating_add(2));
-            let label = format!("{author}{delivery}{exceptional}");
-            rows.push(Line::styled(
-                if self_authored {
-                    label.trim_start_matches(" · ").to_owned()
-                } else {
-                    label
-                },
-                theme.style(author_role),
-            ));
+            if show_sender {
+                let label = format!("── {author}{delivery}{exceptional} ");
+                let label = display_prefix(&label, usize::from(width));
+                let rule = "─".repeat(usize::from(width).saturating_sub(label.width()));
+                rows.push(Line::styled(
+                    format!("{label}{rule}"),
+                    theme.style(author_role),
+                ));
+            } else {
+                let status = format!("{delivery}{exceptional}");
+                if !status.is_empty() {
+                    rows.push(Line::styled(
+                        status.trim_start_matches(" · ").to_owned(),
+                        theme.style(author_role),
+                    ));
+                }
+            }
             if message.text().lines.is_empty() {
                 rows.push(Line::default());
             } else {
@@ -4622,13 +4673,6 @@ fn render_conversation_entry(
     if area.is_empty() {
         return;
     }
-    let self_authored = matches!(
-        entry.presentation,
-        UiConversationEntryPresentation::Message {
-            author: UiConversationAuthor::You,
-            ..
-        }
-    );
     let selected = model.conversation_anchor() == Some(entry.id.as_str());
     let selection = (selected && matches!(model.focus(), UiFocus::Conversation | UiFocus::Draft))
         .then(|| {
@@ -4640,19 +4684,7 @@ fn render_conversation_entry(
                 },
             )
         });
-    let surface = if self_authored {
-        Some(selection.map_or(
-            theme.style(UiThemeRole::ConversationMessageSelf),
-            |selection| {
-                theme
-                    .style(UiThemeRole::ConversationMessageSelf)
-                    .patch(selection)
-            },
-        ))
-    } else {
-        selection
-    };
-    if let Some(surface) = surface {
+    if let Some(surface) = selection {
         frame.render_widget(Block::new().style(surface), area);
     }
     let lines = layout
@@ -4661,16 +4693,6 @@ fn render_conversation_entry(
         .skip(usize::from(first_row))
         .take(usize::from(area.height))
         .cloned()
-        .map(|mut line| {
-            if self_authored && let Some(surface) = surface {
-                line.style = line.style.patch(surface);
-                for span in &mut line.spans {
-                    // Keep Markdown structure while sharing the band's contrast pair.
-                    span.style = span.style.patch(surface);
-                }
-            }
-            line
-        })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), area);
     let continues_above = first_row > 0;
@@ -5153,23 +5175,85 @@ mod tests {
     }
 
     #[test]
+    fn sender_groups_use_routing_identity_and_retain_delivery_notices() {
+        let mut first = message("one");
+        first.presentation = UiConversationEntryPresentation::Message {
+            author: UiConversationAuthor::Participant("Alice".to_owned()),
+            body: "one".to_owned(),
+        };
+        let mut second = first.clone();
+        assert!(!super::same_message_sender(&first, &second));
+        first.technical.push(UiTechnicalSection::Routing {
+            sender: "installation/mailbox-a".to_owned(),
+            recipient: None,
+        });
+        second.technical = first.technical.clone();
+        assert!(super::same_message_sender(&first, &second));
+        second.presentation = UiConversationEntryPresentation::Message {
+            author: UiConversationAuthor::Participant("Renamed".to_owned()),
+            body: "two".to_owned(),
+        };
+        assert!(super::same_message_sender(&first, &second));
+        second.technical = vec![UiTechnicalSection::Routing {
+            sender: "installation/mailbox-b".to_owned(),
+            recipient: None,
+        }];
+        assert!(!super::same_message_sender(&first, &second));
+
+        let mut cache = super::UiRenderCache::new();
+        let theme = UiTheme::terminal();
+        for (state, delivery, expected) in [
+            (
+                UiMessageState::Open,
+                crate::UiMessageDelivery::Pending,
+                "Pending",
+            ),
+            (
+                UiMessageState::Open,
+                crate::UiMessageDelivery::Received,
+                "Received",
+            ),
+            (
+                UiMessageState::Rejected,
+                crate::UiMessageDelivery::Pending,
+                "Could not be delivered",
+            ),
+            (
+                UiMessageState::Archived,
+                crate::UiMessageDelivery::Sent,
+                "Archived",
+            ),
+        ] {
+            second.message_state = Some(state);
+            second.delivery = Some(delivery);
+            let layout = conversation_entry_layout(&second, 40, &theme, &mut cache, false);
+            assert_eq!(layout.rows[0].to_string(), expected);
+            assert_eq!(layout.height, 3);
+        }
+        for width in [0, 1, 2, 4, 20, 80] {
+            let layout = conversation_entry_layout(&first, width, &theme, &mut cache, true);
+            assert_eq!(layout.rows[0].width(), usize::from(width));
+        }
+    }
+
+    #[test]
     fn message_height_uses_the_width_specific_artifact_for_words_and_wide_text() {
         let theme = UiTheme::terminal();
         let mut cache = super::UiRenderCache::new();
         assert_eq!(
-            conversation_entry_layout(&message("one\ntwo"), 20, &theme, &mut cache).height,
+            conversation_entry_layout(&message("one\ntwo"), 20, &theme, &mut cache, true).height,
             3
         );
         assert_eq!(
-            conversation_entry_layout(&message("abcdefgh"), 3, &theme, &mut cache).height,
+            conversation_entry_layout(&message("abcdefgh"), 3, &theme, &mut cache, true).height,
             5
         );
         assert_eq!(
-            conversation_entry_layout(&message("界界界"), 4, &theme, &mut cache).height,
+            conversation_entry_layout(&message("界界界"), 4, &theme, &mut cache, true).height,
             4
         );
         assert_eq!(
-            conversation_entry_layout(&message(""), 20, &theme, &mut cache).height,
+            conversation_entry_layout(&message(""), 20, &theme, &mut cache, true).height,
             3
         );
     }
@@ -5239,7 +5323,7 @@ mod tests {
 
         let mut cache = super::UiRenderCache::new();
         let theme = UiTheme::terminal();
-        let layout = conversation_entry_layout(&entry, 80, &theme, &mut cache);
+        let layout = conversation_entry_layout(&entry, 80, &theme, &mut cache, true);
         assert_eq!(
             layout.height,
             u16::try_from(preview.len())
@@ -5286,7 +5370,7 @@ mod tests {
         };
         let theme = UiTheme::terminal();
         let mut cache = super::UiRenderCache::new();
-        let layout = conversation_entry_layout(&entry, 80, &theme, &mut cache);
+        let layout = conversation_entry_layout(&entry, 80, &theme, &mut cache, true);
 
         assert_eq!(layout.rows[0].to_string(), "$ printf '%s\\n' done");
         assert_eq!(layout.rows[1].to_string(), "│ done");
@@ -5362,7 +5446,7 @@ mod tests {
                     technical: Vec::new(),
                 };
                 let mut cache = super::UiRenderCache::new();
-                let layout = conversation_entry_layout(&entry, 80, &theme, &mut cache);
+                let layout = conversation_entry_layout(&entry, 80, &theme, &mut cache, true);
                 assert_eq!(layout.rows[0].to_string(), "$ echo hello");
                 let last = &layout.rows[layout.rows.len() - 2];
                 if let Some(expected) = expected {
@@ -5458,6 +5542,78 @@ mod tests {
     }
 
     #[test]
+    fn sender_rules_follow_sender_changes_across_activity_rows() {
+        let mut entries = vec![message("first"), message("second")];
+        let mut activity = message("");
+        activity.presentation = UiConversationEntryPresentation::Activity {
+            kind: UiConversationActivityKind::Status,
+            status: UiActivityStatus::Running,
+            summary: "Working".to_owned(),
+            detail: String::new(),
+            truncated: false,
+            completed: None,
+        };
+        entries.insert(1, activity);
+        for sender in ["mailbox-a", "mailbox-a", "mailbox-b"] {
+            let mut entry = message("reply");
+            entry.presentation = UiConversationEntryPresentation::Message {
+                author: UiConversationAuthor::Participant("Alice".to_owned()),
+                body: "reply".to_owned(),
+            };
+            entry.technical.push(UiTechnicalSection::Routing {
+                sender: sender.to_owned(),
+                recipient: None,
+            });
+            entries.push(entry);
+        }
+        entries.push(message("last"));
+        for (index, entry) in entries.iter_mut().enumerate() {
+            entry.id = format!("entry-{index}");
+        }
+        let conversation = crate::UiConversation {
+            row_id: "conversation".to_owned(),
+            title: "Alice".to_owned(),
+            context: None,
+            entries,
+            next_cursor: None,
+        };
+        let model = UiModel::new(UiSize {
+            width: 40,
+            height: 30,
+        });
+        let mut cache = super::UiRenderCache::new();
+        let mut terminal = Terminal::new(TestBackend::new(40, 30)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_conversation_entries(
+                    frame,
+                    &model,
+                    &UiTheme::terminal(),
+                    Rect::new(0, 0, 40, 30),
+                    &conversation,
+                    &mut cache,
+                );
+            })
+            .expect("render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert_eq!(rendered.matches("── You ").count(), 2);
+        assert_eq!(rendered.matches("── Alice ").count(), 2);
+        let heights = cache
+            .conversation_viewport
+            .iter()
+            .flat_map(|observation| &observation.entries)
+            .map(|entry| entry.height)
+            .collect::<Vec<_>>();
+        assert_eq!(heights, vec![3, 2, 2, 3, 2, 3, 3]);
+    }
+
+    #[test]
     fn renderer_reports_exact_conversation_geometry_to_the_shell() {
         let mut first = message("one");
         first.id = "first".to_owned();
@@ -5514,7 +5670,7 @@ mod tests {
                     },
                     crate::UiConversationEntryGeometry {
                         entry_id: "second".to_owned(),
-                        height: 3,
+                        height: 2,
                     },
                 ],
             })
@@ -5530,7 +5686,7 @@ mod tests {
         });
         let theme = UiTheme::terminal();
         let mut cache = super::UiRenderCache::new();
-        let layout = conversation_entry_layout(&entry, 16, &theme, &mut cache);
+        let layout = conversation_entry_layout(&entry, 16, &theme, &mut cache, true);
         let middle = layout
             .rows
             .iter()
