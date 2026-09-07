@@ -5107,6 +5107,7 @@ mod tests {
             },
         };
         let mut entry = UiConversationEntry {
+            canonical_fact: None,
             sender: None,
             id: "tail".to_owned(),
             presentation: UiConversationEntryPresentation::Activity {
@@ -5301,6 +5302,7 @@ mod tests {
     #[test]
     fn command_preview_is_bounded_to_three_output_lines_with_status_and_omission() {
         let entry = UiConversationEntry {
+            canonical_fact: None,
             sender: None,
             id: "command".to_owned(),
             presentation: UiConversationEntryPresentation::Activity {
@@ -5363,6 +5365,7 @@ mod tests {
     #[test]
     fn completed_command_preview_omits_success_status_and_keeps_highlighting() {
         let entry = UiConversationEntry {
+            canonical_fact: None,
             sender: None,
             id: "completed-command".to_owned(),
             presentation: UiConversationEntryPresentation::Activity {
@@ -5441,6 +5444,7 @@ mod tests {
         ] {
             for output in [None, Some(""), Some("one\ntwo\nthree\nfour")] {
                 let entry = UiConversationEntry {
+                    canonical_fact: None,
                     sender: None,
                     id: "command-outcome".to_owned(),
                     presentation: UiConversationEntryPresentation::Activity {
@@ -5589,6 +5593,7 @@ mod tests {
                 entry.id = format!("entry-{index}");
             }
             let conversation = crate::UiConversation {
+                window: None,
                 multiple_non_user_senders: multiple,
                 row_id: "conversation".to_owned(),
                 title: "Alice".to_owned(),
@@ -5660,6 +5665,7 @@ mod tests {
             completed: None,
         };
         let conversation = crate::UiConversation {
+            window: None,
             multiple_non_user_senders: false,
             row_id: "thread-a".to_owned(),
             title: "Alice".to_owned(),
@@ -5759,6 +5765,7 @@ mod tests {
 
     fn message(body: &str) -> UiConversationEntry {
         UiConversationEntry {
+            canonical_fact: None,
             sender: None,
             id: "message".to_owned(),
             presentation: UiConversationEntryPresentation::Message {

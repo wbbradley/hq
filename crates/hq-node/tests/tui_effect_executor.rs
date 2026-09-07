@@ -365,6 +365,7 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
                     ..empty_snapshot(1)
                 },
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     row_id: "thread-a".to_owned(),
                     title: "Thread A".to_owned(),
@@ -820,9 +821,13 @@ fn blocked_command_cannot_delay_latest_conversation_selection_control() {
         .execute([
             snapshot_effect,
             UiEffect::ObserveConversation {
+                section: hq_tui::UiSection::Inbox,
+                anchor: None,
                 row_id: Some("thread-a".to_owned()),
             },
             UiEffect::ObserveConversation {
+                section: hq_tui::UiSection::Inbox,
+                anchor: None,
                 row_id: Some("thread-b".to_owned()),
             },
         ])
@@ -2239,7 +2244,12 @@ enum TestSelection {
 }
 
 impl TuiObservationControl for LatestSelectionControl {
-    fn select_conversation(&self, row_id: Option<String>) {
+    fn select_conversation(
+        &self,
+        row_id: Option<String>,
+        _anchor: Option<[u8; 32]>,
+        _section: hq_tui::UiSection,
+    ) {
         *self.0.lock().expect("selection slot") = TestSelection::Replace(row_id);
     }
 }
@@ -2381,6 +2391,7 @@ impl TuiClientPort for ScriptedTuiClient {
             .expect("conversation requests lock")
             .push((row_id.to_owned(), cursor));
         Ok(UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -2442,6 +2453,7 @@ impl TuiClientPort for ProjectTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -2547,6 +2559,7 @@ impl TuiClientPort for ManagedSessionTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -2601,6 +2614,7 @@ impl TuiClientPort for AgentTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -2687,6 +2701,7 @@ impl TuiClientPort for SlowSnapshotClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -2727,6 +2742,7 @@ impl TuiClientPort for ImmediateSnapshotClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -2775,6 +2791,7 @@ impl TuiClientPort for MailboxTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,

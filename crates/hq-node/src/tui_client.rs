@@ -18,10 +18,11 @@ use hq_local_api::{
     BlockingClientError, ClientConnectionState, ClientEvent, ClientReconnectCause,
     ClientTransportFailureKind,
     protocol::v1::{
-        ActivityStatusDto, AuthoritativeConversationViewDto, AuthoritativeSnapshotDto,
+        ActivityStatusDto, AuthoritativeConversationViewDto,
+        AuthoritativeConversationViewRequestDto, AuthoritativeSnapshotDto,
         CompletedItemPresentationDto, ConversationActivityDto, ConversationActivityKindDto,
         ConversationContextDto, ConversationEntryDto, ConversationKeyDto, ConversationMessageDto,
-        ConversationPageRequest, ConversationPageSelectionDto, ConversationParticipantDto, Id32,
+        ConversationPageSelectionDto, ConversationParticipantDto, Id32,
         InstallationConfigurationDto, InstallationConfigurationPatchDto,
         InteractionAnswerOutcomeDto, InteractionAnswerRequestDto, InteractionKindDto,
         InteractionResponseDto, MailboxAddressDto, MailboxCommandActionDto,
@@ -158,6 +159,22 @@ pub trait TuiClientPort: Send {
         cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure>;
 
+    /// Reads a revision-coherent canonical window, or delegates an unanchored page request.
+    fn load_conversation_window(
+        &mut self,
+        row_id: &str,
+        cursor: Option<String>,
+        anchor: Option<[u8; 32]>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        if anchor.is_some() {
+            return Err(UiFailure {
+                code: "conversation_window_unavailable".to_owned(),
+                action: "reconnect and reload the conversation".to_owned(),
+            });
+        }
+        self.load_conversation(row_id, cursor)
+    }
+
     /// Executes or reconciles one exact terminal provider-interaction response.
     fn answer_interaction(
         &mut self,
@@ -266,14 +283,25 @@ pub trait TuiObservationInterrupt: Send + Sync {
 /// Cross-thread latest-value control for the dedicated observation owner.
 pub trait TuiObservationControl: Send + Sync {
     /// Replaces the desired selected Inbox row without waiting for a response.
-    fn select_conversation(&self, row_id: Option<String>);
+    fn select_conversation(
+        &self,
+        row_id: Option<String>,
+        anchor: Option<[u8; 32]>,
+        section: UiSection,
+    );
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct NoopTuiObservationControl;
 
 impl TuiObservationControl for NoopTuiObservationControl {
-    fn select_conversation(&self, _row_id: Option<String>) {}
+    fn select_conversation(
+        &self,
+        _row_id: Option<String>,
+        _anchor: Option<[u8; 32]>,
+        _section: UiSection,
+    ) {
+    }
 }
 
 /// Dedicated subscribed observation capability owned independently from TUI commands.
@@ -320,8 +348,9 @@ pub struct LocalTuiObserver {
     initial_view: Option<UiMaterializedConversationView>,
     selection: Arc<Mutex<PendingConversationSelection>>,
     control: LocalTuiObservationControl,
-    prior_inbox_rows: Vec<String>,
+    prior_mailbox_rows: Vec<String>,
     desired_row: Option<String>,
+    desired_section: UiSection,
     pending_interactions: Option<Vec<PendingInteractionDto>>,
     activity_ranks: BTreeMap<String, u64>,
     unread_rows: BTreeSet<String>,
@@ -329,6 +358,7 @@ pub struct LocalTuiObserver {
 
 #[derive(Clone)]
 struct ConversationPresentationContext {
+    latest_fact: Option<[u8; 32]>,
     multiple_non_user_senders: bool,
     context: ConversationContextDto,
     local_human: MailboxAddressDto,
@@ -412,10 +442,12 @@ impl SharedTuiPresentation {
                     context,
                     local_human,
                     multiple_non_user_senders,
+                    latest_fact,
                     ..
                 } => Some((
                     conversation_identity(key.clone()),
                     ConversationPresentationContext {
+                        latest_fact: latest_fact.map(Id32::bytes),
                         multiple_non_user_senders: *multiple_non_user_senders,
                         context: context.clone(),
                         local_human: local_human.clone(),
@@ -823,13 +855,18 @@ struct LocalTuiObservationControl {
 enum PendingConversationSelection {
     #[default]
     Unchanged,
-    Replace(Option<String>),
+    Replace(Option<String>, Option<[u8; 32]>, UiSection),
 }
 
 impl TuiObservationControl for LocalTuiObservationControl {
-    fn select_conversation(&self, row_id: Option<String>) {
+    fn select_conversation(
+        &self,
+        row_id: Option<String>,
+        anchor: Option<[u8; 32]>,
+        section: UiSection,
+    ) {
         if let Ok(mut selection) = self.selection.lock() {
-            *selection = PendingConversationSelection::Replace(row_id);
+            *selection = PendingConversationSelection::Replace(row_id, anchor, section);
         }
         self.wake.wake();
     }
@@ -876,7 +913,7 @@ impl LocalTuiObserver {
         client: LocalNodeEventClient,
         presentation: SharedTuiPresentation,
         initial_view: Option<UiMaterializedConversationView>,
-        prior_inbox_rows: Vec<String>,
+        prior_mailbox_rows: Vec<String>,
         desired_row: Option<String>,
     ) -> Self {
         let wake = client.wake_handle();
@@ -888,23 +925,24 @@ impl LocalTuiObserver {
             initial_view,
             selection: Arc::clone(&selection),
             control: LocalTuiObservationControl { selection, wake },
-            prior_inbox_rows,
+            prior_mailbox_rows,
             desired_row,
+            desired_section: UiSection::Inbox,
             pending_interactions: None,
             activity_ranks: BTreeMap::new(),
             unread_rows: BTreeSet::new(),
         }
     }
 
-    fn apply_latest_selection(&mut self) -> Result<(), UiFailure> {
+    fn apply_latest_selection(&mut self) -> Result<bool, UiFailure> {
         let replacement = std::mem::take(
             &mut *self
                 .selection
                 .lock()
                 .map_err(|_| observation_control_failure())?,
         );
-        let PendingConversationSelection::Replace(row_id) = replacement else {
-            return Ok(());
+        let PendingConversationSelection::Replace(row_id, anchor, section) = replacement else {
+            return Ok(false);
         };
         let conversation = row_id
             .as_deref()
@@ -914,6 +952,7 @@ impl LocalTuiObserver {
                     .conversation(row_id)
                     .ok_or_else(observation_control_failure)?;
                 ConversationPageSelectionDto::new(key, 100)
+                    .map(|selection| selection.with_anchor(anchor.map(Id32::new)))
                     .map_err(|_| observation_control_failure())
             })
             .transpose()?;
@@ -923,8 +962,12 @@ impl LocalTuiObserver {
         if let Some(row_id) = &row_id {
             self.unread_rows.remove(row_id);
         }
+        if let Ok(mut presentation) = self.presentation.inner.lock() {
+            presentation.active_conversation_row.clone_from(&row_id);
+        }
         self.desired_row = row_id;
-        Ok(())
+        self.desired_section = section;
+        Ok(true)
     }
 
     fn observe_activity(&mut self, snapshot: &AuthoritativeSnapshotDto) {
@@ -1040,6 +1083,7 @@ impl LocalTuiObserver {
             view,
             &self.presentation,
             self.desired_row.as_deref(),
+            self.desired_section,
         ) {
             Ok(view) => view,
             Err(failure) => {
@@ -1052,7 +1096,7 @@ impl LocalTuiObserver {
         };
         let next_rows = materialized
             .snapshot
-            .inbox_rows
+            .rows(self.desired_section)
             .iter()
             .map(|row| row.id.clone())
             .collect::<Vec<_>>();
@@ -1094,7 +1138,7 @@ impl LocalTuiObserver {
             self.unread_rows.remove(row_id);
         }
         self.decorate_unread(&mut materialized.snapshot);
-        self.prior_inbox_rows = next_rows;
+        self.prior_mailbox_rows = next_rows;
         observations.push(TuiClientObservation::MaterializedView(Box::new(
             materialized,
         )));
@@ -1122,7 +1166,7 @@ impl LocalTuiObserver {
         observations: &mut Vec<TuiClientObservation>,
     ) {
         let prior_index = self
-            .prior_inbox_rows
+            .prior_mailbox_rows
             .iter()
             .position(|row_id| row_id == desired)
             .unwrap_or(0);
@@ -1141,7 +1185,7 @@ impl LocalTuiObserver {
             } else {
                 self.desired_row = None;
             }
-            self.prior_inbox_rows = next_rows;
+            self.prior_mailbox_rows = next_rows;
             return;
         };
         let selection = conversation_selection(&self.presentation, &successor);
@@ -1157,7 +1201,7 @@ impl LocalTuiObserver {
         } else {
             self.desired_row = Some(successor);
         }
-        self.prior_inbox_rows = next_rows;
+        self.prior_mailbox_rows = next_rows;
     }
 }
 
@@ -1208,6 +1252,18 @@ struct InitialTuiView {
     desired_row: Option<String>,
 }
 
+fn conversation_successor(
+    rows: &[String],
+    prior_index: usize,
+    presentation: &SharedTuiPresentation,
+) -> Option<String> {
+    rows.iter()
+        .skip(prior_index.min(rows.len().saturating_sub(1)))
+        .chain(rows.iter())
+        .find(|candidate| presentation.conversation(candidate).is_some())
+        .cloned()
+}
+
 fn activate_initial_tui_view(
     event_client: &mut LocalNodeEventClient,
     presentation: &SharedTuiPresentation,
@@ -1240,6 +1296,7 @@ fn activate_initial_tui_view(
                         view,
                         presentation,
                         desired_row.as_deref(),
+                        UiSection::Inbox,
                     )?;
                     if materialized
                         .conversation
@@ -1266,12 +1323,8 @@ fn activate_initial_tui_view(
                                 inbox_rows.iter().position(|candidate| candidate == row_id)
                             })
                             .unwrap_or(0);
-                        let Some(successor) = next_rows
-                            .iter()
-                            .skip(prior_index.min(next_rows.len().saturating_sub(1)))
-                            .chain(next_rows.iter())
-                            .find(|candidate| presentation.conversation(candidate).is_some())
-                            .cloned()
+                        let Some(successor) =
+                            conversation_successor(&next_rows, prior_index, presentation)
                         else {
                             desired_row = None;
                             inbox_rows = next_rows;
@@ -1508,37 +1561,76 @@ impl TuiClientPort for LocalTuiClient {
         row_id: &str,
         cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
-        let (key, presentation) =
-            self.presentation
-                .conversation(row_id)
-                .ok_or_else(|| UiFailure {
-                    code: "conversation_stale".to_owned(),
-                    action: "reload the Inbox and select the conversation again".to_owned(),
-                })?;
-        let request = ConversationPageRequest::new(key, 100, cursor).map_err(|_| UiFailure {
-            code: "conversation_page_invalid".to_owned(),
-            action: "reload the Inbox and select the conversation again".to_owned(),
-        })?;
-        match self
+        self.load_conversation_window(row_id, cursor, None)
+    }
+
+    fn load_conversation_window(
+        &mut self,
+        row_id: &str,
+        cursor: Option<String>,
+        anchor: Option<[u8; 32]>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        let (key, _) = self
+            .presentation
+            .conversation(row_id)
+            .ok_or_else(observation_control_failure)?;
+        let selection = ConversationPageSelectionDto::new(key.clone(), 100)
+            .and_then(|selection| {
+                if anchor.is_some() {
+                    Ok(selection.with_anchor(anchor.map(Id32::new)))
+                } else {
+                    selection.with_cursor(cursor)
+                }
+            })
+            .map_err(|_| observation_control_failure())?;
+        let response = self
             .client
-            .request(Request::ConversationPage(request))
-            .map_err(|error| client_failure(&error))?
-        {
-            ClientEvent::Response {
-                result: ResponseResult::ConversationPage(page),
-                ..
-            } => Ok(tui_conversation_page(
-                row_id,
-                &presentation.context,
-                &presentation.local_human,
-                presentation.multiple_non_user_senders,
-                page,
-            )),
-            _ => Err(UiFailure {
-                code: "conversation_response_invalid".to_owned(),
-                action: "reload the Inbox and select the conversation again".to_owned(),
-            }),
-        }
+            .request(Request::AuthoritativeConversationView(
+                AuthoritativeConversationViewRequestDto::new(Some(selection)),
+            ))
+            .map_err(|error| client_failure(&error))?;
+        let ClientEvent::Response {
+            result: ResponseResult::AuthoritativeConversationView(view),
+            ..
+        } = response
+        else {
+            return Err(observation_control_failure());
+        };
+        let selected = view
+            .conversation
+            .filter(|selected| selected.key == key && selected.anchor.map(Id32::bytes) == anchor)
+            .ok_or_else(observation_control_failure)?;
+        let context = view
+            .snapshot
+            .items
+            .iter()
+            .find_map(|item| match item {
+                SnapshotItem::Conversation {
+                    key: candidate,
+                    context,
+                    local_human,
+                    multiple_non_user_senders,
+                    latest_fact,
+                    ..
+                } if *candidate == key => Some((
+                    context,
+                    local_human,
+                    *multiple_non_user_senders,
+                    latest_fact.map(Id32::bytes),
+                )),
+                _ => None,
+            })
+            .ok_or_else(observation_control_failure)?;
+        let window = hq_tui::UiConversationWindow {
+            revision: view.snapshot.revision,
+            anchor,
+            newer_cursor: selected.page.previous_cursor.clone(),
+            latest_fact: context.3,
+        };
+        let mut page =
+            tui_conversation_page(row_id, context.0, context.1, context.2, selected.page);
+        page.window = Some(Box::new(window));
+        Ok(page)
     }
 
     fn answer_interaction(
@@ -2162,11 +2254,21 @@ impl TuiObservationPort for LocalTuiObserver {
     }
 
     fn next_observations(&mut self) -> Vec<TuiClientObservation> {
-        if let Err(failure) = self.apply_latest_selection() {
-            return vec![TuiClientObservation::Failure {
-                generation: connection_generation(self.client.connection_state()),
-                failure,
-            }];
+        match self.apply_latest_selection() {
+            Err(failure) => {
+                return vec![TuiClientObservation::Failure {
+                    generation: connection_generation(self.client.connection_state()),
+                    failure,
+                }];
+            }
+            Ok(true) => {
+                let mut observations = Vec::new();
+                self.remap_pending_interactions(&mut observations);
+                if !observations.is_empty() {
+                    return observations;
+                }
+            }
+            Ok(false) => {}
         }
         let current = self.client.connection_state();
         if self.observed_connection != Some(current) {
@@ -2363,6 +2465,7 @@ enum WorkerCommand {
         id: EffectId,
         row_id: String,
         cursor: Option<String>,
+        anchor: Option<[u8; 32]>,
     },
     AnswerInteraction {
         id: EffectId,
@@ -2615,12 +2718,22 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                         },
                     )?;
                 }
-                UiEffect::LoadConversation { id, row_id, cursor } => {
+                UiEffect::LoadConversation {
+                    id,
+                    row_id,
+                    cursor,
+                    anchor,
+                } => {
                     if self.effect_is_outstanding(id) {
                         return Err(TuiExecutorError::DuplicateEffectIdentity);
                     }
                     self.commands
-                        .try_send(WorkerCommand::LoadConversation { id, row_id, cursor })
+                        .try_send(WorkerCommand::LoadConversation {
+                            id,
+                            row_id,
+                            cursor,
+                            anchor,
+                        })
                         .map_err(|error| match error {
                             TrySendError::Full(_) | TrySendError::Disconnected(_) => {
                                 TuiExecutorError::WorkerUnavailable
@@ -2628,8 +2741,13 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                         })?;
                     self.outstanding_snapshots.push(id);
                 }
-                UiEffect::ObserveConversation { row_id } => {
-                    self.observation_control.select_conversation(row_id);
+                UiEffect::ObserveConversation {
+                    row_id,
+                    anchor,
+                    section,
+                } => {
+                    self.observation_control
+                        .select_conversation(row_id, anchor, section);
                 }
                 UiEffect::AnswerInteraction {
                     id,
@@ -2961,8 +3079,13 @@ fn client_worker<P: TuiClientPort>(
                     break;
                 }
             }
-            Ok(WorkerCommand::LoadConversation { id, row_id, cursor }) => {
-                let event = match client.load_conversation(&row_id, cursor) {
+            Ok(WorkerCommand::LoadConversation {
+                id,
+                row_id,
+                cursor,
+                anchor,
+            }) => {
+                let event = match client.load_conversation_window(&row_id, cursor, anchor) {
                     Ok(page) => UiEvent::ConversationLoaded {
                         effect_id: id,
                         page,
@@ -3218,6 +3341,7 @@ fn tui_materialized_conversation_view(
     view: AuthoritativeConversationViewDto,
     presentation: &SharedTuiPresentation,
     desired_row: Option<&str>,
+    section: UiSection,
 ) -> Result<UiMaterializedConversationView, UiFailure> {
     presentation.replace_snapshot(&view.snapshot);
     let providers = presentation.providers();
@@ -3235,14 +3359,14 @@ fn tui_materialized_conversation_view(
         .map(|selected| {
             let row_id = desired_row
                 .filter(|row_id| {
-                    snapshot.inbox_rows.iter().any(|row| row.id == *row_id)
+                    snapshot.rows(section).iter().any(|row| row.id == *row_id)
                         && presentation
                             .conversation(row_id)
                             .is_some_and(|(key, _)| key == selected.key)
                 })
                 .map(ToOwned::to_owned)
                 .or_else(|| {
-                    snapshot.inbox_rows.iter().find_map(|row| {
+                    snapshot.rows(section).iter().find_map(|row| {
                         presentation
                             .conversation(&row.id)
                             .is_some_and(|(key, _)| key == selected.key)
@@ -3250,17 +3374,27 @@ fn tui_materialized_conversation_view(
                     })
                 })
                 .unwrap_or_else(|| conversation_identity(selected.key.clone()));
-            presentation.replace_running_operations(row_id.clone(), &selected.page.items);
+            if selected.page.previous_cursor.is_none() {
+                presentation.replace_running_operations(row_id.clone(), &selected.page.items);
+            }
             let (_, context) = presentation
                 .conversation(&row_id)
                 .ok_or_else(observation_control_failure)?;
-            Ok(tui_conversation_page(
+            let window = hq_tui::UiConversationWindow {
+                revision: view.snapshot.revision,
+                anchor: selected.anchor.map(Id32::bytes),
+                newer_cursor: selected.page.previous_cursor.clone(),
+                latest_fact: context.latest_fact,
+            };
+            let mut page = tui_conversation_page(
                 &row_id,
                 &context.context,
                 &context.local_human,
                 context.multiple_non_user_senders,
                 selected.page,
-            ))
+            );
+            page.window = Some(Box::new(window));
+            Ok(page)
         })
         .transpose()?;
     Ok(UiMaterializedConversationView {
@@ -4454,6 +4588,7 @@ pub fn tui_conversation_page(
 ) -> UiConversationPage {
     let heading = conversation_heading(context);
     UiConversationPage {
+        window: None,
         multiple_non_user_senders,
         row_id: row_id.to_owned(),
         title: heading.title,
@@ -4498,6 +4633,7 @@ fn tui_conversation_entry(
             let status = tui_activity_status(status);
             let kind = tui_activity_kind(activity_kind);
             UiConversationEntry {
+                canonical_fact: Some(fact_id.bytes()),
                 sender: None,
                 id: full_id(fact_id),
                 presentation: UiConversationEntryPresentation::Activity {
@@ -4702,6 +4838,7 @@ fn tui_message_entry(
         },
     );
     UiConversationEntry {
+        canonical_fact: Some(message.fact_id.bytes()),
         sender: Some(hq_tui::UiConversationSender {
             installation_id: message.sender_installation.bytes(),
             mailbox_id: message.sender_mailbox.bytes(),
@@ -5233,6 +5370,15 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn unread_rank_is_aliased_to_the_stable_agent_row_identity() {
+        let (snapshot, conversation_key, agent_id) = named_agent_conversation_snapshot();
+
+        let ranks = inbox_activity_ranks(&snapshot);
+        assert_eq!(ranks[&super::full_id(agent_id)], 17);
+        assert_eq!(ranks[&conversation_identity(conversation_key)], 17);
+    }
+
+    #[allow(clippy::expect_used)]
+    fn named_agent_conversation_snapshot() -> (AuthoritativeSnapshotDto, ConversationKeyDto, Id32) {
         let agent_id = Id32::new([0x21; 32]);
         let conversation_key = ConversationKeyDto::ProviderSession {
             counterparty_installation: Id32::new([0x22; 32]),
@@ -5283,9 +5429,66 @@ mod tests {
         )
         .expect("snapshot");
 
-        let ranks = inbox_activity_ranks(&snapshot);
-        assert_eq!(ranks[&super::full_id(agent_id)], 17);
-        assert_eq!(ranks[&conversation_identity(conversation_key)], 17);
+        (snapshot, conversation_key, agent_id)
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn conversation_window_mapping_uses_the_active_mailbox_and_preserves_source_metadata() {
+        use hq_local_api::protocol::v1::{
+            AuthoritativeConversationViewDto, ConversationPageDto, SelectedConversationPageDto,
+        };
+        use hq_tui::UiSection;
+        let (snapshot, key, agent) = named_agent_conversation_snapshot();
+        let canonical_row = conversation_identity(key.clone());
+        for section in [UiSection::Inbox, UiSection::Sent, UiSection::Archived] {
+            let mut snapshot = snapshot.clone();
+            if section == UiSection::Archived {
+                for item in &mut snapshot.items {
+                    if let SnapshotItem::Conversation { archived, .. } = item {
+                        *archived = true;
+                    }
+                }
+            }
+            let page = ConversationPageDto::new(Vec::new(), Some("older".to_owned()))
+                .expect("page")
+                .with_previous_cursor(Some("newer".to_owned()))
+                .expect("newer cursor");
+            let view = AuthoritativeConversationViewDto {
+                snapshot,
+                conversation: Some(Box::new(
+                    SelectedConversationPageDto::new(key.clone(), page)
+                        .with_anchor(Some(Id32::new([0x27; 32]))),
+                )),
+            };
+            let mapped = super::tui_materialized_conversation_view(
+                [0x25; 32],
+                view,
+                &SharedTuiPresentation::default(),
+                Some(&canonical_row),
+                section,
+            )
+            .expect("mailbox window");
+            let page = mapped.conversation.expect("selected page");
+            let expected = if section == UiSection::Inbox {
+                super::full_id(agent)
+            } else {
+                canonical_row.clone()
+            };
+            assert_eq!(page.row_id, expected);
+            assert!(
+                mapped
+                    .snapshot
+                    .rows(section)
+                    .iter()
+                    .any(|row| row.id == page.row_id)
+            );
+            let window = page.window.expect("canonical evidence");
+            assert_eq!(window.revision, 9);
+            assert_eq!(window.anchor, Some([0x27; 32]));
+            assert_eq!(window.latest_fact, Some([0x28; 32]));
+            assert_eq!(window.newer_cursor.as_deref(), Some("newer"));
+        }
     }
 
     fn participant() -> ConversationParticipantDto {
@@ -5314,6 +5517,7 @@ mod tests {
             data.conversation_presentations.insert(
                 row_id.clone(),
                 ConversationPresentationContext {
+                    latest_fact: None,
                     multiple_non_user_senders: false,
                     context: ConversationContextDto::Direct {
                         participant: participant(),
@@ -5376,6 +5580,7 @@ mod tests {
             data.conversation_presentations.insert(
                 row_id,
                 ConversationPresentationContext {
+                    latest_fact: None,
                     multiple_non_user_senders: false,
                     context: ConversationContextDto::Direct {
                         participant: participant(),

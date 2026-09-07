@@ -175,6 +175,7 @@ fn maximum_markdown_conversation(size: UiSize, body: &str) -> UiModel {
 
     let entries = (0..MAXIMUM_TUI_CONVERSATION_PAGE)
         .map(|index| UiConversationEntry {
+            canonical_fact: None,
             sender: None,
             id: format!("markdown-message-{index:03}"),
             presentation: UiConversationEntryPresentation::Message {
@@ -194,6 +195,7 @@ fn maximum_markdown_conversation(size: UiSize, body: &str) -> UiModel {
             view: UiMaterializedConversationView {
                 snapshot,
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     row_id: "markdown-conversation".to_owned(),
                     title: "Markdown qualification".to_owned(),

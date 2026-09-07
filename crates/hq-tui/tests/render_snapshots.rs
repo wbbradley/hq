@@ -1290,6 +1290,66 @@ fn markdown_messages_render_safely_across_widths_without_parsing_activity() {
 }
 
 #[test]
+fn new_content_hint_remains_visible_until_reader_returns_to_latest() {
+    let mut model = conversation_model_with_content(
+        UiSize {
+            width: 80,
+            height: 20,
+        },
+        UiMessageState::Open,
+        None,
+        &"Older paragraph\n\n".repeat(30),
+        "Working",
+    );
+    let observation = render_observation(&model);
+    model = update(model, UiEvent::ConversationViewportObserved { observation })
+        .expect("measure history")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::MoveCursorHome))
+        .expect("read older content")
+        .model;
+    let conversation = model.conversation().expect("loaded history").clone();
+    let mut entries = conversation.entries;
+    let mut incoming = entries[0].clone();
+    incoming.id = "new-message".to_owned();
+    incoming.presentation = UiConversationEntryPresentation::Message {
+        author: UiConversationAuthor::Participant("Alice".to_owned()),
+        body: "Latest reply".to_owned(),
+    };
+    entries.push(incoming);
+    let mut snapshot = ready_snapshot();
+    snapshot.revision += 1;
+    model = update(
+        model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot,
+                conversation: Some(UiConversationPage {
+                    window: None,
+                    multiple_non_user_senders: false,
+                    row_id: conversation.row_id,
+                    title: conversation.title,
+                    context: conversation.context,
+                    entries,
+                    next_cursor: None,
+                }),
+            },
+        },
+    )
+    .expect("incoming reply")
+    .model;
+    let anchored = render_text(&model);
+    assert!(anchored.contains("New content · End latest"), "{anchored}");
+    assert!(!anchored.contains("Latest reply"), "{anchored}");
+    model = update(model, UiEvent::Input(UiInput::MoveCursorEnd))
+        .expect("return to latest")
+        .model;
+    let latest = render_text(&model);
+    assert!(!latest.contains("New content"), "{latest}");
+    assert!(latest.contains("Latest reply"), "{latest}");
+}
+
+#[test]
 fn oversized_markdown_scrolls_by_rows_without_changing_entry_selection() {
     let body = (0..20)
         .map(|index| format!("## Marker {index:02}"))
@@ -3339,12 +3399,14 @@ fn conversation_model_with_content(
             view: UiMaterializedConversationView {
                 snapshot: ready_snapshot(),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "deploy-9".to_owned(),
                     entries: vec![
                         UiConversationEntry {
+                            canonical_fact: None,
                             sender: None,
                             id: "message-1".to_owned(),
                             presentation: UiConversationEntryPresentation::Message {
@@ -3363,6 +3425,7 @@ fn conversation_model_with_content(
                             technical: Vec::new(),
                         },
                         UiConversationEntry {
+                            canonical_fact: None,
                             sender: None,
                             id: "activity-2".to_owned(),
                             presentation: UiConversationEntryPresentation::Activity {

@@ -1179,6 +1179,8 @@ pub struct UiConversationSender {
 /// Passive reducer-ordered conversation presentation entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiConversationEntry {
+    /// Canonical source fact identity; absent for local optimistic placeholders.
+    pub canonical_fact: Option<[u8; 32]>,
     /// Exact canonical message author; absent for activity and local receipt placeholders.
     pub sender: Option<UiConversationSender>,
     /// Stable canonical fact identity used as the logical scroll anchor.
@@ -2571,9 +2573,24 @@ pub enum UiMailboxDraftPane {
     },
 }
 
+/// Source-backed boundaries and correlation for one bounded conversation window.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiConversationWindow {
+    /// Revision of the serialized snapshot and history query.
+    pub revision: u64,
+    /// Exact canonical fact requested as the reading anchor.
+    pub anchor: Option<[u8; 32]>,
+    /// Opaque continuation toward newer history, if this window does not reach latest.
+    pub newer_cursor: Option<String>,
+    /// Canonically latest presented fact across the complete conversation.
+    pub latest_fact: Option<[u8; 32]>,
+}
+
 /// Passive bounded page returned by the ordinary local API client.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiConversationPage {
+    /// Authoritative window correlation; absent for local-only presentation.
+    pub window: Option<Box<UiConversationWindow>>,
     /// Full-conversation evidence, independent of the entries loaded on this page.
     pub multiple_non_user_senders: bool,
     /// Stable summary-row identity requested by the model.
@@ -2591,6 +2608,8 @@ pub struct UiConversationPage {
 /// Passive accumulated conversation presentation held by the pure model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiConversation {
+    /// Authoritative window correlation; absent for local-only presentation.
+    pub window: Option<Box<UiConversationWindow>>,
     /// Whether the authoritative conversation contains multiple non-local authors.
     pub multiple_non_user_senders: bool,
     /// Stable summary-row identity.
@@ -3032,11 +3051,17 @@ pub enum UiEffect {
         row_id: String,
         /// Opaque continuation cursor; absent for the first page.
         cursor: Option<String>,
+        /// Exact canonical fact requested as a bounded reading window.
+        anchor: Option<[u8; 32]>,
     },
     /// Replace the subscribed observation owner's latest selected Inbox conversation.
     ObserveConversation {
         /// Stable summary-row identity, or no selected detail when outside the Inbox.
         row_id: Option<String>,
+        /// Canonical reading anchor; absent requests latest history.
+        anchor: Option<[u8; 32]>,
+        /// Mailbox whose conversation remains selected.
+        section: UiSection,
     },
     /// Execute or reconcile one exact terminal provider-interaction response.
     AnswerInteraction {
@@ -3152,6 +3177,8 @@ struct PendingConversation {
     id: EffectId,
     row_id: String,
     cursor: Option<String>,
+    anchor: Option<[u8; 32]>,
+    reading_anchor: Option<[u8; 32]>,
     enter_on_load: bool,
 }
 
@@ -3159,6 +3186,7 @@ struct PendingConversation {
 struct ConversationFailure {
     row_id: String,
     cursor: Option<String>,
+    anchor: Option<[u8; 32]>,
     failure: UiFailure,
 }
 
@@ -3249,6 +3277,7 @@ enum UiObservationMode {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ConversationInspection {
+    reading_window: Option<Box<UiConversation>>,
     reading_position: Option<UiConversationViewportPosition>,
     reading_mode: ConversationScrollMode,
     previous_anchor: Option<String>,
@@ -3331,6 +3360,7 @@ pub struct UiModel {
     retained_conversation_order: VecDeque<String>,
     desired_conversation: Option<String>,
     requested_conversation: Option<String>,
+    requested_conversation_anchor: Option<[u8; 32]>,
     observation_mode: UiObservationMode,
     conversation_anchor: Option<String>,
     conversation_scroll_mode: ConversationScrollMode,
@@ -3413,6 +3443,7 @@ impl UiModel {
             retained_conversation_order: VecDeque::new(),
             desired_conversation: None,
             requested_conversation: None,
+            requested_conversation_anchor: None,
             observation_mode: UiObservationMode::SnapshotFallback,
             conversation_anchor: None,
             conversation_scroll_mode: ConversationScrollMode::Anchored,
@@ -4231,8 +4262,17 @@ impl UiModel {
     /// Returns whether an older page is loading for the selected conversation.
     pub fn conversation_older_loading(&self) -> bool {
         self.pending_conversation.as_ref().is_some_and(|pending| {
-            pending.cursor.is_some() && self.selected_row.as_ref() == Some(&pending.row_id)
-        })
+            (pending.cursor.is_some() || pending.anchor.is_some())
+                && self.selected_row.as_ref() == Some(&pending.row_id)
+        }) || (self.conversation_failure().is_none()
+            && self.requested_conversation_anchor.is_some()
+            && self.requested_conversation == self.selected_row
+            && self.conversation.as_ref().is_some_and(|conversation| {
+                conversation
+                    .window
+                    .as_ref()
+                    .is_some_and(|window| window.anchor != self.requested_conversation_anchor)
+            }))
     }
 
     /// Borrows a failure scoped to the currently selected conversation row.
@@ -4246,7 +4286,8 @@ impl UiModel {
     /// Returns whether the visible conversation failure came from an older-page request.
     pub fn conversation_failure_is_older(&self) -> bool {
         self.conversation_failure.as_ref().is_some_and(|failure| {
-            failure.cursor.is_some() && self.selected_row.as_ref() == Some(&failure.row_id)
+            (failure.cursor.is_some() || failure.anchor.is_some())
+                && self.selected_row.as_ref() == Some(&failure.row_id)
         })
     }
 
@@ -4298,9 +4339,21 @@ impl UiModel {
         enter_on_load: bool,
         effects: &mut Vec<UiEffect>,
     ) -> Result<(), UiError> {
+        self.request_conversation_window(row_id, cursor, None, enter_on_load, effects)
+    }
+
+    fn request_conversation_window(
+        &mut self,
+        row_id: String,
+        cursor: Option<String>,
+        anchor: Option<[u8; 32]>,
+        enter_on_load: bool,
+        effects: &mut Vec<UiEffect>,
+    ) -> Result<(), UiError> {
         if let Some(pending) = &mut self.pending_conversation
             && pending.row_id == row_id
             && pending.cursor == cursor
+            && pending.anchor == anchor
         {
             pending.enter_on_load |= enter_on_load;
             return Ok(());
@@ -4310,23 +4363,98 @@ impl UiModel {
             id,
             row_id: row_id.clone(),
             cursor: cursor.clone(),
+            anchor,
+            reading_anchor: self.reading_fact(),
             enter_on_load,
         });
         self.conversation_failure = None;
-        effects.push(UiEffect::LoadConversation { id, row_id, cursor });
+        effects.push(UiEffect::LoadConversation {
+            id,
+            row_id,
+            cursor,
+            anchor,
+        });
         Ok(())
     }
 
-    fn request_inbox_preview(&mut self, effects: &mut Vec<UiEffect>) {
-        if self.section() != UiSection::Inbox {
+    fn conversation_has_newer_history(&self) -> bool {
+        self.conversation
+            .as_ref()
+            .and_then(|conversation| conversation.window.as_ref())
+            .is_some_and(|window| window.newer_cursor.is_some())
+    }
+
+    fn filter_observed_window(&mut self, page: &mut Option<UiConversationPage>) {
+        let Some(candidate) = page.as_ref() else {
+            return;
+        };
+        let Some(window) = candidate.window.as_ref() else {
+            return;
+        };
+        let stale_revision = self
+            .conversation
+            .as_ref()
+            .and_then(|conversation| conversation.window.as_ref())
+            .is_some_and(|current| window.revision < current.revision);
+        if window.anchor != self.requested_conversation_anchor || stale_revision {
+            if !stale_revision {
+                self.observe_incoming_conversation_content(candidate);
+            }
+            *page = None;
+        }
+    }
+
+    fn conversation_response_is_stale(
+        &self,
+        pending: &PendingConversation,
+        page: &UiConversationPage,
+    ) -> bool {
+        let Some(window) = &page.window else {
+            return false;
+        };
+        let revision = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.revision)
+            .max(
+                self.conversation
+                    .as_ref()
+                    .and_then(|conversation| conversation.window.as_ref())
+                    .map_or(0, |window| window.revision),
+            );
+        window.revision < revision
+            || pending.anchor != window.anchor
+            || pending.reading_anchor != self.reading_fact()
+    }
+
+    fn reading_fact(&self) -> Option<[u8; 32]> {
+        if self.conversation_follows_tail() || self.active_conversation_row().is_none() {
+            return None;
+        }
+        let position = self.conversation_viewport_position.as_ref()?;
+        self.conversation
+            .as_ref()?
+            .entries
+            .iter()
+            .find(|entry| entry.id == position.entry_id)?
+            .canonical_fact
+    }
+
+    fn request_conversation_observation(&mut self, effects: &mut Vec<UiEffect>) {
+        if self.section() != UiSection::Inbox && self.active_conversation_row().is_none() {
             if self.requested_conversation.take().is_some() {
-                effects.push(UiEffect::ObserveConversation { row_id: None });
+                effects.push(UiEffect::ObserveConversation {
+                    row_id: None,
+                    anchor: None,
+                    section: self.section(),
+                });
             }
             return;
         }
         let row_id = self
-            .desired_conversation
-            .clone()
+            .active_conversation_row()
+            .map(str::to_owned)
+            .or_else(|| self.desired_conversation.clone())
             .or_else(|| self.selected_row.clone());
         let Some(row_id) = row_id else {
             return;
@@ -4338,7 +4466,11 @@ impl UiModel {
         if !is_conversation {
             self.desired_conversation = None;
             if self.requested_conversation.take().is_some() {
-                effects.push(UiEffect::ObserveConversation { row_id: None });
+                effects.push(UiEffect::ObserveConversation {
+                    row_id: None,
+                    anchor: None,
+                    section: self.section(),
+                });
             }
             self.conversation_setup = self.selected_setup().cloned();
             let focus = self.focus;
@@ -4353,10 +4485,16 @@ impl UiModel {
             self.focus = focus;
             return;
         }
-        if self.requested_conversation.as_ref() != Some(&row_id) {
+        let anchor = self.reading_fact();
+        if self.requested_conversation.as_ref() != Some(&row_id)
+            || self.requested_conversation_anchor != anchor
+        {
             self.requested_conversation = Some(row_id.clone());
+            self.requested_conversation_anchor = anchor;
             effects.push(UiEffect::ObserveConversation {
                 row_id: Some(row_id.clone()),
+                anchor: self.requested_conversation_anchor,
+                section: self.section(),
             });
         }
         if (self.desired_conversation.is_some()
@@ -4364,6 +4502,10 @@ impl UiModel {
                 .conversation
                 .as_ref()
                 .is_none_or(|conversation| conversation.row_id != row_id))
+            && self
+                .pending_conversation
+                .as_ref()
+                .is_none_or(|pending| pending.row_id != row_id)
             && !self.install_retained_conversation(&row_id)
         {
             let focus = self.focus;
@@ -4706,6 +4848,12 @@ impl UiModel {
             return false;
         };
         self.conversation_inspection = Some(ConversationInspection {
+            reading_window: self
+                .conversation
+                .as_ref()
+                .filter(|conversation| conversation.window.is_some())
+                .cloned()
+                .map(Box::new),
             reading_position: self.conversation_viewport_position.clone(),
             reading_mode: self.conversation_scroll_mode,
             previous_anchor: self.conversation_anchor.clone(),
@@ -4719,6 +4867,12 @@ impl UiModel {
         let Some(inspection) = self.conversation_inspection.take() else {
             return false;
         };
+        if inspection.reading_mode == ConversationScrollMode::Anchored
+            && let Some(window) = inspection.reading_window
+        {
+            self.conversation = Some(*window);
+            self.conversation_viewport_geometry = None;
+        }
         self.conversation_anchor = inspection.previous_anchor;
         self.conversation_scroll_mode = inspection.reading_mode;
         self.conversation_viewport_position = inspection.reading_position;
@@ -4857,7 +5011,12 @@ impl UiModel {
         } else {
             current.saturating_sub(rows)
         };
-        let next_mode = if forward && next == geometry.maximum_top() {
+        let has_newer = self
+            .conversation
+            .as_ref()
+            .and_then(|conversation| conversation.window.as_ref())
+            .is_some_and(|window| window.newer_cursor.is_some());
+        let next_mode = if forward && next == geometry.maximum_top() && !has_newer {
             ConversationScrollMode::FollowTail
         } else {
             ConversationScrollMode::Anchored
@@ -5137,6 +5296,14 @@ impl UiModel {
     }
 
     fn reidentify_conversation_row(&mut self, prior: &str, alias: &str) {
+        if let Some(window) = self
+            .conversation_inspection
+            .as_mut()
+            .and_then(|inspection| inspection.reading_window.as_mut())
+            && window.row_id == prior
+        {
+            alias.clone_into(&mut window.row_id);
+        }
         let aliased_path = match self.navigation.active() {
             UiRoute::Conversation { row_id } if row_id == prior => Some(vec![
                 UiRoute::Workspace(self.navigation.workspace()),
@@ -5186,6 +5353,13 @@ impl UiModel {
     }
 
     fn retain_conversation(&mut self, revision: u64, page: UiConversationPage) {
+        if page
+            .window
+            .as_ref()
+            .is_some_and(|window| window.anchor.is_some())
+        {
+            return;
+        }
         let row_id = page.row_id.clone();
         self.retained_conversation_order
             .retain(|candidate| candidate != &row_id);
@@ -5225,19 +5399,27 @@ impl UiModel {
             self.conversation_new_content = false;
             return;
         };
-        if self.conversation_scroll_mode != ConversationScrollMode::FollowTail
-            && page
-                .entries
-                .iter()
-                .filter(|entry| self.conversation_entry_visible(entry))
-                .any(|entry| {
-                    !previous.entries.iter().any(|prior| {
-                        prior.id == entry.id && prior.presentation == entry.presentation
-                    })
-                })
-        {
-            self.conversation_new_content = true;
+        if self.conversation_scroll_mode == ConversationScrollMode::FollowTail {
+            return;
         }
+        let canonical = page.window.as_ref().zip(previous.window.as_ref());
+        let tail_changed =
+            canonical.is_some_and(|(next, prior)| next.latest_fact != prior.latest_fact);
+        let previous_entries = previous
+            .entries
+            .iter()
+            .map(|entry| (entry.id.as_str(), &entry.presentation))
+            .collect::<BTreeMap<_, _>>();
+        let content_changed = page
+            .entries
+            .iter()
+            .filter(|entry| self.conversation_entry_visible(entry))
+            .any(|entry| {
+                previous_entries
+                    .get(entry.id.as_str())
+                    .map_or(canonical.is_none(), |prior| **prior != entry.presentation)
+            });
+        self.conversation_new_content |= tail_changed || content_changed;
     }
 
     fn install_first_conversation_page(&mut self, mut page: UiConversationPage) {
@@ -5251,6 +5433,7 @@ impl UiModel {
         self.observe_incoming_conversation_content(&page);
         apply_pending_project_delivery(self.snapshot.as_ref(), &mut page.entries);
         self.conversation = Some(UiConversation {
+            window: page.window.clone(),
             multiple_non_user_senders: page.multiple_non_user_senders,
             row_id: page.row_id,
             title: page.title,
@@ -5622,6 +5805,13 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         UiEvent::ConversationViewportObserved { observation } => {
             if model.observe_conversation_viewport(observation) {
                 effects.push(UiEffect::RequestRedraw);
+            }
+            if model
+                .conversation
+                .as_ref()
+                .is_some_and(|conversation| conversation.window.is_some())
+            {
+                model.request_conversation_observation(&mut effects);
             }
             request_older_history_near_viewport(&mut model, &mut effects)?;
         }
@@ -6250,7 +6440,11 @@ fn materialized_view_observed(
     if let (Some(current), Some(observed)) =
         (model.selected_row.as_deref(), observed_row.as_deref())
         && current != observed
-        && view.snapshot.inbox_rows.iter().any(|row| row.id == current)
+        && view
+            .snapshot
+            .rows(model.section())
+            .iter()
+            .any(|row| row.id == current)
     {
         view.conversation = None;
     }
@@ -6261,7 +6455,7 @@ fn materialized_view_observed(
     if selected_row.is_some_and(|row_id| {
         !view
             .snapshot
-            .inbox_rows
+            .rows(model.section())
             .iter()
             .any(|row| row.id == row_id && row.kind == UiRowKind::Conversation)
     }) {
@@ -6277,12 +6471,13 @@ fn materialized_view_observed(
         && selected_row != Some(requested)
         && view
             .snapshot
-            .inbox_rows
+            .rows(model.section())
             .iter()
             .any(|row| row.id == requested && row.kind == UiRowKind::Conversation)
     {
         return Ok(());
     }
+    model.filter_observed_window(&mut view.conversation);
     let agent_finished = view
         .conversation
         .as_ref()
@@ -6301,39 +6496,43 @@ fn materialized_view_observed(
     restore_project_setup_route(model);
     if let Some(page) = view.conversation {
         let row_id = page.row_id.clone();
-        model.retain_conversation(revision, page);
+        model.retain_conversation(revision, page.clone());
+        model.install_first_conversation_page(page);
         model.selected_row = Some(row_id.clone());
         model.desired_conversation = None;
         model.requested_conversation = Some(row_id.clone());
-        let _ = model.install_retained_conversation(&row_id);
         if focused_conversation_row.as_deref() == Some(&row_id) {
             model.focus = UiFocus::Conversation;
         }
     } else if model
         .snapshot
         .as_ref()
-        .is_some_and(|snapshot| snapshot.inbox_rows.is_empty())
+        .is_some_and(|snapshot| snapshot.rows(model.section()).is_empty())
     {
         model.selected_row = None;
         model.desired_conversation = None;
         model.requested_conversation = None;
         model.close_conversation();
     } else {
-        model.request_inbox_preview(effects);
+        model.request_conversation_observation(effects);
     }
     reconcile_pending_mailbox_view(model, revision, effects)?;
-    if model
-        .required_revision
-        .is_some_and(|required| revision >= required)
-    {
-        model.required_revision = None;
-    }
+    clear_satisfied_revision(model, revision);
     apply_completion_context(model);
     if agent_finished {
         open_automatic_followup_draft(model, effects)?;
     }
     effects.push(UiEffect::RequestRedraw);
     Ok(())
+}
+
+fn clear_satisfied_revision(model: &mut UiModel, revision: u64) {
+    if model
+        .required_revision
+        .is_some_and(|required| revision >= required)
+    {
+        model.required_revision = None;
+    }
 }
 
 fn interactions_observed(
@@ -6652,7 +6851,7 @@ fn apply_input(
             model.replace_with_workspace_root(section);
             request_configuration_if_needed(model, effects)?;
             if section != UiSection::Inbox {
-                model.request_inbox_preview(effects);
+                model.request_conversation_observation(effects);
             }
             effects.push(UiEffect::RequestRedraw);
         }
@@ -6766,7 +6965,7 @@ fn apply_input(
     };
     if changed {
         request_configuration_if_needed(model, effects)?;
-        model.request_inbox_preview(effects);
+        model.request_conversation_observation(effects);
         request_older_history_near_viewport(model, effects)?;
     }
     if changed || dismissed_transient_help || dismissed_completion {
@@ -7310,7 +7509,7 @@ fn open_selected_project_conversations(
         [row_id] => {
             model.install_inbox_conversation_route(row_id.clone());
             model.desired_conversation = Some(row_id.clone());
-            model.request_inbox_preview(effects);
+            model.request_conversation_observation(effects);
         }
         [first, _, ..] => {
             model.selected_row = Some(first.clone());
@@ -11655,7 +11854,7 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
         model.follow_conversation_tail();
     } else if model.section() == UiSection::Inbox {
         model.desired_conversation = Some(row_id);
-        model.request_inbox_preview(effects);
+        model.request_conversation_observation(effects);
     } else {
         model.request_conversation(row_id, None, false, effects)?;
     }
@@ -11666,6 +11865,13 @@ fn request_older_history_near_viewport(
     model: &mut UiModel,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
+    if model
+        .conversation
+        .as_ref()
+        .is_some_and(|conversation| conversation.window.is_some())
+    {
+        return Ok(());
+    }
     if model.focus != UiFocus::Conversation
         || model.technical_visible()
         || model.conversation_inspecting()
@@ -11694,6 +11900,20 @@ fn request_older_history_near_viewport(
 fn load_more(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, UiError> {
     if model.pending_conversation.is_some() {
         return Ok(false);
+    }
+    if let Some(conversation) = model
+        .conversation
+        .as_ref()
+        .filter(|conversation| conversation.window.is_some())
+    {
+        model.request_conversation_window(
+            conversation.row_id.clone(),
+            None,
+            model.reading_fact(),
+            false,
+            effects,
+        )?;
+        return Ok(true);
     }
     let request = model.conversation.as_ref().and_then(|conversation| {
         conversation
@@ -11831,7 +12051,7 @@ fn snapshot_loaded(
         }
     }
     if model.required_revision.is_none() {
-        model.request_inbox_preview(effects);
+        model.request_conversation_observation(effects);
     }
     effects.push(UiEffect::RequestRedraw);
     Ok(())
@@ -11858,6 +12078,26 @@ fn conversation_loaded(
     if model.selected_row.as_deref() != Some(page.row_id.as_str())
         || !model.selected_row_is_conversation()
     {
+        return Ok(());
+    }
+    if model.conversation_response_is_stale(&pending, &page) {
+        return Ok(());
+    }
+    if let Some(window) = &page.window
+        && pending.cursor.is_some()
+        && model
+            .conversation
+            .as_ref()
+            .and_then(|conversation| conversation.window.as_ref())
+            .is_some_and(|current| current.revision != window.revision)
+    {
+        model.request_conversation_window(
+            page.row_id.clone(),
+            None,
+            model.reading_fact(),
+            false,
+            effects,
+        )?;
         return Ok(());
     }
     let agent_finished =
@@ -11895,6 +12135,7 @@ fn conversation_loaded(
         conversation.next_cursor = page.next_cursor;
     } else {
         model.conversation = Some(UiConversation {
+            window: page.window.clone(),
             multiple_non_user_senders: page.multiple_non_user_senders,
             row_id: page.row_id,
             title: page.title,
@@ -11906,6 +12147,27 @@ fn conversation_loaded(
     if let Some(conversation) = &mut model.conversation {
         place_live_activity_at_tail(&mut conversation.entries);
     }
+    restore_loaded_conversation_anchor(model, previous_anchor, previous_message, followed_tail);
+    model.conversation_viewport_geometry = None;
+    if pending.enter_on_load {
+        model.focus = UiFocus::Conversation;
+    }
+    model.conversation_failure = None;
+    model.last_failure = None;
+    if agent_finished {
+        open_automatic_followup_draft(model, effects)?;
+    }
+    model.request_conversation_observation(effects);
+    effects.push(UiEffect::RequestRedraw);
+    Ok(())
+}
+
+fn restore_loaded_conversation_anchor(
+    model: &mut UiModel,
+    previous_anchor: Option<String>,
+    previous_message: Option<[u8; 32]>,
+    followed_tail: bool,
+) {
     model.conversation_anchor = model.conversation.as_ref().and_then(|conversation| {
         previous_anchor
             .filter(|anchor| conversation.entries.iter().any(|entry| &entry.id == anchor))
@@ -11929,17 +12191,6 @@ fn conversation_loaded(
     } else if followed_tail {
         model.conversation_scroll_mode = ConversationScrollMode::FollowTail;
     }
-    model.conversation_viewport_geometry = None;
-    if pending.enter_on_load {
-        model.focus = UiFocus::Conversation;
-    }
-    model.conversation_failure = None;
-    model.last_failure = None;
-    if agent_finished {
-        open_automatic_followup_draft(model, effects)?;
-    }
-    effects.push(UiEffect::RequestRedraw);
-    Ok(())
 }
 
 fn agent_turn_just_finished(previous: Option<&UiConversation>, next: &UiConversationPage) -> bool {
@@ -12135,6 +12386,7 @@ fn conversation_failed(
     model.conversation_failure = Some(ConversationFailure {
         row_id: pending.row_id,
         cursor: pending.cursor,
+        anchor: pending.anchor,
         failure: failure.clone(),
     });
     model.last_failure = Some(failure);
@@ -12505,10 +12757,16 @@ fn append_pending_message(
     if !draft_targets_open_conversation(model, draft) {
         return None;
     }
+    if model.conversation_has_newer_history() {
+        model.conversation_new_content = true;
+        model.focus = UiFocus::Conversation;
+        return None;
+    }
     let id = format!("pending-mailbox-message:{}", effect_id.0.get());
     let conversation = model.conversation.as_mut()?;
     conversation.entries.retain(|entry| entry.id != id);
     conversation.entries.push(UiConversationEntry {
+        canonical_fact: None,
         sender: None,
         id: id.clone(),
         presentation: UiConversationEntryPresentation::Message {
@@ -12563,6 +12821,11 @@ fn reconcile_committed_message(
         retain_sent_message_anchor(model);
         return;
     }
+    if model.conversation_has_newer_history() {
+        model.conversation_new_content = true;
+        model.focus = UiFocus::Conversation;
+        return;
+    }
     let id = format!("committed-message:{message_id:?}");
     let Some(conversation) = &mut model.conversation else {
         return;
@@ -12588,6 +12851,7 @@ fn reconcile_committed_message(
         return;
     }
     conversation.entries.push(UiConversationEntry {
+        canonical_fact: None,
         sender: None,
         id: id.clone(),
         presentation: UiConversationEntryPresentation::Message {
@@ -12618,7 +12882,9 @@ fn retain_sent_message_anchor(model: &mut UiModel) {
             .and_then(|conversation| conversation.entries.last())
             .map(|entry| entry.id.clone());
     }
-    model.focus = UiFocus::Conversation;
+    if model.focus != UiFocus::Approval {
+        model.focus = UiFocus::Conversation;
+    }
     model.close_technical_details();
 }
 
@@ -12997,7 +13263,7 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
                     model.new_workflow = None;
                     model.new_modal = None;
                     select_project_conversation(model, project.project_id, thread_id);
-                    model.request_inbox_preview(effects);
+                    model.request_conversation_observation(effects);
                 }
                 return Ok(());
             }
@@ -13010,7 +13276,7 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
                 return Ok(());
             };
             select_project_conversation(model, project.project_id, input.thread_id);
-            model.request_inbox_preview(effects);
+            model.request_conversation_observation(effects);
             submit_guided_project(
                 model,
                 project,
@@ -13046,7 +13312,7 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
                 model.new_workflow = None;
                 model.new_modal = None;
                 select_project_conversation(model, project.project_id, thread_id);
-                model.request_inbox_preview(effects);
+                model.request_conversation_observation(effects);
             }
         }
         UiNewWorkflow::ChoosingProject { .. }
@@ -13635,6 +13901,17 @@ fn client_failed(
     model.connection_generation = generation;
     model.connection = UiConnectionState::Reconnecting;
     model.pending_conversation = None;
+    if let (Some(row_id), Some(anchor)) = (
+        model.requested_conversation.as_ref(),
+        model.requested_conversation_anchor,
+    ) {
+        model.conversation_failure = Some(ConversationFailure {
+            row_id: row_id.clone(),
+            cursor: None,
+            anchor: Some(anchor),
+            failure: failure.clone(),
+        });
+    }
     model.last_failure = Some(failure);
     effects.push(UiEffect::RequestRedraw);
 }
@@ -13662,6 +13939,17 @@ mod tests {
 
     fn effect_id(value: u64) -> EffectId {
         EffectId(NonZeroU64::new(value).expect("test effect identity is nonzero"))
+    }
+
+    #[test]
+    fn sent_receipt_preserves_explicit_approval_focus() {
+        let mut model = UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        });
+        model.focus = UiFocus::Approval;
+        super::retain_sent_message_anchor(&mut model);
+        assert_eq!(model.focus, UiFocus::Approval);
     }
 
     #[test]

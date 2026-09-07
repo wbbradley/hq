@@ -178,6 +178,7 @@ fn vim_keys_never_cross_focus_or_activate_the_current_item() {
     let previewed = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -990,7 +991,7 @@ fn guided_project_failure_does_not_rearm_the_submission() {
     );
     assert!(submitting.effects.iter().any(|effect| matches!(
         effect,
-        UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == &conversation_row
+        UiEffect::ObserveConversation { row_id: Some(row_id), .. } if row_id == &conversation_row
     )));
     let (effect_id, action) = project_effect(&submitting.effects);
     for outcome in [
@@ -1484,7 +1485,7 @@ fn logical_selection_focus_section_resize_and_quit_are_pure_transitions() {
     assert_eq!(down.model.selected_row(), Some("beta"));
     assert!(down.effects.iter().any(|effect| matches!(
         effect,
-        UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == "beta"
+        UiEffect::ObserveConversation { row_id: Some(row_id), .. } if row_id == "beta"
     )));
     let focused = update(down.model, UiEvent::Input(UiInput::NextFocus)).expect("change focus");
     assert_eq!(focused.model.focus(), UiFocus::Content);
@@ -1879,6 +1880,7 @@ fn sent_and_archived_open_exact_conversation_routes_on_demand() {
             UiEvent::ConversationLoaded {
                 effect_id,
                 page: UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Conversation".to_owned(),
                     context: None,
@@ -1924,6 +1926,7 @@ fn refresh_removal_and_late_page_completion_cannot_steal_the_active_route() {
         UiEvent::ConversationLoaded {
             effect_id: page_id,
             page: UiConversationPage {
+                window: None,
                 multiple_non_user_senders: false,
                 title: "Alice".to_owned(),
                 context: None,
@@ -2263,6 +2266,7 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: true,
             title: "Alice".to_owned(),
             context: Some("Project · Release".to_owned()),
@@ -2320,6 +2324,7 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
         UiEvent::ConversationLoaded {
             effect_id: more_id,
             page: UiConversationPage {
+                window: None,
                 multiple_non_user_senders: false,
                 title: "Alice".to_owned(),
                 context: Some("Project · Release".to_owned()),
@@ -2357,11 +2362,512 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
     );
 }
 
+fn canonical_history_page(revision: u64, anchor: Option<u8>, ids: &[u8]) -> UiConversationPage {
+    UiConversationPage {
+        window: Some(Box::new(hq_tui::UiConversationWindow {
+            revision,
+            anchor: anchor.map(|id| [id; 32]),
+            newer_cursor: anchor.map(|_| "newer".to_owned()),
+            latest_fact: Some([9; 32]),
+        })),
+        multiple_non_user_senders: false,
+        row_id: "thread-a".to_owned(),
+        title: "Alice".to_owned(),
+        context: None,
+        entries: ids
+            .iter()
+            .map(|id| {
+                let mut value = entry(&format!("fact-{id}"), false);
+                value.canonical_fact = Some([*id; 32]);
+                value
+            })
+            .collect(),
+        next_cursor: Some("older".to_owned()),
+    }
+}
+
+#[test]
+fn anchored_subscription_failure_preserves_reading_and_offers_explicit_retry() {
+    let preview = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        canonical_history_page(1, None, &[1, 2]),
+    );
+    let opened = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let measured =
+        observe_conversation_viewport(opened.model, &[("fact-1", 20), ("fact-2", 20)], 5);
+    let home =
+        update(measured.model, UiEvent::Input(UiInput::MoveCursorHome)).expect("older history");
+    assert!(home.model.conversation_older_loading());
+    let position = home.model.conversation_viewport_position().cloned();
+    let failed = update(
+        home.model,
+        UiEvent::ClientFailed {
+            generation: 1,
+            failure: UiFailure {
+                code: "connection_lost".to_owned(),
+                action: "Retry history".to_owned(),
+            },
+        },
+    )
+    .expect("source read failed");
+    assert!(!failed.model.conversation_older_loading());
+    assert!(failed.model.conversation_failure_is_older());
+    assert_eq!(
+        failed.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+    let retry = update(failed.model, UiEvent::Input(UiInput::Character('l'))).expect("retry");
+    let effect_id = retry
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::LoadConversation {
+                id,
+                row_id,
+                cursor: None,
+                anchor: Some(anchor),
+            } if row_id == "thread-a" && *anchor == [1; 32] => Some(*id),
+            _ => None,
+        })
+        .expect("explicit query retries unchanged subscription interest");
+    let duplicate =
+        update(retry.model, UiEvent::Input(UiInput::Character('l'))).expect("repeat retry");
+    assert!(
+        !duplicate
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::LoadConversation { .. }))
+    );
+    let loaded = update(
+        duplicate.model,
+        UiEvent::ConversationLoaded {
+            effect_id,
+            page: canonical_history_page(1, Some(1), &[0, 1, 2]),
+        },
+    )
+    .expect("retry loaded");
+    assert!(!loaded.model.conversation_older_loading());
+    assert!(loaded.model.conversation_failure().is_none());
+    assert_eq!(
+        loaded.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+}
+
+#[test]
+fn anchored_refresh_keeps_reading_outside_the_latest_page_and_end_returns_to_latest() {
+    let preview = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        canonical_history_page(1, None, &[1, 2]),
+    );
+    let opened = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let observed =
+        observe_conversation_viewport(opened.model, &[("fact-1", 20), ("fact-2", 20)], 5);
+    let home = update(observed.model, UiEvent::Input(UiInput::MoveCursorHome))
+        .expect("read older content");
+    let position = home.model.conversation_viewport_position().cloned();
+    assert!(home.effects.iter().any(|effect| matches!(effect,
+        UiEffect::ObserveConversation { row_id: Some(row), anchor: Some(id), .. } if row == "thread-a" && *id == [1; 32])));
+    let stale_interest = update(
+        home.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a"]),
+                conversation: Some(canonical_history_page(2, None, &[3, 4])),
+            },
+        },
+    )
+    .expect("latest response cannot displace old reading");
+    assert_eq!(
+        stale_interest.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+    assert_eq!(
+        stale_interest
+            .model
+            .conversation()
+            .expect("old window retained")
+            .entries[0]
+            .id,
+        "fact-1"
+    );
+    let anchored = update(
+        stale_interest.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a"]),
+                conversation: Some(canonical_history_page(2, Some(1), &[0, 1, 2])),
+            },
+        },
+    )
+    .expect("matching anchored window");
+    assert_eq!(
+        anchored.model.conversation().expect("fresh window").entries[0].id,
+        "fact-0"
+    );
+    let measured = observe_conversation_viewport(
+        anchored.model,
+        &[("fact-0", 20), ("fact-1", 20), ("fact-2", 20)],
+        5,
+    );
+    assert_eq!(
+        measured.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+    let end =
+        update(measured.model, UiEvent::Input(UiInput::MoveCursorEnd)).expect("request latest");
+    assert!(end.effects.iter().any(|effect| matches!(effect,
+        UiEffect::ObserveConversation { row_id: Some(row), anchor: None, .. } if row == "thread-a")));
+    let latest = update(
+        end.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(3, &["thread-a"]),
+                conversation: Some(canonical_history_page(3, None, &[3, 4])),
+            },
+        },
+    )
+    .expect("latest window");
+    let measured =
+        observe_conversation_viewport(latest.model, &[("fact-3", 20), ("fact-4", 20)], 5);
+    assert!(measured.model.conversation_follows_tail());
+    assert_eq!(
+        measured.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "fact-4".to_owned(),
+            row: 15
+        })
+    );
+}
+
+#[test]
+fn sent_and_archived_reading_windows_remain_subscribed_to_their_mailbox() {
+    for (shortcut, section, row_id) in [
+        ('2', UiSection::Sent, "sent-a"),
+        ('3', UiSection::Archived, "archived-a"),
+    ] {
+        let source = snapshot_for(section, 1, &[row_id]);
+        let root = update(
+            loaded_model(source.clone()),
+            UiEvent::Input(UiInput::Character(shortcut)),
+        )
+        .expect("mailbox");
+        let opened =
+            update(root.model, UiEvent::Input(UiInput::Activate)).expect("open conversation");
+        let (effect_id, _, _) = conversation_effect(&opened.effects);
+        let mut page = canonical_history_page(1, None, &[1, 2]);
+        page.row_id = row_id.to_owned();
+        let loaded = update(
+            opened.model,
+            UiEvent::ConversationLoaded { effect_id, page },
+        )
+        .expect("latest page");
+        let measured = update(
+            loaded.model,
+            UiEvent::ConversationViewportObserved {
+                observation: UiConversationViewportObservation {
+                    conversation_id: row_id.to_owned(),
+                    width: 60,
+                    height: 5,
+                    entries: vec![
+                        UiConversationEntryGeometry {
+                            entry_id: "fact-1".to_owned(),
+                            height: 20,
+                        },
+                        UiConversationEntryGeometry {
+                            entry_id: "fact-2".to_owned(),
+                            height: 20,
+                        },
+                    ],
+                },
+            },
+        )
+        .expect("measure");
+        let home = update(measured.model, UiEvent::Input(UiInput::MoveCursorHome))
+            .expect("read old content");
+        assert!(home.effects.iter().any(|effect| matches!(effect,
+            UiEffect::ObserveConversation { row_id: Some(row), anchor: Some(id), section: actual } if row == row_id && *id == [1; 32] && *actual == section)));
+        let position = home.model.conversation_viewport_position().cloned();
+        let mut source = source;
+        source.revision = 2;
+        let mut page = canonical_history_page(2, Some(1), &[0, 1, 2]);
+        page.row_id = row_id.to_owned();
+        let refreshed = update(
+            home.model,
+            UiEvent::MaterializedViewObserved {
+                view: UiMaterializedConversationView {
+                    snapshot: source,
+                    conversation: Some(page),
+                },
+            },
+        )
+        .expect("anchored mailbox refresh");
+        assert_eq!(refreshed.model.section(), section);
+        assert_eq!(
+            refreshed.model.conversation().expect("window").entries[0].id,
+            "fact-0"
+        );
+        assert_eq!(
+            refreshed.model.conversation_viewport_position(),
+            position.as_ref()
+        );
+    }
+}
+
+#[test]
+fn inspection_restores_a_reading_window_that_was_replaced_while_inspecting() {
+    let preview = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        canonical_history_page(1, None, &[1, 2]),
+    );
+    let open = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let measured = observe_conversation_viewport(open.model, &[("fact-1", 20), ("fact-2", 20)], 5);
+    let home =
+        update(measured.model, UiEvent::Input(UiInput::MoveCursorHome)).expect("read old content");
+    let position = home.model.conversation_viewport_position().cloned();
+    let inspecting = update(home.model, UiEvent::Input(UiInput::Activate)).expect("inspect");
+    let moved = update(inspecting.model, UiEvent::Input(UiInput::Character('j')))
+        .expect("inspect next entry");
+    let replaced = update(
+        moved.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a"]),
+                conversation: Some(canonical_history_page(2, Some(2), &[2, 3, 4])),
+            },
+        },
+    )
+    .expect("inspection window refresh");
+    assert_eq!(
+        replaced
+            .model
+            .conversation()
+            .expect("inspection window")
+            .entries[0]
+            .id,
+        "fact-2"
+    );
+    let reading = update(replaced.model, UiEvent::Input(UiInput::Escape)).expect("restore reading");
+    assert_eq!(
+        reading
+            .model
+            .conversation()
+            .expect("saved reading window")
+            .entries[0]
+            .id,
+        "fact-1"
+    );
+    assert_eq!(
+        reading.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+    assert!(reading.effects.iter().any(|effect| matches!(effect,
+        UiEffect::ObserveConversation { anchor: Some(id), .. } if *id == [1; 32])));
+}
+
+#[test]
+fn anchored_window_changes_only_mark_new_content_when_canonical_tail_changes() {
+    let preview = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        canonical_history_page(1, None, &[1, 2]),
+    );
+    let open = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let measured = observe_conversation_viewport(open.model, &[("fact-1", 20), ("fact-2", 20)], 5);
+    let home =
+        update(measured.model, UiEvent::Input(UiInput::MoveCursorHome)).expect("read old content");
+    let earlier = update(
+        home.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(1, &["thread-a"]),
+                conversation: Some(canonical_history_page(1, Some(1), &[0, 1, 2])),
+            },
+        },
+    )
+    .expect("earlier history appears");
+    assert!(
+        !earlier.model.conversation_has_new_content(),
+        "prefetched older history is not new incoming content"
+    );
+    let position = earlier.model.conversation_viewport_position().cloned();
+    let mut page = canonical_history_page(2, Some(1), &[0, 1, 2]);
+    page.window.as_mut().expect("canonical window").latest_fact = Some([10; 32]);
+    let incoming = update(
+        earlier.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a"]),
+                conversation: Some(page),
+            },
+        },
+    )
+    .expect("new content outside this window");
+    assert!(incoming.model.conversation_has_new_content());
+    assert_eq!(
+        incoming.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+}
+
+#[test]
+fn sending_from_a_partial_history_window_does_not_insert_receipts_into_old_history() {
+    let mut page = canonical_history_page(1, None, &[1]);
+    page.entries[0] = actionable_entry("fact-1", [3; 32]);
+    page.entries[0].canonical_fact = Some([1; 32]);
+    let preview = materialized_transition(snapshot(1, &["thread-a"]), page.clone());
+    let open = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let measured = observe_conversation_viewport(open.model, &[("fact-1", 30)], 5);
+    let home =
+        update(measured.model, UiEvent::Input(UiInput::MoveCursorHome)).expect("read history");
+    page.window.as_mut().expect("window").anchor = Some([1; 32]);
+    page.window.as_mut().expect("window").newer_cursor = Some("newer".to_owned());
+    let historical = update(
+        home.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(1, &["thread-a"]),
+                conversation: Some(page),
+            },
+        },
+    )
+    .expect("partial historical window");
+    let opening =
+        update(historical.model, UiEvent::Input(UiInput::Character('r'))).expect("compose");
+    let (effect_id, target) = open_draft_effect(&opening.effects);
+    let target = target.clone();
+    let draft = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target,
+                content: "new reply".to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("draft");
+    let sending = update(draft.model, UiEvent::Input(UiInput::Activate)).expect("send");
+    assert_eq!(
+        sending.model.conversation().expect("history").entries.len(),
+        1
+    );
+    assert!(sending.model.conversation_has_new_content());
+    let effect_id = sending
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitMailboxCommand { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("submission");
+    let committed = update(
+        sending.model,
+        UiEvent::MailboxCommandCommitted {
+            effect_id,
+            revision: 2,
+            message_id: Some([5; 32]),
+        },
+    )
+    .expect("receipt");
+    assert_eq!(
+        committed
+            .model
+            .conversation()
+            .expect("history")
+            .entries
+            .len(),
+        1
+    );
+    assert!(!committed.model.conversation_follows_tail());
+}
+
+#[test]
+fn late_window_responses_cannot_overwrite_a_newer_revision_or_reading_anchor() {
+    let preview = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        canonical_history_page(1, None, &[1, 2]),
+    );
+    let open = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let measured = observe_conversation_viewport(open.model, &[("fact-1", 20), ("fact-2", 20)], 5);
+    let home =
+        update(measured.model, UiEvent::Input(UiInput::MoveCursorHome)).expect("read old content");
+    let retry = update(home.model, UiEvent::Input(UiInput::Character('l')))
+        .expect("explicit window reload");
+    let effect_id = retry
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::LoadConversation {
+                id,
+                anchor: Some(id_bytes),
+                ..
+            } if *id_bytes == [1; 32] => Some(*id),
+            _ => None,
+        })
+        .expect("canonical anchor request");
+    let fresh = update(
+        retry.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(3, &["thread-a"]),
+                conversation: Some(canonical_history_page(3, Some(1), &[0, 1, 2])),
+            },
+        },
+    )
+    .expect("fresh authoritative window");
+    let stale_revision = update(
+        fresh.model.clone(),
+        UiEvent::ConversationLoaded {
+            effect_id,
+            page: canonical_history_page(2, Some(1), &[1, 7, 8]),
+        },
+    )
+    .expect("stale revision is inert");
+    assert_eq!(
+        stale_revision
+            .model
+            .conversation()
+            .expect("window")
+            .window
+            .as_ref()
+            .expect("source")
+            .revision,
+        3
+    );
+    let measured = observe_conversation_viewport(
+        fresh.model,
+        &[("fact-0", 20), ("fact-1", 20), ("fact-2", 20)],
+        5,
+    );
+    let moved = update(measured.model, UiEvent::Input(UiInput::MoveCursorHome))
+        .expect("change reading anchor");
+    let position = moved.model.conversation_viewport_position().cloned();
+    let stale_anchor = update(
+        moved.model,
+        UiEvent::ConversationLoaded {
+            effect_id,
+            page: canonical_history_page(4, Some(1), &[1, 7, 8]),
+        },
+    )
+    .expect("obsolete anchor is inert even at a higher revision");
+    assert_eq!(
+        stale_anchor.model.conversation().expect("window").entries[0].id,
+        "fact-0"
+    );
+    assert_eq!(
+        stale_anchor.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+}
+
 #[test]
 fn scrolling_near_oldest_content_loads_history_once_and_preserves_position() {
     let preview = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -2407,6 +2913,7 @@ fn scrolling_near_oldest_content_loads_history_once_and_preserves_position() {
         UiEvent::ConversationLoaded {
             effect_id,
             page: UiConversationPage {
+                window: None,
                 multiple_non_user_senders: false,
                 title: "Alice".to_owned(),
                 context: None,
@@ -2518,6 +3025,7 @@ fn incoming_content_preserves_reading_until_end_reenables_tail() {
                 view: UiMaterializedConversationView {
                     snapshot: snapshot(2, &["thread-a"]),
                     conversation: Some(UiConversationPage {
+                        window: None,
                         multiple_non_user_senders: false,
                         title: "Alice".to_owned(),
                         context: None,
@@ -2828,6 +3336,7 @@ fn simultaneous_command_approvals_follow_only_the_selected_conversation() {
     let loaded = materialized_transition(
         snapshot(1, &["thread-a", "thread-b"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             row_id: "thread-a".to_owned(),
             title: "Alice".to_owned(),
@@ -2866,6 +3375,7 @@ fn simultaneous_command_approvals_follow_only_the_selected_conversation() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     row_id: "thread-b".to_owned(),
                     title: "Bob".to_owned(),
@@ -2941,6 +3451,7 @@ fn materialized_view_and_approval_alias_reconcile_atomically() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["agent-id"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -2962,6 +3473,7 @@ fn a_command_approval_does_not_block_replies_in_another_conversation() {
     let loaded = materialized_transition(
         snapshot(1, &["thread-a", "thread-b"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             row_id: "thread-a".to_owned(),
             title: "Alice".to_owned(),
@@ -2989,6 +3501,7 @@ fn a_command_approval_does_not_block_replies_in_another_conversation() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     row_id: "thread-b".to_owned(),
                     title: "Bob".to_owned(),
@@ -3088,6 +3601,7 @@ fn conversation_pages_use_loaded_overlap_and_always_advance_in_small_viewports()
         let preview = materialized_transition(
             snapshot(1, &["thread-a"]),
             UiConversationPage {
+                window: None,
                 multiple_non_user_senders: false,
                 title: "Alice".to_owned(),
                 context: None,
@@ -3280,6 +3794,7 @@ fn conversation_viewport_clamps_and_workspace_replacement_drops_hidden_detail_st
 #[test]
 fn materialized_views_install_list_and_detail_atomically_without_first_page_loading() {
     let first_page = UiConversationPage {
+        window: None,
         multiple_non_user_senders: false,
         title: "Alice".to_owned(),
         context: None,
@@ -3324,7 +3839,7 @@ fn materialized_views_install_list_and_detail_atomically_without_first_page_load
         .expect("request second conversation");
     assert!(selecting.effects.iter().any(|effect| matches!(
         effect,
-        UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == "thread-b"
+        UiEffect::ObserveConversation { row_id: Some(row_id), .. } if row_id == "thread-b"
     )));
     assert_eq!(selecting.model.selected_row(), Some("thread-b"));
     assert!(
@@ -3338,6 +3853,7 @@ fn materialized_views_install_list_and_detail_atomically_without_first_page_load
             view: UiMaterializedConversationView {
                 snapshot: snapshot(1, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Bob".to_owned(),
                     context: None,
@@ -3365,6 +3881,7 @@ fn materialized_view_accepts_a_stable_alias_when_the_prior_row_disappears() {
     let loaded = materialized_transition(
         snapshot(1, &["project-thread"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Builder".to_owned(),
             context: None,
@@ -3379,6 +3896,7 @@ fn materialized_view_accepts_a_stable_alias_when_the_prior_row_disappears() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["agent-id"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Builder".to_owned(),
                     context: None,
@@ -3407,6 +3925,7 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
     let loaded = materialized_transition(
         snapshot(1, &["thread-a", "thread-b"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -3421,7 +3940,7 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
     assert_eq!(moved.model.selected_row(), Some("thread-b"));
     assert!(moved.effects.iter().any(|effect| matches!(
         effect,
-        UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == "thread-b"
+        UiEffect::ObserveConversation { row_id: Some(row_id), .. } if row_id == "thread-b"
     )));
 
     let stale = update(
@@ -3430,6 +3949,7 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
             view: UiMaterializedConversationView {
                 snapshot: snapshot(1, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -3448,6 +3968,7 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
             view: UiMaterializedConversationView {
                 snapshot: snapshot(1, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Bob".to_owned(),
                     context: None,
@@ -3468,6 +3989,7 @@ fn opening_a_selected_preview_while_it_loads_preserves_conversation_focus() {
     let loaded = materialized_transition(
         snapshot(1, &["thread-a", "thread-b"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -3496,6 +4018,7 @@ fn opening_a_selected_preview_while_it_loads_preserves_conversation_focus() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(1, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Bob".to_owned(),
                     context: None,
@@ -3527,6 +4050,7 @@ fn inbox_selection_immediately_reaches_a_not_yet_started_agent_conversation() {
     let loaded = materialized_transition(
         source.clone(),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -3544,7 +4068,7 @@ fn inbox_selection_immediately_reaches_a_not_yet_started_agent_conversation() {
         moved
             .effects
             .iter()
-            .any(|effect| matches!(effect, UiEffect::ObserveConversation { row_id: None }))
+            .any(|effect| matches!(effect, UiEffect::ObserveConversation { row_id: None, .. }))
     );
 
     let stale = update(
@@ -3553,6 +4077,7 @@ fn inbox_selection_immediately_reaches_a_not_yet_started_agent_conversation() {
             view: UiMaterializedConversationView {
                 snapshot: source,
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -3572,7 +4097,7 @@ fn inbox_selection_immediately_reaches_a_not_yet_started_agent_conversation() {
     assert_eq!(returned.model.selected_row(), Some("thread-a"));
     assert!(returned.effects.iter().any(|effect| matches!(
         effect,
-        UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == "thread-a"
+        UiEffect::ObserveConversation { row_id: Some(row_id), .. } if row_id == "thread-a"
     )));
 }
 
@@ -3581,6 +4106,7 @@ fn entering_a_materialized_conversation_requires_no_page_request() {
     let loaded = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -3608,6 +4134,7 @@ fn materialized_first_page_retention_is_lru_bounded() {
     let mut transition = materialized_transition(
         snapshot(1, &row_refs),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "A".to_owned(),
             context: None,
@@ -3625,6 +4152,7 @@ fn materialized_first_page_retention_is_lru_bounded() {
                 view: UiMaterializedConversationView {
                     snapshot: snapshot(1, &row_refs),
                     conversation: Some(UiConversationPage {
+                        window: None,
                         multiple_non_user_senders: false,
                         title: row_id.clone(),
                         context: None,
@@ -3651,7 +4179,7 @@ fn materialized_first_page_retention_is_lru_bounded() {
     assert_eq!(evicted.model.selected_row(), Some(row_ids[0].as_str()));
     assert!(evicted.effects.iter().any(|effect| matches!(
         effect,
-        UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == &row_ids[0]
+        UiEffect::ObserveConversation { row_id: Some(row_id), .. } if row_id == &row_ids[0]
     )));
 }
 
@@ -3660,6 +4188,7 @@ fn inbox_arrow_navigation_moves_one_visible_level_at_a_time() {
     let previewed = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -3806,6 +4335,7 @@ fn older_page_failure_preserves_transcript_anchor_and_retry_cursor() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -3855,6 +4385,7 @@ fn materialized_refresh_preserves_anchor_and_ignores_a_stale_view() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -3869,6 +4400,7 @@ fn materialized_refresh_preserves_anchor_and_ignores_a_stale_view() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: true,
                     title: "Alice".to_owned(),
                     context: None,
@@ -3886,6 +4418,7 @@ fn materialized_refresh_preserves_anchor_and_ignores_a_stale_view() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(1, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -3912,6 +4445,7 @@ fn reconnect_preserves_the_open_conversation_until_authoritative_repair() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -3952,6 +4486,7 @@ fn reconnect_preserves_the_open_conversation_until_authoritative_repair() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -4588,6 +5123,7 @@ fn sent_agent_message_follows_the_live_tail_through_automatic_followup() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -4797,6 +5333,7 @@ fn committed_reply_does_not_duplicate_a_message_loaded_by_an_earlier_invalidatio
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -4870,6 +5407,7 @@ fn accepted_undispatched_project_reply_is_presented_as_pending() {
     let opened = materialized_transition(
         snapshot,
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: Some("hq".to_owned()),
@@ -4919,6 +5457,7 @@ fn live_agent_status_stays_at_the_presentation_tail_after_new_authoritative_outp
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -4973,6 +5512,7 @@ fn terminal_agent_turn_automatically_opens_the_exact_project_continuation_draft(
     let opened = materialized_transition(
         initial,
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: Some("hq".to_owned()),
@@ -5005,6 +5545,7 @@ fn terminal_agent_turn_automatically_opens_the_exact_project_continuation_draft(
             view: UiMaterializedConversationView {
                 snapshot: refreshed,
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: Some("hq".to_owned()),
@@ -5053,6 +5594,7 @@ fn terminal_turn_survives_the_project_conversation_becoming_an_agent_row() {
     let opened = materialized_transition(
         snapshot(1, &["project-conversation"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Project agent".to_owned(),
             context: Some("hq".to_owned()),
@@ -5077,6 +5619,7 @@ fn terminal_turn_survives_the_project_conversation_becoming_an_agent_row() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["alice-agent"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: Some("hq".to_owned()),
@@ -5116,6 +5659,7 @@ fn snapshot_only_agent_row_handoff_keeps_the_open_project_conversation_subscribe
     let opened = materialized_transition(
         initial,
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Project agent".to_owned(),
             context: Some("hq".to_owned()),
@@ -5150,7 +5694,7 @@ fn snapshot_only_agent_row_handoff_keeps_the_open_project_conversation_subscribe
         handed_off
             .effects
             .iter()
-            .all(|effect| !matches!(effect, UiEffect::ObserveConversation { row_id: None }))
+            .all(|effect| !matches!(effect, UiEffect::ObserveConversation { row_id: None, .. }))
     );
 }
 
@@ -5168,6 +5712,7 @@ fn initially_opening_an_already_finished_turn_does_not_open_a_draft() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -5191,6 +5736,7 @@ fn conversation_navigation_skips_successful_turns_but_retains_terminal_evidence(
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -5232,6 +5778,7 @@ fn completed_turn_refresh_removes_hidden_selection_geometry_and_detail_routes() 
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -5253,6 +5800,7 @@ fn completed_turn_refresh_removes_hidden_selection_geometry_and_detail_routes() 
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -5294,6 +5842,7 @@ fn terminal_agent_turn_automatically_replies_to_the_latest_direct_message() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -5313,6 +5862,7 @@ fn terminal_agent_turn_automatically_replies_to_the_latest_direct_message() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -5344,6 +5894,7 @@ fn terminal_agent_turn_does_not_replace_an_existing_draft() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -5363,6 +5914,7 @@ fn terminal_agent_turn_does_not_replace_an_existing_draft() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -5398,6 +5950,7 @@ fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -5418,6 +5971,7 @@ fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -5441,6 +5995,7 @@ fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(3, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
@@ -5580,7 +6135,7 @@ fn new_project_conversation_tracks_local_context_then_selects_authoritative_root
     assert_eq!(selected.model.selected_row(), Some("new"));
     assert!(selected.effects.iter().any(|effect| matches!(
         effect,
-        UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == "new"
+        UiEffect::ObserveConversation { row_id: Some(row_id), .. } if row_id == "new"
     )));
 }
 
@@ -6486,6 +7041,7 @@ fn mailbox_selection_survives_workspace_replacement_without_hidden_conversation_
     let mut model = materialized_transition(
         source,
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -6755,7 +7311,7 @@ fn project_primary_action_routes_zero_one_and_many_conversations_without_guessin
     assert_eq!(one.model.selected_row(), Some(first.id.as_str()));
     assert!(one.effects.iter().any(|effect| matches!(
         effect,
-        UiEffect::ObserveConversation { row_id: Some(row_id) } if row_id == &first.id
+        UiEffect::ObserveConversation { row_id: Some(row_id), .. } if row_id == &first.id
     )));
 
     let second = project_conversation_row(7, 32, 42, "Bob");
@@ -6787,6 +7343,7 @@ fn project_primary_action_routes_zero_one_and_many_conversations_without_guessin
             view: UiMaterializedConversationView {
                 snapshot: many_snapshot,
                 conversation: Some(UiConversationPage {
+                    window: None,
                     multiple_non_user_senders: false,
                     title: first.title.clone(),
                     context: None,
@@ -8275,6 +8832,7 @@ fn opened_conversation(entries: Vec<UiConversationEntry>) -> UiModel {
     let observed = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            window: None,
             multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
@@ -8389,9 +8947,9 @@ fn conversation_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, &str, Option<
     effects
         .iter()
         .find_map(|effect| match effect {
-            UiEffect::LoadConversation { id, row_id, cursor } => {
-                Some((*id, row_id.as_str(), cursor.as_deref()))
-            }
+            UiEffect::LoadConversation {
+                id, row_id, cursor, ..
+            } => Some((*id, row_id.as_str(), cursor.as_deref())),
             _ => None,
         })
         .expect("conversation effect")
@@ -8439,6 +8997,7 @@ fn managed_session_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, &UiManaged
 
 fn entry(id: &str, activity: bool) -> UiConversationEntry {
     UiConversationEntry {
+        canonical_fact: None,
         sender: None,
         id: id.to_owned(),
         presentation: if activity {

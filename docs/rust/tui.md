@@ -41,8 +41,9 @@ provider, model, and theme defaults. `hq config get` includes both overrides;
 `null` in JSON means the default applies.
 
 These preferences are stored through installation configuration and the local API.
-Their transcript paging and editor-sizing consumers are tracked in the unfinished
-conversation reading and persistent composition tasks.
+Transcript paging consumes the overlap preference and clamps it to keep each page
+movement advancing. The editor-sizing consumer remains in the unfinished persistent
+composition task.
 
 ## Canonical navigation path
 

@@ -68,9 +68,12 @@ Home reaches the oldest loaded content; End reaches the bottom and resumes follo
 While reading earlier content, updates preserve that position and show “New content · End latest”.
 `↑` and `↓` indicate clipped content. Resize, cached redraw, and composition preserve the logical
 anchor; they never infer it from screen coordinates. The first history page contains the latest
-canonical entries in chronological order. Scrolling near the oldest loaded content requests an
-older page and prepends it without moving the entry and wrapped row being read. One request runs
-at a time; failed older-page loads retain the reading position and expose `l` to retry.
+canonical entries in chronological order. Moving the top visible entry changes the observed
+canonical fact, requesting a bounded window around that fact with older and newer continuation
+evidence. The entry and wrapped row being read stay in place when that window arrives. Reaching
+the edge of a historical window does not enable tail mode; End requests the latest window. Failed
+history loads retain the reading position and expose `l` to retry the same anchor explicitly;
+repeated retry keys do not duplicate an outstanding request.
 
 Enter explicitly starts Inspect mode at a visible entry. Arrows and `j`/`k` select entries there;
 Enter opens typed details, and Escape closes details before returning from inspection to the saved
@@ -93,17 +96,21 @@ routes rather than overlays.
 
 ## Materialized observation and stale suppression
 
-The list and selected first page arrive as one revision-coherent materialized view. Selection
-publishes a latest-value desired conversation identity and wakes the observer independently of the
-command worker. A bounded cache is keyed by stable row identity and authoritative revision.
+The mailbox list and selected conversation window arrive as one revision-coherent materialized
+view in Inbox, Sent, and Archived. Selection publishes the desired conversation and canonical
+reading fact, waking the observer independently of the command worker. Latest-page previews use
+a bounded cache keyed by stable row identity and authoritative revision; historical windows do
+not replace those previews. Responses for a prior anchor cannot displace the current window.
 
 Stale, duplicate, mismatched, or old-generation observations cannot replace the selected page.
 When a row disappears, the model chooses the row at its prior logical index, or the new final row,
 then waits for that exact page. Invalidations are body-free hints to reread authoritative state.
 
-Locally sent messages appear immediately as typed pending rows. Exact committed evidence replaces
-them; a definite rejection restores the exact draft; ambiguous response loss reconciles without a
-duplicate. Project delivery status comes from typed dispatch evidence.
+Locally sent messages appear immediately as typed pending rows when the window reaches the latest
+history. While reading a partial historical window, sending marks new content without inserting
+a pending row or receipt among older entries. Exact committed evidence replaces pending rows; a
+definite rejection restores the exact draft; ambiguous response loss reconciles without a duplicate.
+Project delivery status comes from typed dispatch evidence.
 
 ## Responsive rendering and actions
 
