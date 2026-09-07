@@ -67,7 +67,9 @@ scroll one viewport with the configured overlap (one line by default, clamped to
 Home reaches the oldest loaded content; End reaches the bottom and resumes following new content.
 While reading earlier content, updates preserve that position and show “New content · End latest”.
 `↑` and `↓` indicate clipped content. Resize, cached redraw, and composition preserve the logical
-anchor; they never infer it from screen coordinates. The first history page contains the latest
+anchor; they never infer it from screen coordinates. Live activity updates retain a presentation
+identity derived from their exact source, operation, item, kind, logical key, and runtime. The current
+canonical fact remains separate; superseded facts resolve through source-owned activity support. The first history page contains the latest
 canonical entries in chronological order. Moving the top visible entry changes the observed
 canonical fact, requesting a bounded window around that fact with older and newer continuation
 evidence. The entry and wrapped row being read stay in place when that window arrives. Reaching

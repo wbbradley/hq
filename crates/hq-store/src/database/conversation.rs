@@ -543,6 +543,52 @@ fn aggregate_parts(key: &ConversationAggregateKey) -> KeyParts {
     }
 }
 
+pub(super) fn superseding_activity_position(
+    connection: &Connection,
+    conversation_digest: [u8; 32],
+    fact: &hq_domain::Fact,
+) -> Result<Option<i64>, StoreError> {
+    let hq_domain::SemanticPayload::HarnessActivityRecorded {
+        source,
+        correlation,
+        item,
+        kind,
+        logical_key,
+        runtime,
+        ..
+    } = fact.payload()
+    else {
+        return Ok(None);
+    };
+    if *kind == ActivityKind::CompletedItem {
+        return Ok(None);
+    }
+    let key = ConversationProjectionKey::Activity(ActivityKey {
+        source: *source,
+        correlation: correlation.clone(),
+        item: item.clone(),
+        kind: *kind,
+        logical_key: logical_key.clone(),
+        runtime: runtime.clone(),
+    });
+    let digest = key_digest(KeyTable::Projection, &projection_parts(&key));
+    connection
+        .query_row(
+            "SELECT ordered.position FROM conversation_support support \
+         JOIN conversation_activities activity ON activity.key_digest = support.key_digest \
+         JOIN reduction_conversation_order ordered ON ordered.fact_id = activity.fact_id \
+         WHERE ordered.key_digest = ?1 AND support.key_digest = ?2 AND support.fact_id = ?3",
+            params![
+                conversation_digest.as_slice(),
+                digest.as_slice(),
+                fact.id().as_bytes().as_slice()
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(database)
+}
+
 fn projection_parts(key: &ConversationProjectionKey) -> KeyParts {
     match key {
         ConversationProjectionKey::Thread(value) => KeyParts::simple(1, *value.as_bytes()),

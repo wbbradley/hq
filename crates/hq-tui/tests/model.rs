@@ -2387,6 +2387,41 @@ fn canonical_history_page(revision: u64, anchor: Option<u8>, ids: &[u8]) -> UiCo
 }
 
 #[test]
+fn streamed_activity_replacement_preserves_wrapped_row_and_updates_source_interest() {
+    let preview = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        canonical_history_page(1, None, &[1, 2]),
+    );
+    let opened = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let measured =
+        observe_conversation_viewport(opened.model, &[("fact-1", 20), ("fact-2", 20)], 5);
+    let home = update(measured.model, UiEvent::Input(UiInput::MoveCursorHome)).expect("anchor");
+    let moved = update(home.model, UiEvent::Input(UiInput::NextItem)).expect("wrapped row");
+    let position = moved.model.conversation_viewport_position().cloned();
+    let mut next = canonical_history_page(2, Some(1), &[1, 2]);
+    next.entries[0].canonical_fact = Some([3; 32]);
+    next.entries[0].presentation = entry("replacement", false).presentation;
+    let refreshed = update(
+        moved.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(2, &["thread-a"]),
+                conversation: Some(next),
+            },
+        },
+    )
+    .expect("same typed activity, newer fact");
+    let measured =
+        observe_conversation_viewport(refreshed.model, &[("fact-1", 30), ("fact-2", 20)], 5);
+    assert_eq!(
+        measured.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+    assert!(measured.effects.iter().any(|effect| matches!(effect,
+        UiEffect::ObserveConversation { anchor: Some(anchor), .. } if *anchor == [3; 32])));
+}
+
+#[test]
 fn short_historical_window_can_scroll_toward_newer_history() {
     let preview = materialized_transition(
         snapshot(1, &["thread-a"]),

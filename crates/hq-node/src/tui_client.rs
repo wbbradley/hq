@@ -4602,6 +4602,37 @@ pub fn tui_conversation_page(
     }
 }
 
+fn activity_presentation_identity(activity: &ConversationActivityDto) -> String {
+    if activity.activity_kind == ConversationActivityKindDto::CompletedItem {
+        return full_id(activity.fact_id);
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"hq.activity-presentation.v1");
+    digest.update(activity.source_installation.bytes());
+    digest.update(activity.source_mailbox.bytes());
+    digest.update(activity.operation.bytes());
+    digest.update([match activity.activity_kind {
+        ConversationActivityKindDto::Status => 0,
+        ConversationActivityKindDto::AgentTurn => 1,
+        ConversationActivityKindDto::Progress => 2,
+        ConversationActivityKindDto::Plan => 3,
+        ConversationActivityKindDto::Diff => 4,
+        ConversationActivityKindDto::CompletedItem => 5,
+    }]);
+    digest.update([u8::from(activity.item.is_some())]);
+    for field in [
+        activity.provider.as_str(),
+        activity.session.as_str(),
+        activity.item.as_deref().unwrap_or(""),
+        activity.logical_key.as_str(),
+        activity.runtime.as_str(),
+    ] {
+        digest.update((field.len() as u64).to_le_bytes());
+        digest.update(field.as_bytes());
+    }
+    format!("activity:{}", full_id(Id32::new(digest.finalize().into())))
+}
+
 fn tui_conversation_entry(
     entry: ConversationEntryDto,
     local_human: &MailboxAddressDto,
@@ -4612,6 +4643,7 @@ fn tui_conversation_entry(
             tui_message_entry(*message, local_human, participant)
         }
         ConversationEntryDto::Activity(activity) => {
+            let entry_id = activity_presentation_identity(&activity);
             let ConversationActivityDto {
                 fact_id,
                 activity_kind,
@@ -4635,7 +4667,7 @@ fn tui_conversation_entry(
             UiConversationEntry {
                 canonical_fact: Some(fact_id.bytes()),
                 sender: None,
-                id: full_id(fact_id),
+                id: entry_id,
                 presentation: UiConversationEntryPresentation::Activity {
                     kind,
                     summary: activity_summary(kind, &status, &content, completed.as_ref()),
@@ -5489,6 +5521,60 @@ mod tests {
             assert_eq!(window.latest_fact, Some([0x28; 32]));
             assert_eq!(window.newer_cursor.as_deref(), Some("newer"));
         }
+    }
+
+    #[test]
+    fn live_activity_presentation_identity_survives_replacement_but_keeps_exact_fact() {
+        use hq_local_api::protocol::v1::{
+            ActivityStatusDto, ConversationActivityDto, ConversationActivityKindDto,
+            ConversationEntryDto,
+        };
+        let prior = ConversationActivityDto {
+            fact_id: Id32::new([1; 32]),
+            activity_kind: ConversationActivityKindDto::Progress,
+            sequence: 1,
+            source_installation: Id32::new([2; 32]),
+            source_mailbox: Id32::new([3; 32]),
+            provider: "codex".to_owned(),
+            session: "session".to_owned(),
+            operation: Id32::new([4; 32]),
+            item: Some("compile".to_owned()),
+            logical_key: "progress".to_owned(),
+            runtime: "runtime".to_owned(),
+            occurred_at_unix_ms: 10,
+            status: ActivityStatusDto::Running,
+            content: "first".to_owned(),
+            truncated: false,
+            completed: None,
+        };
+        let local = MailboxAddressDto {
+            installation_id: Id32::new([5; 32]),
+            mailbox_id: Id32::new([6; 32]),
+        };
+        let map = |activity| {
+            super::tui_conversation_entry(
+                ConversationEntryDto::Activity(Box::new(activity)),
+                &local,
+                None,
+            )
+        };
+        let first = map(prior.clone());
+        let mut updated = prior.clone();
+        updated.fact_id = Id32::new([7; 32]);
+        updated.sequence = 2;
+        updated.occurred_at_unix_ms = 20;
+        updated.content = "more output".to_owned();
+        let next = map(updated.clone());
+        assert_eq!(first.id, next.id);
+        assert_ne!(first.canonical_fact, next.canonical_fact);
+        updated.operation = Id32::new([8; 32]);
+        assert_ne!(first.id, map(updated.clone()).id);
+        updated = prior.clone();
+        updated.runtime = "another runtime".to_owned();
+        assert_ne!(first.id, map(updated.clone()).id);
+        updated = prior;
+        updated.item = Some("tests".to_owned());
+        assert_ne!(first.id, map(updated).id);
     }
 
     fn participant() -> ConversationParticipantDto {

@@ -1667,6 +1667,34 @@ impl Database {
             .ok_or_else(|| StoreError::new(StoreErrorClass::InvalidOperationalRequest))
     }
 
+    fn conversation_anchor_position(
+        &self,
+        key_digest: [u8; 32],
+        fact_id: FactId,
+    ) -> Result<i64, StoreError> {
+        let current = self.connection.query_row(
+            "SELECT position FROM reduction_conversation_order WHERE key_digest = ?1 AND fact_id = ?2",
+            params![key_digest.as_slice(), fact_id.as_bytes().as_slice()], |row| row.get(0),
+        ).optional().map_err(sql_error)?;
+        if let Some(position) = current {
+            return Ok(position);
+        }
+        let present: bool = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM canonical_facts WHERE fact_id = ?1)",
+                [fact_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        if !present {
+            return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
+        }
+        let fact = load_verified_fact(&self.connection, fact_id)?;
+        conversation::superseding_activity_position(&self.connection, key_digest, fact.fact())?
+            .ok_or_else(|| StoreError::new(StoreErrorClass::InvalidOperationalRequest))
+    }
+
     fn conversation_ordered_entries(
         &self,
         key_digest: [u8; 32],
@@ -1754,7 +1782,7 @@ impl Database {
                 direction,
             )
         } else if let Some(anchor) = anchor {
-            let position = self.conversation_fact_position(key_digest, anchor)?;
+            let position = self.conversation_anchor_position(key_digest, anchor)?;
             let window_limit = if current_live_tail.is_some() && limit > 1 {
                 limit - 1
             } else {

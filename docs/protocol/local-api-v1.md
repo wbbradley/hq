@@ -349,7 +349,9 @@ Registration may carry an optional typed conversation key and a nonzero window l
 200. An optional canonical fact `anchor` requests a bounded window around that reading position.
 An optional directional `cursor` requests a continuation window; it is mutually exclusive with
 `anchor`. With neither, the selection requests the latest history. Unknown or cross-conversation
-anchors and cursors are rejected. Returned selections echo the requested anchor so clients can
+anchors and cursors are rejected. A superseded live activity anchor resolves to its current
+projection through the authoritative activity support relationship, scoped to the same conversation.
+Returned selections echo the requested anchor so clients can
 reject responses for a replaced reading position.
 
 The server registers a subscription as pending before reading one materialized view from the
