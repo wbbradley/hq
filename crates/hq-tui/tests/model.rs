@@ -2387,6 +2387,57 @@ fn canonical_history_page(revision: u64, anchor: Option<u8>, ids: &[u8]) -> UiCo
 }
 
 #[test]
+fn short_historical_window_can_scroll_toward_newer_history() {
+    let preview = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        canonical_history_page(1, None, &[1, 2]),
+    );
+    let opened = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let measured = observe_conversation_viewport(opened.model, &[("fact-1", 1), ("fact-2", 1)], 20);
+    let home =
+        update(measured.model, UiEvent::Input(UiInput::MoveCursorHome)).expect("read history");
+    let historical = update(
+        home.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(1, &["thread-a"]),
+                conversation: Some(canonical_history_page(1, Some(1), &[1, 2])),
+            },
+        },
+    )
+    .expect("partial historical window");
+    let measured =
+        observe_conversation_viewport(historical.model, &[("fact-1", 1), ("fact-2", 1)], 20);
+    let moved = update(measured.model, UiEvent::Input(UiInput::NextItem))
+        .expect("scroll toward newer entries");
+    assert_eq!(
+        moved
+            .model
+            .conversation_viewport_position()
+            .expect("reading position")
+            .entry_id,
+        "fact-2"
+    );
+    assert!(moved.effects.iter().any(|effect| matches!(effect,
+        UiEffect::ObserveConversation { anchor: Some(anchor), .. } if *anchor == [2; 32])));
+    let measured = observe_conversation_viewport(moved.model, &[("fact-1", 1), ("fact-2", 1)], 20);
+    assert_eq!(
+        measured
+            .model
+            .conversation_viewport_position()
+            .expect("redraw preserves position")
+            .entry_id,
+        "fact-2"
+    );
+    let end = update(measured.model, UiEvent::Input(UiInput::MoveCursorEnd)).expect("latest");
+    assert!(
+        end.effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::ObserveConversation { anchor: None, .. }))
+    );
+}
+
+#[test]
 fn anchored_subscription_failure_preserves_reading_and_offers_explicit_retry() {
     let preview = materialized_transition(
         snapshot(1, &["thread-a"]),

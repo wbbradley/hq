@@ -3292,6 +3292,7 @@ enum ConversationScrollMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ConversationViewportGeometry {
     height: u16,
+    has_newer_history: bool,
     entries: Vec<UiConversationEntryGeometry>,
 }
 
@@ -3304,7 +3305,12 @@ impl ConversationViewportGeometry {
     }
 
     fn maximum_top(&self) -> u64 {
-        self.total_height().saturating_sub(u64::from(self.height))
+        let retained_rows = if self.has_newer_history {
+            1
+        } else {
+            u64::from(self.height)
+        };
+        self.total_height().saturating_sub(retained_rows)
     }
 
     fn entry_start(&self, entry_id: &str) -> Option<(u64, u16)> {
@@ -4950,6 +4956,7 @@ impl UiModel {
         }
         let geometry = ConversationViewportGeometry {
             height: observation.height,
+            has_newer_history: self.conversation_has_newer_history(),
             entries: observation.entries,
         };
         let previous = self.conversation_viewport_position.clone();

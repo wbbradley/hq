@@ -946,6 +946,63 @@ fn installed_guided_work_resumes_exact_conversation_after_node_restart() {
 }
 
 #[test]
+fn installed_history_pages_keep_old_reading_when_the_agent_finishes() {
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let worktree = directory.path().join("history-worktree");
+    let provider_bin = directory.path().join("provider-bin");
+    std::fs::create_dir(&worktree).expect("working tree");
+    std::fs::create_dir(&provider_bin).expect("provider directory");
+    install_fake_codex(&provider_bin, false);
+    std::fs::write(provider_bin.join("history-pages"), b"enabled").expect("history fixture");
+    let completion_gate = provider_bin.join("completion-gate-1");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&completion_gate)
+            .status()
+            .expect("gate")
+            .success()
+    );
+    let search_path = format!(
+        "{}:{}",
+        provider_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    initialize_identity(&state_root);
+    let _daemon = start_foreground_daemon(&state_root, &search_path, &provider_bin.join("codex"));
+    assert!(
+        hq_output(&state_root, &["human", "create"])
+            .status
+            .success()
+    );
+    let seeded = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::CreateGuidedProjectWork {
+            name: "history-project",
+            path: worktree.to_str().expect("path"),
+            agent: "history-agent",
+            content: "Explore the complete conversation history",
+            search_path: &search_path,
+            approval: false,
+            completion_gate: None,
+        },
+    );
+    assert!(seeded.status.success(), "history setup: {:?}", seeded.bytes);
+    let run = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::ReadPagedHistory {
+            completion_gate: &completion_gate,
+        },
+    );
+    assert!(run.status.success(), "history navigation: {:?}", run.bytes);
+    assert_eq!(run.before, run.after);
+    assert!(mailbox_contains(&state_root, "finished-turn-1"));
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn installed_fake_codex_approval_round_trips_through_the_tui() {
     let _scenario = serial_scenario();
@@ -1336,6 +1393,9 @@ struct PtyRun {
 
 #[derive(Clone, Copy, Debug)]
 enum PtyInteraction<'content> {
+    ReadPagedHistory {
+        completion_gate: &'content Path,
+    },
     QuitOnStart,
     QuitAfterSetup,
     VisitEveryView,
@@ -1480,6 +1540,8 @@ fn run_in_pty_with_trace(
     let mut oversized_to_before_keys = Vec::new();
     let mut before_to_after_keys = Vec::new();
     let mut oversized_phase = 0_u8;
+    let mut history_phase_observed = 0_u8;
+    let mut history_progress_at = Instant::now();
     let mut view_shortcut_phase = 0_u8;
     let mut resize_phase = 0_u8;
     let mut next_state_probe_at = Instant::now();
@@ -1499,6 +1561,65 @@ fn run_in_pty_with_trace(
         let alternate_screen_entered = bytes
             .windows(ENTER_ALTERNATE_SCREEN.len())
             .any(|window| window == ENTER_ALTERNATE_SCREEN);
+        if let PtyInteraction::ReadPagedHistory { completion_gate } = interaction {
+            let rendered = text_without_csi_sequences(&bytes[completion_offset.unwrap_or(0)..]);
+            match oversized_phase {
+                0 if rendered.contains("history-agent") && rendered.contains("Connected") => {
+                    master.write_all(b"\r").expect("open history");
+                    master.flush().expect("navigation flush");
+                    oversized_phase = 10;
+                    completion_offset = Some(bytes.len());
+                }
+                10 if rendered.contains("HISTORY_END") => {
+                    master.write_all(b"\x1b[H").expect("read older history");
+                    master.flush().expect("history flush");
+                    oversized_phase = 1;
+                    completion_offset = Some(bytes.len());
+                }
+                1 if rendered.contains("HISTORY_START") => {
+                    master
+                        .write_all(b"\r\x1b")
+                        .expect("inspect and restore reading");
+                    master.flush().expect("inspection flush");
+                    std::fs::write(completion_gate, b"complete")
+                        .expect("agent finishes while reading history");
+                    oversized_phase = 2;
+                    completion_offset = Some(bytes.len());
+                }
+                1 if Instant::now() >= next_state_probe_at => {
+                    master.write_all(b"\x1b[H").expect("older window");
+                    master.flush().expect("older flush");
+                    next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
+                }
+                2 if rendered.contains("New content") => {
+                    assert!(
+                        !rendered.contains("finished-turn-1"),
+                        "incoming completion moved old reading: {rendered}"
+                    );
+                    master.write_all(b"\x1b[F").expect("return to latest");
+                    master.flush().expect("latest flush");
+                    oversized_phase = 3;
+                    completion_offset = Some(bytes.len());
+                }
+                3 if rendered.contains("finished-turn-1") => {
+                    master
+                        .write_all(&[0x03])
+                        .expect("quit after latest is visible");
+                    master.flush().expect("quit flush");
+                    exit_sent = true;
+                    oversized_phase = 4;
+                }
+                3 | 10 if Instant::now() >= next_state_probe_at => {
+                    // Repaint the current screen so differential writes cannot split the marker.
+                    resize_phase ^= 1;
+                    set_pty_dimensions(&pair.slave, 30, 79 + u16::from(resize_phase));
+                    let process_id = Pid::from_raw(i32::try_from(child.id()).expect("TUI PID"));
+                    kill(process_id, Signal::SIGWINCH).expect("history repaint signal");
+                    next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
+                }
+                _ => {}
+            }
+        }
         if matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
             && !initial_key_sent
             && bytes
@@ -1535,7 +1656,8 @@ fn run_in_pty_with_trace(
                 PtyInteraction::SubmitSelfNote(_) | PtyInteraction::SubmitPastedSelfNote { .. } => {
                     vec![b"N"]
                 }
-                PtyInteraction::ResizeWhileIdle { .. }
+                PtyInteraction::ReadPagedHistory { .. }
+                | PtyInteraction::ResizeWhileIdle { .. }
                 | PtyInteraction::VisitEveryView
                 | PtyInteraction::NavigateInboxConversation { .. }
                 | PtyInteraction::ScrollOversizedConversation { .. }
@@ -2625,7 +2747,15 @@ fn run_in_pty_with_trace(
         if let Some(status) = child.try_wait().expect("TUI process status") {
             break status;
         }
-        if Instant::now().duration_since(last_output_at) >= PROCESS_INACTIVITY_WATCHDOG {
+        if history_phase_observed != oversized_phase {
+            history_phase_observed = oversized_phase;
+            history_progress_at = Instant::now();
+        }
+        let history_stalled = matches!(interaction, PtyInteraction::ReadPagedHistory { .. })
+            && history_progress_at.elapsed() >= PROCESS_INACTIVITY_WATCHDOG.saturating_mul(4);
+        if Instant::now().duration_since(last_output_at) >= PROCESS_INACTIVITY_WATCHDOG
+            || history_stalled
+        {
             let _ = child.kill();
             let _ = child.wait();
             let provider_calls = match interaction {
@@ -2664,7 +2794,7 @@ fn run_in_pty_with_trace(
                 _ => None,
             };
             panic!(
-                "TUI process timed out for {interaction:?} (initial={initial_key_sent}, content={content_sent}, action={managed_action_sent}, provider={managed_provider_sent}, resource={resource_commit_sent}, exit={exit_sent}); provider calls: {provider_calls:?}; project: {guided_project:?}; boundaries: {boundary_evidence:?}; reply evidence: {reply_evidence:?}; output: {}",
+                "TUI process timed out for {interaction:?} (initial={initial_key_sent}, content={content_sent}, action={managed_action_sent}, provider={managed_provider_sent}, resource={resource_commit_sent}, exit={exit_sent}, conversation_phase={oversized_phase}); provider calls: {provider_calls:?}; project: {guided_project:?}; boundaries: {boundary_evidence:?}; reply evidence: {reply_evidence:?}; output: {}",
                 String::from_utf8_lossy(&bytes)
             );
         }
@@ -3000,6 +3130,11 @@ for line in sys.stdin:
                 answer = json.loads(answer_line)
                 if answer.get("id") == approval_id:
                     break
+        if os.path.exists(os.path.join(os.path.dirname(__file__), "history-pages")):
+            for index in range(120):
+                label = "HISTORY_START" if index == 0 else "HISTORY_END" if index == 119 else f"history-entry-{index:03}"
+                item = {"type": "commandExecution", "id": f"history-{index}", "status": "completed", "command": f"echo {label}", "aggregatedOutput": label, "exitCode": 0}
+                print(json.dumps({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": item}}), flush=True)
         completion_gate = os.path.join(os.path.dirname(__file__), f"completion-gate-{turn_number}")
         if os.path.exists(completion_gate):
             with open(completion_gate, "rb", buffering=0) as gate:
