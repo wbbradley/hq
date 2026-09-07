@@ -96,7 +96,7 @@ pub trait QueryDomain {
     /// Loads all authoritative projection packages and their one serialized revision.
     fn authoritative_snapshot(&self) -> Result<AuthoritativeSnapshot, ApplicationError>;
 
-    /// Loads one snapshot and optional selected first page from one authoritative state boundary.
+    /// Loads one snapshot and optional selected history window from one authoritative state boundary.
     fn authoritative_conversation_view(
         &self,
         _selection: Option<&ConversationPageSelection>,
@@ -106,7 +106,8 @@ pub trait QueryDomain {
         ))
     }
 
-    /// Loads one bounded reducer-ordered conversation page.
+    /// Loads the latest bounded conversation page, or older history before a stable cursor.
+    /// Entries within each page follow canonical reducer order.
     fn conversation_entries(
         &self,
         key: &ConversationKey,

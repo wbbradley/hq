@@ -1652,7 +1652,87 @@ impl Database {
         limit: usize,
         cursor: Option<&PageCursor>,
     ) -> Result<Page<ConversationEntry>, StoreError> {
-        if !(1..=200).contains(&limit) {
+        self.load_conversation_window(key, limit, cursor, None)
+    }
+
+    fn conversation_fact_position(
+        &self,
+        key_digest: [u8; 32],
+        fact_id: FactId,
+    ) -> Result<i64, StoreError> {
+        self.connection.query_row(
+            "SELECT position FROM reduction_conversation_order WHERE key_digest = ?1 AND fact_id = ?2",
+            params![key_digest.as_slice(), fact_id.as_bytes().as_slice()], |row| row.get(0),
+        ).optional().map_err(sql_error)?
+            .ok_or_else(|| StoreError::new(StoreErrorClass::InvalidOperationalRequest))
+    }
+
+    fn conversation_ordered_entries(
+        &self,
+        key_digest: [u8; 32],
+        boundary: i64,
+        direction: ConversationPageDirection,
+        limit: usize,
+    ) -> Result<Vec<(i64, FactId, i64)>, StoreError> {
+        let (comparison, order) = match direction {
+            ConversationPageDirection::Older => ("<", "DESC"),
+            ConversationPageDirection::Newer => (">", "ASC"),
+        };
+        let sql = format!(
+            "SELECT position, fact_id, entry_kind FROM reduction_conversation_order \
+             WHERE key_digest = ?1 AND position {comparison} ?2 \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM conversation_activities activity \
+                 WHERE activity.fact_id = reduction_conversation_order.fact_id \
+                   AND (activity.kind = 2 OR (activity.kind = 6 AND activity.status = 2)) \
+               ) ORDER BY position {order} LIMIT ?3"
+        );
+        let mut statement = self.connection.prepare(&sql).map_err(sql_error)?;
+        let limit = i64::try_from(limit)
+            .map_err(|_| StoreError::new(StoreErrorClass::InvalidOperationalRequest))?;
+        let rows = statement
+            .query_map(params![key_digest.as_slice(), boundary, limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(sql_error)?;
+        rows.map(|row| {
+            let (position, fact, kind) = row.map_err(sql_error)?;
+            Ok((position, FactId::from_bytes(fixed_bytes(fact)?), kind))
+        })
+        .collect()
+    }
+
+    fn conversation_continuation(
+        &self,
+        key_digest: [u8; 32],
+        edge: Option<&(i64, FactId, i64)>,
+        direction: ConversationPageDirection,
+    ) -> Result<Option<PageCursor>, StoreError> {
+        let Some((position, fact, _)) = edge else {
+            return Ok(None);
+        };
+        if self
+            .conversation_ordered_entries(key_digest, *position, direction, 1)?
+            .is_empty()
+        {
+            Ok(None)
+        } else {
+            encode_conversation_cursor(key_digest, *fact, direction).map(Some)
+        }
+    }
+
+    fn load_conversation_window(
+        &self,
+        key: &ConversationKey,
+        limit: usize,
+        cursor: Option<&PageCursor>,
+        anchor: Option<FactId>,
+    ) -> Result<Page<ConversationEntry>, StoreError> {
+        if !(1..=200).contains(&limit) || (cursor.is_some() && anchor.is_some()) {
             return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
         }
         let repaired: i64 = self
@@ -1663,90 +1743,77 @@ impl Database {
             return Err(StoreError::new(StoreErrorClass::NotRepaired));
         }
         let key_digest = repair::conversation_key_digest(key);
-        let persisted = repair::conversation_key_is_persisted(&self.connection, key)?;
-        let after = match cursor {
-            None => -1,
-            Some(cursor) => {
-                let (cursor_key, fact_id) = decode_conversation_cursor(cursor)?;
-                if cursor_key != key_digest || !persisted {
-                    return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
-                }
-                self.connection
-                    .query_row(
-                        "SELECT position FROM reduction_conversation_order \
-                         WHERE key_digest = ?1 AND fact_id = ?2",
-                        params![key_digest.as_slice(), fact_id.as_bytes().as_slice()],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()
-                    .map_err(sql_error)?
-                    .ok_or_else(|| StoreError::new(StoreErrorClass::InvalidOperationalRequest))?
+        let current_live_tail = load_conversation_live_tail(&self.connection, key_digest)?;
+        let (boundary, direction) = if let Some(cursor) = cursor {
+            let (cursor_key, fact_id, direction) = decode_conversation_cursor(cursor)?;
+            if cursor_key != key_digest {
+                return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
             }
+            (
+                self.conversation_fact_position(key_digest, fact_id)?,
+                direction,
+            )
+        } else if let Some(anchor) = anchor {
+            let position = self.conversation_fact_position(key_digest, anchor)?;
+            let window_limit = if current_live_tail.is_some() && limit > 1 {
+                limit - 1
+            } else {
+                limit
+            };
+            let newer = self.conversation_ordered_entries(
+                key_digest,
+                position,
+                ConversationPageDirection::Newer,
+                window_limit / 2 + 1,
+            )?;
+            let boundary = if newer.len() > window_limit / 2 {
+                newer.last().map_or(i64::MAX, |entry| entry.0)
+            } else {
+                i64::MAX
+            };
+            (boundary, ConversationPageDirection::Older)
+        } else {
+            (i64::MAX, ConversationPageDirection::Older)
         };
-        if !persisted {
+        if !repair::conversation_key_is_persisted(&self.connection, key)? {
             return Ok(Page::new(Vec::new(), None));
         }
-        let live_tail = if cursor.is_none() {
-            load_conversation_live_tail(&self.connection, key_digest)?
+        let live_tail = if boundary == i64::MAX || direction == ConversationPageDirection::Newer {
+            current_live_tail
         } else {
             None
         };
-        let include_live_tail_with_history = live_tail.is_some() && limit > 1;
-        let history_limit = if include_live_tail_with_history {
+        let history_limit = if live_tail.is_some() && limit > 1 {
             limit - 1
         } else {
             limit
         };
-        let row_limit = i64::try_from(history_limit + 1)
-            .map_err(|_| StoreError::new(StoreErrorClass::InvalidOperationalRequest))?;
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT position, fact_id, entry_kind FROM reduction_conversation_order \
-                 WHERE key_digest = ?1 AND position > ?2 \
-                   AND NOT EXISTS ( \
-                     SELECT 1 FROM conversation_activities activity \
-                     WHERE activity.fact_id = reduction_conversation_order.fact_id \
-                       AND (activity.kind = 2 OR (activity.kind = 6 AND activity.status = 2)) \
-                   ) \
-                 ORDER BY position LIMIT ?3",
-            )
-            .map_err(sql_error)?;
-        let rows = statement
-            .query_map(params![key_digest.as_slice(), after, row_limit], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .map_err(sql_error)?;
-        let mut selected = Vec::with_capacity(history_limit + 1);
-        for row in rows {
-            let (_position, fact_id, entry_kind) = row.map_err(sql_error)?;
-            selected.push((FactId::from_bytes(fixed_bytes(fact_id)?), entry_kind));
+        let mut selected =
+            self.conversation_ordered_entries(key_digest, boundary, direction, history_limit)?;
+        if direction == ConversationPageDirection::Older {
+            selected.reverse();
         }
-        let has_more = selected.len() > history_limit;
-        selected.truncate(history_limit);
-        let next_cursor = if has_more {
-            let fact_id = selected
-                .last()
-                .map(|(fact_id, _)| *fact_id)
-                .ok_or_else(|| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))?;
-            Some(encode_conversation_cursor(key_digest, fact_id)?)
-        } else {
-            None
-        };
+        let older_cursor = self.conversation_continuation(
+            key_digest,
+            selected.first(),
+            ConversationPageDirection::Older,
+        )?;
+        let newer_cursor = self.conversation_continuation(
+            key_digest,
+            selected.last(),
+            ConversationPageDirection::Newer,
+        )?;
         let mut items = selected
             .into_iter()
-            .map(|(fact_id, kind)| conversation::load_entry(&self.connection, fact_id, kind))
+            .map(|(_, fact, kind)| conversation::load_entry(&self.connection, fact, kind))
             .collect::<Result<Vec<_>, _>>()?;
-        if let Some(live_tail) = live_tail
-            && (include_live_tail_with_history || items.is_empty())
+        if newer_cursor.is_none()
+            && let Some(live_tail) = live_tail
+            && items.len() < limit
         {
             items.push(ConversationEntry::Activity(Box::new(live_tail)));
         }
-        Ok(Page::new(items, next_cursor))
+        Ok(Page::new(items, older_cursor).with_previous_cursor(newer_cursor))
     }
 
     pub(super) fn load_agent_snapshot(&self) -> Result<AgentProjectionSnapshot, StoreError> {
@@ -1789,8 +1856,16 @@ impl Database {
         let snapshot = self.load_authoritative_snapshot()?;
         let conversation = selection
             .map(|selection| {
-                self.load_conversation_entries(selection.key(), selection.limit(), None)
-                    .map(|page| SelectedConversationPage::new(selection.key().clone(), page))
+                self.load_conversation_window(
+                    selection.key(),
+                    selection.limit(),
+                    selection.cursor(),
+                    selection.anchor(),
+                )
+                .map(|page| {
+                    SelectedConversationPage::new(selection.key().clone(), page)
+                        .with_anchor(selection.anchor())
+                })
             })
             .transpose()?;
         Ok(AuthoritativeConversationView::new(snapshot, conversation))
@@ -2388,12 +2463,23 @@ fn load_verified_fact(
     Ok(verified)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConversationPageDirection {
+    Older,
+    Newer,
+}
+
 fn encode_conversation_cursor(
     key_digest: [u8; 32],
     fact_id: FactId,
+    direction: ConversationPageDirection,
 ) -> Result<PageCursor, StoreError> {
+    let direction = match direction {
+        ConversationPageDirection::Older => "older",
+        ConversationPageDirection::Newer => "newer",
+    };
     PageCursor::new(format!(
-        "v1:{}:{}",
+        "{direction}:{}:{}",
         lower_hex(&key_digest),
         lower_hex(fact_id.as_bytes())
     ))
@@ -2406,19 +2492,28 @@ fn fixed_bytes(bytes: Vec<u8>) -> Result<[u8; 32], StoreError> {
         .map_err(|_| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))
 }
 
-fn decode_conversation_cursor(cursor: &PageCursor) -> Result<([u8; 32], FactId), StoreError> {
-    let value = cursor.as_str();
-    let mut parts = value.split(':');
+fn decode_conversation_cursor(
+    cursor: &PageCursor,
+) -> Result<([u8; 32], FactId, ConversationPageDirection), StoreError> {
+    let mut parts = cursor.as_str().split(':');
     let parsed = match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some("v1"), Some(key), Some(fact), None) => {
-            Some((decode_lower_hex(key), decode_lower_hex(fact)))
+        (Some(direction @ ("older" | "newer")), Some(key), Some(fact), None) => {
+            Some((decode_lower_hex(key), decode_lower_hex(fact), direction))
         }
         _ => None,
     };
-    let Some((Some(key), Some(fact))) = parsed else {
+    let Some((Some(key), Some(fact), direction)) = parsed else {
         return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
     };
-    Ok((key, FactId::from_bytes(fact)))
+    Ok((
+        key,
+        FactId::from_bytes(fact),
+        if direction == "older" {
+            ConversationPageDirection::Older
+        } else {
+            ConversationPageDirection::Newer
+        },
+    ))
 }
 
 fn lower_hex(bytes: &[u8]) -> String {

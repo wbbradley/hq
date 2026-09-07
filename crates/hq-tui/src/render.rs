@@ -881,7 +881,7 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
                 actions.push(Line::from("r or Enter — write the first message"));
             } else if model.conversation().is_some() {
                 actions.push(Line::from(
-                    "↑/↓ or j/k — select message · Enter — details · Esc — close conversation",
+                    "↑/↓ or j/k — scroll line · PgUp/PgDn — scroll page · Enter — inspect",
                 ));
                 actions.push(Line::from(if model.section() == UiSection::Inbox {
                     "r — reply · d — archive conversation · PgDn — load more"
@@ -3769,6 +3769,12 @@ fn render_conversation(
                 theme.style(UiThemeRole::Attention),
             ));
         }
+        if model.conversation_has_new_content() {
+            header.push(Line::styled(
+                "New content · End latest",
+                theme.style(UiThemeRole::Attention),
+            ));
+        }
         if model.conversation_older_loading() {
             header.push(Line::styled(
                 "Loading older messages…",
@@ -3776,12 +3782,12 @@ fn render_conversation(
             ));
         } else if model.conversation_failure_is_older() {
             header.push(Line::styled(
-                "Older messages could not be loaded · PageDown retry",
+                "Older messages could not be loaded · l retry",
                 theme.style(UiThemeRole::Attention),
             ));
         } else if conversation.next_cursor.is_some() {
             header.push(Line::styled(
-                "Older messages available · PageDown",
+                "Scroll up for older messages",
                 theme.style(UiThemeRole::TextMuted),
             ));
         }
@@ -4676,7 +4682,8 @@ fn render_conversation_entry(
     if area.is_empty() {
         return;
     }
-    let selected = model.conversation_anchor() == Some(entry.id.as_str());
+    let selected =
+        model.conversation_inspecting() && model.conversation_anchor() == Some(entry.id.as_str());
     let selection = (selected && matches!(model.focus(), UiFocus::Conversation | UiFocus::Draft))
         .then(|| {
             theme.style(
@@ -4939,11 +4946,19 @@ fn conversation_footer(model: &UiModel) -> String {
     if model.technical_visible() {
         return " j/k scroll · Esc conversation · ? help".to_owned();
     }
-    let mut controls = vec![if model.viewport().width >= WIDE_WIDTH {
-        "↑/↓ or j/k message"
-    } else {
-        "j/k"
-    }];
+    if model.conversation_inspecting() {
+        return " ↑/↓ or j/k select · Enter details · Esc reading · ? help".to_owned();
+    }
+    let mut controls = vec![
+        if model.viewport().width >= WIDE_WIDTH {
+            "↑/↓ or j/k scroll"
+        } else {
+            "j/k scroll"
+        },
+        "PgUp/PgDn page",
+        "End latest",
+        "Enter inspect",
+    ];
     if matches!(
         model
             .selected_row_data()
@@ -4961,11 +4976,6 @@ fn conversation_footer(model: &UiModel) -> String {
     if model.section() == UiSection::Inbox {
         controls.push("d archive conversation");
     }
-    controls.push(if model.viewport().width >= WIDE_WIDTH {
-        "t/Enter details"
-    } else {
-        "t/Enter info"
-    });
     controls.push(match model.section() {
         UiSection::Inbox => "Esc Inbox",
         UiSection::Sent => "Esc Sent",

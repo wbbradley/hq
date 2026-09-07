@@ -1871,10 +1871,29 @@ fn sent_and_archived_open_exact_conversation_routes_on_demand() {
                 },
             ]
         );
-        let (_, requested_row, cursor) = conversation_effect(&opened.effects);
+        let (effect_id, requested_row, cursor) = conversation_effect(&opened.effects);
         assert_eq!(requested_row, row_id);
         assert_eq!(cursor, None);
-        model = update(opened.model, UiEvent::Input(UiInput::Escape))
+        let loaded = update(
+            opened.model,
+            UiEvent::ConversationLoaded {
+                effect_id,
+                page: UiConversationPage {
+                    multiple_non_user_senders: false,
+                    title: "Conversation".to_owned(),
+                    context: None,
+                    row_id: row_id.to_owned(),
+                    entries: vec![entry("message", false)],
+                    next_cursor: None,
+                },
+            },
+        )
+        .expect("latest page arrives");
+        assert!(
+            loaded.model.conversation_follows_tail(),
+            "new conversations start at the tail"
+        );
+        model = update(loaded.model, UiEvent::Input(UiInput::Escape))
             .expect("return to mailbox root")
             .model;
         assert_eq!(model.navigation_path(), &[UiRoute::Workspace(workspace)]);
@@ -2267,8 +2286,12 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
 
     let focused =
         update(opened.model, UiEvent::Input(UiInput::Activate)).expect("focus conversation");
+    let observed =
+        observe_conversation_viewport(focused.model, &[("message-1", 3), ("activity-2", 5)], 4);
+    let inspecting =
+        update(observed.model, UiEvent::Input(UiInput::Activate)).expect("inspect visible entry");
     let earlier =
-        update(focused.model, UiEvent::Input(UiInput::Character('k'))).expect("move earlier");
+        update(inspecting.model, UiEvent::Input(UiInput::Character('k'))).expect("move earlier");
     assert_eq!(earlier.model.conversation_anchor(), Some("message-1"));
     let moved =
         update(earlier.model, UiEvent::Input(UiInput::Character('j'))).expect("return to tail");
@@ -2335,7 +2358,92 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
 }
 
 #[test]
-fn conversation_viewport_scrolls_visual_rows_independently_from_entry_navigation() {
+fn scrolling_near_oldest_content_loads_history_once_and_preserves_position() {
+    let preview = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        UiConversationPage {
+            multiple_non_user_senders: false,
+            title: "Alice".to_owned(),
+            context: None,
+            row_id: "thread-a".to_owned(),
+            entries: vec![entry("recent", false)],
+            next_cursor: Some("older-cursor".to_owned()),
+        },
+    );
+    let opened =
+        update(preview.model, UiEvent::Input(UiInput::Activate)).expect("open conversation");
+    let observed = observe_conversation_viewport(opened.model, &[("recent", 40)], 5);
+    assert_no_conversation_load(&observed.effects);
+    let home = update(observed.model, UiEvent::Input(UiInput::MoveCursorHome))
+        .expect("oldest loaded content");
+    let (effect_id, _, cursor) = conversation_effect(&home.effects);
+    assert_eq!(cursor, Some("older-cursor"));
+    let position = home.model.conversation_viewport_position().cloned();
+    let duplicate =
+        update(home.model, UiEvent::Input(UiInput::PreviousItem)).expect("scroll during load");
+    assert_no_conversation_load(&duplicate.effects);
+    let failed = update(
+        duplicate.model,
+        UiEvent::ConversationFailed {
+            effect_id,
+            failure: UiFailure {
+                code: "offline".to_owned(),
+                action: "retry".to_owned(),
+            },
+        },
+    )
+    .expect("history load failed");
+    let scrolled =
+        update(failed.model, UiEvent::Input(UiInput::NextItem)).expect("reading remains available");
+    assert_no_conversation_load(&scrolled.effects);
+    let home = update(scrolled.model, UiEvent::Input(UiInput::MoveCursorHome))
+        .expect("return to previous position");
+    let retry =
+        update(home.model, UiEvent::Input(UiInput::Character('l'))).expect("explicit retry");
+    let (effect_id, _, cursor) = conversation_effect(&retry.effects);
+    assert_eq!(cursor, Some("older-cursor"));
+    let loaded = update(
+        retry.model,
+        UiEvent::ConversationLoaded {
+            effect_id,
+            page: UiConversationPage {
+                multiple_non_user_senders: false,
+                title: "Alice".to_owned(),
+                context: None,
+                row_id: "thread-a".to_owned(),
+                entries: vec![entry("older", false)],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("older history prepends");
+    assert_eq!(
+        loaded
+            .model
+            .conversation()
+            .expect("conversation")
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["older", "recent"]
+    );
+    assert_eq!(
+        loaded.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+    let measured = observe_conversation_viewport(loaded.model, &[("older", 20), ("recent", 40)], 5);
+    assert_eq!(
+        measured.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+    let home =
+        update(measured.model, UiEvent::Input(UiInput::MoveCursorHome)).expect("exhausted history");
+    assert_no_conversation_load(&home.effects);
+}
+
+#[test]
+fn conversation_viewport_scrolls_visual_rows_with_arrows_and_jk() {
     let model = opened_conversation(vec![
         entry("message-1", false),
         entry("message-2", false),
@@ -2368,26 +2476,140 @@ fn conversation_viewport_scrolls_visual_rows_independently_from_entry_navigation
     assert!(!scrolled.model.conversation_follows_tail());
 
     let selected = update(scrolled.model, UiEvent::Input(UiInput::Character('k')))
-        .expect("jump to previous entry");
-    assert_eq!(selected.model.conversation_anchor(), Some("message-2"));
+        .expect("scroll one visual row with k");
+    assert_eq!(selected.model.conversation_anchor(), Some("message-3"));
     assert_eq!(
         selected.model.conversation_viewport_position(),
         Some(&UiConversationViewportPosition {
             entry_id: "message-2".to_owned(),
-            row: 0,
+            row: 6,
         })
     );
 
     let within_entry = update(selected.model, UiEvent::Input(UiInput::NextItem))
         .expect("scroll inside selected entry");
-    assert_eq!(within_entry.model.conversation_anchor(), Some("message-2"));
+    assert_eq!(within_entry.model.conversation_anchor(), Some("message-3"));
     assert_eq!(
         within_entry.model.conversation_viewport_position(),
         Some(&UiConversationViewportPosition {
             entry_id: "message-2".to_owned(),
-            row: 1,
+            row: 7,
         })
     );
+}
+
+#[test]
+fn incoming_content_preserves_reading_until_end_reenables_tail() {
+    for follow in [false, true] {
+        let model = opened_conversation(vec![entry("message-1", false), entry("message-2", false)]);
+        let observed =
+            observe_conversation_viewport(model, &[("message-1", 10), ("message-2", 10)], 5);
+        let reading = if follow {
+            observed.model
+        } else {
+            update(observed.model, UiEvent::Input(UiInput::PreviousItem))
+                .expect("conversation test transition or evidence")
+                .model
+        };
+        let position = reading.conversation_viewport_position().cloned();
+        let refreshed = update(
+            reading,
+            UiEvent::MaterializedViewObserved {
+                view: UiMaterializedConversationView {
+                    snapshot: snapshot(2, &["thread-a"]),
+                    conversation: Some(UiConversationPage {
+                        multiple_non_user_senders: false,
+                        title: "Alice".to_owned(),
+                        context: None,
+                        row_id: "thread-a".to_owned(),
+                        entries: vec![
+                            entry("message-1", false),
+                            entry("message-2", false),
+                            entry("message-3", false),
+                        ],
+                        next_cursor: None,
+                    }),
+                },
+            },
+        )
+        .expect("conversation test transition or evidence");
+        assert_eq!(refreshed.model.conversation_follows_tail(), follow);
+        assert_eq!(refreshed.model.conversation_has_new_content(), !follow);
+        let observed = observe_conversation_viewport(
+            refreshed.model,
+            &[("message-1", 10), ("message-2", 10), ("message-3", 10)],
+            5,
+        );
+        if !follow {
+            assert_eq!(
+                observed.model.conversation_viewport_position(),
+                position.as_ref()
+            );
+        }
+        let ended = update(observed.model, UiEvent::Input(UiInput::MoveCursorEnd))
+            .expect("conversation test transition or evidence");
+        assert!(ended.model.conversation_follows_tail());
+        assert!(!ended.model.conversation_has_new_content());
+        assert_eq!(
+            ended.model.conversation_viewport_position(),
+            Some(&UiConversationViewportPosition {
+                entry_id: "message-3".to_owned(),
+                row: 5,
+            })
+        );
+    }
+}
+
+#[test]
+fn conversation_inspection_restores_reading_position_and_tail_mode() {
+    let model = opened_conversation(vec![
+        entry("message-1", false),
+        entry("message-2", false),
+        entry("message-3", false),
+    ]);
+    let observed = observe_conversation_viewport(
+        model,
+        &[("message-1", 3), ("message-2", 10), ("message-3", 3)],
+        5,
+    );
+    for reading in [
+        observed.model.clone(),
+        update(observed.model, UiEvent::Input(UiInput::PreviousItem))
+            .expect("conversation test transition or evidence")
+            .model,
+    ] {
+        let position = reading.conversation_viewport_position().cloned();
+        let following = reading.conversation_follows_tail();
+        assert!(!reading.conversation_inspecting());
+        let inspecting = update(reading, UiEvent::Input(UiInput::Activate))
+            .expect("conversation test transition or evidence");
+        assert!(inspecting.model.conversation_inspecting());
+        assert!(!inspecting.model.technical_visible());
+        assert_eq!(inspecting.model.conversation_anchor(), Some("message-2"));
+        assert_eq!(
+            inspecting.model.conversation_viewport_position(),
+            position.as_ref()
+        );
+        let moved = update(inspecting.model, UiEvent::Input(UiInput::Character('k')))
+            .expect("conversation test transition or evidence");
+        assert_eq!(moved.model.conversation_anchor(), Some("message-1"));
+        let details = update(moved.model, UiEvent::Input(UiInput::Activate))
+            .expect("conversation test transition or evidence");
+        assert!(details.model.technical_visible());
+        let back = update(details.model, UiEvent::Input(UiInput::Escape))
+            .expect("conversation test transition or evidence");
+        assert!(back.model.conversation_inspecting());
+        assert!(!back.model.technical_visible());
+        let reading = update(back.model, UiEvent::Input(UiInput::Escape))
+            .expect("conversation test transition or evidence");
+        assert!(!reading.model.conversation_inspecting());
+        assert_eq!(reading.model.focus(), UiFocus::Conversation);
+        assert_eq!(
+            reading.model.conversation_viewport_position(),
+            position.as_ref()
+        );
+        assert_eq!(reading.model.conversation_follows_tail(), following);
+    }
 }
 
 #[test]
@@ -2855,51 +3077,129 @@ fn inline_approval_completion_requires_the_exact_request_and_restores_retry_stat
 }
 
 #[test]
+fn conversation_pages_use_loaded_overlap_and_always_advance_in_small_viewports() {
+    for (overlap, height, rows) in [
+        (None, 5, 4),
+        (Some(0), 5, 5),
+        (Some(2), 5, 3),
+        (Some(u16::MAX), 5, 1),
+        (None, 1, 1),
+    ] {
+        let preview = materialized_transition(
+            snapshot(1, &["thread-a"]),
+            UiConversationPage {
+                multiple_non_user_senders: false,
+                title: "Alice".to_owned(),
+                context: None,
+                row_id: "thread-a".to_owned(),
+                entries: vec![entry("message", false)],
+                next_cursor: None,
+            },
+        );
+        let opened = update(preview.model, UiEvent::Input(UiInput::Activate))
+            .expect("conversation test transition or evidence");
+        let effect_id = opened
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::LoadConfiguration { id } => Some(*id),
+                _ => None,
+            })
+            .expect("opening conversation loads display preferences");
+        let loaded = update(
+            opened.model,
+            UiEvent::ConfigurationLoaded {
+                effect_id,
+                configuration: UiConfiguration {
+                    conversation_page_overlap: overlap,
+                    composer_height_percent: None,
+                    default_provider: None,
+                    theme: None,
+                    codex_model: None,
+                    codex_yolo: false,
+                    themes: Vec::new(),
+                },
+            },
+        )
+        .expect("conversation test transition or evidence");
+        let observed = observe_conversation_viewport(loaded.model, &[("message", 100)], height);
+        let home = update(observed.model, UiEvent::Input(UiInput::MoveCursorHome))
+            .expect("conversation test transition or evidence");
+        let down = update(home.model, UiEvent::Input(UiInput::PageDown))
+            .expect("conversation test transition or evidence");
+        assert_eq!(
+            down.model
+                .conversation_viewport_position()
+                .expect("conversation test transition or evidence")
+                .row,
+            rows
+        );
+        let up = update(down.model, UiEvent::Input(UiInput::PageUp))
+            .expect("conversation test transition or evidence");
+        assert_eq!(
+            up.model
+                .conversation_viewport_position()
+                .expect("conversation test transition or evidence")
+                .row,
+            0
+        );
+    }
+}
+
+#[test]
 fn conversation_viewport_home_end_and_geometry_refresh_preserve_stable_entry_rows() {
     let model = opened_conversation(vec![entry("message-1", false), entry("message-2", false)]);
     let observed = observe_conversation_viewport(model, &[("message-1", 4), ("message-2", 12)], 5);
-    let selected = update(observed.model, UiEvent::Input(UiInput::Character('k')))
-        .expect("select first entry");
-    let ended = update(selected.model, UiEvent::Input(UiInput::MoveCursorEnd))
-        .expect("show selected entry end");
+    let homed = update(observed.model, UiEvent::Input(UiInput::MoveCursorHome))
+        .expect("conversation test transition or evidence");
     assert_eq!(
-        ended.model.conversation_viewport_position(),
+        homed.model.conversation_viewport_position(),
         Some(&UiConversationViewportPosition {
             entry_id: "message-1".to_owned(),
             row: 0,
         })
     );
-
-    let selected = update(ended.model, UiEvent::Input(UiInput::Character('j')))
-        .expect("select oversized entry");
-    let ended = update(selected.model, UiEvent::Input(UiInput::MoveCursorEnd))
-        .expect("show oversized entry end");
+    assert!(!homed.model.conversation_follows_tail());
+    let page = update(homed.model, UiEvent::Input(UiInput::PageDown))
+        .expect("conversation test transition or evidence");
     assert_eq!(
-        ended.model.conversation_viewport_position(),
-        Some(&UiConversationViewportPosition {
-            entry_id: "message-2".to_owned(),
-            row: 7,
-        })
-    );
-    let refreshed =
-        observe_conversation_viewport(ended.model, &[("message-2", 8), ("message-1", 4)], 5);
-    assert_eq!(
-        refreshed.model.conversation_viewport_position(),
-        Some(&UiConversationViewportPosition {
-            entry_id: "message-2".to_owned(),
-            row: 7,
-        }),
-        "the same stable entry and nearby row survive reordering"
-    );
-    let homed = update(refreshed.model, UiEvent::Input(UiInput::MoveCursorHome))
-        .expect("show entry beginning");
-    assert_eq!(
-        homed.model.conversation_viewport_position(),
+        page.model.conversation_viewport_position(),
         Some(&UiConversationViewportPosition {
             entry_id: "message-2".to_owned(),
             row: 0,
         })
     );
+    let line = update(page.model, UiEvent::Input(UiInput::NextItem))
+        .expect("conversation test transition or evidence");
+    let resized =
+        observe_conversation_viewport(line.model, &[("message-1", 6), ("message-2", 14)], 4);
+    assert_eq!(
+        resized.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-2".to_owned(),
+            row: 1,
+        })
+    );
+    let ended = update(resized.model, UiEvent::Input(UiInput::MoveCursorEnd))
+        .expect("conversation test transition or evidence");
+    assert_eq!(
+        ended.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-2".to_owned(),
+            row: 10,
+        })
+    );
+    assert!(ended.model.conversation_follows_tail());
+    let page = update(ended.model, UiEvent::Input(UiInput::PageUp))
+        .expect("conversation test transition or evidence");
+    assert_eq!(
+        page.model.conversation_viewport_position(),
+        Some(&UiConversationViewportPosition {
+            entry_id: "message-2".to_owned(),
+            row: 7,
+        })
+    );
+    assert!(!page.model.conversation_follows_tail());
 }
 
 #[test]
@@ -3398,7 +3698,9 @@ fn inbox_arrow_navigation_moves_one_visible_level_at_a_time() {
 #[test]
 fn inbox_back_closes_technical_details_before_leaving_the_conversation() {
     let model = opened_conversation(vec![entry("message-1", false)]);
-    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("open details");
+    let inspecting = update(model, UiEvent::Input(UiInput::Activate)).expect("inspect");
+    let details =
+        update(inspecting.model, UiEvent::Input(UiInput::Activate)).expect("open details");
     assert!(details.model.technical_visible());
     assert_eq!(
         details.model.navigation_path(),
@@ -3419,7 +3721,10 @@ fn inbox_back_closes_technical_details_before_leaving_the_conversation() {
     assert!(!closed.model.technical_visible());
     assert_eq!(closed.model.focus(), UiFocus::Conversation);
 
-    let back = update(closed.model, UiEvent::Input(UiInput::MoveCursorLeft))
+    let reading =
+        update(closed.model, UiEvent::Input(UiInput::MoveCursorLeft)).expect("leave inspection");
+    assert!(!reading.model.conversation_inspecting());
+    let back = update(reading.model, UiEvent::Input(UiInput::MoveCursorLeft))
         .expect("return to Inbox list");
     assert_eq!(back.model.focus(), UiFocus::Content);
 }
@@ -3743,8 +4048,9 @@ fn activity_never_becomes_a_reply_or_state_action_target() {
         actionable_entry("message", [1; 32]),
         entry("activity", true),
     ]);
+    let inspecting = update(opened, UiEvent::Input(UiInput::Activate)).expect("inspect message");
     let activity =
-        update(opened, UiEvent::Input(UiInput::Character('j'))).expect("select activity");
+        update(inspecting.model, UiEvent::Input(UiInput::Character('j'))).expect("select activity");
     let guided = update(
         activity.model.clone(),
         UiEvent::Input(UiInput::Character('r')),
@@ -4140,13 +4446,86 @@ fn committed_reply_dismisses_the_editor_and_appears_as_sent_at_the_conversation_
 }
 
 #[test]
+fn composing_and_sending_preserve_a_scrolled_reading_position() {
+    let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
+    let observed = observe_conversation_viewport(opened, &[("question", 30)], 5);
+    let reading = update(observed.model, UiEvent::Input(UiInput::PreviousItem))
+        .expect("conversation test transition or evidence")
+        .model;
+    let position = reading.conversation_viewport_position().cloned();
+    let opening = update(reading, UiEvent::Input(UiInput::Character('r')))
+        .expect("conversation test transition or evidence");
+    assert!(!opening.model.conversation_follows_tail());
+    let (effect_id, target) = open_draft_effect(&opening.effects);
+    let target = target.clone();
+    let draft = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target,
+                content: "answer".to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("conversation test transition or evidence");
+    let typing = update(draft.model, UiEvent::Input(UiInput::Character('!')))
+        .expect("conversation test transition or evidence");
+    assert!(!typing.model.conversation_follows_tail());
+    let saving = update(typing.model, UiEvent::Input(UiInput::Activate))
+        .expect("conversation test transition or evidence");
+    let (effect_id, saved) = save_draft_effect(&saving.effects);
+    let saved = UiMailboxDraft {
+        version: 2,
+        ..saved.clone()
+    };
+    let sending = update(
+        saving.model,
+        UiEvent::DraftSaved {
+            effect_id,
+            draft: saved,
+        },
+    )
+    .expect("conversation test transition or evidence");
+    assert!(!sending.model.conversation_follows_tail());
+    assert_eq!(
+        sending.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+    assert!(sending.model.conversation_has_new_content());
+    let effect_id = sending
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitMailboxCommand { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("conversation test transition or evidence");
+    let committed = update(
+        sending.model,
+        UiEvent::MailboxCommandCommitted {
+            effect_id,
+            revision: 2,
+            message_id: Some([5; 32]),
+        },
+    )
+    .expect("conversation test transition or evidence");
+    assert!(!committed.model.conversation_follows_tail());
+    assert_eq!(
+        committed.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+}
+
+#[test]
 fn sent_agent_message_follows_the_live_tail_through_automatic_followup() {
     let opened = opened_conversation(vec![
         actionable_entry("question", [3; 32]),
         agent_turn_entry("turn-running", UiActivityStatus::Running),
     ]);
-    let question =
-        update(opened, UiEvent::Input(UiInput::Character('k'))).expect("select question");
+    let question = update(opened, UiEvent::Input(UiInput::Activate)).expect("inspect question");
     let opening = update(question.model, UiEvent::Input(UiInput::Character('r'))).expect("reply");
     let (open_id, _) = open_draft_effect(&opening.effects);
     let loaded = update(
@@ -4830,6 +5209,10 @@ fn conversation_navigation_skips_successful_turns_but_retains_terminal_evidence(
         .model;
     assert_eq!(model.conversation_anchor(), Some("interrupted"));
     assert_eq!(model.conversation().expect("loaded").entries.len(), 4);
+    model = observe_conversation_viewport(model, &[("message", 3), ("interrupted", 5)], 4).model;
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("inspect visible entry")
+        .model;
     model = update(model, UiEvent::Input(UiInput::Character('k')))
         .expect("previous")
         .model;
@@ -4861,7 +5244,8 @@ fn completed_turn_refresh_removes_hidden_selection_geometry_and_detail_routes() 
         },
     );
     let opened = update(opened.model, UiEvent::Input(UiInput::Activate)).expect("open");
-    let details = update(opened.model, UiEvent::Input(UiInput::Character('t'))).expect("details");
+    let observed = observe_conversation_viewport(opened.model, &[("message", 3), ("turn", 5)], 4);
+    let details = update(observed.model, UiEvent::Input(UiInput::Character('t'))).expect("details");
     assert!(details.model.technical_visible());
     let finished = update(
         details.model,
@@ -7991,6 +8375,14 @@ fn timer_effect(effects: &[UiEffect], expected: UiTimerKind) -> hq_tui::EffectId
             _ => None,
         })
         .expect("timer effect")
+}
+
+fn assert_no_conversation_load(effects: &[UiEffect]) {
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::LoadConversation { .. }))
+    );
 }
 
 fn conversation_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, &str, Option<&str>) {

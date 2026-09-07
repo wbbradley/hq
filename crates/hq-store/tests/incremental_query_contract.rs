@@ -311,7 +311,7 @@ fn minimum_page_limit_keeps_durable_history_bounded_and_cursor_reachable() {
         .load_conversation_entries(&key, 1, None)
         .expect("minimum first page loads");
     assert_eq!(first_page.items().len(), 1);
-    assert_eq!(first_page.items()[0].fact_id(), expected[0]);
+    assert_eq!(first_page.items()[0].fact_id(), expected[1]);
     let cursor = first_page
         .next_cursor()
         .expect("remaining durable history has a cursor");
@@ -319,8 +319,30 @@ fn minimum_page_limit_keeps_durable_history_bounded_and_cursor_reachable() {
         .load_conversation_entries(&key, 1, Some(cursor))
         .expect("minimum continuation page loads");
     assert_eq!(second_page.items().len(), 1);
-    assert_eq!(second_page.items()[0].fact_id(), expected[1]);
+    assert_eq!(second_page.items()[0].fact_id(), expected[0]);
     assert!(second_page.next_cursor().is_none());
+    for anchor in expected {
+        for limit in 1..=3 {
+            let selection = hq_application::ConversationPageSelection::new(key.clone(), limit)
+                .expect("bounded selection")
+                .with_anchor(Some(anchor));
+            let view = store
+                .application_state_handle()
+                .authoritative_conversation_view(Some(&selection))
+                .expect("small anchored window with a live tail");
+            let selected = view.conversation().expect("selected window");
+            assert_eq!(selected.anchor(), Some(anchor));
+            assert!(selected.page().items().len() <= limit);
+            assert!(
+                selected
+                    .page()
+                    .items()
+                    .iter()
+                    .any(|entry| entry.fact_id() == anchor),
+                "live activity must not evict the reading anchor"
+            );
+        }
+    }
 }
 
 #[test]
@@ -805,7 +827,7 @@ fn cursor_pages_are_bound_to_the_conversation_and_concatenate_to_reducer_order()
 }
 
 #[test]
-fn equal_time_mixed_pages_concatenate_to_local_reducer_order_after_repair_and_reopen() {
+fn equal_time_mixed_pages_prepend_to_local_reducer_order_after_repair_and_reopen() {
     let directory = TestDirectory::new();
     let database = directory.database_path();
     let store = open_store(&database);
@@ -848,6 +870,15 @@ fn equal_time_mixed_pages_concatenate_to_local_reducer_order_after_repair_and_re
     let first = store
         .load_conversation_entries(&key, 5, None)
         .expect("first page loads");
+    assert_eq!(
+        first
+            .items()
+            .iter()
+            .map(ConversationEntry::fact_id)
+            .collect::<Vec<_>>(),
+        durable[durable.len() - 5..],
+        "opening history returns the latest canonical entries"
+    );
     let other_key = ConversationKey::ProviderSession {
         counterparty: MailboxAddress::new(
             authority_policy().local_installation(),
@@ -871,6 +902,13 @@ fn equal_time_mixed_pages_concatenate_to_local_reducer_order_after_repair_and_re
     assert_eq!(load_all_ids(&reopened, &key, 6), durable);
 }
 
+fn conversation_page_ids(page: &hq_domain::Page<ConversationEntry>) -> Vec<FactId> {
+    page.items()
+        .iter()
+        .map(ConversationEntry::fact_id)
+        .collect()
+}
+
 fn load_all_ids(
     store: &hq_store::Store,
     key: &ConversationKey,
@@ -882,12 +920,107 @@ fn load_all_ids(
         let page = store
             .load_conversation_entries(key, limit, cursor.as_ref())
             .expect("conversation page loads");
-        ids.extend(page.items().iter().map(ConversationEntry::fact_id));
+        ids.splice(0..0, page.items().iter().map(ConversationEntry::fact_id));
         cursor = page.next_cursor().cloned();
         if cursor.is_none() {
             return ids;
         }
     }
+}
+
+#[test]
+fn anchored_history_windows_reread_canonical_content_and_page_in_both_directions() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let root = verified_fact();
+    let mailbox = verified_child(root.verified_event().event_id());
+    for fact in [root, mailbox]
+        .into_iter()
+        .chain((0..12).map(|index| authored_durable_conversation_entry(index, false)))
+    {
+        store.append_verified(fact).expect("history ingests");
+    }
+    let key = ConversationKey::ProviderSession {
+        counterparty: MailboxAddress::new(
+            authority_policy().local_installation(),
+            authority_policy().local_human_mailbox(),
+        ),
+        provider: ProviderId::new("paged-provider").expect("provider"),
+        session: ProviderSessionId::new("paged-session").expect("session"),
+    };
+    let expected = load_all_ids(&store, &key, 12);
+    let selection = hq_application::ConversationPageSelection::new(key.clone(), 4)
+        .expect("selection")
+        .with_anchor(Some(expected[4]));
+    let view = store
+        .application_state_handle()
+        .authoritative_conversation_view(Some(&selection))
+        .expect("anchored view");
+    let window = view.conversation().expect("selected window").page();
+    assert_eq!(conversation_page_ids(window), expected[3..7]);
+    let older = store
+        .load_conversation_entries(&key, 4, window.next_cursor())
+        .expect("older page");
+    assert_eq!(conversation_page_ids(&older), expected[..3]);
+    let newer = store
+        .load_conversation_entries(&key, 4, window.previous_cursor())
+        .expect("newer page");
+    assert_eq!(conversation_page_ids(&newer), expected[7..11]);
+    let latest = store
+        .load_conversation_entries(&key, 4, newer.previous_cursor())
+        .expect("last page");
+    assert_eq!(conversation_page_ids(&latest), expected[11..]);
+    assert!(latest.previous_cursor().is_none());
+    assert!(older.next_cursor().is_none());
+    let continuation = hq_application::ConversationPageSelection::new(key.clone(), 4)
+        .expect("continuation selection")
+        .with_cursor(window.previous_cursor().cloned());
+    let coherent = store
+        .application_state_handle()
+        .authoritative_conversation_view(Some(&continuation))
+        .expect("revision-coherent newer page");
+    assert_eq!(
+        conversation_page_ids(coherent.conversation().expect("selected page").page()),
+        expected[7..11]
+    );
+
+    store
+        .append_verified(authored_durable_conversation_entry(99, false))
+        .expect("incoming history");
+    let refreshed = store
+        .application_state_handle()
+        .authoritative_conversation_view(Some(&selection))
+        .expect("reread anchored view");
+    assert!(refreshed.snapshot().revision() > view.snapshot().revision());
+    let page = refreshed.conversation().expect("refreshed window").page();
+    assert_eq!(page.items().len(), 4);
+    assert!(
+        page.items()
+            .iter()
+            .any(|entry| entry.fact_id() == expected[4])
+    );
+    let all = load_all_ids(&store, &key, 20);
+    let indices = page
+        .items()
+        .iter()
+        .map(|entry| {
+            all.iter()
+                .position(|id| *id == entry.fact_id())
+                .expect("canonical identity")
+        })
+        .collect::<Vec<_>>();
+    assert!(indices.windows(2).all(|pair| pair[1] == pair[0] + 1));
+    let wrong = hq_application::ConversationPageSelection::new(key, 4)
+        .expect("selection")
+        .with_anchor(Some(FactId::from_bytes([0xff; 32])));
+    assert_eq!(
+        store
+            .application_state_handle()
+            .authoritative_conversation_view(Some(&wrong))
+            .expect_err("unrelated anchor rejects")
+            .class(),
+        StoreErrorClass::InvalidOperationalRequest
+    );
 }
 
 #[test]
@@ -939,7 +1072,7 @@ fn thousand_entry_later_pages_use_the_covering_conversation_index() {
         .prepare(
             "EXPLAIN QUERY PLAN SELECT position, fact_id, entry_kind \
              FROM reduction_conversation_order \
-             WHERE key_digest = ?1 AND position > ?2 ORDER BY position LIMIT ?3",
+             WHERE key_digest = ?1 AND position < ?2 ORDER BY position DESC LIMIT ?3",
         )
         .expect("query plan prepares")
         .query_map(params![[0_u8; 32].as_slice(), 900_i64, 18_i64], |row| {

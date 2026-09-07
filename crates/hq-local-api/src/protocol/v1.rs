@@ -711,7 +711,7 @@ pub enum ConversationContextDto {
     },
 }
 
-/// One bounded reducer-ordered conversation page request.
+/// One bounded conversation page request, latest first with older continuation pages.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationPageRequest {
@@ -719,7 +719,7 @@ pub struct ConversationPageRequest {
     pub key: ConversationKeyDto,
     /// Nonzero inclusive page limit.
     pub limit: u16,
-    /// Opaque continuation cursor.
+    /// Stable exclusive boundary for older history; absent selects the latest page.
     pub cursor: Option<String>,
 }
 
@@ -759,18 +759,51 @@ pub struct ConversationPageSelectionDto {
     pub key: ConversationKeyDto,
     /// Nonzero inclusive first-page limit.
     pub limit: u16,
+    /// Canonical fact to keep inside the returned window; none selects latest history.
+    pub anchor: Option<Id32>,
+    /// Directional page boundary, mutually exclusive with an anchor.
+    pub cursor: Option<String>,
 }
 
 impl ConversationPageSelectionDto {
     /// Constructs one bounded typed selection.
     pub fn new(key: ConversationKeyDto, limit: u16) -> Result<Self, ValueError> {
-        let selection = Self { key, limit };
+        let selection = Self {
+            key,
+            limit,
+            anchor: None,
+            cursor: None,
+        };
         selection.validate()?;
         Ok(selection)
     }
 
+    /// Requests a bounded window around a canonical fact identity.
+    #[must_use]
+    pub fn with_anchor(mut self, anchor: Option<Id32>) -> Self {
+        self.cursor = None;
+        self.anchor = anchor;
+        self
+    }
+
+    /// Selects a validated directional continuation instead of an anchored window.
+    pub fn with_cursor(mut self, cursor: Option<String>) -> Result<Self, ValueError> {
+        self.anchor = None;
+        self.cursor = cursor;
+        self.validate()?;
+        Ok(self)
+    }
+
     fn validate(&self) -> Result<(), ValueError> {
         validate_conversation_key(&self.key)?;
+        if (self.anchor.is_some() && self.cursor.is_some())
+            || self
+                .cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.is_empty() || cursor.len() > MAX_CURSOR_BYTES)
+        {
+            return Err(ValueError::InvalidCursor);
+        }
         if self.limit == 0 || self.limit > MAX_MATERIALIZED_CONVERSATION_PAGE_ITEMS {
             return Err(ValueError::InvalidPageLimit);
         }
@@ -2753,8 +2786,10 @@ pub enum PresentationKindDto {
 pub struct ConversationPageDto {
     /// Reducer-ordered bounded conversation entries.
     pub items: Vec<ConversationEntryDto>,
-    /// Opaque continuation cursor when more entries exist.
+    /// Stable continuation boundary when older canonical entries exist.
     pub next_cursor: Option<String>,
+    /// Stable continuation boundary when newer canonical entries exist.
+    pub previous_cursor: Option<String>,
 }
 
 impl ConversationPageDto {
@@ -2763,9 +2798,19 @@ impl ConversationPageDto {
         items: Vec<ConversationEntryDto>,
         next_cursor: Option<String>,
     ) -> Result<Self, ValueError> {
-        let page = Self { items, next_cursor };
+        let page = Self {
+            items,
+            next_cursor,
+            previous_cursor: None,
+        };
         validate_page(&page)?;
         Ok(page)
+    }
+    /// Adds a validated reverse continuation for newer history.
+    pub fn with_previous_cursor(mut self, cursor: Option<String>) -> Result<Self, ValueError> {
+        self.previous_cursor = cursor;
+        validate_page(&self)?;
+        Ok(self)
     }
 }
 
@@ -2777,12 +2822,24 @@ pub struct SelectedConversationPageDto {
     pub key: ConversationKeyDto,
     /// Bounded reducer-ordered first page.
     pub page: ConversationPageDto,
+    /// Requested canonical anchor, echoed for selection-response correlation.
+    pub anchor: Option<Id32>,
 }
 
 impl SelectedConversationPageDto {
     /// Constructs one selected first page.
     pub const fn new(key: ConversationKeyDto, page: ConversationPageDto) -> Self {
-        Self { key, page }
+        Self {
+            key,
+            page,
+            anchor: None,
+        }
+    }
+    /// Echoes the exact canonical anchor used to select this window.
+    #[must_use]
+    pub const fn with_anchor(mut self, anchor: Option<Id32>) -> Self {
+        self.anchor = anchor;
+        self
     }
 }
 
@@ -2793,7 +2850,7 @@ pub struct AuthoritativeConversationViewDto {
     /// Complete authoritative projection snapshot.
     pub snapshot: AuthoritativeSnapshotDto,
     /// Selected first page, when requested.
-    pub conversation: Option<SelectedConversationPageDto>,
+    pub conversation: Option<Box<SelectedConversationPageDto>>,
 }
 
 impl AuthoritativeConversationViewDto {
@@ -2804,7 +2861,7 @@ impl AuthoritativeConversationViewDto {
     ) -> Result<Self, ValueError> {
         let view = Self {
             snapshot,
-            conversation,
+            conversation: conversation.map(Box::new),
         };
         validate_authoritative_conversation_view(&view)?;
         Ok(view)
@@ -4365,10 +4422,10 @@ fn validate_page(page: &ConversationPageDto) -> Result<(), ValueError> {
     if page.items.len() > usize::from(MAX_PAGE_ITEMS) {
         return Err(ValueError::TooManyItems);
     }
-    if page
-        .next_cursor
-        .as_ref()
-        .is_some_and(|cursor| cursor.is_empty() || cursor.len() > MAX_CURSOR_BYTES)
+    if [page.next_cursor.as_ref(), page.previous_cursor.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|cursor| cursor.is_empty() || cursor.len() > MAX_CURSOR_BYTES)
     {
         return Err(ValueError::InvalidCursor);
     }

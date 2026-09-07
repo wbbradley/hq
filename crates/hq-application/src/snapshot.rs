@@ -992,10 +992,12 @@ pub struct AuthoritativeSnapshot {
 pub struct ConversationPageSelection {
     key: hq_reducer::ConversationKey,
     limit: usize,
+    anchor: Option<FactId>,
+    cursor: Option<hq_domain::PageCursor>,
 }
 
 impl ConversationPageSelection {
-    /// Constructs one bounded first-page selection.
+    /// Constructs a bounded selection of the latest conversation history.
     pub fn new(
         key: hq_reducer::ConversationKey,
         limit: usize,
@@ -1009,7 +1011,38 @@ impl ConversationPageSelection {
                 actual: limit,
             });
         }
-        Ok(Self { key, limit })
+        Ok(Self {
+            key,
+            limit,
+            anchor: None,
+            cursor: None,
+        })
+    }
+
+    /// Requests a bounded window containing this exact canonical fact.
+    #[must_use]
+    pub fn with_anchor(mut self, anchor: Option<FactId>) -> Self {
+        self.cursor = None;
+        self.anchor = anchor;
+        self
+    }
+
+    /// Selects a directional continuation instead of an anchored window.
+    #[must_use]
+    pub fn with_cursor(mut self, cursor: Option<hq_domain::PageCursor>) -> Self {
+        self.anchor = None;
+        self.cursor = cursor;
+        self
+    }
+
+    /// Returns the opaque directional continuation, when requested.
+    pub const fn cursor(&self) -> Option<&hq_domain::PageCursor> {
+        self.cursor.as_ref()
+    }
+
+    /// Returns the canonical reading anchor, or none for the latest page.
+    pub const fn anchor(&self) -> Option<FactId> {
+        self.anchor
     }
 
     /// Returns the selected stable conversation identity.
@@ -1017,7 +1050,7 @@ impl ConversationPageSelection {
         &self.key
     }
 
-    /// Returns the inclusive first-page item limit.
+    /// Returns the inclusive history-window item limit.
     pub const fn limit(&self) -> usize {
         self.limit
     }
@@ -1028,12 +1061,29 @@ impl ConversationPageSelection {
 pub struct SelectedConversationPage {
     key: hq_reducer::ConversationKey,
     page: Page<ConversationEntry>,
+    anchor: Option<FactId>,
 }
 
 impl SelectedConversationPage {
     /// Constructs one typed selected page.
     pub const fn new(key: hq_reducer::ConversationKey, page: Page<ConversationEntry>) -> Self {
-        Self { key, page }
+        Self {
+            key,
+            page,
+            anchor: None,
+        }
+    }
+
+    /// Correlates the returned window with the requested canonical reading anchor.
+    #[must_use]
+    pub const fn with_anchor(mut self, anchor: Option<FactId>) -> Self {
+        self.anchor = anchor;
+        self
+    }
+
+    /// Returns the requested anchor; none means the latest page was selected.
+    pub const fn anchor(&self) -> Option<FactId> {
+        self.anchor
     }
 
     /// Returns the selected stable conversation identity.
@@ -1071,7 +1121,7 @@ impl AuthoritativeConversationView {
         &self.snapshot
     }
 
-    /// Returns the selected first page, when requested.
+    /// Returns the selected bounded history window, when requested.
     pub const fn conversation(&self) -> Option<&SelectedConversationPage> {
         self.conversation.as_ref()
     }

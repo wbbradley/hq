@@ -131,12 +131,31 @@ fn materialized_conversation_view_round_trips_with_one_bounded_typed_selection()
         counterparty_mailbox: Id32::new([2; 32]),
         thread: Id32::new([5; 32]),
     };
-    let selection = ConversationPageSelectionDto::new(key.clone(), 100).expect("selection");
+    let anchor = Some(Id32::new([9; 32]));
+    let selection = ConversationPageSelectionDto::new(key.clone(), 100)
+        .expect("selection")
+        .with_anchor(anchor);
+    let application_selection =
+        hq_local_api::conversation_selection_from_v1(Some(selection.clone()))
+            .expect("application conversion")
+            .expect("selection");
+    assert_eq!(
+        application_selection.anchor(),
+        Some(FactId::from_bytes([9; 32]))
+    );
     let snapshot = AuthoritativeSnapshotDto::new(7, Vec::new()).expect("snapshot");
-    let page = ConversationPageDto::new(Vec::new(), None).expect("page");
+    let page = ConversationPageDto::new(Vec::new(), Some("older-boundary".to_owned()))
+        .expect("page")
+        .with_previous_cursor(Some("newer-boundary".to_owned()))
+        .expect("reverse cursor");
+    assert!(
+        page.clone()
+            .with_previous_cursor(Some(String::new()))
+            .is_err()
+    );
     let view = AuthoritativeConversationViewDto::new(
         snapshot,
-        Some(SelectedConversationPageDto::new(key.clone(), page)),
+        Some(SelectedConversationPageDto::new(key.clone(), page).with_anchor(anchor)),
     )
     .expect("coherent view");
 
@@ -166,6 +185,35 @@ fn materialized_conversation_view_round_trips_with_one_bounded_typed_selection()
         ),
     )));
 
+    let cursor_selection = ConversationPageSelectionDto::new(key.clone(), 4)
+        .expect("selection")
+        .with_cursor(Some("newer-boundary".to_owned()))
+        .expect("cursor selection");
+    let converted = hq_local_api::conversation_selection_from_v1(Some(cursor_selection.clone()))
+        .expect("conversion")
+        .expect("selection");
+    assert_eq!(
+        converted.cursor().map(hq_domain::PageCursor::as_str),
+        Some("newer-boundary")
+    );
+    assert_eq!(converted.anchor(), None);
+    round_trip(&WireMessage::Request(RequestEnvelope::new(
+        RequestId::new(4).expect("id"),
+        Request::AuthoritativeConversationView(AuthoritativeConversationViewRequestDto::new(Some(
+            cursor_selection,
+        ))),
+    )));
+    assert!(
+        ConversationPageSelectionDto::new(key.clone(), 4)
+            .expect("selection")
+            .with_cursor(Some(String::new()))
+            .is_err()
+    );
+    let mut conflicting = ConversationPageSelectionDto::new(key.clone(), 4)
+        .expect("selection")
+        .with_anchor(anchor);
+    conflicting.cursor = Some("newer-boundary".to_owned());
+    assert!(hq_local_api::conversation_selection_from_v1(Some(conflicting)).is_err());
     assert!(ConversationPageSelectionDto::new(key.clone(), 0).is_err());
     assert!(ConversationPageSelectionDto::new(key, 201).is_err());
 }

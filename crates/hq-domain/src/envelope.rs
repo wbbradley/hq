@@ -64,17 +64,34 @@ impl PageCursor {
     }
 }
 
-/// One bounded query result page and its optional continuation.
+/// One bounded query result page and its optional directional continuations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Page<T> {
     items: Vec<T>,
     next_cursor: Option<PageCursor>,
+    previous_cursor: Option<PageCursor>,
 }
 
 impl<T> Page<T> {
     /// Creates a page after the owning query has applied its item limit.
     pub const fn new(items: Vec<T>, next_cursor: Option<PageCursor>) -> Self {
-        Self { items, next_cursor }
+        Self {
+            items,
+            next_cursor,
+            previous_cursor: None,
+        }
+    }
+
+    /// Adds a cursor for traversing the same query in the opposite direction.
+    #[must_use]
+    pub fn with_previous_cursor(mut self, cursor: Option<PageCursor>) -> Self {
+        self.previous_cursor = cursor;
+        self
+    }
+
+    /// Returns the reverse continuation cursor, when available.
+    pub const fn previous_cursor(&self) -> Option<&PageCursor> {
+        self.previous_cursor.as_ref()
     }
 
     /// Borrows the page items.

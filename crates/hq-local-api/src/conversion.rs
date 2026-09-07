@@ -842,6 +842,10 @@ pub fn page_to_v1(page: &Page<ConversationEntry>) -> Result<ConversationPageDto,
     ConversationPageDto::new(
         items,
         page.next_cursor().map(|cursor| cursor.as_str().to_owned()),
+    )?
+    .with_previous_cursor(
+        page.previous_cursor()
+            .map(|cursor| cursor.as_str().to_owned()),
     )
 }
 
@@ -851,11 +855,24 @@ pub fn conversation_selection_from_v1(
 ) -> Result<Option<ConversationPageSelection>, ValueError> {
     selection
         .map(|selection| {
-            ConversationPageSelection::new(
+            if selection.anchor.is_some() && selection.cursor.is_some() {
+                return Err(ValueError::InvalidCursor);
+            }
+            let value = ConversationPageSelection::new(
                 conversation_key_from_v1(selection.key)?,
                 usize::from(selection.limit),
             )
-            .map_err(|_| ValueError::InvalidPageLimit)
+            .map_err(|_| ValueError::InvalidPageLimit)?;
+            if let Some(anchor) = selection.anchor {
+                Ok(value.with_anchor(Some(FactId::from_bytes(anchor.bytes()))))
+            } else {
+                let cursor = selection
+                    .cursor
+                    .map(PageCursor::new)
+                    .transpose()
+                    .map_err(|_| ValueError::InvalidCursor)?;
+                Ok(value.with_cursor(cursor))
+            }
         })
         .transpose()
 }
@@ -870,6 +887,7 @@ pub fn authoritative_conversation_view_to_v1(
         .map(|conversation| {
             page_to_v1(conversation.page()).map(|page| {
                 SelectedConversationPageDto::new(conversation_key_to_v1(conversation.key()), page)
+                    .with_anchor(conversation.anchor().map(|id| Id32::new(*id.as_bytes())))
             })
         })
         .transpose()?;

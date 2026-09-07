@@ -327,7 +327,7 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
         },
         UiMessageState::Archived,
     ));
-    assert!(archived.contains("d archive conversation"));
+    assert!(archived.contains("Enter inspect"));
     assert!(!archived.contains("u restore"));
     let confirmation = update(
         conversation_model(UiSize {
@@ -410,23 +410,14 @@ fn hidden_sender_names_preserve_status_and_message_body_styles() {
             )
             .expect("measure transcript")
             .model;
-            for selection_role in [
-                Some(UiThemeRole::ConversationSelectionFocused),
-                Some(UiThemeRole::ConversationSelectionUnfocused),
-                None,
-            ] {
+            for selection_role in [Some(UiThemeRole::ConversationSelectionFocused), None] {
                 let model = match selection_role {
-                    None => {
-                        update(model.clone(), UiEvent::Input(UiInput::Character('j')))
-                            .expect("select activity")
+                    None => model.clone(),
+                    _ => {
+                        update(model.clone(), UiEvent::Input(UiInput::Activate))
+                            .expect("inspect message")
                             .model
                     }
-                    Some(UiThemeRole::ConversationSelectionUnfocused) => {
-                        update(model.clone(), UiEvent::Input(UiInput::Character('r')))
-                            .expect("compose reply")
-                            .model
-                    }
-                    _ => model.clone(),
                 };
                 let buffer = render_buffer_with_theme(&model, &theme);
                 let (_, y) = find_text_start(&buffer, "Can we ship?");
@@ -1193,6 +1184,20 @@ fn conversation_messages_start_at_the_pane_edge_and_selection_fills_the_row() {
     let (body_x, body_y) = find_text_start(&buffer, "Can we ship?");
     assert_eq!(body_x, 0, "full-pane message body has no renderer indent");
 
+    for y in [body_y, body_y + 1] {
+        assert!(
+            !buffer
+                .cell((119, y))
+                .expect("transcript cell")
+                .modifier
+                .contains(Modifier::REVERSED),
+            "ordinary reading has no selected message"
+        );
+    }
+    let inspecting = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("inspect visible message")
+        .model;
+    let buffer = render_buffer_with_theme(&inspecting, &theme);
     let selected = theme.style(UiThemeRole::ConversationSelectionFocused);
     for y in [body_y, body_y + 1] {
         let final_cell = buffer.cell((119, y)).expect("full selected row");
@@ -1257,7 +1262,7 @@ fn markdown_messages_render_safely_across_widths_without_parsing_activity() {
             .cell((ready_x, ready_y))
             .expect("styled message cell");
         assert!(ready.modifier.contains(Modifier::BOLD));
-        assert!(ready.modifier.contains(Modifier::REVERSED));
+        assert!(!ready.modifier.contains(Modifier::REVERSED));
     }
 
     let narrow = conversation_model_with_content(
@@ -1308,12 +1313,19 @@ fn oversized_markdown_scrolls_by_rows_without_changing_entry_selection() {
     model = update(model, UiEvent::ConversationViewportObserved { observation })
         .expect("install measured transcript")
         .model;
-    for _ in 0..8 {
-        model = update(model, UiEvent::Input(UiInput::NextItem))
+    model = update(model, UiEvent::Input(UiInput::MoveCursorHome))
+        .expect("read oldest loaded content")
+        .model;
+    for input in [UiInput::NextItem, UiInput::Character('j')]
+        .into_iter()
+        .cycle()
+        .take(8)
+    {
+        model = update(model, UiEvent::Input(input))
             .expect("scroll one visual row")
             .model;
     }
-    assert_eq!(model.conversation_anchor(), Some("message-1"));
+    assert_eq!(model.conversation_anchor(), Some("activity-2"));
     let scrolled = render_text(&model);
     assert!(!scrolled.contains("Marker 00"), "{scrolled}");
     assert!(scrolled.contains('↑'), "{scrolled}");
@@ -1321,15 +1333,18 @@ fn oversized_markdown_scrolls_by_rows_without_changing_entry_selection() {
     let buffer = render_buffer_with_theme(&model, &UiTheme::terminal());
     let (marker_x, marker_y) = find_text_start(&buffer, "Marker");
     assert!(
-        buffer
+        !buffer
             .cell((marker_x, marker_y))
             .expect("partially visible selected message")
             .modifier
             .contains(Modifier::REVERSED),
-        "selection remains attached to the entry while its header is offscreen"
+        "ordinary reading has no selection, including partially visible messages"
     );
 
-    let activity = update(model, UiEvent::Input(UiInput::Character('j')))
+    let inspecting =
+        update(model, UiEvent::Input(UiInput::Activate)).expect("inspect visible entry");
+    assert_eq!(inspecting.model.conversation_anchor(), Some("message-1"));
+    let activity = update(inspecting.model, UiEvent::Input(UiInput::Character('j')))
         .expect("jump to next entry")
         .model;
     assert_eq!(activity.conversation_anchor(), Some("activity-2"));
@@ -1348,11 +1363,10 @@ fn technical_details_are_in_pane_and_keep_exact_activity_content() {
             height: 20,
         },
     ] {
-        let activity = update(
-            conversation_model(size),
-            UiEvent::Input(UiInput::Character('j')),
-        )
-        .expect("select activity");
+        let inspecting =
+            update(conversation_model(size), UiEvent::Input(UiInput::Activate)).expect("inspect");
+        let activity = update(inspecting.model, UiEvent::Input(UiInput::Character('j')))
+            .expect("select activity");
         let details = update(activity.model, UiEvent::Input(UiInput::Activate))
             .expect("open technical details")
             .model;
@@ -3386,7 +3400,5 @@ fn conversation_model_with_content(
     .expect("conversation page");
     let opened =
         update(observed.model, UiEvent::Input(UiInput::Activate)).expect("focus conversation");
-    update(opened.model, UiEvent::Input(UiInput::Character('k')))
-        .expect("select message")
-        .model
+    opened.model
 }

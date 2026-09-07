@@ -58,13 +58,23 @@ and image URLs remain inert text.
 
 Activity is a typed, compact, non-speaker entry. Running, success, failure, command, file, tool,
 search, plan, diff, and other supported kinds retain their closed type and status. Ordinary rows
-show a bounded summary. Enter on applicable activity opens full-pane technical details containing
+show a bounded summary. Enter activates Inspect mode; Enter again on applicable activity opens full-pane technical details containing
 the retained structured fields, output, failure evidence, and stable correlation data.
 
-The viewport is anchored by stable entry identity plus wrapped visual-row offset. Row scrolling and
-entry selection can reach every part of an oversized entry and its neighbors. `↑` and `↓` indicate
-clipped content. Paging, resize, cached redraw, and an open composer preserve the logical anchor;
-they never infer it from screen coordinates.
+The viewport is anchored by stable entry identity plus wrapped visual-row offset. In ordinary
+reading, arrows and `j`/`k` scroll one rendered line without selecting messages. PageUp/PageDown
+scroll one viewport with the configured overlap (one line by default, clamped to allow progress).
+Home reaches the oldest loaded content; End reaches the bottom and resumes following new content.
+While reading earlier content, updates preserve that position and show “New content · End latest”.
+`↑` and `↓` indicate clipped content. Resize, cached redraw, and composition preserve the logical
+anchor; they never infer it from screen coordinates. The first history page contains the latest
+canonical entries in chronological order. Scrolling near the oldest loaded content requests an
+older page and prepends it without moving the entry and wrapped row being read. One request runs
+at a time; failed older-page loads retain the reading position and expose `l` to retry.
+
+Enter explicitly starts Inspect mode at a visible entry. Arrows and `j`/`k` select entries there;
+Enter opens typed details, and Escape closes details before returning from inspection to the saved
+reading position and tail mode. Ordinary reading does not highlight a selected message.
 
 ## Conversation-scoped adjacent content
 

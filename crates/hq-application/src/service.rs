@@ -90,7 +90,7 @@ where
         self.ports.authoritative_snapshot()
     }
 
-    /// Loads one snapshot and optional selected first page from one authoritative state boundary.
+    /// Loads one snapshot and optional selected history window from one authoritative state boundary.
     pub fn authoritative_conversation_view(
         &self,
         selection: Option<&ConversationPageSelection>,

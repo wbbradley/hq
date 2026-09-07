@@ -48,7 +48,7 @@ All limits are inclusive. A larger value is rejected before it can become applic
 | build name, version, or commit field | 128 bytes, nonempty, no control characters |
 | unsigned canonical mutation plan | canonical v1 `MAX_CONTENT_BYTES` |
 | conversation page | 256 entries |
-| selected materialized first page | 200 entries |
+| selected materialized history window | 200 entries |
 | opaque page cursor | 512 bytes, nonempty |
 | invalidation topics | 6, nonempty, sorted, unique |
 | authoritative snapshot | 16,384 projection items |
@@ -237,7 +237,9 @@ Conversation bodies and activity are loaded through the bounded page method usin
 thread, provider-session, or project-thread conversation key. A project-thread key carries exact
 32-byte project and initiating-thread identities; it does not substitute the current agent or
 provider session. The continuation cursor is opaque, belongs to this query, and is never interpreted
-by a client. Page order is the reducer's canonical presentation order. This additional closed key
+by a client. An absent cursor selects the latest history. `next_cursor` traverses toward older
+entries; `previous_cursor` traverses toward newer entries. Entries inside each returned page follow
+the reducer's canonical presentation order. This additional closed key
 variant is part of the existing unshipped local API v1 shape; there is no compatibility branch or
 version bump.
 
@@ -343,10 +345,18 @@ notification contains only subscription ID, newest committed revision, sorted to
 `full_snapshot` flag. It never contains projection rows, message bodies, secrets, or transport
 observations.
 
-Registration may carry an optional typed conversation key and a nonzero first-page limit of at most
-200. The server registers a subscription as pending before reading one materialized view from the
+Registration may carry an optional typed conversation key and a nonzero window limit of at most
+200. An optional canonical fact `anchor` requests a bounded window around that reading position.
+An optional directional `cursor` requests a continuation window; it is mutually exclusive with
+`anchor`. With neither, the selection requests the latest history. Unknown or cross-conversation
+anchors and cursors are rejected. Returned selections echo the requested anchor so clients can
+reject responses for a replaced reading position.
+
+The server registers a subscription as pending before reading one materialized view from the
 serialized store actor. Its acknowledgement contains the complete snapshot and, when selected, that
-conversation's first page; the enclosing snapshot revision applies to both. The subscription
+conversation's bounded window; the enclosing snapshot revision applies to both. Explicit window
+queries use the same boundary so continuation responses can be fenced against newer observations.
+The subscription
 becomes active only after the acknowledgement frame is confirmed written. Disconnect cancels
 pending or active registration idempotently.
 

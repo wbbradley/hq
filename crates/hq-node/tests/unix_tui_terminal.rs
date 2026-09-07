@@ -1743,7 +1743,7 @@ fn run_in_pty_with_trace(
             && content_sent
             && !managed_action_sent
             && completion_offset.is_some_and(|offset| {
-                text_without_csi_sequences(&bytes[offset..]).contains("archive conversation")
+                text_without_csi_sequences(&bytes[offset..]).contains("scroll")
             })
         {
             let keys = if visit_bounds {
@@ -1848,10 +1848,9 @@ fn run_in_pty_with_trace(
             && oversized_phase == 2
             && completion_offset.is_some_and(|offset| {
                 let output = &bytes[offset..];
-                text_without_csi_sequences(output).contains("archive conversation")
-                    && output
-                        .windows(last.len())
-                        .any(|window| window == last.as_bytes())
+                output
+                    .windows(last.len())
+                    .any(|window| window == last.as_bytes())
             })
         {
             master.write_all(b"\x1b[H").expect("Home key writes");
@@ -1867,8 +1866,8 @@ fn run_in_pty_with_trace(
                     .any(|window| window == first.as_bytes())
             })
         {
-            for _ in 0..40 {
-                write_pty_bytes(&mut master, b"\x1b[B");
+            for row in 0..40 {
+                write_pty_bytes(&mut master, if row % 2 == 0 { b"j" } else { b"\x1b[B" });
             }
             master.flush().expect("row-down keys flush");
             managed_action_sent = true;
@@ -1999,9 +1998,7 @@ fn run_in_pty_with_trace(
         ) && content_sent
             && !managed_action_sent
             && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows("d archive conversation".len())
-                    .any(|window| window == "d archive conversation".as_bytes())
+                text_without_csi_sequences(&bytes[offset..]).contains("scroll")
             })
         {
             master.write_all(b"r").expect("project reply key writes");
