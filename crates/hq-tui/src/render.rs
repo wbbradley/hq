@@ -3533,13 +3533,17 @@ fn render_compact_draft(
     area: Rect,
 ) -> bool {
     if !model.draft_matches_active_conversation() {
-        let text = if model.last_failure().is_some() {
-            "Previous draft could not be saved"
+        let text = if model.can_retry_previous_draft_save() {
+            "Previous draft not saved · Enter retry"
         } else {
             "Saving previous draft…"
         };
         frame.render_widget(
-            Paragraph::new(text).style(theme.style(UiThemeRole::TextMuted)),
+            Paragraph::new(text).style(theme.style(if model.can_retry_previous_draft_save() {
+                UiThemeRole::Error
+            } else {
+                UiThemeRole::TextMuted
+            })),
             area,
         );
         return true;
@@ -5012,6 +5016,8 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         " Enter finish · Esc back · F1 help · q quit".to_owned()
     } else if matches!(model.active_route(), UiRoute::Recovery { .. }) {
         " Enter retry or reconcile · Esc back · F1 help · q quit".to_owned()
+    } else if model.focus() == UiFocus::Draft && model.can_retry_previous_draft_save() {
+        " Enter retry saving previous draft · Tab/Esc read · F1 help".to_owned()
     } else if let Some(failure) = model.last_failure() {
         format!(
             " Could not complete that action · {} · ? details",

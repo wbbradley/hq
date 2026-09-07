@@ -3544,3 +3544,61 @@ fn persistent_composer_grows_collapses_and_keeps_the_caret_visible_at_its_height
     );
     assert!(render_observation(&small).height > 0);
 }
+
+#[test]
+fn failed_previous_draft_has_a_visible_retry_action_at_narrow_and_normal_sizes() {
+    for width in [40, 104] {
+        let reading = conversation_model(UiSize { width, height: 18 });
+        let composing = update(reading, UiEvent::Input(UiInput::NextFocus)).expect("compose");
+        let edited = update(
+            composing.model,
+            UiEvent::Input(UiInput::Paste("retain this".to_owned())),
+        )
+        .expect("type");
+        let reading = update(edited.model, UiEvent::Input(UiInput::Escape)).expect("read");
+        let list = update(reading.model, UiEvent::Input(UiInput::Escape)).expect("list");
+        let mut source = ready_snapshot();
+        source.revision += 1;
+        source.inbox_rows[2].conversation_target = Some(hq_tui::UiConversationTarget::Thread {
+            counterparty_installation: [7; 32],
+            counterparty_mailbox: [8; 32],
+            thread_id: [10; 32],
+        });
+        let list = update(
+            list.model,
+            UiEvent::MaterializedViewObserved {
+                view: UiMaterializedConversationView {
+                    snapshot: source,
+                    conversation: None,
+                },
+            },
+        )
+        .expect("observe second conversation");
+        let selected = update(list.model, UiEvent::Input(UiInput::NextItem)).expect("select next");
+        let switching = update(selected.model, UiEvent::Input(UiInput::Activate)).expect("switch");
+        let save_id = switching
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::SaveDraft { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("save previous");
+        let failed = update(
+            switching.model,
+            UiEvent::DraftFailed {
+                effect_id: save_id,
+                current: None,
+                failure: UiFailure {
+                    code: "draft_save_failed".to_owned(),
+                    action: "try again".to_owned(),
+                },
+            },
+        )
+        .expect("failure");
+        let screen = render_text(&failed.model);
+        assert!(screen.contains("Previous draft not saved"), "{screen}");
+        assert!(screen.contains("Enter retry"), "{screen}");
+        assert!(!screen.contains("Enter send"), "{screen}");
+    }
+}

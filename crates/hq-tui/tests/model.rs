@@ -9499,3 +9499,387 @@ fn switching_after_erasing_unsaved_text_opens_the_next_editor_without_waiting_fo
             .any(|effect| matches!(effect, UiEffect::SaveDraft { .. }))
     );
 }
+
+fn switch_to_other_conversation(edited: UiModel) -> hq_tui::UiTransition {
+    let reading = update(edited, UiEvent::Input(UiInput::Escape))
+        .expect("read")
+        .model;
+    let list = update(reading, UiEvent::Input(UiInput::Escape))
+        .expect("list")
+        .model;
+    let mut source = snapshot(2, &["thread-a", "thread-b"]);
+    for (row, thread_id) in source.inbox_rows.iter_mut().zip([[3; 32], [7; 32]]) {
+        row.conversation_target = Some(UiConversationTarget::Thread {
+            counterparty_installation: [1; 32],
+            counterparty_mailbox: [2; 32],
+            thread_id,
+        });
+    }
+    let list = update(
+        list,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: source,
+                conversation: None,
+            },
+        },
+    )
+    .expect("new conversation arrives")
+    .model;
+    let selected = update(list, UiEvent::Input(UiInput::NextItem))
+        .expect("choose second")
+        .model;
+    update(selected, UiEvent::Input(UiInput::Activate)).expect("open second")
+}
+
+#[test]
+fn failed_conversation_switch_can_retry_saving_without_editing_the_previous_draft() {
+    let edited = update(
+        typed_conversation_composer("keep me"),
+        UiEvent::Input(UiInput::Character('!')),
+    )
+    .expect("edit");
+    let switching = switch_to_other_conversation(edited.model);
+    let (save_id, prior) = save_draft_effect(&switching.effects);
+    let prior = prior.clone();
+    let failed = update(
+        switching.model,
+        UiEvent::DraftFailed {
+            effect_id: save_id,
+            failure: UiFailure {
+                code: "save_failed".to_owned(),
+                action: "try again".to_owned(),
+            },
+            current: None,
+        },
+    )
+    .expect("save failed");
+    assert_eq!(failed.model.focus(), UiFocus::Draft);
+    let ignored = update(failed.model, UiEvent::Input(UiInput::Character('x')))
+        .expect("protect previous draft");
+    assert!(
+        matches!(ignored.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, .. }) if draft == &prior)
+    );
+    assert!(
+        !ignored
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::SaveDraft { .. }))
+    );
+    let retry = update(ignored.model, UiEvent::Input(UiInput::Activate)).expect("retry save");
+    let (retry_id, retried) = save_draft_effect(&retry.effects);
+    assert_ne!(retry_id, save_id);
+    assert_eq!(retried, &prior);
+    assert!(
+        !retry
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::SubmitMailboxCommand { .. }))
+    );
+    let opened = update(
+        retry.model,
+        UiEvent::DraftSaved {
+            effect_id: retry_id,
+            draft: UiMailboxDraft {
+                version: 2,
+                ..prior
+            },
+        },
+    )
+    .expect("save succeeds");
+    let (_, target) = open_draft_effect(&opened.effects);
+    assert!(matches!(target, UiMailboxDraftTarget::Conversation {
+        conversation: hq_tui::UiConversationId::Thread { thread_id, .. }
+    } if *thread_id == [7; 32]));
+}
+
+#[test]
+fn waiting_for_another_conversations_save_keeps_both_focus_directions_and_escape() {
+    for input in [UiInput::NextFocus, UiInput::PreviousFocus, UiInput::Escape] {
+        let edited = update(
+            typed_conversation_composer("keep me"),
+            UiEvent::Input(UiInput::Character('!')),
+        )
+        .expect("edit");
+        let switching = switch_to_other_conversation(edited.model);
+        assert_eq!(switching.model.focus(), UiFocus::Draft);
+        let reading = update(switching.model, UiEvent::Input(input)).expect("read while saving");
+        assert_eq!(reading.model.focus(), UiFocus::Conversation);
+        let composer = update(reading.model, UiEvent::Input(UiInput::PreviousFocus))
+            .expect("back to composer");
+        assert_eq!(composer.model.focus(), UiFocus::Draft);
+    }
+}
+
+#[test]
+fn save_failure_before_conversation_send_keeps_text_editable_and_does_not_send() {
+    let edited = update(
+        typed_conversation_composer("keep me"),
+        UiEvent::Input(UiInput::Character('!')),
+    )
+    .expect("edit");
+    let sending = update(edited.model, UiEvent::Input(UiInput::Activate)).expect("send");
+    let (save_id, _) = save_draft_effect(&sending.effects);
+    let failed = update(
+        sending.model,
+        UiEvent::DraftFailed {
+            effect_id: save_id,
+            failure: UiFailure {
+                code: "save_failed".to_owned(),
+                action: "try again".to_owned(),
+            },
+            current: None,
+        },
+    )
+    .expect("save failed");
+    let corrected =
+        update(failed.model, UiEvent::Input(UiInput::Character('?'))).expect("correct text");
+    assert!(
+        matches!(corrected.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing {
+        draft, submitting: false, dirty: true, ..
+    }) if draft.content == "keep me!?")
+    );
+    assert!(
+        !corrected
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::SubmitMailboxCommand { .. }))
+    );
+}
+
+#[test]
+fn unrelated_draft_save_response_does_not_release_the_pending_save_or_consume_text() {
+    let edited = update(
+        typed_conversation_composer("keep me"),
+        UiEvent::Input(UiInput::Character('!')),
+    )
+    .expect("edit");
+    let sending = update(edited.model, UiEvent::Input(UiInput::Activate)).expect("send");
+    let (save_id, draft) = save_draft_effect(&sending.effects);
+    let saved = UiMailboxDraft {
+        version: 2,
+        ..draft.clone()
+    };
+    let unrelated = update(
+        sending.model,
+        UiEvent::DraftSaved {
+            effect_id: save_id,
+            draft: UiMailboxDraft {
+                draft_id: [88; 32],
+                ..saved.clone()
+            },
+        },
+    )
+    .expect("unrelated response");
+    assert!(
+        !unrelated
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::SubmitMailboxCommand { .. }))
+    );
+    let matched = update(
+        unrelated.model,
+        UiEvent::DraftSaved {
+            effect_id: save_id,
+            draft: saved.clone(),
+        },
+    )
+    .expect("exact response");
+    assert!(
+        matched
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::SubmitMailboxCommand {
+        draft: Some(actual), ..
+    } if actual == &saved))
+    );
+}
+
+#[test]
+fn completing_a_previous_drafts_save_does_not_steal_transcript_focus() {
+    let edited = update(
+        typed_conversation_composer("keep me"),
+        UiEvent::Input(UiInput::Character('!')),
+    )
+    .expect("edit");
+    let switching = switch_to_other_conversation(edited.model);
+    let (save_id, prior) = save_draft_effect(&switching.effects);
+    let prior = prior.clone();
+    let reading =
+        update(switching.model, UiEvent::Input(UiInput::NextFocus)).expect("read while waiting");
+    let opening = update(
+        reading.model,
+        UiEvent::DraftSaved {
+            effect_id: save_id,
+            draft: UiMailboxDraft {
+                version: 2,
+                ..prior
+            },
+        },
+    )
+    .expect("saved");
+    assert_eq!(opening.model.focus(), UiFocus::Conversation);
+    let (open_id, target) = open_draft_effect(&opening.effects);
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                draft_id: [9; 32],
+                target: target.clone(),
+                content: String::new(),
+                version: 0,
+            },
+        },
+    )
+    .expect("opened");
+    assert_eq!(loaded.model.focus(), UiFocus::Conversation);
+}
+
+#[test]
+fn unrelated_draft_load_response_keeps_waiting_for_the_requested_target() {
+    let opened = update(
+        loaded_model(snapshot(1, &[])),
+        UiEvent::Input(UiInput::Character('N')),
+    )
+    .expect("open note");
+    let (open_id, target) = open_draft_effect(&opened.effects);
+    let draft = UiMailboxDraft {
+        draft_id: [5; 32],
+        target: target.clone(),
+        content: "saved note".to_owned(),
+        version: 1,
+    };
+    let unrelated = update(
+        opened.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: UiMailboxDraft {
+                target: UiMailboxDraftTarget::Direct {
+                    installation_id: [1; 32],
+                    mailbox_id: [2; 32],
+                },
+                ..draft.clone()
+            },
+        },
+    )
+    .expect("unrelated target");
+    assert!(matches!(
+        unrelated.model.mailbox_draft(),
+        Some(UiMailboxDraftPane::Loading {
+            target: UiMailboxDraftTarget::SelfNote
+        })
+    ));
+    let matched = update(
+        unrelated.model,
+        UiEvent::DraftLoaded {
+            effect_id: open_id,
+            draft: draft.clone(),
+        },
+    )
+    .expect("requested target");
+    assert!(
+        matches!(matched.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft: actual, .. }) if actual == &draft)
+    );
+}
+
+#[test]
+fn choosing_a_new_draft_waits_for_the_current_save_then_opens_the_requested_target() {
+    let edited = update(
+        typed_conversation_composer("keep me"),
+        UiEvent::Input(UiInput::Character('!')),
+    )
+    .expect("edit");
+    let reading = update(edited.model, UiEvent::Input(UiInput::Escape)).expect("read");
+    let requested =
+        update(reading.model, UiEvent::Input(UiInput::Character('N'))).expect("new note");
+    let (save_id, prior) = save_draft_effect(&requested.effects);
+    let saved = UiMailboxDraft {
+        version: 2,
+        ..prior.clone()
+    };
+    let completed = update(
+        requested.model,
+        UiEvent::DraftSaved {
+            effect_id: save_id,
+            draft: saved,
+        },
+    )
+    .expect("saved previous");
+    let (_, target) = open_draft_effect(&completed.effects);
+    assert_eq!(target, &UiMailboxDraftTarget::SelfNote);
+}
+
+#[test]
+fn navigating_away_cancels_a_queued_new_draft_without_cancelling_the_previous_save() {
+    let edited = update(
+        typed_conversation_composer("keep me"),
+        UiEvent::Input(UiInput::Character('!')),
+    )
+    .expect("edit");
+    let reading = update(edited.model, UiEvent::Input(UiInput::Escape)).expect("read");
+    let requested =
+        update(reading.model, UiEvent::Input(UiInput::Character('N'))).expect("new note");
+    let (save_id, prior) = save_draft_effect(&requested.effects);
+    let saved = UiMailboxDraft {
+        version: 2,
+        ..prior.clone()
+    };
+    let list =
+        update(requested.model, UiEvent::Input(UiInput::Escape)).expect("leave conversation");
+    let completed = update(
+        list.model,
+        UiEvent::DraftSaved {
+            effect_id: save_id,
+            draft: saved.clone(),
+        },
+    )
+    .expect("saved previous");
+    assert_eq!(completed.model.focus(), UiFocus::Content);
+    assert!(
+        !completed
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::OpenDraft { .. }))
+    );
+    assert!(
+        matches!(completed.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, dirty: false, .. }) if draft == &saved)
+    );
+}
+
+#[test]
+fn a_new_draft_requested_during_send_waits_for_the_receipt_and_survives_composer_reopening() {
+    let sending = update(
+        typed_conversation_composer("send this"),
+        UiEvent::Input(UiInput::Activate),
+    )
+    .expect("send");
+    let command_id = sending
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitMailboxCommand { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("command");
+    let reading = update(sending.model, UiEvent::Input(UiInput::Escape)).expect("read");
+    let requested =
+        update(reading.model, UiEvent::Input(UiInput::Character('N'))).expect("new note");
+    assert!(
+        !requested
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::OpenDraft { .. }))
+    );
+    let committed = update(
+        requested.model,
+        UiEvent::MailboxCommandCommitted {
+            effect_id: command_id,
+            revision: 2,
+            message_id: Some([4; 32]),
+        },
+    )
+    .expect("receipt");
+    let (_, target) = open_draft_effect(&committed.effects);
+    assert_eq!(target, &UiMailboxDraftTarget::SelfNote);
+}

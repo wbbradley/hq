@@ -138,6 +138,14 @@ not reserve a stored draft: its stable local identity is persisted on the first 
 or before sending. Typing and erasing before that save leaves no empty stored draft. Existing
 saved drafts reopen with their exact identity, version, and text.
 
+While the previous conversation's draft saves, Tab and Escape still reach the transcript. A failed
+save retains that draft and offers Enter to retry saving; it cannot send or edit the previous
+conversation's text from the new conversation. Completing the save preserves the user's current
+surface focus. A save failure before sending releases the editor for corrections and cancels that
+send intent; sending again requires an explicit action. Choosing a different draft while a save or
+send is pending retains that choice until the exact completion arrives. Leaving the requesting
+screen cancels the queued choice without cancelling the existing save or send.
+
 ## Responsive rendering and actions
 
 The mailbox root and conversation detail are separate full-pane routes at compact and wide widths.
