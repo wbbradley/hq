@@ -13789,3 +13789,45 @@ explicit handoff, both focus directions, stale/mismatched approval handling, and
 exact draft/cursor restoration after resolution. The pending-approval alert is
 contextual status, not a duplicate ordinary composer-shortcut row.
 
+
+
+## Composer shortcuts in the global footer
+
+Implemented in `ec471cf`. Conversation and standalone composers now show ordinary shortcuts
+once in the global footer. Valid draft text occupies the former hint row; inline validation
+reserves space only until corrected. Compact feedback keeps validation and caret visible at
+40×10, including alongside the independent approval notice. Composer sizing counts actual
+borders and contextual feedback while preserving its configured cap. Rendering tests cover
+footer placement, reclaimed text space, validation styling and removal, context, status,
+byte count, and caret. Formatting, strict workspace all-target Clippy, and the full serial
+workspace suite passed.
+
+Original task:
+
+### Show composer shortcuts once in the global footer
+
+Conversation composition currently displays duplicate shortcut rows: `render_draft_pane`
+always reserves a local hint row, while `render_footer` also advertises send, newline,
+and close actions.
+
+- In `crates/hq-tui/src/render.rs`, remove the normal shortcut row from
+  `render_draft_pane`. Let draft text use the entire inner area when no
+  `message_field_error()` exists; reserve a row for error-styled validation feedback
+  only while an error exists.
+- Keep composer shortcut guidance in the global footer. Cover conversation drafts
+  and standalone drafts: standalone composition uses
+  `UiRoute::Form { capability: StartNewWork, .. }`, whose generic form footer currently
+  takes precedence over the draft-focus branch. Select composer guidance for that
+  typed composition state without changing unrelated route or notification behavior.
+- Extend `crates/hq-tui/tests/render_snapshots.rs` to cover conversation and standalone
+  composition at normal and narrow sizes. Assert shortcut guidance occurs once in
+  the footer, the reclaimed row belongs to the text editor, and validation feedback
+  remains visible and releases its row when cleared. Preserve recipient/project
+  context, save status, byte count, and caret rendering.
+
+Dependencies: none.
+
+Complete when ordinary composition has one shortcut footer, valid drafts no longer
+reserve a redundant hint row, and invalid drafts retain visible inline validation
+feedback.
+
