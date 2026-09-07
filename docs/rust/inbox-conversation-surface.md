@@ -133,7 +133,10 @@ without choosing arbitrary message authority.
 A conversation send retains its text until the exact command commits. The committed receipt opens
 a fresh composer for the same conversation. Reentering a retained editor preserves its cursor.
 Switching conversations saves the preceding draft before preparing the new target, and keystrokes
-cannot edit a draft belonging to another conversation.
+cannot edit a draft belonging to another conversation. Opening an empty conversation editor does
+not reserve a stored draft: its stable local identity is persisted on the first nonempty autosave
+or before sending. Typing and erasing before that save leaves no empty stored draft. Existing
+saved drafts reopen with their exact identity, version, and text.
 
 ## Responsive rendering and actions
 

@@ -3474,6 +3474,8 @@ fn render_draft_pane(
                 "sending"
             } else if *dirty {
                 "saving"
+            } else if draft.version == 0 {
+                "ready"
             } else {
                 "saved"
             };

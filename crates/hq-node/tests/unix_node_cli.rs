@@ -3351,3 +3351,64 @@ fn concurrent_readiness_callers_spawn_candidates_but_converge_on_one_owner() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+#[test]
+fn browsing_conversations_does_not_fill_draft_storage_and_edited_drafts_reopen() {
+    use hq_node::{LocalTuiClient, TuiClientPort};
+    use hq_tui::{UiConversationId, UiMailboxDraftTarget};
+
+    let directory = TestDirectory::new();
+    let (state, _) = initialize(&directory);
+    let _stop = DaemonStopGuard(state.root().to_owned());
+    let mut reader = local_client(state.clone(), InitialView::OnDemand);
+    let mut editor = LocalTuiClient::new(
+        local_client(state.clone(), InitialView::OnDemand),
+        state.clone(),
+    );
+    let mut last = None;
+    for index in 0u16..130 {
+        let mut thread_id = [0; 32];
+        thread_id[..2].copy_from_slice(&index.to_le_bytes());
+        let target = UiMailboxDraftTarget::Conversation {
+            conversation: UiConversationId::Thread {
+                counterparty_installation: [1; 32],
+                counterparty_mailbox: [2; 32],
+                thread_id,
+            },
+        };
+        let draft = editor.open_draft(target).expect("open conversation editor");
+        assert_eq!(draft.version, 0, "empty editor has no durable version");
+        last = Some(draft);
+    }
+    let ClientEvent::Response {
+        result: ResponseResult::MailboxDrafts(drafts),
+        ..
+    } = reader.request(Request::MailboxDrafts).expect("read drafts")
+    else {
+        panic!("expected drafts");
+    };
+    assert!(drafts.is_empty(), "browsing must not create durable drafts");
+
+    let mut draft = last.expect("last editor");
+    draft.content = "Keep this text across reopening".to_owned();
+    let saved = editor.save_draft(draft.clone()).expect("first save");
+    assert_eq!(saved.draft_id, draft.draft_id);
+    assert_eq!(saved.version, 1);
+    drop(editor);
+    let mut reopened =
+        LocalTuiClient::new(local_client(state.clone(), InitialView::OnDemand), state);
+    assert_eq!(
+        reopened.open_draft(saved.target.clone()).expect("reopen"),
+        saved
+    );
+    let ClientEvent::Response {
+        result: ResponseResult::MailboxDrafts(drafts),
+        ..
+    } = reader
+        .request(Request::MailboxDrafts)
+        .expect("read saved draft")
+    else {
+        panic!("expected drafts");
+    };
+    assert_eq!(drafts.len(), 1);
+}

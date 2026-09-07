@@ -1730,11 +1730,20 @@ impl TuiClientPort for LocalTuiClient {
                 _ => return Err(draft_protocol_error()),
             }
         }
+        let draft_id = random_identity().map_err(|failure| TuiDraftError {
+            failure,
+            current: None,
+        })?;
+        if matches!(target, UiMailboxDraftTarget::Conversation { .. }) {
+            return Ok(UiMailboxDraft {
+                draft_id,
+                target,
+                content: String::new(),
+                version: 0,
+            });
+        }
         let request = MailboxDraftSaveRequestDto {
-            draft_id: Id32::new(random_identity().map_err(|failure| TuiDraftError {
-                failure,
-                current: None,
-            })?),
+            draft_id: Id32::new(draft_id),
             target: mailbox_draft_target(&target),
             content: String::new(),
             expected_version: None,
@@ -1771,7 +1780,7 @@ impl TuiClientPort for LocalTuiClient {
             draft_id: Id32::new(draft.draft_id),
             target: mailbox_draft_target(&draft.target),
             content: draft.content,
-            expected_version: Some(draft.version),
+            expected_version: (draft.version != 0).then_some(draft.version),
         };
         match self
             .client

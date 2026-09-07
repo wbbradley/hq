@@ -9180,6 +9180,10 @@ fn conversation_opens_composer_and_cycles_focus_without_editing_the_transcript()
 }
 
 fn typed_conversation_composer(content: &str) -> UiModel {
+    typed_conversation_composer_version(content, 1)
+}
+
+fn typed_conversation_composer_version(content: &str, version: u64) -> UiModel {
     let mut source = snapshot(1, &["thread-a"]);
     let target = UiConversationTarget::Thread {
         counterparty_installation: [1; 32],
@@ -9216,7 +9220,7 @@ fn typed_conversation_composer(content: &str) -> UiModel {
                 draft_id: [4; 32],
                 target: draft_target.clone(),
                 content: content.to_owned(),
-                version: 1,
+                version,
             },
         },
     )
@@ -9386,5 +9390,112 @@ fn compose_shortcut_cannot_retarget_or_replace_a_dirty_conversation_draft() {
     );
     assert!(
         matches!(composing.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, dirty: true, .. }) if draft.content == "draftX" && matches!(draft.target, UiMailboxDraftTarget::Conversation { .. }))
+    );
+}
+
+#[test]
+fn erasing_unsaved_conversation_text_does_not_create_an_empty_durable_draft() {
+    let typed = update(
+        typed_conversation_composer_version("", 0),
+        UiEvent::Input(UiInput::Character('x')),
+    )
+    .expect("type");
+    let erased = update(typed.model, UiEvent::Input(UiInput::Backspace)).expect("erase");
+    let timer = timer_effect(&erased.effects, UiTimerKind::AutosaveDraft);
+    let elapsed =
+        update(erased.model, UiEvent::TimerElapsed { effect_id: timer }).expect("autosave");
+    assert!(
+        !elapsed
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::SaveDraft { .. }))
+    );
+    assert!(
+        matches!(elapsed.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing {
+        draft, dirty: false, ..
+    }) if draft.version == 0 && draft.content.is_empty())
+    );
+}
+
+#[test]
+fn provisional_conversation_send_saves_before_submitting_the_exact_draft() {
+    let sending = update(
+        typed_conversation_composer_version("first message", 0),
+        UiEvent::Input(UiInput::Activate),
+    )
+    .expect("send");
+    let (save_id, draft) = save_draft_effect(&sending.effects);
+    assert_eq!(draft.version, 0);
+    assert!(
+        !sending
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::SubmitMailboxCommand { .. }))
+    );
+    let saved = UiMailboxDraft {
+        version: 1,
+        ..draft.clone()
+    };
+    let submitted = update(
+        sending.model,
+        UiEvent::DraftSaved {
+            effect_id: save_id,
+            draft: saved.clone(),
+        },
+    )
+    .expect("saved");
+    assert!(submitted.effects.iter().any(|effect| matches!(effect,
+        UiEffect::SubmitMailboxCommand { draft: Some(actual), .. } if actual == &saved
+    )));
+}
+
+#[test]
+fn switching_after_erasing_unsaved_text_opens_the_next_editor_without_waiting_for_a_save() {
+    let typed = update(
+        typed_conversation_composer_version("", 0),
+        UiEvent::Input(UiInput::Character('x')),
+    )
+    .expect("type");
+    let edited = update(typed.model, UiEvent::Input(UiInput::Backspace))
+        .expect("erase")
+        .model;
+    let reading = update(edited, UiEvent::Input(UiInput::Escape))
+        .expect("read")
+        .model;
+    let list = update(reading, UiEvent::Input(UiInput::Escape))
+        .expect("list")
+        .model;
+    let mut source = snapshot(2, &["thread-a", "thread-b"]);
+    for (row, thread_id) in source.inbox_rows.iter_mut().zip([[3; 32], [7; 32]]) {
+        row.conversation_target = Some(UiConversationTarget::Thread {
+            counterparty_installation: [1; 32],
+            counterparty_mailbox: [2; 32],
+            thread_id,
+        });
+    }
+    let list = update(
+        list,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: source,
+                conversation: None,
+            },
+        },
+    )
+    .expect("new conversation arrives")
+    .model;
+    let selected = update(list, UiEvent::Input(UiInput::NextItem))
+        .expect("choose second")
+        .model;
+    let opening = update(selected, UiEvent::Input(UiInput::Activate)).expect("open second");
+    let (_, target) = open_draft_effect(&opening.effects);
+    assert!(matches!(target, UiMailboxDraftTarget::Conversation {
+        conversation: hq_tui::UiConversationId::Thread { thread_id, .. }
+    } if *thread_id == [7; 32]));
+    assert!(
+        !opening
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::SaveDraft { .. }))
     );
 }

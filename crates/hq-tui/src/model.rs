@@ -2550,7 +2550,7 @@ pub struct UiMailboxDraft {
     pub target: UiMailboxDraftTarget,
     /// Possibly-empty bounded composition text.
     pub content: String,
-    /// Optimistic local draft version.
+    /// Optimistic local draft version; zero denotes an unsaved editor.
     pub version: u64,
 }
 
@@ -4635,7 +4635,9 @@ impl UiModel {
         if matches!(&self.mailbox_draft, Some(UiMailboxDraftPane::Editing { draft, dirty: true, .. }) if draft.target != target)
         {
             self.save_draft(effects)?;
-            return Ok(());
+            if self.pending_mailbox.is_some() {
+                return Ok(());
+            }
         }
         self.close_technical_details();
         self.finish_conversation_inspection();
@@ -4666,12 +4668,20 @@ impl UiModel {
         if self.pending_mailbox.is_some() {
             return Ok(());
         }
-        let Some(UiMailboxDraftPane::Editing {
-            draft, dirty: true, ..
-        }) = &self.mailbox_draft
-        else {
+        let Some(UiMailboxDraftPane::Editing { draft, dirty, .. }) = &mut self.mailbox_draft else {
             return Ok(());
         };
+        if !*dirty {
+            return Ok(());
+        }
+        if draft.version == 0
+            && draft.content.is_empty()
+            && matches!(draft.target, UiMailboxDraftTarget::Conversation { .. })
+        {
+            *dirty = false;
+            self.autosave_timer = None;
+            return Ok(());
+        }
         let draft = draft.clone();
         let id = self.allocate_effect()?;
         self.pending_mailbox = Some(PendingMailbox {
@@ -9138,7 +9148,7 @@ fn submit_draft(
         model.last_failure = None;
         return Ok(true);
     }
-    if dirty {
+    if dirty || draft.version == 0 {
         model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
             draft,
             dirty: true,
@@ -12484,7 +12494,14 @@ fn open_conversation_composer(
             if model.last_failure.is_none() {
                 model.save_draft(effects)?;
             }
-            return Ok(());
+            if model.pending_mailbox.is_some()
+                || matches!(
+                    model.mailbox_draft,
+                    Some(UiMailboxDraftPane::Editing { dirty: true, .. })
+                )
+            {
+                return Ok(());
+            }
         }
         model.mailbox_draft = None;
         model.autosave_timer = None;
