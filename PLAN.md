@@ -2,24 +2,6 @@
 
 ## Next Up
 
-### Conversation display preferences
-
-Persist and expose the two settings required by conversation reading and persistent
-composition: page overlap in rendered lines (default one) and focused composer
-height cap as a percentage of available height (default one-third). Use the current
-installation configuration, local API, and Config screen; validate numeric values
-and preserve unrelated defaults on field-specific updates. Zero page overlap is
-valid; allow only positive composer percentages below 100 so the transcript retains
-space. Runtime geometry must still clamp overlap to permit paging and the composer
-cap to keep both surfaces usable on small terminals.
-
-Touch installation configuration encoding/decoding and mutation, local API types,
-node/TUI configuration mapping, Config input/rendering, and configuration docs.
-Complete when defaults, persisted round trips, invalid values, isolated field
-updates, and editable Config controls are covered by tests. These settings are
-consumed by the following reading and composition tasks; their behavior remains
-unfinished until those tasks land.
-
 ### Conversation reading, inspection, and history paging
 
 Ordinary conversation navigation must be a wrapped-line scroll position rather

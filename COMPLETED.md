@@ -13614,3 +13614,32 @@ Complete when one-counterpart conversations omit repetitive sender names and unu
 header rows, while multiple-sender conversations retain attribution based on
 conversation-wide typed evidence regardless of pagination, without losing delivery
 feedback or message details.
+
+## Conversation display preferences
+
+Added optional page-overlap and composer-height overrides to installation persistence,
+the local API, CLI configuration output, and the Config screen. Empty values restore
+one rendered line and exact one-third sizing respectively. Numeric validation remains
+inline; invalid percentages never replace persisted state. Field-specific saves retain
+unrelated defaults. Verified identity persistence, protocol bounds, model editing, and
+rendered controls, plus formatting, strict workspace Clippy, and workspace tests.
+The following reading and composition tasks own use of these preferences and their
+runtime geometry clamps.
+
+### Conversation display preferences
+
+Persist and expose the two settings required by conversation reading and persistent
+composition: page overlap in rendered lines (default one) and focused composer
+height cap as a percentage of available height (default one-third). Use the current
+installation configuration, local API, and Config screen; validate numeric values
+and preserve unrelated defaults on field-specific updates. Zero page overlap is
+valid; allow only positive composer percentages below 100 so the transcript retains
+space. Runtime geometry must still clamp overlap to permit paging and the composer
+cap to keep both surfaces usable on small terminals.
+
+Touch installation configuration encoding/decoding and mutation, local API types,
+node/TUI configuration mapping, Config input/rendering, and configuration docs.
+Complete when defaults, persisted round trips, invalid values, isolated field
+updates, and editable Config controls are covered by tests. These settings are
+consumed by the following reading and composition tasks; their behavior remains
+unfinished until those tasks land.
