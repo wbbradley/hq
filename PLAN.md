@@ -2,6 +2,26 @@
 
 ## Next Up
 
+### Continue asynchronous conversations
+
+The persistent composer must send repeatedly into direct conversations and personal
+notes, but asynchronous continuation currently accepts only project exchanges.
+Generalize application message-continuation planning and canonical reduction to
+retain the exact initiating thread for private direct messages and personal notes.
+Allow either participant of a private direct exchange to continue it; keep project
+inputs bound to the original sender, recipient, and project. Preserve root scope,
+causal ancestry, purpose, and provider correlation; reject unrelated senders,
+foreign threads, changed context, and missing roots. Question answers retain their
+existing separate semantics.
+
+Touch application messaging plans and their project callers, conversation reduction,
+semantic conversation documentation, planner tests, and complete-batch reduction
+contracts. Complete when successive same-thread messages and private reverse-direction
+messages project consistently across arrival orders, self-notes remain one thread,
+and invalid scope/address/project/correlation changes fail closed. This is a semantic
+prerequisite: conversation-level draft targets, API/store plumbing, and the complete
+persistent composer remain in the following task.
+
 ### Persistent conversation composition
 
 Keep transcript and composer visible as two surfaces, even on small terminals.
@@ -23,7 +43,7 @@ only committed evidence consumes sent text.
 Touch TUI draft/focus/input/layout state, shell/configuration plumbing, and typed
 application/local API draft targets or message-continuation validation as necessary.
 Update conversation documentation and contextual hints. Dependencies: display
-preferences and conversation reading. Complete when tests cover both focus
+preferences, conversation reading, and asynchronous continuation. Complete when tests cover both focus
 directions, editing isolation, small-screen sizing, successive sends in the same
 conversation, navigation and draft restoration, failed and uncertain sends, and
 reading-position preservation while composing. The later global-footer task keeps
