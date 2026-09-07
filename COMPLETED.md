@@ -13515,3 +13515,48 @@ Added editing-specific Ctrl-B/F character movement and Ctrl-Left/Right word move
 Original task:
 
 - **Add familiar character and word movement shortcuts to TUI text editing** — Normalize Ctrl-B/Ctrl-F as character-backward/character-forward and Ctrl-Left/Ctrl-Right as word-backward/word-forward, represent them as editing-specific `UiInput` intents, and apply them to every existing cursor-capable text surface: message drafts, searches, agent and session names, and project forms. Define a word as a maximal run of Unicode alphanumeric characters plus `_`; backward movement skips separators and lands at the previous word's start, while forward movement crosses the current word and separators to the next word's start or the text end, with punctuation, whitespace, and newlines treated as separators. Preserve UTF-8 boundaries; make beginning/end movement a no-op; do not change text, dirty state, validation errors, or autosave scheduling; keep plain Left/Right and Ctrl-C behavior unchanged; and make these editing-only chords inert outside editable fields. Complete the work with crossterm normalization tests, reusable-editor tests covering punctuation, whitespace, newlines, and multibyte text in single- and multiline fields, plus updated contextual editing help. Append/backspace-only interaction answers and configuration editing remain out of scope. (`crates/hq-node/src/tui_shell.rs:514`, `crates/hq-tui/src/model.rs:758`, `crates/hq-tui/src/model.rs:9459`, `crates/hq-tui/src/render.rs:589`)
+
+## 2026-09-06 — Exact project-session recovery before dispatch
+
+Project dispatch now observes or resumes the exact saved provider session using the acknowledged
+launch directory, revalidates current project/input eligibility after readiness, and preserves the
+existing assignment and submission identities. Concurrent readiness requests share the exact live
+worker; project/provider/session mismatches fail closed. Generic supervisor recovery no longer
+replays project queues without a current workflow eligibility check, while direct-session recovery
+continues reconciling its own inputs. Durable accepted-delivery evidence can repair canonical
+attribution even when resume is unavailable. Submission trace boundaries now require saved provider
+acceptance rather than an attempted delivery.
+
+Added supervisor and workflow regressions for concurrency, stale queued work, identity mismatches,
+failed readiness, invalid launch directories, close during resume, and acceptance-response loss.
+The installed TUI test now restarts HQ between its initial message and follow-up, asserting one
+provider conversation start, one exact resume and two submissions. Its fake provider retains turn
+identity across restart, and the daemon guard permits clean lease release before replacement.
+Formatting, strict workspace Clippy, the full workspace suite and final affected-project tests pass.
+Persisted recovery retries and truthful runtime/message UI state remain queued separately.
+
+### Original plan entry
+
+### Resume exact project sessions before dispatch
+
+**Problem.** After restart the durable assignment remains runnable but the supervisor has no
+worker. Project dispatch queues a message without resuming that worker. Ordinary project resume
+also risks draining stale project deliveries without checking current assignment eligibility.
+
+**Scope.** Add an idempotent exact-session readiness operation to the harness supervisor and project
+runtime port. Carry the saved launch directory in canonical workflow snapshots, validate it before
+readiness, and recheck current assignment/input eligibility after readiness before dispatch. Resume
+must not drain project delivery records; the project workflow selects each eligible input explicitly.
+Keep direct-session recovery behavior intact. Correct premature submission trace evidence.
+
+**Dependencies and invariants.** Build on existing supervisor ownership, exact resume and submission
+lookup. Preserve the project assignment, session, stable input identity and authoritative sequence.
+Concurrent readiness calls reuse the matching live worker; mismatched project/provider/session must
+fail closed. Failed resume never creates a new conversation or submits a message. Runtime readiness
+is observed anew, never inferred from an old successful operation. No prerequisite task exists.
+
+**Completion.** Regression tests cover restart with saved project input, repeated readiness without
+a second worker, exact-session mismatch, stale project records left undrained, failed resume, launch
+validation, eligibility changes during resume, and acceptance-response loss without resubmission.
+Project dispatch automatically resumes the exact session and submits once; related runtime contract
+docs describe the behavior. Persisted retries and the client runtime-state projection follow below.
