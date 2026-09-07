@@ -345,6 +345,10 @@ enum RelayRequest {
 }
 
 enum HarnessRequest {
+    WorkerLease {
+        agent_id: AgentId,
+        reply: SyncSender<Result<Option<crate::StoredHarnessLease>, StoreError>>,
+    },
     Apply {
         mutation: Box<StoredHarnessStateMutation>,
         reply: SyncSender<Result<HarnessLeaseOutcome, StoreError>>,
@@ -748,6 +752,23 @@ impl fmt::Debug for RelayStateHandle {
 }
 
 impl HarnessStateHandle {
+    /// Reads one exact retained worker lease without scanning other agents.
+    pub fn worker_lease(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<crate::StoredHarnessLease>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Harness(Box::new(HarnessRequest::WorkerLease {
+                agent_id,
+                reply,
+            })))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Applies one atomic durable managed-runtime coordination transition.
     pub fn apply(
         &self,
@@ -1511,6 +1532,9 @@ fn handle_project_saga_request(database: &mut Database, request: ProjectSagaRequ
 
 fn handle_harness_request(database: &mut Database, request: HarnessRequest) {
     match request {
+        HarnessRequest::WorkerLease { agent_id, reply } => {
+            let _ = reply.send(database.load_harness_worker_lease(agent_id));
+        }
         HarnessRequest::Apply { mutation, reply } => {
             let _ = reply.send(database.apply_harness_state(*mutation));
         }

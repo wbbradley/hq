@@ -1239,6 +1239,16 @@ mod tests {
                 expires_at_millis: now + 60_000,
             })
             .expect("prior submission owner");
+        assert_eq!(
+            state
+                .worker_lease(request.body.binding.agent_id)
+                .expect("exact adapter lease"),
+            Some(hq_harness::HarnessWorkerLease {
+                agent_id: request.body.binding.agent_id,
+                owner_token: token,
+                expires_at_millis: now + 60_000,
+            })
+        );
         state
             .apply(hq_harness::HarnessStateMutation::SetDeliveryState {
                 agent_id: request.body.binding.agent_id,

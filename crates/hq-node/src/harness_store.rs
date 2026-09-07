@@ -29,6 +29,17 @@ impl HarnessStoreAdapter {
 }
 
 impl HarnessStatePort for HarnessStoreAdapter {
+    fn worker_lease(
+        &self,
+        agent_id: hq_domain::AgentId,
+    ) -> Result<Option<HarnessWorkerLease>, HarnessError> {
+        self.store
+            .worker_lease(agent_id)
+            .map_err(|error| map_store_error(error, HarnessErrorClass::PersistenceCollision))?
+            .map(map_lease)
+            .transpose()
+    }
+
     fn apply(&self, mutation: HarnessStateMutation) -> Result<HarnessLeaseOutcome, HarnessError> {
         let conflict = mutation_conflict(&mutation);
         self.store

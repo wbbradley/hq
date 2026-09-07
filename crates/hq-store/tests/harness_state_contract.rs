@@ -321,3 +321,67 @@ fn assert_terminal_delivery_replay(
         StoreErrorClass::HarnessStateConflict
     );
 }
+
+#[test]
+fn exact_worker_lease_read_preserves_deadlines_beyond_snapshot_and_reopen() {
+    let directory = TestDirectory::new();
+    let database = directory.database_path();
+    let store = open_store(&database);
+    let handle = store.harness_state_handle();
+    let target = AgentId::from_bytes([9; 32]);
+    assert_eq!(handle.worker_lease(target).expect("missing lease"), None);
+    for byte in 1..=9 {
+        handle
+            .apply(StoredHarnessStateMutation::ClaimLease {
+                agent_id: AgentId::from_bytes([byte; 32]),
+                owner_token: [byte + 10; 32],
+                now_millis: 10,
+                expires_at_millis: 20,
+            })
+            .expect("claim");
+    }
+    assert!(
+        !handle
+            .load(1)
+            .expect("bounded snapshot")
+            .leases
+            .iter()
+            .any(|lease| lease.agent_id == target)
+    );
+    let exact = handle
+        .worker_lease(target)
+        .expect("exact read")
+        .expect("retained lease");
+    assert_eq!(exact.owner_token, [19; 32]);
+    assert_eq!(exact.expires_at_millis, 20);
+    store.close().expect("close");
+    let reopened = open_store(&database);
+    let handle = reopened.harness_state_handle();
+    assert_eq!(
+        handle.worker_lease(target).expect("reopen exact read"),
+        Some(exact)
+    );
+    handle
+        .apply(StoredHarnessStateMutation::ClaimLease {
+            agent_id: target,
+            owner_token: [99; 32],
+            now_millis: 20,
+            expires_at_millis: 30,
+        })
+        .expect("expired owner replaced");
+    assert_eq!(
+        handle
+            .worker_lease(target)
+            .expect("new lease")
+            .expect("retained")
+            .owner_token,
+        [99; 32]
+    );
+    handle
+        .apply(StoredHarnessStateMutation::ReleaseLease {
+            agent_id: target,
+            owner_token: [99; 32],
+        })
+        .expect("release");
+    assert_eq!(handle.worker_lease(target).expect("released read"), None);
+}

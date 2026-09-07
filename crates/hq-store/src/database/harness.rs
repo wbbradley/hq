@@ -618,7 +618,7 @@ fn load_events(
         .collect()
 }
 
-fn load_lease(
+pub(super) fn load_lease(
     connection: &Connection,
     agent_id: AgentId,
 ) -> Result<Option<StoredHarnessLease>, StoreError> {

@@ -101,6 +101,22 @@ pub struct HarnessWorkerLease {
     pub expires_at_millis: u64,
 }
 
+/// Point-in-time evidence from an exact live worker under the supervisor lock.
+/// This is not a durable readiness receipt or authority for a later delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HarnessReadyWorker {
+    /// Named agent owned by this worker.
+    pub agent_id: AgentId,
+    /// Exact optional project binding of the live worker.
+    pub project_id: Option<ProjectId>,
+    /// Actual live provider namespace.
+    pub provider_id: ProviderId,
+    /// Actual acknowledged session of the live worker.
+    pub session_id: ProviderSessionId,
+    /// Exact opaque current worker owner; not inferred from a saved session receipt.
+    pub owner_token: HarnessOwnerToken,
+}
+
 /// Passive acknowledged durable-session record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HarnessReadySession {
@@ -298,6 +314,10 @@ pub trait HarnessStatePort: Send + Sync {
 
     /// Loads one bounded deterministic repair snapshot.
     fn load(&self, limit: usize) -> Result<HarnessStateSnapshot, HarnessError>;
+
+    /// Reads one exact retained lease, including an expired row, without a global scan.
+    /// A lease is ownership/deadline evidence, never proof of a live worker.
+    fn worker_lease(&self, agent_id: AgentId) -> Result<Option<HarnessWorkerLease>, HarnessError>;
 
     /// Loads one exact managed-session control operation for response-loss replay.
     fn session_operation(
@@ -800,13 +820,14 @@ impl HarnessSupervisor {
     pub fn ensure_resumed(
         &self,
         request: HarnessLaunchRequest,
-    ) -> Result<ProviderSessionId, HarnessError> {
+    ) -> Result<HarnessReadyWorker, HarnessError> {
         self.ensure_accepting()?;
         let HarnessSessionRequest::Resume { session_id } = &request.session else {
             return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
         };
+        let agent_id = request.agent_id;
         let mut workers = self.lock_workers()?;
-        if let Some(worker) = workers.get_mut(&request.agent_id) {
+        if let Some(worker) = workers.get_mut(&agent_id) {
             if worker.provider_id != request.provider_id
                 || worker.session_id != *session_id
                 || worker.project_id != request.project_id
@@ -815,10 +836,30 @@ impl HarnessSupervisor {
                     HarnessErrorClass::SessionIdentityMismatch,
                 ));
             }
-            renew_worker(&self.config, &self.dependencies, request.agent_id, worker)?;
-            return Ok(worker.session_id.clone());
+        } else {
+            self.launch_owned(request, &mut workers)?;
         }
-        self.launch_owned(request, &mut workers)
+        let worker = workers
+            .get(&agent_id)
+            .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
+        // Launch may cross a slow external boundary. Renew again before reporting readiness.
+        renew_worker(&self.config, &self.dependencies, agent_id, worker)?;
+        Ok(HarnessReadyWorker {
+            agent_id,
+            project_id: worker.project_id,
+            provider_id: worker.provider_id.clone(),
+            session_id: worker.session_id.clone(),
+            owner_token: worker.token,
+        })
+    }
+
+    /// Reads the exact retained lease for scheduling ownership-aware recovery.
+    /// Absence or expiry does not establish readiness or grant ownership.
+    pub fn worker_lease(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<HarnessWorkerLease>, HarnessError> {
+        self.dependencies.state.worker_lease(agent_id)
     }
 
     fn launch_owned(

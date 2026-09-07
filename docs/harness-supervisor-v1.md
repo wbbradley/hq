@@ -68,6 +68,17 @@ session without replaying inputs. The worker lock serializes readiness with conc
 stop. A live worker for a different project, provider or session rejects the request; a retained
 ready-session row or successful operation receipt is not proof of a live worker. Failed exact resume
 never falls back to starting a new conversation.
+Successful exact resume returns `HarnessReadyWorker`, constructed from the live worker while
+holding the catalog lock after ownership renewal or launch. It names the actual agent, optional
+project, provider/session and opaque owner token. Concurrent reuse returns the same owner;
+stop followed by resume creates a new owner even when the saved session is unchanged. This is
+point-in-time evidence, not authority for later submission or a durable liveness guarantee.
+
+`worker_lease(agent_id)` reads one retained lease by its exact agent key through the store actor.
+It preserves the owner and absolute expiry, including expired rows, without scanning a bounded
+snapshot. Recovery can use that deadline when another owner blocks launch. A retained lease,
+its expiry, or its absence never establishes a live worker or bypasses atomic lease acquisition.
+
 
 Each state read is explicitly bounded. Direct exact-identity reads support client replay without
 scanning or regressing a terminal record. A caller that owns more runnable rows than one bounded

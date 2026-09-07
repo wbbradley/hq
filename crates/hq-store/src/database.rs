@@ -1976,6 +1976,13 @@ impl Database {
         harness::apply(&mut self.connection, mutation)
     }
 
+    pub(super) fn load_harness_worker_lease(
+        &self,
+        agent_id: hq_domain::AgentId,
+    ) -> Result<Option<crate::StoredHarnessLease>, StoreError> {
+        harness::load_lease(&self.connection, agent_id)
+    }
+
     pub(super) fn load_harness_state(
         &self,
         limit: usize,

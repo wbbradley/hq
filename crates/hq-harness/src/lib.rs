@@ -26,7 +26,7 @@ pub use supervisor::{
     HarnessDiagnosticEvent, HarnessDiagnosticSink, HarnessDiagnosticTarget, HarnessEventCheckpoint,
     HarnessEventPumpReport, HarnessLaunchRequest, HarnessLeaseOutcome, HarnessOwnerToken,
     HarnessPendingInteraction, HarnessPersistencePort, HarnessProjectDelivery, HarnessReadySession,
-    HarnessResponderId, HarnessSessionControlOutcome, HarnessSessionOperation,
+    HarnessReadyWorker, HarnessResponderId, HarnessSessionControlOutcome, HarnessSessionOperation,
     HarnessSessionOperationKind, HarnessSessionOperationState, HarnessStateMutation,
     HarnessStatePort, HarnessStateSnapshot, HarnessSupervisor, HarnessSupervisorConfig,
     HarnessSupervisorDependencies, HarnessSupervisorReport, HarnessTokenSource, HarnessWorkerLease,

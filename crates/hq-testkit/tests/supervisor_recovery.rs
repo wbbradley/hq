@@ -77,6 +77,125 @@ fn direct_session_recovery_still_reconciles_acceptance_without_resubmission() {
 }
 
 #[test]
+fn exact_resume_renews_ownership_after_a_slow_provider_launch() {
+    let agent = AgentId::from_bytes([1; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider");
+    let session_id = ProviderSessionId::new("saved").expect("session");
+    let clock = Arc::new(TestClock::new(10));
+    let during_open = clock.clone();
+    let provider = Arc::new(ProviderState::default());
+    *provider.on_open.lock().expect("hook") = Some(Box::new(move || {
+        during_open.0.store(100_000, Ordering::SeqCst);
+    }));
+    let runtime = supervisor(dependencies(
+        registry(provider_id.clone(), session_id.clone(), provider),
+        Arc::new(MemoryState::default()),
+        Arc::new(MemoryPersistence::available()),
+        clock.clone(),
+        Arc::new(TestTokens::default()),
+    ));
+    let ready = runtime
+        .ensure_resumed(launch(
+            agent,
+            provider_id,
+            HarnessSessionRequest::Resume { session_id },
+        ))
+        .expect("slow launch ready");
+    let lease = runtime
+        .worker_lease(agent)
+        .expect("lease query")
+        .expect("lease");
+    assert_eq!(lease.owner_token, ready.owner_token);
+    assert!(lease.expires_at_millis > clock.now_millis());
+    runtime.shutdown().expect("shutdown");
+}
+
+#[test]
+fn foreign_lease_deadline_is_exact_and_stale_worker_cannot_report_readiness() {
+    let agent = AgentId::from_bytes([1; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider");
+    let session_id = ProviderSessionId::new("durable-session").expect("session");
+    let state = Arc::new(MemoryState::default());
+    let clock = Arc::new(TestClock::new(10));
+    let runtime = supervisor(dependencies(
+        registry(
+            provider_id.clone(),
+            session_id.clone(),
+            Arc::new(ProviderState::default()),
+        ),
+        state.clone(),
+        Arc::new(MemoryPersistence::available()),
+        clock.clone(),
+        Arc::new(TestTokens::default()),
+    ));
+    let request = || {
+        launch(
+            agent,
+            provider_id.clone(),
+            HarnessSessionRequest::Resume {
+                session_id: session_id.clone(),
+            },
+        )
+    };
+    let foreign = HarnessOwnerToken::from_bytes([90; 32]).expect("foreign token");
+    state
+        .apply(HarnessStateMutation::ClaimLease {
+            agent_id: agent,
+            owner_token: foreign,
+            now_millis: 10,
+            expires_at_millis: 100,
+        })
+        .expect("foreign claim");
+    assert_eq!(
+        runtime
+            .ensure_resumed(request())
+            .expect_err("live foreign owner blocks")
+            .class,
+        HarnessErrorClass::OwnershipConflict
+    );
+    assert_eq!(
+        runtime.worker_lease(agent).expect("exact retained lease"),
+        Some(HarnessWorkerLease {
+            agent_id: agent,
+            owner_token: foreign,
+            expires_at_millis: 100,
+        })
+    );
+    assert!(state.snapshot().ready_sessions.is_empty());
+    clock.0.store(100, Ordering::SeqCst);
+    let ready = runtime
+        .ensure_resumed(request())
+        .expect("expired lease can be acquired");
+    assert_ne!(ready.owner_token, foreign);
+    let lease = runtime.worker_lease(agent).expect("lease").expect("owned");
+    state
+        .apply(HarnessStateMutation::ClaimLease {
+            agent_id: agent,
+            owner_token: foreign,
+            now_millis: lease.expires_at_millis,
+            expires_at_millis: lease.expires_at_millis + 100,
+        })
+        .expect("new owner after expiry");
+    clock.0.store(lease.expires_at_millis, Ordering::SeqCst);
+    assert_eq!(
+        runtime
+            .ensure_resumed(request())
+            .expect_err("stale worker cannot renew")
+            .class,
+        HarnessErrorClass::OwnershipConflict
+    );
+    assert_eq!(
+        runtime
+            .worker_lease(agent)
+            .expect("retained foreign lease")
+            .expect("lease")
+            .owner_token,
+        foreign
+    );
+    runtime.shutdown().expect("shutdown");
+}
+
+#[test]
 fn exact_project_resume_reuses_worker_without_draining_saved_deliveries() {
     let agent = AgentId::from_bytes([1; 32]);
     let provider_id = ProviderId::new("scripted").expect("provider");
@@ -96,6 +215,7 @@ fn exact_project_resume_reuses_worker_without_draining_saved_deliveries() {
         .deliver(saved.clone())
         .expect_err("no worker; input stays queued");
     let restarted = supervisor(dependencies);
+    let project_id = saved.project.as_ref().map(|project| project.project_id);
     let request = || {
         let mut request = launch(
             agent,
@@ -104,25 +224,26 @@ fn exact_project_resume_reuses_worker_without_draining_saved_deliveries() {
                 session_id: session_id.clone(),
             },
         );
-        request.project_id = saved.project.as_ref().map(|project| project.project_id);
+        request.project_id = project_id;
         request
     };
-    std::thread::scope(|scope| {
+    let evidence = std::thread::scope(|scope| {
         let first = scope.spawn(|| restarted.ensure_resumed(request()));
         let second = scope.spawn(|| restarted.ensure_resumed(request()));
-        assert_eq!(
-            first.join().expect("first joins").expect("resume"),
-            session_id
-        );
-        assert_eq!(
-            second.join().expect("second joins").expect("reuse"),
-            session_id
-        );
+        let first = first.join().expect("first joins").expect("resume");
+        let second = second.join().expect("second joins").expect("reuse");
+        assert_eq!(first, second);
+        assert_eq!(first.agent_id, agent);
+        assert_eq!(first.provider_id, provider_id);
+        assert_eq!(first.session_id, session_id);
+        assert_eq!(first.project_id, request().project_id);
+        first
     });
     let leases = state.snapshot().leases;
+    assert_eq!(evidence.owner_token, leases[0].owner_token);
     assert_eq!(
         restarted.ensure_resumed(request()).expect("reuse"),
-        session_id
+        evidence
     );
     assert_eq!(state.snapshot().leases, leases);
     assert_eq!(restarted.wake().expect("generic wake"), 0);
@@ -159,6 +280,14 @@ fn exact_project_resume_reuses_worker_without_draining_saved_deliveries() {
         state.delivery_state(agent),
         Some(HarnessDeliveryState::Accepted)
     );
+    restarted.stop(agent).expect("stop exact worker");
+    assert_eq!(restarted.worker_lease(agent).expect("released lease"), None);
+    assert!(!state.snapshot().ready_sessions.is_empty());
+    let resumed = restarted
+        .ensure_resumed(request())
+        .expect("resume saved session");
+    assert_eq!(resumed.session_id, evidence.session_id);
+    assert_ne!(resumed.owner_token, evidence.owner_token);
     restarted.shutdown().expect("shutdown");
 }
 
@@ -1384,6 +1513,16 @@ impl MemoryState {
 }
 
 impl HarnessStatePort for MemoryState {
+    fn worker_lease(&self, agent_id: AgentId) -> Result<Option<HarnessWorkerLease>, HarnessError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?
+            .leases
+            .get(&agent_id)
+            .copied())
+    }
+
     #[allow(clippy::too_many_lines)]
     fn apply(&self, mutation: HarnessStateMutation) -> Result<HarnessLeaseOutcome, HarnessError> {
         let mut state = self
@@ -1835,6 +1974,7 @@ impl HarnessTokenSource for TestTokens {
 
 #[derive(Default)]
 struct ProviderState {
+    on_open: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     accepted: Mutex<BTreeMap<MessageId, CommandDigest>>,
     lost_once: AtomicBool,
     submission_calls: AtomicUsize,
@@ -1885,6 +2025,9 @@ impl HarnessInstance for TestInstance {
             && session_id != self.session_id
         {
             return Err(HarnessError::new(HarnessErrorClass::SessionNotFound));
+        }
+        if let Some(on_open) = self.state.on_open.lock().expect("open hook").take() {
+            on_open();
         }
         Ok(OpenedHarnessSession {
             session_id: self.session_id,
