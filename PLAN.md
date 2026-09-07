@@ -2,23 +2,6 @@
 
 ## Next Up
 
-### Composer approval handoff
-
-Use the conversation's lower surface for pending command approval, replacing the
-editor without a modal or third Tab stop. While composing, show “Approval needed”
-near the editor bottom in the alert semantic color without interrupting typing.
-Tab preserves draft/cursor and switches directly to approval UI; Tab/Shift-Tab then
-cycle transcript and approval focus. Resolution restores the focused composer with
-its draft and cursor, preserving transcript position and tail state throughout.
-Keep exact typed approval correlation and prevent editing keystrokes from approving.
-
-Touch TUI approval/draft/focus state, lower-surface rendering, footer hints and
-conversation docs. Dependencies: persistent conversation composition. Complete when
-model, render, and installed terminal tests prove approval arrival while typing,
-explicit handoff, both focus directions, stale/mismatched approval handling, and
-exact draft/cursor restoration after resolution. The pending-approval alert is
-contextual status, not a duplicate ordinary composer-shortcut row.
-
 ### Show composer shortcuts once in the global footer
 
 Conversation composition currently displays duplicate shortcut rows: `render_draft_pane`

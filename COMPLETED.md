@@ -13757,3 +13757,35 @@ directions, editing isolation, small-screen sizing, successive sends in the same
 conversation, navigation and draft restoration, failed and uncertain sends, and
 reading-position preservation while composing. The later global-footer task keeps
 its standalone-composer and validation scope.
+
+
+## Composer approval handoff
+
+Implemented in `8f78ef7`. Pending approval leaves the composer editable with an alert-colored
+notice. Explicit Tab/Shift-Tab handoff replaces the editor, retains two-surface navigation,
+and restores the focused draft and caret on resolution. Active-conversation scoping and
+complete request correlation prevent background or stale responses from taking focus or
+mutating another request. Choice refresh follows typed values. Model/render tests cover
+normal and tiny layouts, cursor/viewport/tail retention, multi-request sequencing, and stale
+callbacks; the installed provider journey proves exact approval and continued editing.
+Formatting, strict workspace all-target Clippy, and the full serial workspace suite passed.
+
+Original task:
+
+### Composer approval handoff
+
+Use the conversation's lower surface for pending command approval, replacing the
+editor without a modal or third Tab stop. While composing, show “Approval needed”
+near the editor bottom in the alert semantic color without interrupting typing.
+Tab preserves draft/cursor and switches directly to approval UI; Tab/Shift-Tab then
+cycle transcript and approval focus. Resolution restores the focused composer with
+its draft and cursor, preserving transcript position and tail state throughout.
+Keep exact typed approval correlation and prevent editing keystrokes from approving.
+
+Touch TUI approval/draft/focus state, lower-surface rendering, footer hints and
+conversation docs. Dependencies: persistent conversation composition. Complete when
+model, render, and installed terminal tests prove approval arrival while typing,
+explicit handoff, both focus directions, stale/mismatched approval handling, and
+exact draft/cursor restoration after resolution. The pending-approval alert is
+contextual status, not a duplicate ordinary composer-shortcut row.
+
