@@ -2,81 +2,102 @@
 
 ## Next Up
 
-### Conversation scrolling and persistent composition
+### Conversation display preferences
 
-Conversation navigation currently mixes wrapped-line scrolling (arrows) with
-message selection (`j`/`k`), causing large jumps through long messages. Composition
-also captures input while its draft exists rather than routing by surface focus.
-Make ordinary conversation reading a scroll position, with a persistent composer
-and separate, explicit message inspection.
+Persist and expose the two settings required by conversation reading and persistent
+composition: page overlap in rendered lines (default one) and focused composer
+height cap as a percentage of available height (default one-third). Use the current
+installation configuration, local API, and Config screen; validate numeric values
+and preserve unrelated defaults on field-specific updates. Zero page overlap is
+valid; allow only positive composer percentages below 100 so the transcript retains
+space. Runtime geometry must still clamp overlap to permit paging and the composer
+cap to keep both surfaces usable on small terminals.
 
-Scope and agreed behavior:
+Touch installation configuration encoding/decoding and mutation, local API types,
+node/TUI configuration mapping, Config input/rendering, and configuration docs.
+Complete when defaults, persisted round trips, invalid values, isolated field
+updates, and editable Config controls are covered by tests. These settings are
+consumed by the following reading and composition tasks; their behavior remains
+unfinished until those tasks land.
 
-- Keep two surfaces visible even on small terminals: transcript above, composer
-  below. Tab/Shift-Tab cycle focus between them. Open conversations with composer
-  focus. Route typing and caret movement only to the focused editor; transcript
-  `j`/`k` and up/down all scroll one rendered line, including wrapping and explicit
-  line breaks, without selecting messages.
-- PageUp/PageDown scroll a viewport with configurable overlap, defaulting to one
-  rendered line. Clamp overlap for tiny viewports so paging still advances. Load
-  older history automatically near the top without moving the content being read;
-  prevent duplicate requests and stop at exhausted history. Home reaches the oldest
-  loaded content; End reaches the bottom and enables tail mode. These are transcript
-  bindings; editor navigation retains its editing meaning.
-- Follow incoming content only while already at the tail. Otherwise retain the
-  prior reading position across appends, streaming updates, history prepends, and
-  redraws, and show a new-content indicator with a discoverable jump-to-latest
-  action. Typing and focus changes must not independently enable tail mode.
-- Remove normal message-selection highlighting. Provide an explicit Inspect mode:
-  provisionally Enter activates it and highlights a visible message, `j`/`k` choose
-  entries within that mode, and details remain accessible through typed entry
-  identities. Escape returns to the unchanged reading position. Keep activation
-  separate from the capability so the key can be remapped later. Ordinary scrolling
-  must not silently retarget inspected evidence.
-- The composer sends to the current conversation. Message-specific replies and
-  conversation forking are outside this task; do not add reply targeting or a
-  “Replying to” workflow. Resolve existing direct-message send requirements using
-  authoritative conversation context, never whichever message happens to be visible
-  or selected. Preserve distinct direct/project conversation semantics.
-- Grow the focused composer with content up to a configurable height cap, defaulting
-  to one-third of available height, then scroll its editor internally. Collapse the
-  unfocused composer to one line while retaining the draft and cursor. Keep both
-  surfaces usable at small sizes and preserve the logical reading position when
-  composer geometry changes. Expose and persist page overlap and composer height
-  settings through the existing configuration path.
-- Escape from the composer focuses the transcript; Escape from ordinary transcript
-  reading returns to the conversation list. Successful sending leaves the composer
-  focused and ready for another message. Retain existing autosave, send-failure,
-  pending-send, and receipt guarantees; only committed evidence consumes sent text.
-- Pending command approval uses the same lower surface, replacing the editor rather
-  than opening a modal or introducing a third Tab stop. While composing, show
-  “Approval needed” near the editor bottom in the alert semantic color without
-  interrupting typing. Tab then preserves the draft/cursor and switches directly to
-  the approval UI. In approval state, Tab/Shift-Tab cycle transcript and approval
-  focus. After resolution restore the composer, focused, with its draft and cursor;
-  preserve transcript position and tail state throughout. Keep exact typed approval
-  correlation and ensure ordinary editing keystrokes cannot approve a command.
+### Conversation reading, inspection, and history paging
 
-Implementation touchpoints: `crates/hq-tui/src/model.rs` (viewport, inspection,
-focus/input routing, draft lifecycle, approval handling), `render.rs` (surface
-geometry, highlighting, hints, alert), relevant shell input/configuration plumbing,
-and `docs/rust/inbox-conversation-surface.md`. Reuse renderer-measured entry geometry
-and the stable entry identity plus wrapped-row viewport anchor instead of creating
-an unrelated positional selection model. Update stale footer/help guidance that
-currently describes arrows and `j`/`k` as message navigation.
+Ordinary conversation navigation must be a wrapped-line scroll position rather
+than message selection. Reuse renderer-measured entry geometry and stable entry
+identity plus wrapped-row position.
 
-Dependencies: no preceding task is required. The following composer-shortcut task
-touches the same rendering and footer code; preserve its scope. The approval-needed
-alert is contextual status, not a duplicate row of ordinary composer shortcuts.
+- In transcript reading, `j`/`k` and up/down scroll one rendered line, including
+  wrapping and explicit line breaks. Remove ordinary message-selection highlights.
+- PageUp/PageDown scroll a viewport using the persisted page-overlap preference;
+  clamp overlap so small viewports still advance. Open at the latest history and
+  load older history automatically near the top without moving the content being
+  read. Prevent duplicate requests, retain explicit retry after failure, and stop
+  at exhausted history. Home reaches oldest loaded content; End reaches the bottom
+  and enables tail mode. Editor navigation retains editing meanings.
+- Follow incoming content only while already at the tail. Otherwise preserve the
+  prior reading position across append, streaming updates, history prepend, resize,
+  and redraw. Show a new-content indicator and discoverable jump-to-latest action.
+  Typing or switching focus must not independently enable tail mode.
+- Provide explicit Inspect mode, provisionally activated by Enter. Highlight a
+  visible entry; `j`/`k` choose entries there and typed details remain accessible.
+  Escape returns to the unchanged reading position. Keep activation separate from
+  capability for later remapping; scrolling never silently retargets evidence.
 
-Complete when model and rendered-buffer tests demonstrate identical line scrolling
-for both key families through oversized Markdown at narrow sizes; configurable
-paging and history loading without jumps; tail/End and resize behavior; inspection
-entry/exit without losing the reading position; focused input routing in both Tab
-directions; persistent composition across sends, navigation, and failures; and
-approval arrival while typing followed by explicit handoff and exact draft
-restoration. Update the existing tests that intentionally distinguish arrow
-scrolling from `j`/`k` selection, and cover configuration persistence and bounds.
+Touch `crates/hq-tui/src/model.rs`, `render.rs`, shell input normalization, and the
+application/local API/store history paging path. Preserve canonical source order
+and conversation identity across pages and refreshes, rather than deriving order
+from names, timestamps, or arrival position. Update footer/help and
+`docs/rust/inbox-conversation-surface.md`.
+
+Dependencies: conversation display preferences. Complete when model, rendered-buffer,
+store pagination, and installed terminal tests cover oversized Markdown, both key
+families, configurable paging, history loading without jumps, tail/End, resize,
+new-content indication, and inspection entry/exit. Replace tests that deliberately
+encode the old distinction between arrow scrolling and `j`/`k` selection.
+
+### Persistent conversation composition
+
+Keep transcript and composer visible as two surfaces, even on small terminals.
+Tab/Shift-Tab cycle focus. Open conversations with composer focus; route typing and
+caret movement only to the focused editor. Grow that editor with content up to the
+persisted height cap (default one-third of available height), then scroll internally.
+Collapse the unfocused composer to one line, retaining draft and cursor. Geometry
+changes preserve the logical reading position and both surfaces remain usable.
+
+The composer sends to the current conversation. Message-specific replies and forking
+are outside scope: do not add reply targeting or a “Replying to” workflow. Resolve
+direct-message send requirements using authoritative conversation context, never a
+visible/selected message; preserve distinct direct/project conversation semantics.
+Escape from compose focuses the transcript; Escape from ordinary reading returns to
+the conversation list. Successful send leaves compose focused and ready for another
+message. Preserve autosave, failures, pending sends, and exact receipt guarantees;
+only committed evidence consumes sent text.
+
+Touch TUI draft/focus/input/layout state, shell/configuration plumbing, and typed
+application/local API draft targets or message-continuation validation as necessary.
+Update conversation documentation and contextual hints. Dependencies: display
+preferences and conversation reading. Complete when tests cover both focus
+directions, editing isolation, small-screen sizing, successive sends in the same
+conversation, navigation and draft restoration, failed and uncertain sends, and
+reading-position preservation while composing. The later global-footer task keeps
+its standalone-composer and validation scope.
+
+### Composer approval handoff
+
+Use the conversation's lower surface for pending command approval, replacing the
+editor without a modal or third Tab stop. While composing, show “Approval needed”
+near the editor bottom in the alert semantic color without interrupting typing.
+Tab preserves draft/cursor and switches directly to approval UI; Tab/Shift-Tab then
+cycle transcript and approval focus. Resolution restores the focused composer with
+its draft and cursor, preserving transcript position and tail state throughout.
+Keep exact typed approval correlation and prevent editing keystrokes from approving.
+
+Touch TUI approval/draft/focus state, lower-surface rendering, footer hints and
+conversation docs. Dependencies: persistent conversation composition. Complete when
+model, render, and installed terminal tests prove approval arrival while typing,
+explicit handoff, both focus directions, stale/mismatched approval handling, and
+exact draft/cursor restoration after resolution. The pending-approval alert is
+contextual status, not a duplicate ordinary composer-shortcut row.
 
 ### Show composer shortcuts once in the global footer
 
