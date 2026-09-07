@@ -1163,9 +1163,20 @@ pub enum UiTechnicalSection {
     },
 }
 
+/// Installation-qualified canonical message sender used independently of display text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiConversationSender {
+    /// Exact sender installation identity.
+    pub installation_id: [u8; 32],
+    /// Exact sender mailbox identity.
+    pub mailbox_id: [u8; 32],
+}
+
 /// Passive reducer-ordered conversation presentation entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiConversationEntry {
+    /// Exact canonical message author; absent for activity and local receipt placeholders.
+    pub sender: Option<UiConversationSender>,
     /// Stable canonical fact identity used as the logical scroll anchor.
     pub id: String,
     /// Typed ordinary presentation independent from action authority.
@@ -2548,6 +2559,8 @@ pub enum UiMailboxDraftPane {
 /// Passive bounded page returned by the ordinary local API client.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiConversationPage {
+    /// Full-conversation evidence, independent of the entries loaded on this page.
+    pub multiple_non_user_senders: bool,
     /// Stable summary-row identity requested by the model.
     pub row_id: String,
     /// Participant-oriented conversation heading.
@@ -2563,6 +2576,8 @@ pub struct UiConversationPage {
 /// Passive accumulated conversation presentation held by the pure model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiConversation {
+    /// Whether the authoritative conversation contains multiple non-local authors.
+    pub multiple_non_user_senders: bool,
     /// Stable summary-row identity.
     pub row_id: String,
     /// Participant-oriented conversation heading.
@@ -5101,6 +5116,7 @@ impl UiModel {
             || self.conversation_scroll_mode == ConversationScrollMode::FollowTail;
         apply_pending_project_delivery(self.snapshot.as_ref(), &mut page.entries);
         self.conversation = Some(UiConversation {
+            multiple_non_user_senders: page.multiple_non_user_senders,
             row_id: page.row_id,
             title: page.title,
             context: page.context,
@@ -11642,6 +11658,7 @@ fn conversation_loaded(
         conversation.next_cursor = page.next_cursor;
     } else {
         model.conversation = Some(UiConversation {
+            multiple_non_user_senders: page.multiple_non_user_senders,
             row_id: page.row_id,
             title: page.title,
             context: page.context,
@@ -12255,6 +12272,7 @@ fn append_pending_message(
     let conversation = model.conversation.as_mut()?;
     conversation.entries.retain(|entry| entry.id != id);
     conversation.entries.push(UiConversationEntry {
+        sender: None,
         id: id.clone(),
         presentation: UiConversationEntryPresentation::Message {
             author: UiConversationAuthor::You,
@@ -12334,6 +12352,7 @@ fn reconcile_committed_message(
         return;
     }
     conversation.entries.push(UiConversationEntry {
+        sender: None,
         id: id.clone(),
         presentation: UiConversationEntryPresentation::Message {
             author: UiConversationAuthor::You,

@@ -304,7 +304,7 @@ fn locally_authored_messages_only_show_delivery_state_while_it_is_useful() {
             delivery,
         ));
         assert!(rendered.contains(label), "{rendered}");
-        assert!(rendered.contains("── You"), "{rendered}");
+        assert!(!rendered.contains("── You"), "{rendered}");
         if delivery == UiMessageDelivery::Sent {
             assert!(!rendered.contains("You · Sent"), "{rendered}");
         }
@@ -312,7 +312,7 @@ fn locally_authored_messages_only_show_delivery_state_while_it_is_useful() {
 }
 
 #[test]
-fn sender_rules_fill_the_width_without_inverting_message_bodies() {
+fn hidden_sender_names_preserve_status_and_message_body_styles() {
     let native = UiTheme::terminal().with_style(
         UiThemeRole::ConversationAuthorSelf,
         Style::new().fg(Color::Black).bg(Color::Yellow),
@@ -395,11 +395,8 @@ fn sender_rules_fill_the_width_without_inverting_message_bodies() {
                         .modifier
                         .contains(Modifier::BOLD)
                 );
-                assert!(snapshot_text(&buffer).contains("── You"));
-                assert_eq!(
-                    buffer.cell((width - 1, y - 1)).expect("rule end").symbol(),
-                    "─"
-                );
+                assert!(!snapshot_text(&buffer).contains("── You"));
+                assert!(snapshot_text(&buffer).contains("Pending"));
                 if selection_role.is_none() {
                     assert!(
                         !buffer
@@ -1142,7 +1139,7 @@ fn conversation_messages_start_at_the_pane_edge_and_selection_fills_the_row() {
     assert_eq!(body_x, 0, "full-pane message body has no renderer indent");
 
     let selected = theme.style(UiThemeRole::ConversationSelectionFocused);
-    for y in [body_y - 1, body_y, body_y + 1] {
+    for y in [body_y, body_y + 1] {
         let final_cell = buffer.cell((119, y)).expect("full selected row");
         assert!(
             final_cell.modifier.contains(Modifier::REVERSED),
@@ -1153,11 +1150,7 @@ fn conversation_messages_start_at_the_pane_edge_and_selection_fills_the_row() {
             "selection uses the focused conversation role"
         );
     }
-    let author = buffer.cell((body_x, body_y - 1)).expect("author cell");
-    assert_eq!(
-        Some(author.fg),
-        theme.style(UiThemeRole::ConversationAuthorParticipant).fg
-    );
+    assert!(!snapshot_text(&buffer).contains("── You"));
 }
 
 #[test]
@@ -3277,11 +3270,13 @@ fn conversation_model_with_content(
             view: UiMaterializedConversationView {
                 snapshot: ready_snapshot(),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "deploy-9".to_owned(),
                     entries: vec![
                         UiConversationEntry {
+                            sender: None,
                             id: "message-1".to_owned(),
                             presentation: UiConversationEntryPresentation::Message {
                                 author: delivery.map_or_else(
@@ -3299,6 +3294,7 @@ fn conversation_model_with_content(
                             technical: Vec::new(),
                         },
                         UiConversationEntry {
+                            sender: None,
                             id: "activity-2".to_owned(),
                             presentation: UiConversationEntryPresentation::Activity {
                                 kind: UiConversationActivityKind::Progress,

@@ -4066,8 +4066,11 @@ fn render_conversation_entries(
     let layouts = visible_entries
         .iter()
         .map(|entry| {
-            let show_sender =
-                !previous_message.is_some_and(|previous| same_message_sender(previous, entry));
+            let show_sender = conversation.multiple_non_user_senders
+                && matches!(&entry.presentation,
+                    UiConversationEntryPresentation::Message { author, .. }
+                        if !matches!(author, UiConversationAuthor::You))
+                && !previous_message.is_some_and(|previous| same_message_sender(previous, entry));
             if matches!(
                 entry.presentation,
                 UiConversationEntryPresentation::Message { .. }
@@ -4150,36 +4153,16 @@ struct ConversationEntryLayout {
     height: u16,
 }
 
-// Routing contains the exact sender address, independently of the display name.
-// Activity rows do not introduce a new message sender. Missing sender evidence
-// never causes unrelated participants with identical labels to be grouped.
+// Activity never introduces a message author; unknown identity never merges senders.
 fn same_message_sender(left: &UiConversationEntry, right: &UiConversationEntry) -> bool {
-    fn sender(entry: &UiConversationEntry) -> Option<&str> {
-        entry.technical.iter().find_map(|section| match section {
-            UiTechnicalSection::Routing { sender, .. } => Some(sender.as_str()),
-            _ => None,
-        })
-    }
-    match (&left.presentation, &right.presentation) {
+    matches!(
+        (&left.presentation, &right.presentation),
         (
-            UiConversationEntryPresentation::Message {
-                author: left_author,
-                ..
-            },
-            UiConversationEntryPresentation::Message {
-                author: right_author,
-                ..
-            },
-        ) => match (sender(left), sender(right)) {
-            (Some(left), Some(right)) => left == right,
-            (None, None) => matches!(
-                (left_author, right_author),
-                (UiConversationAuthor::You, UiConversationAuthor::You)
-            ),
-            _ => false,
-        },
-        _ => false,
-    }
+            UiConversationEntryPresentation::Message { .. },
+            UiConversationEntryPresentation::Message { .. }
+        )
+    ) && left.sender.is_some()
+        && left.sender == right.sender
 }
 
 fn conversation_entry_layout(
@@ -5094,6 +5077,7 @@ mod tests {
             },
         };
         let mut entry = UiConversationEntry {
+            sender: None,
             id: "tail".to_owned(),
             presentation: UiConversationEntryPresentation::Activity {
                 kind: UiConversationActivityKind::Progress,
@@ -5175,7 +5159,7 @@ mod tests {
     }
 
     #[test]
-    fn sender_groups_use_routing_identity_and_retain_delivery_notices() {
+    fn sender_groups_use_typed_identity_and_retain_delivery_notices() {
         let mut first = message("one");
         first.presentation = UiConversationEntryPresentation::Message {
             author: UiConversationAuthor::Participant("Alice".to_owned()),
@@ -5183,21 +5167,21 @@ mod tests {
         };
         let mut second = first.clone();
         assert!(!super::same_message_sender(&first, &second));
-        first.technical.push(UiTechnicalSection::Routing {
-            sender: "installation/mailbox-a".to_owned(),
-            recipient: None,
+        first.sender = Some(crate::UiConversationSender {
+            installation_id: [1; 32],
+            mailbox_id: [2; 32],
         });
-        second.technical = first.technical.clone();
+        second.sender = first.sender;
         assert!(super::same_message_sender(&first, &second));
         second.presentation = UiConversationEntryPresentation::Message {
             author: UiConversationAuthor::Participant("Renamed".to_owned()),
             body: "two".to_owned(),
         };
         assert!(super::same_message_sender(&first, &second));
-        second.technical = vec![UiTechnicalSection::Routing {
-            sender: "installation/mailbox-b".to_owned(),
-            recipient: None,
-        }];
+        second.sender = Some(crate::UiConversationSender {
+            installation_id: [1; 32],
+            mailbox_id: [3; 32],
+        });
         assert!(!super::same_message_sender(&first, &second));
 
         let mut cache = super::UiRenderCache::new();
@@ -5287,6 +5271,7 @@ mod tests {
     #[test]
     fn command_preview_is_bounded_to_three_output_lines_with_status_and_omission() {
         let entry = UiConversationEntry {
+            sender: None,
             id: "command".to_owned(),
             presentation: UiConversationEntryPresentation::Activity {
                 kind: UiConversationActivityKind::CompletedItem,
@@ -5348,6 +5333,7 @@ mod tests {
     #[test]
     fn completed_command_preview_omits_success_status_and_keeps_highlighting() {
         let entry = UiConversationEntry {
+            sender: None,
             id: "completed-command".to_owned(),
             presentation: UiConversationEntryPresentation::Activity {
                 kind: UiConversationActivityKind::CompletedItem,
@@ -5425,6 +5411,7 @@ mod tests {
         ] {
             for output in [None, Some(""), Some("one\ntwo\nthree\nfour")] {
                 let entry = UiConversationEntry {
+                    sender: None,
                     id: "command-outcome".to_owned(),
                     presentation: UiConversationEntryPresentation::Activity {
                         kind: UiConversationActivityKind::CompletedItem,
@@ -5543,74 +5530,87 @@ mod tests {
 
     #[test]
     fn sender_rules_follow_sender_changes_across_activity_rows() {
-        let mut entries = vec![message("first"), message("second")];
-        let mut activity = message("");
-        activity.presentation = UiConversationEntryPresentation::Activity {
-            kind: UiConversationActivityKind::Status,
-            status: UiActivityStatus::Running,
-            summary: "Working".to_owned(),
-            detail: String::new(),
-            truncated: false,
-            completed: None,
-        };
-        entries.insert(1, activity);
-        for sender in ["mailbox-a", "mailbox-a", "mailbox-b"] {
-            let mut entry = message("reply");
-            entry.presentation = UiConversationEntryPresentation::Message {
-                author: UiConversationAuthor::Participant("Alice".to_owned()),
-                body: "reply".to_owned(),
+        for multiple in [false, true] {
+            let mut entries = vec![message("first"), message("second")];
+            let mut activity = message("");
+            activity.presentation = UiConversationEntryPresentation::Activity {
+                kind: UiConversationActivityKind::Status,
+                status: UiActivityStatus::Running,
+                summary: "Working".to_owned(),
+                detail: String::new(),
+                truncated: false,
+                completed: None,
             };
-            entry.technical.push(UiTechnicalSection::Routing {
-                sender: sender.to_owned(),
-                recipient: None,
+            entries.insert(1, activity);
+            for sender in [1, 1, 2] {
+                let mut entry = message("reply");
+                entry.presentation = UiConversationEntryPresentation::Message {
+                    author: UiConversationAuthor::Participant("Alice".to_owned()),
+                    body: "reply".to_owned(),
+                };
+                entry.sender = Some(crate::UiConversationSender {
+                    installation_id: [1; 32],
+                    mailbox_id: [sender; 32],
+                });
+                entries.push(entry);
+            }
+            entries.push(message("last"));
+            for (index, entry) in entries.iter_mut().enumerate() {
+                entry.id = format!("entry-{index}");
+            }
+            let conversation = crate::UiConversation {
+                multiple_non_user_senders: multiple,
+                row_id: "conversation".to_owned(),
+                title: "Alice".to_owned(),
+                context: None,
+                entries,
+                next_cursor: None,
+            };
+            let model = UiModel::new(UiSize {
+                width: 40,
+                height: 30,
             });
-            entries.push(entry);
+            let mut cache = super::UiRenderCache::new();
+            let mut terminal = Terminal::new(TestBackend::new(40, 30)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    render_conversation_entries(
+                        frame,
+                        &model,
+                        &UiTheme::terminal(),
+                        Rect::new(0, 0, 40, 30),
+                        &conversation,
+                        &mut cache,
+                    );
+                })
+                .expect("render");
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>();
+            assert_eq!(rendered.matches("── You ").count(), 0);
+            assert_eq!(
+                rendered.matches("── Alice ").count(),
+                if multiple { 2 } else { 0 }
+            );
+            let heights = cache
+                .conversation_viewport
+                .iter()
+                .flat_map(|observation| &observation.entries)
+                .map(|entry| entry.height)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                heights,
+                if multiple {
+                    vec![2, 2, 2, 3, 2, 3, 2]
+                } else {
+                    vec![2; 7]
+                }
+            );
         }
-        entries.push(message("last"));
-        for (index, entry) in entries.iter_mut().enumerate() {
-            entry.id = format!("entry-{index}");
-        }
-        let conversation = crate::UiConversation {
-            row_id: "conversation".to_owned(),
-            title: "Alice".to_owned(),
-            context: None,
-            entries,
-            next_cursor: None,
-        };
-        let model = UiModel::new(UiSize {
-            width: 40,
-            height: 30,
-        });
-        let mut cache = super::UiRenderCache::new();
-        let mut terminal = Terminal::new(TestBackend::new(40, 30)).expect("terminal");
-        terminal
-            .draw(|frame| {
-                render_conversation_entries(
-                    frame,
-                    &model,
-                    &UiTheme::terminal(),
-                    Rect::new(0, 0, 40, 30),
-                    &conversation,
-                    &mut cache,
-                );
-            })
-            .expect("render");
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect::<String>();
-        assert_eq!(rendered.matches("── You ").count(), 2);
-        assert_eq!(rendered.matches("── Alice ").count(), 2);
-        let heights = cache
-            .conversation_viewport
-            .iter()
-            .flat_map(|observation| &observation.entries)
-            .map(|entry| entry.height)
-            .collect::<Vec<_>>();
-        assert_eq!(heights, vec![3, 2, 2, 3, 2, 3, 3]);
     }
 
     #[test]
@@ -5630,6 +5630,7 @@ mod tests {
             completed: None,
         };
         let conversation = crate::UiConversation {
+            multiple_non_user_senders: false,
             row_id: "thread-a".to_owned(),
             title: "Alice".to_owned(),
             context: None,
@@ -5666,7 +5667,7 @@ mod tests {
                 entries: vec![
                     crate::UiConversationEntryGeometry {
                         entry_id: "first".to_owned(),
-                        height: 3,
+                        height: 2,
                     },
                     crate::UiConversationEntryGeometry {
                         entry_id: "second".to_owned(),
@@ -5728,6 +5729,7 @@ mod tests {
 
     fn message(body: &str) -> UiConversationEntry {
         UiConversationEntry {
+            sender: None,
             id: "message".to_owned(),
             presentation: UiConversationEntryPresentation::Message {
                 author: UiConversationAuthor::You,

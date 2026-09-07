@@ -2042,6 +2042,8 @@ pub enum SnapshotItem {
         context: ConversationContextDto,
         /// Exact reserved local-human mailbox for author presentation.
         local_human: MailboxAddressDto,
+        /// Whether the full conversation has multiple distinct non-local message authors.
+        multiple_non_user_senders: bool,
         /// Stable initiating message identity for a project thread.
         root_message: Option<Id32>,
         /// Sanitized bounded one-line message preview.

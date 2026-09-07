@@ -244,6 +244,7 @@ fn retained_subscription_view_is_drawn_without_refetching_startup_state() {
         initial: Some(UiMaterializedConversationView {
             snapshot,
             conversation: Some(UiConversationPage {
+                multiple_non_user_senders: false,
                 title: "Alice".to_owned(),
                 context: None,
                 row_id: "thread-a".to_owned(),
@@ -309,6 +310,7 @@ fn idle_shell_wakes_and_draws_a_provider_interaction_without_terminal_polling() 
                 project_setups: Vec::new(),
             },
             conversation: Some(UiConversationPage {
+                multiple_non_user_senders: false,
                 title: "Alice".to_owned(),
                 context: None,
                 row_id: "thread-a".to_owned(),
@@ -371,10 +373,12 @@ fn passive_draw_geometry_is_reduced_before_the_next_frame() {
                 project_setups: Vec::new(),
             },
             conversation: Some(UiConversationPage {
+                multiple_non_user_senders: false,
                 title: "Alice".to_owned(),
                 context: None,
                 row_id: "thread-a".to_owned(),
                 entries: vec![UiConversationEntry {
+                    sender: None,
                     id: "message-1".to_owned(),
                     presentation: UiConversationEntryPresentation::Message {
                         author: UiConversationAuthor::Participant("Alice".to_owned()),
@@ -715,6 +719,7 @@ impl TuiClientPort for EmptyClient {
         _cursor: Option<String>,
     ) -> Result<hq_tui::UiConversationPage, hq_tui::UiFailure> {
         Ok(hq_tui::UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: row_id.to_owned(),

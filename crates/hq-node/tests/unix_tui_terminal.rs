@@ -446,6 +446,9 @@ fn installed_markdown_content_is_inert_and_resource_free() {
             "```text\n\x1b[888zCODE_MARKER\n```\n\n",
             "- outer item\n  - nested item with continuation words\n\n",
             "| Name | Oversized value |\n| --- | --- |\n| bounded | {} |\n\n",
+            // Keep this fixture oversized even when optional message headings are absent.
+            "Additional history paragraph one.\n\nAdditional history paragraph two.\n\n",
+            "Additional history paragraph three.\n\nAdditional history paragraph four.\n\n",
             "![absent local image](file://{})",
         ),
         wide_cell,

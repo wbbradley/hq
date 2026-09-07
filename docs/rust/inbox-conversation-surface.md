@@ -48,8 +48,12 @@ refresh retain coherent content and never replace it with a first-page loading s
 ## Conversation information hierarchy
 
 The conversation header identifies the participant and optional project in ordinary language.
-Messages render as `You`, the named or honest fallback participant, or `Unknown sender`, based only
-on exact mailbox evidence. Message bodies are normalized for safe terminal display; Markdown links
+Sender names are omitted when at most one non-user sender has authored messages in the
+conversation. When multiple non-user senders exist, sender changes show the named or honest
+fallback participant, including `Unknown sender` for unresolved names. The local user's name is
+omitted. Conversation-wide attribution and consecutive-sender grouping use exact typed mailbox
+evidence, independently of display names or loaded pages. Empty sender rows are omitted, while
+delivery and exceptional status remain visible. Message bodies are normalized for safe terminal display; Markdown links
 and image URLs remain inert text.
 
 Activity is a typed, compact, non-speaker entry. Running, success, failure, command, file, tool,

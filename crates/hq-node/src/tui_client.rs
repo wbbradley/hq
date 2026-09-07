@@ -329,6 +329,7 @@ pub struct LocalTuiObserver {
 
 #[derive(Clone)]
 struct ConversationPresentationContext {
+    multiple_non_user_senders: bool,
     context: ConversationContextDto,
     local_human: MailboxAddressDto,
 }
@@ -410,10 +411,12 @@ impl SharedTuiPresentation {
                     key,
                     context,
                     local_human,
+                    multiple_non_user_senders,
                     ..
                 } => Some((
                     conversation_identity(key.clone()),
                     ConversationPresentationContext {
+                        multiple_non_user_senders: *multiple_non_user_senders,
                         context: context.clone(),
                         local_human: local_human.clone(),
                     },
@@ -1518,6 +1521,7 @@ impl TuiClientPort for LocalTuiClient {
                 row_id,
                 &presentation.context,
                 &presentation.local_human,
+                presentation.multiple_non_user_senders,
                 page,
             )),
             _ => Err(UiFailure {
@@ -3235,6 +3239,7 @@ fn tui_materialized_conversation_view(
                 &row_id,
                 &context.context,
                 &context.local_human,
+                context.multiple_non_user_senders,
                 selected.page,
             ))
         })
@@ -4425,10 +4430,12 @@ pub fn tui_conversation_page(
     row_id: &str,
     context: &ConversationContextDto,
     local_human: &MailboxAddressDto,
+    multiple_non_user_senders: bool,
     page: hq_local_api::protocol::v1::ConversationPageDto,
 ) -> UiConversationPage {
     let heading = conversation_heading(context);
     UiConversationPage {
+        multiple_non_user_senders,
         row_id: row_id.to_owned(),
         title: heading.title,
         context: heading.context,
@@ -4472,6 +4479,7 @@ fn tui_conversation_entry(
             let status = tui_activity_status(status);
             let kind = tui_activity_kind(activity_kind);
             UiConversationEntry {
+                sender: None,
                 id: full_id(fact_id),
                 presentation: UiConversationEntryPresentation::Activity {
                     kind,
@@ -4675,6 +4683,10 @@ fn tui_message_entry(
         },
     );
     UiConversationEntry {
+        sender: Some(hq_tui::UiConversationSender {
+            installation_id: message.sender_installation.bytes(),
+            mailbox_id: message.sender_mailbox.bytes(),
+        }),
         id: full_id(message.fact_id),
         presentation: UiConversationEntryPresentation::Message {
             author,
@@ -5126,6 +5138,7 @@ mod tests {
         let snapshot = AuthoritativeSnapshotDto::new(
             7,
             vec![SnapshotItem::Conversation {
+                multiple_non_user_senders: false,
                 key: ConversationKeyDto::ProjectThread {
                     project: project_id,
                     thread: Id32::new([0x33; 32]),
@@ -5224,6 +5237,7 @@ mod tests {
                     runnable: true,
                 },
                 SnapshotItem::Conversation {
+                    multiple_non_user_senders: false,
                     key: conversation_key.clone(),
                     context: ConversationContextDto::Direct {
                         participant: ConversationParticipantDto {
@@ -5281,6 +5295,7 @@ mod tests {
             data.conversation_presentations.insert(
                 row_id.clone(),
                 ConversationPresentationContext {
+                    multiple_non_user_senders: false,
                     context: ConversationContextDto::Direct {
                         participant: participant(),
                     },
@@ -5342,6 +5357,7 @@ mod tests {
             data.conversation_presentations.insert(
                 row_id,
                 ConversationPresentationContext {
+                    multiple_non_user_senders: false,
                     context: ConversationContextDto::Direct {
                         participant: participant(),
                     },

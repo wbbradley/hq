@@ -84,6 +84,7 @@ fn completed_command_mapping_is_typed_multiline_and_terminal_safe() {
             installation_id: Id32::new([3; 32]),
             mailbox_id: Id32::new([4; 32]),
         },
+        false,
         page,
     );
     assert!(matches!(
@@ -171,6 +172,7 @@ fn completed_file_tool_and_search_mapping_uses_closed_typed_summaries() {
             installation_id: Id32::new([4; 32]),
             mailbox_id: Id32::new([5; 32]),
         },
+        false,
         page,
     );
     let summaries = mapped
@@ -363,6 +365,7 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
                     ..empty_snapshot(1)
                 },
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     row_id: "thread-a".to_owned(),
                     title: "Thread A".to_owned(),
                     context: None,
@@ -908,6 +911,7 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
         21,
         vec![
             SnapshotItem::Conversation {
+                multiple_non_user_senders: false,
                 key: ConversationKeyDto::Thread {
                     counterparty_installation: Id32::new([1; 32]),
                     counterparty_mailbox: Id32::new([2; 32]),
@@ -1037,6 +1041,7 @@ fn authoritative_snapshot_preserves_project_thread_conversation_identity() {
         1,
         vec![
             SnapshotItem::Conversation {
+                multiple_non_user_senders: false,
                 key: ConversationKeyDto::ProjectThread {
                     project: Id32::new([0x31; 32]),
                     thread: Id32::new([0x42; 32]),
@@ -1642,7 +1647,7 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
         installation_id: Id32::new([4; 32]),
         mailbox_id: Id32::new([5; 32]),
     };
-    let mapped = tui_conversation_page("thread-row", &context, &local_human, page);
+    let mapped = tui_conversation_page("thread-row", &context, &local_human, false, page);
     assert_eq!(mapped.row_id, "thread-row");
     assert_eq!(mapped.title, "Alice");
     assert_eq!(mapped.next_cursor.as_deref(), Some("opaque-next"));
@@ -1707,8 +1712,13 @@ fn conversation_message_mapping_preserves_safe_multiline_text() {
         ConversationPageDto::new(vec![ConversationEntryDto::Message(Box::new(message))], None)
             .expect("valid message page");
 
-    let mapped =
-        tui_conversation_page("row", &ConversationContextDto::Personal, &local_human, page);
+    let mapped = tui_conversation_page(
+        "row",
+        &ConversationContextDto::Personal,
+        &local_human,
+        false,
+        page,
+    );
     let UiConversationEntryPresentation::Message { body, .. } = &mapped.entries[0].presentation
     else {
         panic!("message remains typed")
@@ -1731,6 +1741,45 @@ fn conversation_message_mapping_preserves_safe_multiline_text() {
 }
 
 #[test]
+fn conversation_sender_evidence_is_independent_of_page_contents_and_labels() {
+    let local_human = MailboxAddressDto {
+        installation_id: Id32::new([4; 32]),
+        mailbox_id: Id32::new([5; 32]),
+    };
+    for multiple in [false, true] {
+        let page = ConversationPageDto::new(
+            vec![ConversationEntryDto::Message(Box::new(
+                conversation_message(Id32::new([6; 32]), Id32::new([7; 32])),
+            ))],
+            Some("older-history".to_owned()),
+        )
+        .expect("page");
+        let mapped = tui_conversation_page(
+            "row",
+            &ConversationContextDto::Personal,
+            &local_human,
+            multiple,
+            page,
+        );
+        assert_eq!(mapped.multiple_non_user_senders, multiple);
+        assert_eq!(
+            mapped.entries[0].sender,
+            Some(hq_tui::UiConversationSender {
+                installation_id: [6; 32],
+                mailbox_id: [7; 32],
+            })
+        );
+        assert!(matches!(
+            mapped.entries[0].presentation,
+            UiConversationEntryPresentation::Message {
+                author: UiConversationAuthor::Unknown,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
 fn local_message_without_peer_receipt_is_presented_as_sent() {
     let local_human = MailboxAddressDto {
         installation_id: Id32::new([4; 32]),
@@ -1744,8 +1793,13 @@ fn local_message_without_peer_receipt_is_presented_as_sent() {
     )
     .expect("valid message page");
 
-    let mapped =
-        tui_conversation_page("row", &ConversationContextDto::Personal, &local_human, page);
+    let mapped = tui_conversation_page(
+        "row",
+        &ConversationContextDto::Personal,
+        &local_human,
+        false,
+        page,
+    );
 
     assert_eq!(mapped.entries[0].delivery, Some(UiMessageDelivery::Sent));
 }
@@ -1765,7 +1819,7 @@ fn conversation_author_classification_uses_only_exact_mailbox_evidence() {
             None,
         )
         .expect("valid message page");
-        let mapped = tui_conversation_page("row", &context, &local_human, page);
+        let mapped = tui_conversation_page("row", &context, &local_human, false, page);
         let UiConversationEntryPresentation::Message { author, .. } =
             &mapped.entries[0].presentation
         else {
@@ -1935,7 +1989,7 @@ fn every_conversation_activity_kind_and_status_remains_typed() {
                 None,
             )
             .expect("valid activity page");
-            let mapped = tui_conversation_page("row", &context, &local_human, page);
+            let mapped = tui_conversation_page("row", &context, &local_human, false, page);
             assert!(matches!(
                 &mapped.entries[0].presentation,
                 UiConversationEntryPresentation::Activity {
@@ -2327,6 +2381,7 @@ impl TuiClientPort for ScriptedTuiClient {
             .expect("conversation requests lock")
             .push((row_id.to_owned(), cursor));
         Ok(UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: row_id.to_owned(),
@@ -2387,6 +2442,7 @@ impl TuiClientPort for ProjectTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: row_id.to_owned(),
@@ -2491,6 +2547,7 @@ impl TuiClientPort for ManagedSessionTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: row_id.to_owned(),
@@ -2544,6 +2601,7 @@ impl TuiClientPort for AgentTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: row_id.to_owned(),
@@ -2629,6 +2687,7 @@ impl TuiClientPort for SlowSnapshotClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: row_id.to_owned(),
@@ -2668,6 +2727,7 @@ impl TuiClientPort for ImmediateSnapshotClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: row_id.to_owned(),
@@ -2715,6 +2775,7 @@ impl TuiClientPort for MailboxTuiClient {
         _cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure> {
         Ok(UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: row_id.to_owned(),

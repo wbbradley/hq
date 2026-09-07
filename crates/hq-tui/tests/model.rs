@@ -178,6 +178,7 @@ fn vim_keys_never_cross_focus_or_activate_the_current_item() {
     let previewed = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -1902,6 +1903,7 @@ fn refresh_removal_and_late_page_completion_cannot_steal_the_active_route() {
         UiEvent::ConversationLoaded {
             effect_id: page_id,
             page: UiConversationPage {
+                multiple_non_user_senders: false,
                 title: "Alice".to_owned(),
                 context: None,
                 row_id: "thread-a".to_owned(),
@@ -2240,6 +2242,7 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: true,
             title: "Alice".to_owned(),
             context: Some("Project · Release".to_owned()),
             row_id: "thread-a".to_owned(),
@@ -2292,6 +2295,7 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
         UiEvent::ConversationLoaded {
             effect_id: more_id,
             page: UiConversationPage {
+                multiple_non_user_senders: false,
                 title: "Alice".to_owned(),
                 context: Some("Project · Release".to_owned()),
                 row_id: "thread-a".to_owned(),
@@ -2301,6 +2305,13 @@ fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
         },
     )
     .expect("next page appends");
+    assert!(
+        appended
+            .model
+            .conversation()
+            .expect("conversation")
+            .multiple_non_user_senders
+    );
     assert_eq!(
         appended
             .model
@@ -2593,6 +2604,7 @@ fn simultaneous_command_approvals_follow_only_the_selected_conversation() {
     let loaded = materialized_transition(
         snapshot(1, &["thread-a", "thread-b"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             row_id: "thread-a".to_owned(),
             title: "Alice".to_owned(),
             context: None,
@@ -2630,6 +2642,7 @@ fn simultaneous_command_approvals_follow_only_the_selected_conversation() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     row_id: "thread-b".to_owned(),
                     title: "Bob".to_owned(),
                     context: None,
@@ -2704,6 +2717,7 @@ fn materialized_view_and_approval_alias_reconcile_atomically() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["agent-id"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "agent-id".to_owned(),
@@ -2724,6 +2738,7 @@ fn a_command_approval_does_not_block_replies_in_another_conversation() {
     let loaded = materialized_transition(
         snapshot(1, &["thread-a", "thread-b"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             row_id: "thread-a".to_owned(),
             title: "Alice".to_owned(),
             context: None,
@@ -2750,6 +2765,7 @@ fn a_command_approval_does_not_block_replies_in_another_conversation() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     row_id: "thread-b".to_owned(),
                     title: "Bob".to_owned(),
                     context: None,
@@ -2962,6 +2978,7 @@ fn conversation_viewport_clamps_and_workspace_replacement_drops_hidden_detail_st
 #[test]
 fn materialized_views_install_list_and_detail_atomically_without_first_page_loading() {
     let first_page = UiConversationPage {
+        multiple_non_user_senders: false,
         title: "Alice".to_owned(),
         context: None,
         row_id: "thread-a".to_owned(),
@@ -3019,6 +3036,7 @@ fn materialized_views_install_list_and_detail_atomically_without_first_page_load
             view: UiMaterializedConversationView {
                 snapshot: snapshot(1, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Bob".to_owned(),
                     context: None,
                     row_id: "thread-b".to_owned(),
@@ -3045,6 +3063,7 @@ fn materialized_view_accepts_a_stable_alias_when_the_prior_row_disappears() {
     let loaded = materialized_transition(
         snapshot(1, &["project-thread"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Builder".to_owned(),
             context: None,
             row_id: "project-thread".to_owned(),
@@ -3058,6 +3077,7 @@ fn materialized_view_accepts_a_stable_alias_when_the_prior_row_disappears() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["agent-id"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Builder".to_owned(),
                     context: None,
                     row_id: "agent-id".to_owned(),
@@ -3085,6 +3105,7 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
     let loaded = materialized_transition(
         snapshot(1, &["thread-a", "thread-b"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -3107,6 +3128,7 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
             view: UiMaterializedConversationView {
                 snapshot: snapshot(1, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -3124,6 +3146,7 @@ fn inbox_selection_eagerly_replaces_preview_loads_without_stealing_list_focus() 
             view: UiMaterializedConversationView {
                 snapshot: snapshot(1, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Bob".to_owned(),
                     context: None,
                     row_id: "thread-b".to_owned(),
@@ -3143,6 +3166,7 @@ fn opening_a_selected_preview_while_it_loads_preserves_conversation_focus() {
     let loaded = materialized_transition(
         snapshot(1, &["thread-a", "thread-b"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -3170,6 +3194,7 @@ fn opening_a_selected_preview_while_it_loads_preserves_conversation_focus() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(1, &["thread-a", "thread-b"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Bob".to_owned(),
                     context: None,
                     row_id: "thread-b".to_owned(),
@@ -3200,6 +3225,7 @@ fn inbox_selection_immediately_reaches_a_not_yet_started_agent_conversation() {
     let loaded = materialized_transition(
         source.clone(),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -3225,6 +3251,7 @@ fn inbox_selection_immediately_reaches_a_not_yet_started_agent_conversation() {
             view: UiMaterializedConversationView {
                 snapshot: source,
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -3252,6 +3279,7 @@ fn entering_a_materialized_conversation_requires_no_page_request() {
     let loaded = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -3278,6 +3306,7 @@ fn materialized_first_page_retention_is_lru_bounded() {
     let mut transition = materialized_transition(
         snapshot(1, &row_refs),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "A".to_owned(),
             context: None,
             row_id: row_ids[0].clone(),
@@ -3294,6 +3323,7 @@ fn materialized_first_page_retention_is_lru_bounded() {
                 view: UiMaterializedConversationView {
                     snapshot: snapshot(1, &row_refs),
                     conversation: Some(UiConversationPage {
+                        multiple_non_user_senders: false,
                         title: row_id.clone(),
                         context: None,
                         row_id: row_id.clone(),
@@ -3328,6 +3358,7 @@ fn inbox_arrow_navigation_moves_one_visible_level_at_a_time() {
     let previewed = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -3468,6 +3499,7 @@ fn older_page_failure_preserves_transcript_anchor_and_retry_cursor() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -3516,6 +3548,7 @@ fn materialized_refresh_preserves_anchor_and_ignores_a_stale_view() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -3529,6 +3562,7 @@ fn materialized_refresh_preserves_anchor_and_ignores_a_stale_view() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: true,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -3545,6 +3579,7 @@ fn materialized_refresh_preserves_anchor_and_ignores_a_stale_view() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(1, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -3556,6 +3591,13 @@ fn materialized_refresh_preserves_anchor_and_ignores_a_stale_view() {
     )
     .expect("stale view ignored");
     assert_eq!(stale.model.conversation_anchor(), Some("message-2"));
+    assert!(
+        stale
+            .model
+            .conversation()
+            .expect("conversation")
+            .multiple_non_user_senders
+    );
 }
 
 #[test]
@@ -3563,6 +3605,7 @@ fn reconnect_preserves_the_open_conversation_until_authoritative_repair() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -3602,6 +3645,7 @@ fn reconnect_preserves_the_open_conversation_until_authoritative_repair() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -4163,6 +4207,7 @@ fn sent_agent_message_follows_the_live_tail_through_automatic_followup() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -4371,6 +4416,7 @@ fn committed_reply_does_not_duplicate_a_message_loaded_by_an_earlier_invalidatio
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -4443,6 +4489,7 @@ fn accepted_undispatched_project_reply_is_presented_as_pending() {
     let opened = materialized_transition(
         snapshot,
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: Some("hq".to_owned()),
             row_id: "project-thread".to_owned(),
@@ -4491,6 +4538,7 @@ fn live_agent_status_stays_at_the_presentation_tail_after_new_authoritative_outp
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -4544,6 +4592,7 @@ fn terminal_agent_turn_automatically_opens_the_exact_project_continuation_draft(
     let opened = materialized_transition(
         initial,
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: Some("hq".to_owned()),
             row_id: "thread-a".to_owned(),
@@ -4575,6 +4624,7 @@ fn terminal_agent_turn_automatically_opens_the_exact_project_continuation_draft(
             view: UiMaterializedConversationView {
                 snapshot: refreshed,
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: Some("hq".to_owned()),
                     row_id: "thread-a".to_owned(),
@@ -4622,6 +4672,7 @@ fn terminal_turn_survives_the_project_conversation_becoming_an_agent_row() {
     let opened = materialized_transition(
         snapshot(1, &["project-conversation"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Project agent".to_owned(),
             context: Some("hq".to_owned()),
             row_id: "project-conversation".to_owned(),
@@ -4645,6 +4696,7 @@ fn terminal_turn_survives_the_project_conversation_becoming_an_agent_row() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["alice-agent"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: Some("hq".to_owned()),
                     row_id: "alice-agent".to_owned(),
@@ -4683,6 +4735,7 @@ fn snapshot_only_agent_row_handoff_keeps_the_open_project_conversation_subscribe
     let opened = materialized_transition(
         initial,
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Project agent".to_owned(),
             context: Some("hq".to_owned()),
             row_id: "project-conversation".to_owned(),
@@ -4734,6 +4787,7 @@ fn initially_opening_an_already_finished_turn_does_not_open_a_draft() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -4756,6 +4810,7 @@ fn conversation_navigation_skips_successful_turns_but_retains_terminal_evidence(
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -4792,6 +4847,7 @@ fn completed_turn_refresh_removes_hidden_selection_geometry_and_detail_routes() 
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -4811,6 +4867,7 @@ fn completed_turn_refresh_removes_hidden_selection_geometry_and_detail_routes() 
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -4851,6 +4908,7 @@ fn terminal_agent_turn_automatically_replies_to_the_latest_direct_message() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -4869,6 +4927,7 @@ fn terminal_agent_turn_automatically_replies_to_the_latest_direct_message() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -4899,6 +4958,7 @@ fn terminal_agent_turn_does_not_replace_an_existing_draft() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -4917,6 +4977,7 @@ fn terminal_agent_turn_does_not_replace_an_existing_draft() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -4951,6 +5012,7 @@ fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
     let opened = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -4970,6 +5032,7 @@ fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(2, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -4992,6 +5055,7 @@ fn automatic_followup_waits_until_every_agent_turn_is_terminal() {
             view: UiMaterializedConversationView {
                 snapshot: snapshot(3, &["thread-a"]),
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: "Alice".to_owned(),
                     context: None,
                     row_id: "thread-a".to_owned(),
@@ -6036,6 +6100,7 @@ fn mailbox_selection_survives_workspace_replacement_without_hidden_conversation_
     let mut model = materialized_transition(
         source,
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -6336,6 +6401,7 @@ fn project_primary_action_routes_zero_one_and_many_conversations_without_guessin
             view: UiMaterializedConversationView {
                 snapshot: many_snapshot,
                 conversation: Some(UiConversationPage {
+                    multiple_non_user_senders: false,
                     title: first.title.clone(),
                     context: None,
                     row_id: first.id.clone(),
@@ -7823,6 +7889,7 @@ fn opened_conversation(entries: Vec<UiConversationEntry>) -> UiModel {
     let observed = materialized_transition(
         snapshot(1, &["thread-a"]),
         UiConversationPage {
+            multiple_non_user_senders: false,
             title: "Alice".to_owned(),
             context: None,
             row_id: "thread-a".to_owned(),
@@ -7978,6 +8045,7 @@ fn managed_session_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, &UiManaged
 
 fn entry(id: &str, activity: bool) -> UiConversationEntry {
     UiConversationEntry {
+        sender: None,
         id: id.to_owned(),
         presentation: if activity {
             UiConversationEntryPresentation::Activity {

@@ -178,6 +178,7 @@ fn project_thread_snapshot_summary_converts_to_the_same_typed_v1_key() {
         Revision::new(7),
         DomainSnapshot::empty(),
         vec![ConversationSummary {
+            multiple_non_user_senders: true,
             key: ConversationKey::ProjectThread { project_id, thread },
             context: ConversationContext::Project {
                 project_id,
@@ -200,6 +201,13 @@ fn project_thread_snapshot_summary_converts_to_the_same_typed_v1_key() {
     );
     let converted = snapshot_to_v1(&snapshot).expect("snapshot converts");
     assert_eq!(converted.items.len(), 1);
+    assert!(matches!(
+        converted.items[0],
+        SnapshotItem::Conversation {
+            multiple_non_user_senders: true,
+            ..
+        }
+    ));
     let (project, converted_thread, context_project, name, participant, preview) = converted
         .items
         .iter()
@@ -243,6 +251,7 @@ fn conversation_summary_validation_rejects_incoherent_v1_context_without_a_versi
     let project = id(0x51);
     let thread = id(0x52);
     let summary = |context, preview| SnapshotItem::Conversation {
+        multiple_non_user_senders: false,
         key: ConversationKeyDto::ProjectThread { project, thread },
         context,
         local_human: MailboxAddressDto {
@@ -1574,6 +1583,7 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
             frontier: vec![id(34)],
         },
         SnapshotItem::Conversation {
+            multiple_non_user_senders: false,
             key: conversation,
             context: ConversationContextDto::Direct {
                 participant: ConversationParticipantDto {

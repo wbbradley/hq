@@ -2015,6 +2015,14 @@ fn conversation_summaries(
                 key: key.clone(),
                 context: conversation_context(key, order, &presentation),
                 local_human,
+                multiple_non_user_senders: order
+                    .iter()
+                    .filter_map(|fact_id| messages.get(fact_id))
+                    .map(|message| message.content.sender)
+                    .filter(|sender| *sender != local_human)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    > 1,
                 root_message: match key {
                     ConversationKey::ProjectThread { thread, .. } => order
                         .iter()

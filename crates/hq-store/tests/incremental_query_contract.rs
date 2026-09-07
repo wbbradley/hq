@@ -2,7 +2,7 @@
 
 #![allow(clippy::expect_used)]
 
-use hq_application::{ClientProjection, ConversationContext};
+use hq_application::{ClientProjection, ConversationContext, QueryDomain};
 use hq_domain::{
     FactId, MailboxAddress, PageCursor, ProjectId, ProviderId, ProviderSessionId, ThreadId,
 };
@@ -17,6 +17,101 @@ use support::{
     authority_policy, open_store, seed_canonical_corpus, verified_account, verified_child,
     verified_fact, verified_incomplete_peer_question, verified_question,
 };
+
+#[test]
+fn sender_summary_covers_history_outside_the_selected_page() {
+    use hq_domain::{
+        AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, ContentText, FactScope,
+        MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MessageContent, MessageId, MessagePurpose,
+        PresentationKind, SemanticPayload, Timestamp,
+    };
+    for root_mailbox in [0x33, 0x44] {
+        let directory = TestDirectory::new();
+        let store = open_store(&directory.database_path());
+        let root = verified_fact();
+        let root_id = root.fact().id();
+        store.append_verified(root).expect("root");
+        let project_id = ProjectId::from_bytes([0x91; 32]);
+        let local = authority_policy().local_installation();
+        let address =
+            |mailbox| MailboxAddress::new(local, hq_domain::MailboxId::from_bytes([mailbox; 32]));
+        let content = |index, sender, recipient| MessageContent {
+            message_id: MessageId::from_bytes([index; 32]),
+            sender: address(sender),
+            recipient: Some(address(recipient)),
+            body: ContentText::new("Message").expect("body"),
+            purpose: MessagePurpose::Question,
+            presentation: PresentationKind::Message,
+            correlation: None,
+            project_id: Some(project_id),
+        };
+        let sign = |index, parents, payload| {
+            hq_protocol::CanonicalEventPlan::new(
+                local,
+                Timestamp::from_unix_millis(3000 + i64::from(index)),
+                FactScope::InstallationPrivate(local),
+                CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+                    BoundedSet::new(parents).expect("parents"),
+                    [AuthorityReference::new(
+                        AuthorityRole::LocalInstallation,
+                        root_id,
+                    )],
+                )
+                .expect("causal references"),
+                payload,
+            )
+            .sign(&support::signer(1), [index; 32])
+            .expect("signed message")
+        };
+        let question = sign(
+            1,
+            vec![root_id],
+            SemanticPayload::QuestionAsked(content(1, root_mailbox, 0x55)),
+        );
+        let question_id = question.fact().id();
+        let thread = ThreadId::from_bytes(*question_id.as_bytes());
+        store.append_verified(question).expect("question");
+        let key = ConversationKey::ProjectThread { project_id, thread };
+        let selection = hq_application::ConversationPageSelection::new(key, 1).expect("selection");
+        let gateway = hq_store::StoreGateway::new(
+            &store,
+            authority_policy(),
+            std::sync::Arc::new(support::signer(1)),
+        );
+        assert!(
+            !gateway
+                .authoritative_snapshot()
+                .expect("snapshot")
+                .conversations()[0]
+                .multiple_non_user_senders
+        );
+        for index in [2, 3] {
+            let answer = sign(
+                index,
+                vec![root_id, question_id],
+                SemanticPayload::AnswerGiven {
+                    thread_id: thread,
+                    message: content(index, 0x55, root_mailbox),
+                },
+            );
+            store.append_verified(answer).expect("answer");
+            let view = gateway
+                .authoritative_conversation_view(Some(&selection))
+                .expect("view");
+            let summary = view
+                .snapshot()
+                .conversations()
+                .iter()
+                .find(|summary| summary.key == *selection.key())
+                .expect("summary");
+            assert_eq!(summary.multiple_non_user_senders, root_mailbox != 0x33);
+            assert_eq!(
+                view.conversation().expect("selected").page().items().len(),
+                1
+            );
+        }
+    }
+}
 
 #[test]
 fn active_operation_has_one_latest_progress_tail_and_terminal_replaces_it() {

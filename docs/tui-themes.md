@@ -188,10 +188,11 @@ may approximate them; HQ does not silently rewrite the theme. Prefer `terminal`,
 `ansi:N` when terminal-native colors are important. The `no-color` theme retains bold, dim, reverse,
 labels, borders, and selection markers so focus and state remain understandable without color.
 
-Your messages use `conversation.author.self` for a `You` label embedded in a full-width
-horizontal rule. Other senders use `conversation.author.participant`. A sender heading appears
-only when the sender changes; grouping uses exact routing identity, not display names.
-Delivery notices remain visible on subsequent messages in the same group.
+Your messages omit the sender name and use `conversation.author.self` for delivery notices.
+Other senders use `conversation.author.participant`. Sender headings appear only in conversations
+with multiple non-user senders and only when the sender changes; grouping uses typed mailbox
+identity, not display names. The sender count covers the entire conversation rather than the
+loaded page. Delivery notices remain visible even when sender headings are omitted.
 Message bodies retain their ordinary Markdown colors. Selection uses
 `conversation.selection.focused` or `conversation.selection.unfocused`.
 

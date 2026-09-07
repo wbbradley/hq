@@ -850,6 +850,7 @@ pub enum ClientProjection {
         key: hq_reducer::ConversationKey,
         context: ConversationContext,
         local_human: MailboxAddress,
+        multiple_non_user_senders: bool,
         root_message: Option<hq_domain::MessageId>,
         preview: Option<ShortText>,
         latest_fact: Option<FactId>,
@@ -1138,6 +1139,7 @@ impl AuthoritativeSnapshot {
                 key: summary.key.clone(),
                 context: summary.context.clone(),
                 local_human: summary.local_human,
+                multiple_non_user_senders: summary.multiple_non_user_senders,
                 root_message: summary.root_message,
                 preview: summary.preview.clone(),
                 latest_fact: summary.latest_fact,
@@ -1185,6 +1187,8 @@ pub struct ConversationSummary {
     pub context: ConversationContext,
     /// Exact reserved local-human mailbox used only for presentation classification.
     pub local_human: MailboxAddress,
+    /// Whether distinct non-local message authors exist across the full conversation.
+    pub multiple_non_user_senders: bool,
     /// Stable initiating message identity for a project thread.
     pub root_message: Option<hq_domain::MessageId>,
     /// Sanitized bounded one-line conversation preview.
