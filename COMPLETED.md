@@ -13874,3 +13874,43 @@ prerequisite for the following runtime-recovery task; live readiness observation
 persisted bounded retries, automatic wake scheduling and runtime recovery controls remain
 in that task. Complete when queued evidence remains distinct end to end and replay
 consumes one canonical input only after proven provider acceptance.
+
+
+## Expose exact harness readiness and lease evidence
+
+Implemented in `53e55eb`: exact resume returns typed current worker identity and owner,
+constructed under the worker lock after lease renewal, including after slow launch.
+Added indexed exact-agent lease reads through harness, node adapter and store actor,
+retaining owner/deadline evidence across reopen without scanning snapshots. Tests cover
+concurrent reuse, stop/resume owner changes, foreign lease deadlines, stale ownership,
+slow launch, exact storage reads beyond snapshot bounds, expiry and release. Updated
+supervisor documentation. Formatting, strict workspace all-target Clippy, the full serial
+workspace suite and focused final-adjustment supervisor tests passed. Project recovery
+status, persisted retry scheduling and UI integration remain unfinished.
+
+Original task:
+
+### Expose exact harness readiness and lease evidence
+
+Runtime recovery needs current worker ownership and retained lease deadlines. Exact resume
+currently returns only a session ID, and lease discovery requires a bounded aggregate
+snapshot that can omit the desired agent.
+
+- Return typed readiness evidence from exact resume containing the actual live agent,
+  project, provider/session and worker owner. Construct it under the worker lock after
+  successful ownership renewal or launch; durable ready-session receipts alone never
+  establish a live worker. Keep exact-resume identity checks and no fresh fallback.
+- Add an exact agent-keyed lease read through harness state, store actor/database and
+  node adapter. Preserve the retained owner and absolute deadline, including expired
+  rows; absence is not a readiness claim. Use indexed exact reads, not snapshot scanning.
+- Test concurrent exact resume reuses one owner, stop/restart changes ownership, retained
+  sessions without workers require resume, mismatched identity and lost ownership fail
+  closed, and unexpired foreign leases remain available as deadline evidence without
+  launching. Verify exact lease reads, release and reopen through real storage.
+- Update supervisor documentation and consumers for the typed return value. Preserve
+  delivery eligibility, project queue exclusion, exact acceptance and existing fences.
+
+This supplies evidence for the following runtime-recovery task. Assignment/node-generation
+projection, failure classification across application boundaries, persisted bounded retry
+scheduling and user controls remain there. Complete when runtime readiness names a current
+worker owner and lease deadlines can be queried by exact agent without a global scan.
