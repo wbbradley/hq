@@ -122,7 +122,8 @@ visible together. Tab and Shift-Tab switch surfaces; Escape from the composer fo
 and Escape from ordinary reading returns to the list. Retained draft text does not capture reading
 keys. The focused composer grows with rendered text up to its configured height cap, then scrolls
 internally to keep the caret visible. An unfocused composer occupies one row. Small layouts omit
-editor decoration before sacrificing the editable row.
+editor decoration before sacrificing the editable row. The transcript heading also yields space
+to keep a message row visible when the editor uses a large height limit.
 
 Conversation drafts carry a typed conversation identity through the client, API, and store. The
 source resolves the initiating root from transaction-consistent canonical state. Direct asynchronous
@@ -139,13 +140,18 @@ not reserve a stored draft: its stable local identity is persisted on the first 
 or before sending. Typing and erasing before that save leaves no empty stored draft. Existing
 saved drafts reopen with their exact identity, version, and text.
 
+If loading a draft fails, the composer offers Enter to retry loading the exact target. Changing
+conversations can load the new target independently.
+
 While the previous conversation's draft saves, Tab and Escape still reach the transcript. A failed
 save retains that draft and offers Enter to retry saving; it cannot send or edit the previous
 conversation's text from the new conversation. Completing the save preserves the user's current
 surface focus. A save failure before sending releases the editor for corrections and cancels that
 send intent; sending again requires an explicit action. Choosing a different draft while a save or
 send is pending retains that choice until the exact completion arrives. Leaving the requesting
-screen cancels the queued choice without cancelling the existing save or send.
+screen cancels the queued choice without cancelling the existing save or send. New personal notes,
+direct messages, and new project conversations open in the standalone editor rather than appearing
+under another conversation’s transcript. Returning to a conversation prepares its own typed draft.
 
 ## Responsive rendering and actions
 

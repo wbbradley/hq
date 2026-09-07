@@ -3961,14 +3961,35 @@ impl UiModel {
     }
 
     pub(crate) fn draft_matches_active_conversation(&self) -> bool {
-        match self.draft_target() {
-            Some(UiMailboxDraftTarget::Conversation { conversation }) => {
-                self.active_conversation_row().is_some()
-                    && selected_conversation_target(self)
-                        .is_some_and(|target| target.conversation_id() == *conversation)
-            }
-            _ => true,
+        if self.active_conversation_row().is_none() {
+            return !matches!(
+                self.draft_target(),
+                Some(UiMailboxDraftTarget::Conversation { .. })
+            );
         }
+        let desired = selected_conversation_target(self)
+            .map(|target| UiMailboxDraftTarget::Conversation {
+                conversation: target.conversation_id(),
+            })
+            .or_else(|| {
+                self.selected_setup()
+                    .map(|setup| setup.draft.target.clone())
+            });
+        self.draft_target() == desired.as_ref()
+    }
+
+    pub(crate) fn draft_wait_message(&self) -> &'static str {
+        match self.pending_mailbox.as_ref().map(|pending| &pending.kind) {
+            Some(PendingMailboxKind::SubmitCommand(_)) => "Waiting for previous send result…",
+            Some(PendingMailboxKind::OpenDraft) => "Opening message editor…",
+            Some(PendingMailboxKind::SaveDraft) | None => "Saving previous draft…",
+        }
+    }
+
+    pub(crate) fn can_retry_draft_load(&self) -> bool {
+        self.pending_mailbox.is_none()
+            && self.last_failure.is_some()
+            && matches!(self.mailbox_draft, Some(UiMailboxDraftPane::Loading { .. }))
     }
 
     pub(crate) fn can_retry_previous_draft_save(&self) -> bool {
@@ -4630,22 +4651,29 @@ impl UiModel {
         }
     }
 
+    fn retain_conversation_draft_cursor(&mut self) {
+        if let Some(UiMailboxDraftPane::Editing { draft, .. }) = &self.mailbox_draft
+            && let UiMailboxDraftTarget::Conversation { conversation } = &draft.target
+        {
+            self.conversation_cursors.insert(
+                conversation.clone(),
+                self.message_field_cursor(&draft.content),
+            );
+        }
+    }
+
     fn open_draft(
         &mut self,
         target: UiMailboxDraftTarget,
         effects: &mut Vec<UiEffect>,
     ) -> Result<(), UiError> {
-        if matches!(&self.mailbox_draft, Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.target == target)
-        {
-            self.requested_draft = None;
-            self.focus = UiFocus::Draft;
-            return Ok(());
-        }
-        if self.pending_mailbox.is_some()
-            || matches!(
-                &self.mailbox_draft,
-                Some(UiMailboxDraftPane::Editing { dirty: true, .. })
-            )
+        let same_target = matches!(&self.mailbox_draft, Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.target == target);
+        if !same_target
+            && (self.pending_mailbox.is_some()
+                || matches!(
+                    &self.mailbox_draft,
+                    Some(UiMailboxDraftPane::Editing { dirty: true, .. })
+                ))
         {
             self.requested_draft = Some(RequestedDraft {
                 target: target.clone(),
@@ -4660,6 +4688,24 @@ impl UiModel {
             }
         }
         self.requested_draft = None;
+        self.retain_conversation_draft_cursor();
+        if self.active_conversation_row().is_some()
+            && matches!(
+                target,
+                UiMailboxDraftTarget::SelfNote
+                    | UiMailboxDraftTarget::Direct { .. }
+                    | UiMailboxDraftTarget::Project {
+                        thread_id: None,
+                        ..
+                    }
+            )
+        {
+            self.close_conversation();
+        }
+        if same_target {
+            self.focus = UiFocus::Draft;
+            return Ok(());
+        }
         self.close_technical_details();
         self.finish_conversation_inspection();
         let id = self.allocate_effect()?;
@@ -4670,17 +4716,13 @@ impl UiModel {
         if self.active_conversation_row().is_none() {
             self.change_section(UiSection::Inbox);
         }
-        if let UiMailboxDraftTarget::Conversation { conversation } = &target {
-            self.form.cursors.remove(&UiFormField::Message);
-            if let Some(cursor) = self.conversation_cursors.get(conversation) {
-                self.form.cursors.insert(UiFormField::Message, *cursor);
-            }
-        }
+        self.form.cursors.remove(&UiFormField::Message);
         self.focus = UiFocus::Draft;
         self.mailbox_modal = None;
         self.mailbox_draft = Some(UiMailboxDraftPane::Loading {
             target: target.clone(),
         });
+        self.last_failure = None;
         effects.push(UiEffect::OpenDraft { id, target });
         Ok(())
     }
@@ -9144,6 +9186,12 @@ fn apply_draft_input(
     }
 
     match model.mailbox_draft.clone() {
+        Some(UiMailboxDraftPane::Loading { target })
+            if matches!(input, UiInput::Activate) && model.can_retry_draft_load() =>
+        {
+            model.open_draft(target, effects)?;
+            Ok(true)
+        }
         Some(UiMailboxDraftPane::Loading { .. }) | None => Ok(false),
         Some(UiMailboxDraftPane::Editing {
             draft,
@@ -12486,16 +12534,12 @@ fn open_conversation_composer(
     }
     if let Some(current) = model.draft_target().cloned() {
         if current == target {
+            if entering && model.can_retry_draft_load() {
+                model.open_draft(target, effects)?;
+            }
             return Ok(());
         }
-        let UiMailboxDraftTarget::Conversation { conversation } = current else {
-            return Ok(());
-        };
-        if let Some(UiMailboxDraftPane::Editing { draft, .. }) = &model.mailbox_draft {
-            model
-                .conversation_cursors
-                .insert(conversation, model.message_field_cursor(&draft.content));
-        }
+        model.retain_conversation_draft_cursor();
         if model.pending_mailbox.is_some() {
             return Ok(());
         }
@@ -12515,10 +12559,13 @@ fn open_conversation_composer(
                 return Ok(());
             }
         }
+        if model.can_retry_draft_load() {
+            model.last_failure = None;
+        }
         model.mailbox_draft = None;
         model.autosave_timer = None;
     }
-    if model.pending_mailbox.is_none() && (entering || model.last_failure.is_none()) {
+    if model.pending_mailbox.is_none() {
         let focus = model.focus;
         model.open_draft(target, effects)?;
         model.focus = focus;
@@ -12729,12 +12776,22 @@ fn draft_loaded(
     }
     model.pending_mailbox = None;
     install_project_setup(model, &draft);
+    let cursor = match &draft.target {
+        UiMailboxDraftTarget::Conversation { conversation } => {
+            model.conversation_cursors.get(conversation).copied()
+        }
+        _ => None,
+    };
     model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
         draft,
         dirty: false,
         submitting: false,
         closing: false,
     });
+    model.sync_form();
+    if let Some(cursor) = cursor {
+        model.form.cursors.insert(UiFormField::Message, cursor);
+    }
     model.last_failure = None;
     effects.push(UiEffect::RequestRedraw);
 }
@@ -13223,7 +13280,6 @@ fn mailbox_command_failed(
             submitting: false,
             closing: false,
         });
-        model.focus = UiFocus::Draft;
     } else if let Some(UiMailboxDraftPane::Editing {
         submitting,
         closing,

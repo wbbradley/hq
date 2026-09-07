@@ -3602,3 +3602,215 @@ fn failed_previous_draft_has_a_visible_retry_action_at_narrow_and_normal_sizes()
         assert!(!screen.contains("Enter send"), "{screen}");
     }
 }
+
+#[test]
+fn persisted_composer_height_limit_changes_visible_editor_and_transcript_space() {
+    let mut heights = Vec::new();
+    for percent in [10, 50, 90] {
+        let reading = conversation_model(UiSize {
+            width: 64,
+            height: 24,
+        });
+        let config = update(
+            ready_model(UiSize {
+                width: 64,
+                height: 24,
+            }),
+            UiEvent::Input(UiInput::Character('6')),
+        )
+        .expect("configuration");
+        let effect_id = config
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::LoadConfiguration { id } => Some(*id),
+                _ => None,
+            })
+            .expect("load persisted configuration");
+        let loaded = update(
+            config.model,
+            UiEvent::ConfigurationLoaded {
+                effect_id,
+                configuration: hq_tui::UiConfiguration {
+                    composer_height_percent: Some(percent),
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("persisted height limit");
+        let list = update(loaded.model, UiEvent::Input(UiInput::Character('1'))).expect("Inbox");
+        let conversation = reading.conversation().expect("fixture conversation");
+        let observed = update(
+            list.model,
+            UiEvent::MaterializedViewObserved {
+                view: UiMaterializedConversationView {
+                    snapshot: ready_snapshot(),
+                    conversation: Some(UiConversationPage {
+                        window: conversation.window.clone(),
+                        multiple_non_user_senders: conversation.multiple_non_user_senders,
+                        row_id: conversation.row_id.clone(),
+                        title: conversation.title.clone(),
+                        context: conversation.context.clone(),
+                        entries: conversation.entries.clone(),
+                        next_cursor: conversation.next_cursor.clone(),
+                    }),
+                },
+            },
+        )
+        .expect("conversation source");
+        let opened =
+            update(observed.model, UiEvent::Input(UiInput::Activate)).expect("conversation");
+        let (effect_id, target) = opened
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::OpenDraft { id, target } => Some((*id, target.clone())),
+                _ => None,
+            })
+            .expect("conversation draft");
+        let composing = update(
+            opened.model,
+            UiEvent::DraftLoaded {
+                effect_id,
+                draft: UiMailboxDraft {
+                    draft_id: [99; 32],
+                    target,
+                    version: 1,
+                    content: (0..40)
+                        .map(|row| format!("Draft row {row:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                },
+            },
+        )
+        .expect("long saved draft");
+        let rendered = render_text(&composing.model);
+        assert!(rendered.contains("Draft row 39"), "{percent}: {rendered}");
+        let height = render_observation(&composing.model).height;
+        assert!(height > 0, "transcript remains usable at {percent}");
+        heights.push(height);
+    }
+    assert!(
+        heights[0] > heights[1] && heights[1] > heights[2],
+        "{heights:?}"
+    );
+}
+
+#[test]
+fn wrapped_composer_keeps_wide_combining_and_joined_emoji_carets_visible() {
+    let reading = conversation_model(UiSize {
+        width: 40,
+        height: 10,
+    });
+    let composing = update(reading, UiEvent::Input(UiInput::NextFocus)).expect("compose");
+    let source = format!("{}tail", "界e\u{301}👩‍💻".repeat(30));
+    let pasted = update(
+        composing.model,
+        UiEvent::Input(UiInput::Paste(source.clone())),
+    )
+    .expect("long Unicode line");
+    assert!(render_text(&pasted.model).contains("tail"));
+    let mut model = update(pasted.model, UiEvent::Input(UiInput::MoveCursorHome))
+        .expect("return to first wrapped row")
+        .model;
+    for expected in ["界", "e\u{301}", "e\u{301}", "👩‍💻"] {
+        let buffer = render_buffer_with_theme(&model, &UiTheme::terminal());
+        assert!(buffer.content.iter().any(|cell| cell.symbol() == expected && cell.modifier.contains(Modifier::REVERSED)),
+            "caret for {expected:?}: {}", snapshot_text(&buffer));
+        model = update(model, UiEvent::Input(UiInput::MoveCharacterForward))
+            .expect("move within Unicode source")
+            .model;
+    }
+    assert!(
+        matches!(model.mailbox_draft(), Some(hq_tui::UiMailboxDraftPane::Editing { draft, .. }) if draft.content == source)
+    );
+}
+
+#[test]
+fn changing_composer_geometry_preserves_the_observed_transcript_reading_position() {
+    let body = (0..80)
+        .map(|row| format!("History paragraph {row:02}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let model = conversation_model_with_content(
+        UiSize {
+            width: 48,
+            height: 20,
+        },
+        UiMessageState::Open,
+        None,
+        &body,
+        "Still working",
+    );
+    let observation = render_observation(&model);
+    let measured = update(model, UiEvent::ConversationViewportObserved { observation })
+        .expect("measure transcript");
+    let reading =
+        update(measured.model, UiEvent::Input(UiInput::PreviousItem)).expect("read above tail");
+    let position = reading
+        .model
+        .conversation_viewport_position()
+        .cloned()
+        .expect("logical position");
+    let focused = update(reading.model, UiEvent::Input(UiInput::NextFocus)).expect("compose");
+    let expanded = update(
+        focused.model,
+        UiEvent::Input(UiInput::Paste("compose line\n".repeat(30))),
+    )
+    .expect("grow editor");
+    let observation = render_observation(&expanded.model);
+    let mut model = update(
+        expanded.model,
+        UiEvent::ConversationViewportObserved { observation },
+    )
+    .expect("editor geometry")
+    .model;
+    assert_eq!(model.conversation_viewport_position(), Some(&position));
+    assert!(!model.conversation_follows_tail());
+    for input in [UiInput::NextFocus, UiInput::PreviousFocus] {
+        model = update(model, UiEvent::Input(input))
+            .expect("switch surfaces")
+            .model;
+        let observation = render_observation(&model);
+        model = update(model, UiEvent::ConversationViewportObserved { observation })
+            .expect("changed surface geometry")
+            .model;
+        assert_eq!(model.conversation_viewport_position(), Some(&position));
+        assert!(!model.conversation_follows_tail());
+    }
+}
+
+#[test]
+fn failed_conversation_draft_load_shows_retry_instead_of_send() {
+    for width in [40, 104] {
+        let opening = update(
+            ready_model(UiSize { width, height: 18 }),
+            UiEvent::Input(UiInput::Activate),
+        )
+        .expect("conversation");
+        let effect_id = opening
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::OpenDraft { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("draft load");
+        let failed = update(
+            opening.model,
+            UiEvent::DraftFailed {
+                effect_id,
+                current: None,
+                failure: UiFailure {
+                    code: "draft_load_failed".to_owned(),
+                    action: "try again".to_owned(),
+                },
+            },
+        )
+        .expect("load failure");
+        let screen = render_text(&failed.model);
+        assert!(screen.contains("Could not load draft"), "{screen}");
+        assert!(screen.contains("Enter retry"), "{screen}");
+        assert!(!screen.contains("Enter send"), "{screen}");
+    }
+}

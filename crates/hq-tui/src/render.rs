@@ -3536,7 +3536,7 @@ fn render_compact_draft(
         let text = if model.can_retry_previous_draft_save() {
             "Previous draft not saved · Enter retry"
         } else {
-            "Saving previous draft…"
+            model.draft_wait_message()
         };
         frame.render_widget(
             Paragraph::new(text).style(theme.style(if model.can_retry_previous_draft_save() {
@@ -3544,6 +3544,18 @@ fn render_compact_draft(
             } else {
                 UiThemeRole::TextMuted
             })),
+            area,
+        );
+        return true;
+    }
+    if model.can_retry_draft_load() {
+        let text = if model.focus() == UiFocus::Draft {
+            "Could not load draft · Enter retry"
+        } else {
+            "Draft unavailable · Tab to retry"
+        };
+        frame.render_widget(
+            Paragraph::new(text).style(theme.style(UiThemeRole::Error)),
             area,
         );
         return true;
@@ -3967,7 +3979,7 @@ fn render_conversation(
         header.push(Line::default());
         let header_height = u16::try_from(header.len())
             .unwrap_or(u16::MAX)
-            .min(inner.height);
+            .min(inner.height.saturating_sub(1));
         let [header_area, entries_area] =
             Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).areas(inner);
         frame.render_widget(Paragraph::new(header), header_area);
@@ -5016,6 +5028,8 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         " Enter finish · Esc back · F1 help · q quit".to_owned()
     } else if matches!(model.active_route(), UiRoute::Recovery { .. }) {
         " Enter retry or reconcile · Esc back · F1 help · q quit".to_owned()
+    } else if model.focus() == UiFocus::Draft && model.can_retry_draft_load() {
+        " Enter retry loading draft · Tab/Esc read · F1 help".to_owned()
     } else if model.focus() == UiFocus::Draft && model.can_retry_previous_draft_save() {
         " Enter retry saving previous draft · Tab/Esc read · F1 help".to_owned()
     } else if let Some(failure) = model.last_failure() {

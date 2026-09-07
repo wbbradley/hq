@@ -876,6 +876,7 @@ fn installed_guided_work_resumes_exact_conversation_after_node_restart() {
         start_foreground_daemon(&state_root, &search_path, &provider_bin.join("codex"));
 
     let follow_up = "continue with the installed follow-up";
+    let next_message = "send another message without reopening the composer";
     let completion_gate = provider_bin.join("completion-gate-2");
     let gate = Command::new("mkfifo")
         .arg(&completion_gate)
@@ -885,10 +886,11 @@ fn installed_guided_work_resumes_exact_conversation_after_node_restart() {
     let reply = run_in_pty(
         &state_root,
         true,
-        PtyInteraction::ReplyToProjectConversation {
+        PtyInteraction::SendToProjectConversation {
             name,
             initial: content,
             content: follow_up,
+            next_content: next_message,
             completion_gate: &completion_gate,
         },
     );
@@ -906,14 +908,20 @@ fn installed_guided_work_resumes_exact_conversation_after_node_restart() {
         reply.bytes
     );
     let project = project_json(&state_root, name);
-    assert_eq!(project["inputs"].as_array().map(Vec::len), Some(2));
-    assert_eq!(project["dispatches"].as_array().map(Vec::len), Some(2));
+    assert_eq!(project["inputs"].as_array().map(Vec::len), Some(3));
+    assert_eq!(project["dispatches"].as_array().map(Vec::len), Some(3));
     assert_eq!(
         project["inputs"][1]["message_id"],
         project["dispatches"][1]["message_id"]
     );
     assert!(mailbox_contains(&state_root, follow_up));
     assert!(mailbox_contains(&state_root, "finished-turn-2"));
+    assert!(mailbox_contains(&state_root, next_message));
+    assert!(mailbox_contains(&state_root, "finished-turn-3"));
+    assert_eq!(
+        project["inputs"][2]["message_id"],
+        project["dispatches"][2]["message_id"]
+    );
     assert_eq!(project["assignment"], original_assignment);
     let calls = std::fs::read_to_string(provider_bin.join("calls.log")).expect("provider calls");
     let calls = calls
@@ -941,7 +949,7 @@ fn installed_guided_work_resumes_exact_conversation_after_node_restart() {
             .iter()
             .filter(|call| call["method"] == "turn/start")
             .count(),
-        2
+        3
     );
 }
 
@@ -1421,10 +1429,11 @@ enum PtyInteraction<'content> {
         last: &'content str,
         after: &'content str,
     },
-    ReplyToProjectConversation {
+    SendToProjectConversation {
         name: &'content str,
         initial: &'content str,
         content: &'content str,
+        next_content: &'content str,
         completion_gate: &'content Path,
     },
     CreateAgent(&'content str),
@@ -1663,7 +1672,7 @@ fn run_in_pty_with_trace(
                 | PtyInteraction::VisitEveryView
                 | PtyInteraction::NavigateInboxConversation { .. }
                 | PtyInteraction::ScrollOversizedConversation { .. }
-                | PtyInteraction::ReplyToProjectConversation { .. } => Vec::new(),
+                | PtyInteraction::SendToProjectConversation { .. } => Vec::new(),
                 PtyInteraction::CreateAgent(_) => {
                     vec![b"4", b"c"]
                 }
@@ -2097,7 +2106,7 @@ fn run_in_pty_with_trace(
             exit_sent = true;
             oversized_phase = 10;
         }
-        if let PtyInteraction::ReplyToProjectConversation { name, initial, .. } = interaction
+        if let PtyInteraction::SendToProjectConversation { name, initial, .. } = interaction
             && initial_key_sent
             && !content_sent
             && bytes
@@ -2116,22 +2125,8 @@ fn run_in_pty_with_trace(
             content_sent = true;
             completion_offset = Some(bytes.len());
         }
-        if matches!(
-            interaction,
-            PtyInteraction::ReplyToProjectConversation { .. }
-        ) && content_sent
-            && !managed_action_sent
-            && completion_offset.is_some_and(|offset| {
-                text_without_csi_sequences(&bytes[offset..]).contains("scroll")
-            })
-        {
-            master.write_all(b"r").expect("project reply key writes");
-            master.flush().expect("project reply key flushes");
-            managed_action_sent = true;
-            completion_offset = Some(bytes.len());
-        }
-        if let PtyInteraction::ReplyToProjectConversation { content, .. } = interaction
-            && managed_action_sent
+        if let PtyInteraction::SendToProjectConversation { content, .. } = interaction
+            && content_sent
             && !managed_provider_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
@@ -2146,7 +2141,7 @@ fn run_in_pty_with_trace(
             managed_provider_sent = true;
             completion_offset = Some(bytes.len());
         }
-        if let PtyInteraction::ReplyToProjectConversation {
+        if let PtyInteraction::SendToProjectConversation {
             completion_gate, ..
         } = interaction
             && managed_provider_sent
@@ -2164,19 +2159,33 @@ fn run_in_pty_with_trace(
             std::fs::write(completion_gate, b"complete").expect("provider completion gate opens");
             resource_commit_sent = true;
         }
+        if let PtyInteraction::SendToProjectConversation { next_content, .. } = interaction
+            && resource_commit_sent
+            && !interaction_answer_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"finished-turn-2".len())
+                    .any(|window| window == b"finished-turn-2")
+            })
+        {
+            master
+                .write_all(format!("{next_content}\r").as_bytes())
+                .expect("next conversation message writes");
+            master.flush().expect("next conversation message flushes");
+            interaction_answer_sent = true;
+            completion_offset = Some(bytes.len());
+        }
         if matches!(
             interaction,
-            PtyInteraction::ReplyToProjectConversation { .. }
+            PtyInteraction::SendToProjectConversation { .. }
         ) && resource_commit_sent
+            && interaction_answer_sent
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 let output = &bytes[offset..];
                 output
-                    .windows(b"finished-turn-2".len())
-                    .any(|window| window == b"finished-turn-2")
-                    && output
-                        .windows(b"0/16384".len())
-                        .any(|window| window == b"0/16384")
+                    .windows(b"finished-turn-3".len())
+                    .any(|window| window == b"finished-turn-3")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -2644,9 +2653,6 @@ fn run_in_pty_with_trace(
                     output
                         .windows(b"finished-turn-1".len())
                         .any(|window| window == b"finished-turn-1")
-                        && output
-                            .windows(b"0/16384".len())
-                            .any(|window| window == b"0/16384")
                 });
             let ordinary_setup_finished =
                 completion_gate.is_none() && Instant::now() >= next_state_probe_at && {
@@ -2779,7 +2785,7 @@ fn run_in_pty_with_trace(
                 .or_else(|| Some(state_root.join("diagnostics/boundaries.jsonl")))
                 .and_then(|path| std::fs::read_to_string(path).ok());
             let reply_evidence = match interaction {
-                PtyInteraction::ReplyToProjectConversation {
+                PtyInteraction::SendToProjectConversation {
                     name,
                     completion_gate,
                     ..

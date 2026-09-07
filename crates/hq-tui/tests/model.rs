@@ -9967,3 +9967,189 @@ fn composing_after_inspecting_another_message_keeps_the_conversation_target() {
             .any(|effect| matches!(effect, UiEffect::OpenDraft { .. }))
     );
 }
+
+#[test]
+fn starting_a_personal_note_from_a_conversation_uses_a_standalone_editor() {
+    let reading = update(
+        typed_conversation_composer(""),
+        UiEvent::Input(UiInput::Escape),
+    )
+    .expect("read");
+    let opening = update(reading.model, UiEvent::Input(UiInput::Character('N'))).expect("new note");
+    assert_eq!(
+        open_draft_effect(&opening.effects).1,
+        &UiMailboxDraftTarget::SelfNote
+    );
+    assert!(matches!(
+        opening.model.active_route(),
+        UiRoute::Form {
+            capability: hq_tui::UiWorkflowCapability::StartNewWork,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn retained_standalone_draft_does_not_block_opening_the_conversations_own_composer() {
+    let source = typed_conversation_snapshot(1);
+    let opening = update(
+        loaded_model(source),
+        UiEvent::Input(UiInput::Character('N')),
+    )
+    .expect("new note");
+    let (effect_id, target) = open_draft_effect(&opening.effects);
+    let loaded = update(
+        opening.model,
+        UiEvent::DraftLoaded {
+            effect_id,
+            draft: UiMailboxDraft {
+                draft_id: [12; 32],
+                target: target.clone(),
+                content: "saved separate note".to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("note");
+    // Workspace replacement can occur while an interaction temporarily owns focus.
+    let approval = update(
+        loaded.model,
+        UiEvent::InteractionsObserved {
+            interactions: vec![command_approval(7, "thread-a")],
+        },
+    )
+    .expect("request");
+    let workspace =
+        update(approval.model, UiEvent::Input(UiInput::Character('4'))).expect("Agents");
+    let inbox = update(workspace.model, UiEvent::Input(UiInput::Character('1'))).expect("Inbox");
+    let observed = update(
+        inbox.model,
+        UiEvent::InteractionsObserved {
+            interactions: Vec::new(),
+        },
+    )
+    .expect("resolved independently");
+    let opening = update(observed.model, UiEvent::Input(UiInput::Activate)).expect("conversation");
+    assert_eq!(
+        open_draft_effect(&opening.effects).1,
+        &conversation_draft_target()
+    );
+}
+
+#[test]
+fn failed_conversation_draft_load_can_retry_or_open_a_different_conversation() {
+    let opening = open_typed_conversation_composer(opened_conversation(vec![actionable_entry(
+        "question", [3; 32],
+    )]));
+    let (effect_id, target) = open_draft_effect(&opening.effects);
+    let target = target.clone();
+    let failed = update(
+        opening.model,
+        UiEvent::DraftFailed {
+            effect_id,
+            current: None,
+            failure: UiFailure {
+                code: "draft_load_failed".to_owned(),
+                action: "try again".to_owned(),
+            },
+        },
+    )
+    .expect("load failed");
+    let retry =
+        update(failed.model.clone(), UiEvent::Input(UiInput::Activate)).expect("retry load");
+    let (retry_id, retried_target) = open_draft_effect(&retry.effects);
+    assert_ne!(retry_id, effect_id);
+    assert_eq!(retried_target, &target);
+    let restored = update(
+        retry.model,
+        UiEvent::DraftLoaded {
+            effect_id: retry_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target,
+                content: "restored text".to_owned(),
+                version: 2,
+            },
+        },
+    )
+    .expect("restored");
+    assert!(
+        matches!(restored.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.content == "restored text")
+    );
+    let switched = switch_to_other_conversation(failed.model);
+    assert!(
+        matches!(open_draft_effect(&switched.effects).1, UiMailboxDraftTarget::Conversation {
+        conversation: hq_tui::UiConversationId::Thread { thread_id, .. }
+    } if *thread_id == [7; 32])
+    );
+}
+
+#[test]
+fn a_late_send_failure_does_not_block_another_conversations_editor_or_steal_focus() {
+    let sending = update(
+        typed_conversation_composer("saved message"),
+        UiEvent::Input(UiInput::Activate),
+    )
+    .expect("send");
+    let effect_id = sending
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitMailboxCommand { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("send effect");
+    let switched = switch_to_other_conversation(sending.model);
+    let reading = update(switched.model, UiEvent::Input(UiInput::NextFocus))
+        .expect("read second conversation");
+    let failed = update(
+        reading.model,
+        UiEvent::MailboxCommandFailed {
+            effect_id,
+            failure: UiFailure {
+                code: "mailbox_target_stale".to_owned(),
+                action: "reopen the saved draft".to_owned(),
+            },
+        },
+    )
+    .expect("previous send rejected");
+    assert_eq!(failed.model.focus(), UiFocus::Conversation);
+    assert!(
+        matches!(open_draft_effect(&failed.effects).1, UiMailboxDraftTarget::Conversation {
+        conversation: hq_tui::UiConversationId::Thread { thread_id, .. }
+    } if *thread_id == [7; 32])
+    );
+}
+
+#[test]
+fn returning_from_a_standalone_note_restores_the_conversation_draft_caret() {
+    let moved = update(
+        typed_conversation_composer("draft"),
+        UiEvent::Input(UiInput::MoveCursorLeft),
+    )
+    .expect("caret");
+    let reading = update(moved.model, UiEvent::Input(UiInput::Escape)).expect("read");
+    let note = update(reading.model, UiEvent::Input(UiInput::Character('N'))).expect("new note");
+    let list = update(note.model, UiEvent::Input(UiInput::Escape)).expect("cancel note");
+    let opened =
+        update(list.model, UiEvent::Input(UiInput::Activate)).expect("reopen conversation");
+    let (effect_id, target) = open_draft_effect(&opened.effects);
+    let restored = update(
+        opened.model,
+        UiEvent::DraftLoaded {
+            effect_id,
+            draft: UiMailboxDraft {
+                draft_id: [4; 32],
+                target: target.clone(),
+                content: "draft".to_owned(),
+                version: 1,
+            },
+        },
+    )
+    .expect("saved conversation draft");
+    let edited = update(restored.model, UiEvent::Input(UiInput::Character('X')))
+        .expect("type at retained caret");
+    assert!(
+        matches!(edited.model.mailbox_draft(), Some(UiMailboxDraftPane::Editing { draft, .. }) if draft.content == "drafXt")
+    );
+}
