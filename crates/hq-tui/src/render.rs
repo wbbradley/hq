@@ -3784,16 +3784,21 @@ fn draft_editor_layout(
     focused: bool,
     width: Option<u16>,
 ) -> (Text<'static>, usize) {
+    let width = width.map(|width| usize::from(width.max(1)));
     let input_style = theme.style(UiThemeRole::Input);
     let cursor_style = input_style.patch(theme.style(UiThemeRole::Cursor));
     let mut lines = Vec::new();
     let mut spans = Vec::new();
     let mut column = 0;
     let mut cursor_row = 0;
-    for (offset, grapheme) in source.grapheme_indices(true) {
+    let mut word_start = true;
+    let mut soft_start = false;
+    let mut hidden_cursor = false;
+    let mut graphemes = source.grapheme_indices(true);
+    while let Some((offset, grapheme)) = graphemes.next() {
         let at_cursor = focused && (offset..offset + grapheme.len()).contains(&cursor);
         if grapheme.ends_with('\n') {
-            if at_cursor {
+            if at_cursor || hidden_cursor {
                 cursor_row = push_draft_span(
                     &mut lines,
                     &mut spans,
@@ -3802,29 +3807,59 @@ fn draft_editor_layout(
                     Span::styled(" ", cursor_style),
                 );
             }
-            lines.push(Line::from(std::mem::take(&mut spans)));
-            column = 0;
+            finish_draft_row(&mut lines, &mut spans, &mut column);
+            word_start = true;
+            soft_start = false;
+            hidden_cursor = false;
             continue;
         }
-        let rendered = if grapheme == "\t" {
-            "    ".to_owned()
-        } else if grapheme.chars().any(char::is_control) {
-            " ".to_owned()
-        } else {
-            grapheme.to_owned()
-        };
+        let separator = draft_separator(grapheme);
+        if word_start
+            && !separator
+            && let Some(maximum) = width
+        {
+            let cells = std::iter::once(grapheme)
+                .chain(graphemes.clone().map(|(_, part)| part))
+                .take_while(|part| !draft_separator(part))
+                .map(|part| draft_grapheme_text(part, width).width())
+                .sum::<usize>();
+            if cells <= maximum && draft_span_overflows(column, cells, width) {
+                finish_draft_row(&mut lines, &mut spans, &mut column);
+                soft_start = true;
+            }
+        }
+        word_start = separator;
+        let rendered = draft_grapheme_text(grapheme, width);
+        if separator && draft_span_overflows(column, rendered.width(), width) {
+            finish_draft_row(&mut lines, &mut spans, &mut column);
+            soft_start = true;
+        }
+        if separator && soft_start {
+            hidden_cursor |= at_cursor;
+            continue;
+        }
+        let paint_cursor = at_cursor || hidden_cursor;
         let row = push_draft_span(
             &mut lines,
             &mut spans,
             &mut column,
             width,
-            Span::styled(rendered, if at_cursor { cursor_style } else { input_style }),
+            Span::styled(
+                rendered.to_owned(),
+                if paint_cursor {
+                    cursor_style
+                } else {
+                    input_style
+                },
+            ),
         );
-        if at_cursor {
+        if paint_cursor {
             cursor_row = row;
         }
+        hidden_cursor = false;
+        soft_start = false;
     }
-    if focused && cursor == source.len() {
+    if focused && (cursor == source.len() || hidden_cursor) {
         cursor_row = push_draft_span(
             &mut lines,
             &mut spans,
@@ -3837,19 +3872,54 @@ fn draft_editor_layout(
     (Text::from(lines), cursor_row)
 }
 
+fn draft_separator(grapheme: &str) -> bool {
+    grapheme.chars().all(char::is_whitespace)
+}
+
+fn draft_grapheme_text(grapheme: &str, width: Option<usize>) -> &str {
+    let rendered = if grapheme == "\t" {
+        "    "
+    } else if grapheme.chars().any(char::is_control) {
+        " "
+    } else {
+        grapheme
+    };
+    if let Some(maximum) = width
+        && rendered.width() > maximum
+    {
+        if grapheme == "\t" {
+            &"    "[..maximum.min(4)]
+        } else {
+            "…"
+        }
+    } else {
+        rendered
+    }
+}
+
+fn draft_span_overflows(column: usize, cells: usize, width: Option<usize>) -> bool {
+    column > 0 && width.is_some_and(|width| column.saturating_add(cells) > width)
+}
+
+fn finish_draft_row(
+    lines: &mut Vec<Line<'static>>,
+    spans: &mut Vec<Span<'static>>,
+    column: &mut usize,
+) {
+    lines.push(Line::from(std::mem::take(spans)));
+    *column = 0;
+}
+
 fn push_draft_span(
     lines: &mut Vec<Line<'static>>,
     spans: &mut Vec<Span<'static>>,
     column: &mut usize,
-    width: Option<u16>,
+    width: Option<usize>,
     span: Span<'static>,
 ) -> usize {
     let cells = span.content.width();
-    if width.is_some_and(|width| {
-        *column > 0 && column.saturating_add(cells) > usize::from(width.max(1))
-    }) {
-        lines.push(Line::from(std::mem::take(spans)));
-        *column = 0;
+    if draft_span_overflows(*column, cells, width) {
+        finish_draft_row(lines, spans, column);
     }
     *column = column.saturating_add(cells);
     spans.push(span);
@@ -5578,6 +5648,79 @@ mod tests {
     };
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn composer_wraps_words_and_hides_only_soft_row_separators() {
+        let cases: &[(&str, u16, &[&str])] = &[
+            ("alpha beta", 8, &["alpha ", "beta"]),
+            ("alpha beta", 5, &["alpha", "beta"]),
+            ("ab    cd", 3, &["ab ", "cd"]),
+            ("a\tbb", 4, &["a", "bb"]),
+            ("\talpha beta", 12, &["    alpha ", "beta"]),
+            ("a\n  b\n\nc", 3, &["a", "  b", "", "c"]),
+            ("abcdefgh", 3, &["abc", "def", "gh"]),
+            ("你 好", 3, &["你 ", "好"]),
+            ("e\u{301}x y", 3, &["e\u{301}x ", "y"]),
+            ("👩‍💻ab z", 4, &["👩‍💻ab", "z"]),
+            ("ab cd", 1, &["a", "b", "c", "d"]),
+            ("你", 1, &["…"]),
+            ("a b", 0, &["a", "b"]),
+        ];
+        for &(source, width, expected) in cases {
+            let (text, _) =
+                super::draft_editor_layout(&UiTheme::terminal(), source, 0, false, Some(width));
+            let rows: Vec<String> = text.lines.iter().map(ToString::to_string).collect();
+            assert_eq!(rows, expected, "source {source:?}, width {width}");
+        }
+    }
+
+    #[test]
+    fn composer_caret_remains_visible_on_hidden_separators_and_grapheme_boundaries() {
+        let theme = UiTheme::terminal();
+        let cursor_style = theme
+            .style(UiThemeRole::Input)
+            .patch(theme.style(UiThemeRole::Cursor));
+        let source = "abcd  ef";
+        for cursor in 0..=source.len() {
+            let (text, row) = super::draft_editor_layout(&theme, source, cursor, true, Some(4));
+            assert_eq!(row, usize::from(cursor >= 4), "cursor {cursor}");
+            let painted: Vec<_> = text
+                .lines
+                .iter()
+                .enumerate()
+                .flat_map(|(row, line)| {
+                    line.spans
+                        .iter()
+                        .filter(move |span| span.style == cursor_style)
+                        .map(move |span| (row, span))
+                })
+                .collect();
+            assert_eq!(painted.len(), 1, "cursor {cursor}");
+            assert_eq!(painted[0].0, row);
+            assert!(!painted[0].1.content.is_empty());
+            assert!(text.lines.iter().all(|line| line.width() <= 4));
+        }
+        for (source, width, cursor) in [
+            ("abcd  ", 4, 5),
+            ("abcd  \nnext", 4, 5),
+            ("e\u{301}x", 2, 1),
+            ("👩‍💻x", 2, 4),
+            ("你", 1, 0),
+        ] {
+            let (text, row) = super::draft_editor_layout(&theme, source, cursor, true, Some(width));
+            assert!(
+                text.lines[row]
+                    .spans
+                    .iter()
+                    .any(|span| span.style == cursor_style)
+            );
+            assert!(
+                text.lines
+                    .iter()
+                    .all(|line| line.width() <= usize::from(width))
+            );
+        }
+    }
 
     #[test]
     fn pending_interaction_supersedes_only_its_exact_running_tail() {
