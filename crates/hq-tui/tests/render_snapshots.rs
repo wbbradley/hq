@@ -324,6 +324,7 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
     .model;
     let confirmation = render_text(&confirmation);
     assert!(confirmation.contains("Archive this conversation?"));
+    assert!(confirmation.contains("y/Enter confirm · n/Esc cancel"));
     assert!(confirmation.contains("stop active work first"));
     assert!(confirmation.contains("whole conversation"));
 }
@@ -3500,7 +3501,7 @@ fn persistent_composer_grows_collapses_and_keeps_the_caret_visible_at_its_height
         width: 64,
         height: 24,
     });
-    assert!(render_text(&reading).contains("Tab to compose"));
+    assert!(render_text(&reading).contains("╴ Tab to compose ╶"));
     let reading_height = render_observation(&reading).height;
     let composing = update(reading, UiEvent::Input(UiInput::NextFocus))
         .expect("compose")

@@ -2622,15 +2622,21 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                     Some("Only you will receive this note."),
                 ),
             };
-            let mut lines = vec![Line::from(label), Line::default()];
+            let mut lines = vec![
+                Line::default(),
+                Line::styled(label, theme.style(UiThemeRole::Heading)),
+                Line::default(),
+            ];
             if let Some(explanation) = explanation {
                 lines.push(Line::from(explanation));
                 lines.push(Line::default());
             }
-            lines.push(Line::from("Enter confirm · Esc cancel"));
+            lines.push(Line::from("y/Enter confirm · n/Esc cancel"));
             frame.render_widget(
                 Paragraph::new(lines)
-                    .block(Block::bordered().title(" Confirm message change "))
+                    .block(
+                        Block::bordered().border_style(theme.style(UiThemeRole::BorderUnfocused)),
+                    )
                     .wrap(Wrap { trim: false }),
                 area,
             );
@@ -3620,9 +3626,9 @@ fn render_compact_draft(
         };
         let mut spans = vec![Span::styled(
             if model.current_command_approval().is_some() {
-                "Tab to review approval · "
+                "╴ Tab to review approval ╶  "
             } else {
-                "Tab to compose · "
+                "╴ Tab to compose ╶  "
             },
             theme.style(UiThemeRole::Accent),
         )];
@@ -5211,7 +5217,11 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     {
         " Tab next field · Enter continue · Esc back · F1 help · q quit".to_owned()
     } else if matches!(model.active_route(), UiRoute::Confirmation { .. }) {
-        " Enter confirm · Esc cancel · F1 help · q quit".to_owned()
+        if matches!(model.mailbox_modal(), Some(UiMailboxModal::Confirm { .. })) {
+            " y/Enter confirm · n/Esc cancel · F1 help · q quit".to_owned()
+        } else {
+            " Enter confirm · Esc cancel · F1 help · q quit".to_owned()
+        }
     } else if matches!(model.active_route(), UiRoute::Progress { .. }) {
         " Working… · this operation cannot be cancelled · F1 help · q quit".to_owned()
     } else if matches!(model.project_interaction(), Some(UiProjectInteraction::Outcome { result })

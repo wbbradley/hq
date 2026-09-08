@@ -9325,7 +9325,10 @@ fn apply_mailbox_modal_input(
         },
         None => Ok(false),
         Some(UiMailboxModal::Confirm { action }) => {
-            if matches!(input, UiInput::Activate) {
+            if matches!(input, UiInput::Character('n' | 'N')) {
+                model.mailbox_modal = None;
+                Ok(true)
+            } else if matches!(input, UiInput::Activate | UiInput::Character('y' | 'Y')) {
                 model.submit_mailbox(None, action, effects)?;
                 Ok(true)
             } else {

@@ -6393,6 +6393,32 @@ fn new_launcher_owns_direct_message_and_d_archives_the_conversation() {
         UiEvent::Input(UiInput::Character('d')),
     )
     .expect("archive confirm");
+    for input in [UiInput::Character('y'), UiInput::Character('Y')] {
+        let confirmed =
+            update(archive_confirm.model.clone(), UiEvent::Input(input)).expect("yes confirms");
+        assert!(confirmed.effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::SubmitMailboxCommand {
+                action: UiMailboxAction::ArchiveConversation { .. },
+                ..
+            }
+        )));
+    }
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Character('N'),
+        UiInput::Escape,
+    ] {
+        let cancelled =
+            update(archive_confirm.model.clone(), UiEvent::Input(input)).expect("no cancels");
+        assert!(cancelled.model.mailbox_modal().is_none());
+        assert!(
+            !cancelled
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::SubmitMailboxCommand { .. }))
+        );
+    }
     let archive =
         update(archive_confirm.model, UiEvent::Input(UiInput::Activate)).expect("archive submit");
     assert!(archive.effects.iter().any(|effect| matches!(
