@@ -82,6 +82,7 @@ done
 [[ "$STATE_ROOT" = /* ]] || die "state root must be an absolute path: $STATE_ROOT"
 [[ "$STATE_ROOT" != / && "$STATE_ROOT" != "$HOME" ]] || die "refusing unsafe state root: $STATE_ROOT"
 
+# Bash 3.2 (macOS) requires guarded expansion of empty arrays under nounset.
 STATE_ROOTS=()
 HQ_EXECUTABLES=()
 
@@ -100,14 +101,14 @@ add_state_root() {
   [[ "$candidate" = /* ]] || die "state root must be an absolute path: $candidate"
   [[ "$candidate" != / && "$candidate" != "$HOME" ]] || \
     die "refusing unsafe state root: $candidate"
-  if add_unique_path "$candidate" "${STATE_ROOTS[@]}"; then
+  if add_unique_path "$candidate" ${STATE_ROOTS[@]+"${STATE_ROOTS[@]}"}; then
     STATE_ROOTS+=("$candidate")
   fi
 }
 
 add_hq_executable() {
   local candidate=$1
-  if [[ -n "$candidate" ]] && add_unique_path "$candidate" "${HQ_EXECUTABLES[@]}"; then
+  if [[ -n "$candidate" ]] && add_unique_path "$candidate" ${HQ_EXECUTABLES[@]+"${HQ_EXECUTABLES[@]}"}; then
     HQ_EXECUTABLES+=("$candidate")
   fi
 }
@@ -172,11 +173,11 @@ case "$(uname -s)" in
     ;;
 esac
 
-for prior_state_root in "${STATE_ROOTS[@]}"; do
+for prior_state_root in ${STATE_ROOTS[@]+"${STATE_ROOTS[@]}"}; do
   [[ -e "$prior_state_root" || -L "$prior_state_root" ]] || continue
   step "Stopping HQ for $prior_state_root"
   stopped=false
-  for executable in "${HQ_EXECUTABLES[@]}"; do
+  for executable in ${HQ_EXECUTABLES[@]+"${HQ_EXECUTABLES[@]}"}; do
     [[ -x "$executable" ]] || continue
     if "$executable" --state-root "$prior_state_root" daemon stop; then
       stopped=true
@@ -188,7 +189,7 @@ for prior_state_root in "${STATE_ROOTS[@]}"; do
 done
 
 step "Removing prior HQ state and executables"
-for prior_state_root in "${STATE_ROOTS[@]}"; do
+for prior_state_root in ${STATE_ROOTS[@]+"${STATE_ROOTS[@]}"}; do
   rm -rf -- "$prior_state_root"
 done
 for executable in "$HQ_BIN" "$CARGO_BIN_ROOT" "$RELEASE_BIN"; do
