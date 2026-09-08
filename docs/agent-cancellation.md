@@ -2,7 +2,7 @@
 
 Assessment against the repository and ACP v1 documentation on 2026-09-07.
 This records the cancellation design and implemented control path. Installed
-provider cancellation qualification and accepted-input recovery audits remain
+provider cancellation qualification remains
 required before the parent implementation task is complete.
 
 Implement cancellation through HQ's existing neutral harness contract now. Defer
@@ -83,6 +83,17 @@ application integration must retain future inputs in the durable queue during th
 interval rather than treating backpressure as permanent rejection. Finished/cancelled
 UI state must come from authoritative operation evidence. Late output before
 completion remains valid.
+
+Provider history is used to recover an unambiguous active turn before live
+lifecycle evidence arrives. After live evidence is available, history remains
+submission-acceptance evidence and cannot replace the active turn. Known terminal
+turn IDs reject late running notifications and fail closed on late questions.
+A delayed start reply cannot revive its completed turn; lookup of an older input
+cannot overwrite the operation binding established by a later accepted steer.
+Deterministic adapter tests inject terminal/new-turn notifications before stale
+history replies, repeat those reads, and check that cancellation still targets the
+new operation. Multiple running history candidates do not select a control target
+by their list positions.
 
 ## Control contract
 

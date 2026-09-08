@@ -4,7 +4,7 @@
 
 ### Capability-aware cancellation of agent work
 
-Problem: The independent cancellation control now reaches the conversation model, but installed stop-and-continue behavior and stale provider-history handling still need qualification. Offer cancellation only for recipients with the capability; human recipients and unsupported harnesses must not offer or accept it.
+Problem: The independent cancellation control now reaches the conversation model, but installed stop-and-continue behavior still needs qualification. Offer cancellation only for recipients with the capability; human recipients and unsupported harnesses must not offer or accept it.
 
 Existing foundation: `docs/agent-cancellation.md` records the neutral target, daemon job registry, independently owned local API/TUI control workers, immutable request replay, and canonical terminal-state presentation. `HarnessSupervisor::cancel_owned` bypasses the ordinary worker lock; temporary submission backpressure retains saved input for authoritative acceptance lookup. Qualify the remaining behavior through these paths.
 
@@ -13,7 +13,6 @@ Scope and dependencies:
 - Follow the completed control-path and ACP assessment in `docs/agent-cancellation.md`: implement neutral cancellation now, defer arbitrary ACP integration, and preserve the safe-submission registry gate.
 - Extend the installed provider fixture in `crates/hq-node/tests/unix_tui_terminal.rs` to hold generation/tool execution until the actual interrupt arrives. Exercise Ctrl-G through the installed TUI/local API, verify exact provider thread/turn identity, persist and display authoritative interruption, then successfully send another message.
 - Qualify blocked provider RPC handling and sibling responsiveness through the actual control path. Preserve the existing independent executor, server-session, responder-cleanup, and supervisor gate guarantees.
-- Audit `CodexSession::read_thread`, `lookup_internal`, live lifecycle notifications, and `CodexOperationControl::activate`. A history response currently replaces `active_turn` and can reactivate an old operation after newer live evidence. Add deterministic late-history tests and preserve current-turn and terminal evidence without selecting authority from turn list position.
 - Exercise natural completion races, duplicate/stale requests, uncertain acknowledgements, and cancellation while awaiting approval through the installed path. Preserve the clear distinction between requesting a stop and observing canonical terminal status, exact immutable retries, and draft/reading position.
 - Verify that a future message sent while cancellation is pending survives temporary backpressure, retains its exact input identity, and proceeds afterward. Accepted work must be looked up rather than resubmitted, including across restart; project retries still require canonical eligibility.
 

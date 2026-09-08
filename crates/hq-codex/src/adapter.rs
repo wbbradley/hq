@@ -193,6 +193,14 @@ impl HarnessInstance for CodexInstance {
     }
 }
 
+/// Live lifecycle evidence takes precedence over unversioned provider history snapshots.
+#[derive(Default)]
+struct TurnLifecycle {
+    active: Option<String>,
+    terminal: BTreeSet<String>,
+    live_observed: bool,
+}
+
 struct CodexSession {
     launch: CodexLaunch,
     transport: JsonlTransport,
@@ -208,7 +216,7 @@ struct CodexSession {
     compatibility_failed: bool,
     deferred_error: Option<HarnessErrorClass>,
     pending_submission_operation: Option<OperationId>,
-    active_turn: Option<String>,
+    turn_lifecycle: TurnLifecycle,
     operation_control: Arc<crate::operation_control::CodexOperationControl>,
     operations: BTreeMap<String, OperationId>,
     submissions: BTreeMap<MessageId, SubmissionRecord>,
@@ -288,7 +296,7 @@ impl CodexSession {
             compatibility_failed: false,
             deferred_error: None,
             pending_submission_operation: None,
-            active_turn: None,
+            turn_lifecycle: TurnLifecycle::default(),
             operation_control,
             operations: BTreeMap::new(),
             submissions: BTreeMap::new(),
@@ -449,10 +457,19 @@ impl CodexSession {
             {
                 self.operations.insert(turn_id.clone(), operation_id);
             }
+            self.turn_lifecycle.live_observed = true;
+            if self.turn_lifecycle.terminal.contains(&turn_id) {
+                // A provider turn has one terminal lifecycle. Late running notifications must
+                // not recreate either a control target or canonical running activity.
+                return;
+            }
             if status == "inProgress" {
-                self.active_turn = Some(turn_id.clone());
-            } else if method == "turn/completed" && self.active_turn.as_deref() == Some(&turn_id) {
-                self.active_turn = None;
+                self.turn_lifecycle.active = Some(turn_id.clone());
+            } else if method == "turn/completed" {
+                self.turn_lifecycle.terminal.insert(turn_id.clone());
+                if self.turn_lifecycle.active.as_deref() == Some(&turn_id) {
+                    self.turn_lifecycle.active = None;
+                }
                 if let Some(operation) = self.operations.get(&turn_id).copied() {
                     if let Err(error) = self.cancel_pending_for_operation(operation) {
                         self.deferred_error = Some(error.class);
@@ -497,11 +514,17 @@ impl CodexSession {
         }
         let thread_id = string_field(&params, "threadId").unwrap_or_default();
         let turn_id = string_field(&params, "turnId").unwrap_or_default();
+        if thread_id == self.thread_id && self.turn_lifecycle.terminal.contains(&turn_id) {
+            return self.fail_closed(id, method, &params);
+        }
         if thread_id == self.thread_id && !turn_id.is_empty() {
+            self.turn_lifecycle.live_observed = true;
             self.operations
                 .entry(turn_id.clone())
                 .or_insert_with(|| provider_operation_id(&thread_id, &turn_id));
-            self.active_turn.get_or_insert_with(|| turn_id.clone());
+            self.turn_lifecycle
+                .active
+                .get_or_insert_with(|| turn_id.clone());
         }
         self.synchronize_operation_control();
         let Some(operation_id) = self.operations.get(&turn_id).copied() else {
@@ -810,7 +833,7 @@ impl CodexSession {
     }
 
     fn synchronize_operation_control(&self) {
-        if let Some(turn) = &self.active_turn
+        if let Some(turn) = &self.turn_lifecycle.active
             && let Some(operation) = self.operations.get(turn)
         {
             self.operation_control
@@ -839,13 +862,20 @@ impl CodexSession {
                 HarnessErrorClass::SessionIdentityMismatch,
             ));
         }
-        self.active_turn = response
-            .thread
-            .turns
-            .iter()
-            .rev()
-            .find(|turn| turn.status == "inProgress")
-            .map(|turn| turn.id.clone());
+        // History can recover a running turn before live lifecycle evidence is available.
+        // Once live evidence has arrived, history is acceptance evidence only. It cannot displace live
+        // evidence processed while the RPC was pending, or revive a known terminal turn.
+        // Multiple running candidates are ambiguous; history list order is not authority.
+        if !self.turn_lifecycle.live_observed && self.turn_lifecycle.active.is_none() {
+            let mut running = response.thread.turns.iter().filter(|turn| {
+                turn.status == "inProgress" && !self.turn_lifecycle.terminal.contains(&turn.id)
+            });
+            if let Some(turn) = running.next()
+                && running.next().is_none()
+            {
+                self.turn_lifecycle.active = Some(turn.id.clone());
+            }
+        }
         Ok(response.thread)
     }
 
@@ -862,7 +892,11 @@ impl CodexSession {
                 .iter()
                 .any(|item| item.kind == "userMessage" && item.client_id == client_id)
             {
-                self.operations.insert(turn.id, record.operation_id);
+                // Acceptance of an older input does not supersede a later accepted steer or
+                // live operation binding on this same provider turn.
+                self.operations
+                    .entry(turn.id)
+                    .or_insert(record.operation_id);
                 self.synchronize_operation_control();
                 return Ok(HarnessSubmissionLookup::Accepted);
             }
@@ -985,7 +1019,7 @@ impl HarnessSession for CodexSession {
         let client_id = message_hex(submission.submission_id);
         let body = submission.body.as_str().to_owned();
         self.pending_submission_operation = Some(submission.operation_id);
-        let result = if let Some(active_turn) = self.active_turn.clone() {
+        let result = if let Some(active_turn) = self.turn_lifecycle.active.clone() {
             let thread_id = self.thread_id.clone();
             let response = self.rpc::<_, TurnSteerResponse>(
                 "turn/steer",
@@ -1212,6 +1246,7 @@ impl CodexSession {
         client_id: String,
     ) -> Result<HarnessSubmissionOutcome, HarnessError> {
         let thread_id = self.thread_id.clone();
+        let prior_active = self.turn_lifecycle.active.clone();
         let response = self.rpc::<_, TurnResponse>(
             "turn/start",
             TurnStartParams {
@@ -1227,8 +1262,13 @@ impl CodexSession {
             Ok(response) if !response.turn.id.is_empty() => {
                 self.operations
                     .insert(response.turn.id.clone(), operation_id);
-                if response.turn.status == "inProgress" || response.turn.status.is_empty() {
-                    self.active_turn = Some(response.turn.id);
+                if (response.turn.status == "inProgress" || response.turn.status.is_empty())
+                    && !self.turn_lifecycle.terminal.contains(&response.turn.id)
+                {
+                    if self.turn_lifecycle.active == prior_active {
+                        self.turn_lifecycle.active = Some(response.turn.id);
+                    }
+                    self.turn_lifecycle.live_observed = true;
                 }
                 Ok(HarnessSubmissionOutcome::Accepted)
             }

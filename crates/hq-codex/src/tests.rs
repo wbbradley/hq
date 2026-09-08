@@ -161,6 +161,9 @@ mod adapter {
         lose_interrupt_response: bool,
         read_waiting: Option<std::sync::mpsc::SyncSender<()>>,
         history_accepts: bool,
+        before_read_response: Vec<Value>,
+        history_turns: Option<Value>,
+        before_start_response: Vec<Value>,
         emit_events: bool,
         emit_after_read: bool,
         initialize_error: bool,
@@ -181,6 +184,9 @@ mod adapter {
                 lose_interrupt_response: false,
                 read_waiting: None,
                 history_accepts: false,
+                before_read_response: Vec::new(),
+                history_turns: None,
+                before_start_response: Vec::new(),
                 emit_events: false,
                 emit_after_read: false,
                 initialize_error: false,
@@ -531,6 +537,195 @@ mod adapter {
                     response: HarnessInteractiveResponse::Choice(ShortText::new("accept")?),
                 })
                 .is_err()
+        );
+        opened.session.force_stop()?;
+        Ok(())
+    }
+
+    fn completed_test_turn() -> Value {
+        json!({"method":"turn/completed","params":{"threadId":"thr-test","turn":{"id":"turn-test","status":"interrupted","items":[]}}})
+    }
+
+    #[test]
+    fn late_history_does_not_revive_terminal_work_or_replace_a_newer_live_turn()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for newer in [false, true] {
+            let mut frames = vec![completed_test_turn()];
+            if newer {
+                frames.push(json!({"method":"turn/started","params":{"threadId":"thr-test","turn":{"id":"turn-newer","status":"inProgress","items":[]}}}));
+            }
+            let starter = Arc::new(FakeStarter::new([ServerSpec {
+                history_accepts: true,
+                before_read_response: frames,
+                ..ServerSpec::default()
+            }]));
+            let factory = factory(Arc::clone(&starter), Arc::new(RecordingSink::default()))?;
+            let mut opened = factory
+                .create_instance(instance_request())?
+                .open_session(HarnessSessionRequest::Start)?;
+            let input = submission()?;
+            opened.session.submit(input.clone())?;
+            let control = opened.session.operation_control().ok_or("control")?;
+            assert_eq!(
+                opened.session.lookup_submission(&input)?,
+                HarnessSubmissionLookup::Accepted
+            );
+            assert_eq!(
+                control.cancel_operation(input.operation_id)?,
+                HarnessCancellationOutcome::AlreadyFinished
+            );
+            // A second stale snapshot must not undo terminal knowledge learned before that read.
+            assert_eq!(
+                opened.session.lookup_submission(&input)?,
+                HarnessSubmissionLookup::Accepted
+            );
+            assert_eq!(
+                control.cancel_operation(input.operation_id)?,
+                HarnessCancellationOutcome::AlreadyFinished
+            );
+            if newer {
+                let mut operation = None;
+                for _ in 0..3 {
+                    if let HarnessEventPoll::Event(HarnessEvent::Activity(activity)) =
+                        next_ready_event(&mut *opened.session)?
+                        && activity.status == ActivityStatus::Running
+                        && activity.operation_id != input.operation_id
+                    {
+                        operation = Some(activity.operation_id);
+                    }
+                }
+                assert_eq!(
+                    control.cancel_operation(operation.ok_or("newer live operation")?)?,
+                    HarnessCancellationOutcome::Requested
+                );
+                let observed = starter.observed.lock().map_err(|_| "observations")?;
+                let request = observed
+                    .iter()
+                    .find(|request| request["method"] == "turn/interrupt")
+                    .ok_or("interrupt")?;
+                assert_eq!(request["params"]["turnId"], "turn-newer");
+            }
+            opened.session.force_stop()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn looking_up_older_input_cannot_retarget_a_later_accepted_steer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let starter = Arc::new(FakeStarter::new([ServerSpec {
+            history_accepts: true,
+            ..ServerSpec::default()
+        }]));
+        let factory = factory(Arc::clone(&starter), Arc::new(RecordingSink::default()))?;
+        let mut opened = factory
+            .create_instance(instance_request())?
+            .open_session(HarnessSessionRequest::Start)?;
+        let first = submission()?;
+        opened.session.submit(first.clone())?;
+        let next = HarnessSubmission {
+            submission_id: MessageId::from_bytes([7; 32]),
+            digest: CommandDigest::from_bytes([8; 32]),
+            operation_id: OperationId::from_bytes([9; 32]),
+            body: ContentText::new("next input")?,
+        };
+        opened.session.submit(next.clone())?;
+        assert_eq!(
+            opened.session.lookup_submission(&first)?,
+            HarnessSubmissionLookup::Accepted
+        );
+        let control = opened.session.operation_control().ok_or("control")?;
+        assert_eq!(
+            control.cancel_operation(first.operation_id)?,
+            HarnessCancellationOutcome::AlreadyFinished
+        );
+        assert_eq!(
+            control.cancel_operation(next.operation_id)?,
+            HarnessCancellationOutcome::Requested
+        );
+        opened.session.force_stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn history_cannot_introduce_an_unobserved_turn_after_live_completion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let starter = Arc::new(FakeStarter::new([ServerSpec {
+            before_read_response: vec![completed_test_turn()],
+            history_turns: Some(
+                json!([{ "id":"older-unobserved-turn", "status":"inProgress", "items":[
+                    {"type":"userMessage","id":"user","clientId":"04".repeat(32)}
+                ]}]),
+            ),
+            ..ServerSpec::default()
+        }]));
+        let factory = factory(Arc::clone(&starter), Arc::new(RecordingSink::default()))?;
+        let mut opened = factory
+            .create_instance(instance_request())?
+            .open_session(HarnessSessionRequest::Start)?;
+        let input = submission()?;
+        opened.session.submit(input.clone())?;
+        assert_eq!(
+            opened.session.lookup_submission(&input)?,
+            HarnessSubmissionLookup::Accepted
+        );
+        assert_eq!(
+            opened
+                .session
+                .operation_control()
+                .ok_or("control")?
+                .cancel_operation(input.operation_id)?,
+            HarnessCancellationOutcome::AlreadyFinished
+        );
+        opened.session.force_stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_notification_before_start_reply_cannot_reactivate_the_turn()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let starter = Arc::new(FakeStarter::new([ServerSpec {
+            before_start_response: vec![completed_test_turn()],
+            ..ServerSpec::default()
+        }]));
+        let factory = factory(Arc::clone(&starter), Arc::new(RecordingSink::default()))?;
+        let mut opened = factory
+            .create_instance(instance_request())?
+            .open_session(HarnessSessionRequest::Start)?;
+        let input = submission()?;
+        opened.session.submit(input.clone())?;
+        let control = opened.session.operation_control().ok_or("control")?;
+        assert_eq!(
+            control.cancel_operation(input.operation_id)?,
+            HarnessCancellationOutcome::AlreadyFinished
+        );
+        opened.session.force_stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_history_cannot_choose_a_running_turn_by_list_position()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let starter = Arc::new(FakeStarter::new([ServerSpec {
+            history_turns: Some(json!([
+                {"id":"turn-other","status":"inProgress","items":[]},
+                {"id":"turn-test","status":"inProgress","items":[{"type":"userMessage","id":"user","clientId":"04".repeat(32)}]}
+            ])),
+            ..ServerSpec::default()
+        }]));
+        let factory = factory(Arc::clone(&starter), Arc::new(RecordingSink::default()))?;
+        let mut opened = factory
+            .create_instance(instance_request())?
+            .open_session(HarnessSessionRequest::Start)?;
+        let input = submission()?;
+        assert_eq!(
+            opened.session.lookup_submission(&input)?,
+            HarnessSubmissionLookup::Accepted
+        );
+        let control = opened.session.operation_control().ok_or("control")?;
+        assert_eq!(
+            control.cancel_operation(input.operation_id)?,
+            HarnessCancellationOutcome::AlreadyFinished
         );
         opened.session.force_stop()?;
         Ok(())
@@ -1731,6 +1926,8 @@ mod adapter {
         let mut line = String::new();
         let mut client_id = String::new();
         let mut deferred_read = None;
+        let mut turn_number = 0_u64;
+        let mut turn_id = "turn-test".to_owned();
         loop {
             line.clear();
             let Ok(count) = reader.read_line(&mut line) else {
@@ -1794,6 +1991,10 @@ mod adapter {
                     write_open_frames(&spec, &mut output);
                 }
                 Some("turn/start") => {
+                    turn_number += 1;
+                    if turn_number > 1 {
+                        turn_id = format!("turn-test-{turn_number}");
+                    }
                     client_id = message
                         .get("params")
                         .and_then(|params| params.get("clientUserMessageId"))
@@ -1802,24 +2003,27 @@ mod adapter {
                         .to_owned();
                     write_frame(
                         &mut output,
-                        &json!({"method":"turn/started","params":{"threadId":spec.thread_id,"turn":{"id":"turn-test","status":"inProgress","items":[]}}}),
+                        &json!({"method":"turn/started","params":{"threadId":spec.thread_id,"turn":{"id":turn_id,"status":"inProgress","items":[]}}}),
                     );
+                    for frame in std::mem::take(&mut spec.before_start_response) {
+                        write_frame(&mut output, &frame);
+                    }
                     if spec.lose_turn_response {
                         spec.lose_turn_response = false;
                     } else {
                         write_result(
                             &mut output,
                             &message,
-                            &json!({"turn":{"id":"turn-test","status":"inProgress","items":[]}}),
+                            &json!({"turn":{"id":turn_id,"status":"inProgress","items":[]}}),
                         );
                         if spec.emit_events {
                             write_frame(
                                 &mut output,
-                                &json!({"method":"item/completed","params":{"threadId":spec.thread_id,"turnId":"turn-test","item":{"type":"agentMessage","id":"answer","text":"finished","phase":"final_answer"}}}),
+                                &json!({"method":"item/completed","params":{"threadId":spec.thread_id,"turnId":turn_id,"item":{"type":"agentMessage","id":"answer","text":"finished","phase":"final_answer"}}}),
                             );
                             write_frame(
                                 &mut output,
-                                &json!({"id":40,"method":"item/tool/requestUserInput","params":{"threadId":spec.thread_id,"turnId":"turn-test","itemId":"question","questions":[{"id":"scope","header":"Scope","question":"Proceed?","options":[{"label":"approve","description":"Continue"}]}]}}),
+                                &json!({"id":40,"method":"item/tool/requestUserInput","params":{"threadId":spec.thread_id,"turnId":turn_id,"itemId":"question","questions":[{"id":"scope","header":"Scope","question":"Proceed?","options":[{"label":"approve","description":"Continue"}]}]}}),
                             );
                         }
                     }
@@ -1830,12 +2034,17 @@ mod adapter {
                     } else {
                         client_id.clone()
                     };
-                    let turns = if spec.history_accepts {
-                        json!([{"id":"turn-test","status":"inProgress","items":[{"type":"userMessage","id":"user","clientId":accepted_client_id}]}])
+                    let turns = if let Some(turns) = &spec.history_turns {
+                        turns.clone()
+                    } else if spec.history_accepts {
+                        json!([{"id":turn_id,"status":"inProgress","items":[{"type":"userMessage","id":"user","clientId":accepted_client_id}]}])
                     } else {
                         json!([])
                     };
                     let result = json!({"thread":{"id":spec.thread_id,"turns":turns}});
+                    for frame in std::mem::take(&mut spec.before_read_response) {
+                        write_frame(&mut output, &frame);
+                    }
                     if let Some(waiting) = spec.read_waiting.take() {
                         deferred_read = Some((message.clone(), result));
                         let _ = waiting.send(());
@@ -1845,7 +2054,7 @@ mod adapter {
                     if spec.emit_after_read {
                         write_frame(
                             &mut output,
-                            &json!({"method":"item/completed","params":{"threadId":spec.thread_id,"turnId":"turn-test","item":{"type":"agentMessage","id":"recovered","text":"recovered output","phase":"final_answer"}}}),
+                            &json!({"method":"item/completed","params":{"threadId":spec.thread_id,"turnId":turn_id,"item":{"type":"agentMessage","id":"recovered","text":"recovered output","phase":"final_answer"}}}),
                         );
                     }
                 }
@@ -1856,7 +2065,7 @@ mod adapter {
                         spec.lose_interrupt_response = false;
                         continue;
                     }
-                    write_result(&mut output, &message, &json!({"turnId":"turn-test"}));
+                    write_result(&mut output, &message, &json!({"turnId":turn_id}));
                     if let Some((request, result)) = deferred_read.take() {
                         write_result(&mut output, &request, &result);
                     }
@@ -1868,7 +2077,7 @@ mod adapter {
                             &json!({
                                 "method": "turn/completed",
                                 "params": {"threadId": spec.thread_id, "turn": {
-                                    "id": "turn-test", "status": "interrupted"
+                                    "id": turn_id, "status": "interrupted"
                                 }}
                             }),
                         );
