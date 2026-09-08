@@ -82,8 +82,15 @@ impl Drop for ProcessTestLease {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct UnavailableNodeComponent;
+
+impl hq_node::ShareProjectApplication for UnavailableNodeComponent {
+    type Handle = Self;
+    fn share_project_application(&self) -> Self {
+        self.clone()
+    }
+}
 
 impl NodeComponent for UnavailableNodeComponent {
     fn start(&mut self, _cancellation: CancellationToken) -> Result<(), ComponentError> {

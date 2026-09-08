@@ -18,7 +18,7 @@ does not itself establish the durable acceptance evidence HQ requires.
 | Supervisor | `cancellable_worker` and `cancel_owned` use a separately locked handle registry, exact worker descriptors and live lease checks. | Route application cancellation through this path rather than the synchronous cancel convenience method. |
 | Codex | `hq-codex/src/adapter.rs` maps an HQ operation to threadId/turnId and sends turn/interrupt. | Preserve exact targeting and distinguish accepted interruption from observed completion. |
 | Application/node | ControlHarness exposes typed target queries, bounded cancellation admission and request observation. Canonical agent/session authority and exact generation/lease/operation are revalidated before independent dispatch. | Connect local API callers and prove installed end-to-end behavior. |
-| Local API | `hq-local-api/src/server.rs` handles requests synchronously; `hq-node/src/session_registry.rs` calls receive during dispatch. | Keep control dispatch responsive even when another command is waiting. A separate socket alone does not prove this. |
+| Local API | Exact target/query/request-state DTOs route through independently owned per-session application work; responder cleanup also runs outside the coordinator. | Prove the installed cancellation action through the full TUI/provider path. |
 | TUI | `hq-node/src/tui_client.rs` processes WorkerCommand values in a receive loop. | Do not enqueue interrupt behind a blocked operation on the same client worker. |
 
 Paths in this table are relative to `crates/`.
@@ -37,10 +37,17 @@ cannot overlap their prior dispatch, and shutdown joins admitted controls before
 starting a fresh generation. Query authorization resolves current project
 assignments or selected direct agent sessions; human threads have no target.
 
-The local API and TUI command worker still need this independent admission path
-before the feature is end-to-end. Ordinary session methods also still use the
-supervisor workers mutex; cancellation must use cancel_owned rather than acquire
-that lock.
+The local API now exposes query, cancellation admission, and request observation
+separately. The runtime owns application capabilities for independent request
+workers. Per-session response/write order is preserved, and lifecycle requests
+retain coordinator ownership for stop acknowledgement. Disconnected work and
+responder cleanup remain bounded and joined before application shutdown. Gate
+tests prove that a second client's control can release both a blocked request and
+blocked cleanup on another connection.
+
+The TUI command worker still needs an independent control path before the feature
+is end-to-end. Ordinary session methods also still use the supervisor workers
+mutex; cancellation must use cancel_owned rather than acquire that lock.
 
 Generation continues remotely after turn submission, so not every running turn
 holds a Rust lock. This explains why the existing adapter can already interrupt

@@ -635,3 +635,309 @@ async fn drain_completes_while_the_shared_event_queue_is_saturated() {
     );
     foundation.shutdown().expect("foundation cleanup");
 }
+
+struct GatedExecutor {
+    gate_cleanup: bool,
+    hub: RevisionHub,
+    gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    release: std::sync::mpsc::Sender<()>,
+}
+impl hq_node::LocalRequestExecutor for GatedExecutor {
+    fn disconnect(&self, session: &mut hq_local_api::ServerSession) {
+        if self.gate_cleanup {
+            self.gate
+                .lock()
+                .expect("cleanup gate")
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("sibling control releases cleanup");
+        }
+        session.disconnect();
+    }
+    fn execute(
+        &self,
+        session: &mut hq_local_api::ServerSession,
+        message: WireMessage,
+    ) -> Result<hq_local_api::OutboundMessage, hq_local_api::ServerSessionError> {
+        if let WireMessage::Request(envelope) = &message {
+            match envelope.request {
+                Request::AuthoritativeSnapshot => self
+                    .gate
+                    .lock()
+                    .expect("gate")
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("independent control releases blocked request"),
+                Request::AgentOperation(_) => self.release.send(()).expect("release"),
+                _ => {}
+            }
+        }
+        session.receive(
+            message,
+            &snapshot_application(self.hub.clone()),
+            &UnavailableLifecycle,
+        )
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn independent_requests_release_a_blocked_sibling_without_waiting_for_its_response() {
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+    let directory = TestDirectory::new();
+    let (foundation, runtime) = foundation(&directory);
+    let hub = RevisionHub::default();
+    let application = snapshot_application(hub.clone());
+    let (release, gate) = mpsc::channel();
+    let mut registry = LocalSessionRegistry::new(
+        LocalSessionRegistryConfig {
+            session_capacity: NonZeroUsize::new(2).expect("sessions"),
+            event_capacity: NonZeroUsize::new(4).expect("events"),
+            write_capacity: NonZeroUsize::new(2).expect("writes"),
+        },
+        hub.clone(),
+        build(),
+    )
+    .with_request_executor(Arc::new(GatedExecutor {
+        gate_cleanup: false,
+        hub,
+        gate: Mutex::new(gate),
+        release,
+    }));
+    let first_id = Id32::new([120; 32]);
+    let second_id = Id32::new([121; 32]);
+    let (stream, client) = accepted(&foundation, &runtime);
+    registry.admit(first_id, stream).expect("first");
+    let mut first = tokio::net::UnixStream::from_std(client).expect("client");
+    let (stream, client) = accepted(&foundation, &runtime);
+    registry.admit(second_id, stream).expect("second");
+    let mut second = tokio::net::UnixStream::from_std(client).expect("client");
+    negotiate(&mut registry, &application, &mut first, first_id).await;
+    negotiate(&mut registry, &application, &mut second, second_id).await;
+    let request = WireMessage::Request(RequestEnvelope::new(
+        RequestId::new(1).expect("request"),
+        Request::AuthoritativeSnapshot,
+    ));
+    first
+        .write_all(&request.encode_frame().expect("frame"))
+        .await
+        .expect("write");
+    assert_eq!(
+        registry
+            .dispatch_next(&application, &UnavailableLifecycle)
+            .await,
+        Some(LocalSessionDispatch::RequestDispatched {
+            session_id: first_id
+        })
+    );
+    let request = WireMessage::Request(RequestEnvelope::new(
+        RequestId::new(1).expect("request"),
+        Request::AgentOperation(hq_local_api::protocol::v1::AgentOperationQueryDto {
+            account_id: Id32::new([1; 32]),
+            home: Id32::new([2; 32]),
+            conversation: hq_local_api::protocol::v1::ConversationKeyDto::Thread {
+                counterparty_installation: Id32::new([2; 32]),
+                counterparty_mailbox: Id32::new([3; 32]),
+                thread: Id32::new([4; 32]),
+            },
+            tracked_operation: None,
+        }),
+    ));
+    second
+        .write_all(&request.encode_frame().expect("frame"))
+        .await
+        .expect("write");
+    assert_eq!(
+        registry
+            .dispatch_next(&application, &UnavailableLifecycle)
+            .await,
+        Some(LocalSessionDispatch::RequestDispatched {
+            session_id: second_id
+        })
+    );
+    while registry.pending_response_count() != 0 {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            registry.dispatch_next(&application, &UnavailableLifecycle),
+        )
+        .await
+        .expect("requests complete");
+    }
+    assert!(matches!(
+        read_message(&mut first).await,
+        WireMessage::Response(_)
+    ));
+    assert!(matches!(
+        read_message(&mut second).await,
+        WireMessage::Response(_)
+    ));
+    let report = registry.shutdown().await;
+    assert!(report.task_failures.is_empty());
+    assert_eq!(report.retained_tasks, 0);
+    foundation.shutdown().expect("cleanup");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn disconnected_request_retains_capacity_until_its_owned_work_joins() {
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+    let directory = TestDirectory::new();
+    let (foundation, runtime) = foundation(&directory);
+    let hub = RevisionHub::default();
+    let application = snapshot_application(hub.clone());
+    let (release, gate) = mpsc::channel();
+    let mut registry = LocalSessionRegistry::new(
+        LocalSessionRegistryConfig {
+            session_capacity: NonZeroUsize::MIN,
+            event_capacity: NonZeroUsize::new(4).expect("events"),
+            write_capacity: NonZeroUsize::new(2).expect("writes"),
+        },
+        hub.clone(),
+        build(),
+    )
+    .with_request_executor(Arc::new(GatedExecutor {
+        gate_cleanup: false,
+        hub,
+        gate: Mutex::new(gate),
+        release: release.clone(),
+    }));
+    let session_id = Id32::new([122; 32]);
+    let (stream, client) = accepted(&foundation, &runtime);
+    registry.admit(session_id, stream).expect("admit");
+    let mut client = tokio::net::UnixStream::from_std(client).expect("client");
+    negotiate(&mut registry, &application, &mut client, session_id).await;
+    let request = WireMessage::Request(RequestEnvelope::new(
+        RequestId::new(1).expect("request"),
+        Request::AuthoritativeSnapshot,
+    ));
+    client
+        .write_all(&request.encode_frame().expect("frame"))
+        .await
+        .expect("write");
+    assert_eq!(
+        registry
+            .dispatch_next(&application, &UnavailableLifecycle)
+            .await,
+        Some(LocalSessionDispatch::RequestDispatched { session_id })
+    );
+    drop(client);
+    while !registry.is_empty() {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            registry.dispatch_next(&application, &UnavailableLifecycle),
+        )
+        .await
+        .expect("transport closes");
+    }
+    assert_eq!(
+        registry.task_count(),
+        1,
+        "request retains its owned capabilities"
+    );
+    let (stream, _client) = accepted(&foundation, &runtime);
+    assert_eq!(
+        registry.admit(Id32::new([123; 32]), stream),
+        Err(LocalSessionAdmissionError::Full)
+    );
+    release.send(()).expect("release");
+    while registry.task_count() != 0 {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            registry.dispatch_next(&application, &UnavailableLifecycle),
+        )
+        .await
+        .expect("request joins");
+    }
+    let (stream, _client) = accepted(&foundation, &runtime);
+    registry
+        .admit(Id32::new([124; 32]), stream)
+        .expect("capacity released after join");
+    let report = registry.shutdown().await;
+    assert!(report.task_failures.is_empty());
+    assert_eq!(report.retained_tasks, 0);
+    foundation.shutdown().expect("cleanup");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn responder_cleanup_cannot_block_a_sibling_control_request() {
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+    let directory = TestDirectory::new();
+    let (foundation, runtime) = foundation(&directory);
+    let hub = RevisionHub::default();
+    let application = snapshot_application(hub.clone());
+    let (release, gate) = mpsc::channel();
+    let mut registry = LocalSessionRegistry::new(
+        LocalSessionRegistryConfig {
+            session_capacity: NonZeroUsize::new(2).expect("sessions"),
+            event_capacity: NonZeroUsize::new(4).expect("events"),
+            write_capacity: NonZeroUsize::new(2).expect("writes"),
+        },
+        hub.clone(),
+        build(),
+    )
+    .with_request_executor(Arc::new(GatedExecutor {
+        gate_cleanup: true,
+        hub,
+        gate: Mutex::new(gate),
+        release: release.clone(),
+    }));
+    let first_id = Id32::new([125; 32]);
+    let second_id = Id32::new([126; 32]);
+    let (stream, client) = accepted(&foundation, &runtime);
+    registry.admit(first_id, stream).expect("first");
+    let mut first = tokio::net::UnixStream::from_std(client).expect("client");
+    let (stream, client) = accepted(&foundation, &runtime);
+    registry.admit(second_id, stream).expect("second");
+    let mut second = tokio::net::UnixStream::from_std(client).expect("client");
+    negotiate(&mut registry, &application, &mut first, first_id).await;
+    negotiate(&mut registry, &application, &mut second, second_id).await;
+    drop(first);
+    while registry.len() == 2 {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            registry.dispatch_next(&application, &UnavailableLifecycle),
+        )
+        .await
+        .expect("transport closes without waiting for cleanup");
+    }
+    let request = WireMessage::Request(RequestEnvelope::new(
+        RequestId::new(1).expect("request"),
+        Request::AgentOperation(hq_local_api::protocol::v1::AgentOperationQueryDto {
+            account_id: Id32::new([1; 32]),
+            home: Id32::new([2; 32]),
+            conversation: hq_local_api::protocol::v1::ConversationKeyDto::Thread {
+                counterparty_installation: Id32::new([2; 32]),
+                counterparty_mailbox: Id32::new([3; 32]),
+                thread: Id32::new([4; 32]),
+            },
+            tracked_operation: None,
+        }),
+    ));
+    second
+        .write_all(&request.encode_frame().expect("frame"))
+        .await
+        .expect("write");
+    loop {
+        let event = tokio::time::timeout(
+            Duration::from_secs(3),
+            registry.dispatch_next(&application, &UnavailableLifecycle),
+        )
+        .await
+        .expect("control progresses");
+        if event
+            == Some(LocalSessionDispatch::WriteConfirmed {
+                session_id: second_id,
+            })
+        {
+            break;
+        }
+    }
+    assert!(matches!(
+        read_message(&mut second).await,
+        WireMessage::Response(_)
+    ));
+    release.send(()).expect("second cleanup may finish");
+    let report = registry.shutdown().await;
+    assert!(report.task_failures.is_empty());
+    assert_eq!(report.retained_tasks, 0);
+    foundation.shutdown().expect("cleanup");
+}

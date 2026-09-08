@@ -436,6 +436,36 @@ impl ServerSession {
                 .map_err(|_| invalid_request_error())
                 .and_then(|request| application.control_project(request))
                 .map(|outcome| ResponseResult::ProjectCommand(project_command_to_v1(&outcome))),
+            Request::AgentOperation(request) => {
+                crate::conversion::agent_operation_query_from_v1(request)
+                    .map_err(|_| invalid_request_error())
+                    .and_then(|query| application.query_agent_operation(query))
+                    .map(|view| {
+                        ResponseResult::AgentOperation(Box::new(
+                            crate::conversion::agent_operation_view_to_v1(&view),
+                        ))
+                    })
+            }
+            Request::CancelAgentOperation(request) => {
+                crate::conversion::agent_cancellation_request_from_v1(*request)
+                    .map_err(|_| invalid_request_error())
+                    .and_then(|request| application.cancel_agent_operation(request))
+                    .map(|state| {
+                        ResponseResult::AgentCancellationState(
+                            crate::conversion::agent_cancellation_state_to_v1(&state),
+                        )
+                    })
+            }
+            Request::AgentCancellationState(request) => {
+                crate::conversion::agent_cancellation_request_from_v1(*request)
+                    .map_err(|_| invalid_request_error())
+                    .and_then(|request| application.agent_cancellation_state(request))
+                    .map(|state| {
+                        ResponseResult::AgentCancellationState(
+                            crate::conversion::agent_cancellation_state_to_v1(&state),
+                        )
+                    })
+            }
             Request::ProjectRecovery(request) => application
                 .query_project_recovery(crate::conversion::project_recovery_query_from_v1(request))
                 .map(|view| {

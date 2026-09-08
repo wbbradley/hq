@@ -169,10 +169,24 @@ pub struct NodeShutdownReport {
 /// Transient complete application capability bundle borrowing the concrete component owners.
 pub struct NodeApplicationPorts<'a, R, H, P> {
     store: StoreGateway,
-    revisions: &'a RevisionHub,
-    relay: &'a R,
-    harness: &'a H,
-    project: &'a P,
+    revisions: RevisionHub,
+    relay: ApplicationCapability<'a, R>,
+    harness: ApplicationCapability<'a, H>,
+    project: ApplicationCapability<'a, P>,
+}
+
+enum ApplicationCapability<'a, T> {
+    Borrowed(&'a T),
+    Owned(Box<T>),
+}
+impl<T> std::ops::Deref for ApplicationCapability<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
 }
 
 impl<R, H, P> QueryDomain for NodeApplicationPorts<'_, R, H, P> {
@@ -545,10 +559,33 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
         let store = foundation.store()?;
         Some(NodeApplicationPorts {
             store: StoreGateway::new(store, policy, foundation.signer_handle()),
-            revisions: &self.revisions,
-            relay: &components.relay,
-            harness: &components.harness,
-            project: &components.project,
+            revisions: self.revisions.clone(),
+            relay: ApplicationCapability::Borrowed(&components.relay),
+            harness: ApplicationCapability::Borrowed(&components.harness),
+            project: ApplicationCapability::Borrowed(&components.project),
+        })
+    }
+
+    /// Shares only application capabilities for owned independent request execution.
+    pub fn owned_application_ports(
+        &self,
+        policy: AuthorityPolicy,
+    ) -> Option<NodeApplicationPorts<'static, R, H, P::Handle>>
+    where
+        R: Clone + 'static,
+        H: Clone + 'static,
+        P: crate::ShareProjectApplication,
+    {
+        let foundation = self.foundation.as_ref()?;
+        let components = self.components.as_ref()?;
+        Some(NodeApplicationPorts {
+            store: StoreGateway::new(foundation.store()?, policy, foundation.signer_handle()),
+            revisions: self.revisions.clone(),
+            relay: ApplicationCapability::Owned(Box::new(components.relay.clone())),
+            harness: ApplicationCapability::Owned(Box::new(components.harness.clone())),
+            project: ApplicationCapability::Owned(Box::new(
+                components.project.share_project_application(),
+            )),
         })
     }
 

@@ -1,5 +1,9 @@
 //! Strict local API v1 messages and length-delimited framing.
 
+#[path = "agent_operations.rs"]
+mod agent_operations;
+pub use agent_operations::*;
+
 use std::{error::Error, fmt, num::NonZeroU64};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
@@ -1918,6 +1922,12 @@ pub enum Request {
     RetryProjectRuntime(Box<ProjectRecoveryRetryRequestDto>),
     /// Reads current exact runtime recovery evidence.
     ProjectRecovery(ProjectRecoveryQueryDto),
+    /// Queries authorized recipient cancellation capability and canonical operation state.
+    AgentOperation(AgentOperationQueryDto),
+    /// Admits an exact cancellation without waiting for provider acknowledgement.
+    CancelAgentOperation(Box<AgentCancellationRequestDto>),
+    /// Observes a prior cancellation request without resubmitting it.
+    AgentCancellationState(Box<AgentCancellationRequestDto>),
     /// Execute or reconcile one exact node-owned named-agent retirement.
     RetireAgent(Box<AgentRetirementRequestDto>),
     /// Load one bounded passive pending-interaction view.
@@ -3158,6 +3168,10 @@ pub enum ResponseResult {
     ProjectRecoveryRetry(ProjectRecoveryRetryOutcomeDto),
     /// Exact current project recovery evidence.
     ProjectRecovery(Box<ProjectRecoveryViewDto>),
+    /// Authorized current cancellation target and canonical operation evidence.
+    AgentOperation(Box<AgentOperationViewDto>),
+    /// Cancellation admission or acknowledgement, distinct from terminal work status.
+    AgentCancellationState(AgentCancellationStateDto),
     /// Named-agent retirement progress or terminal result.
     AgentRetirement(AgentRetirementOutcomeDto),
     /// Bounded passive pending interactions.
@@ -3447,6 +3461,14 @@ impl WireMessage {
                     validate_text(&request.provider, PROVIDER_ID_MAX_BYTES)?;
                     validate_text(&request.session, PROVIDER_SESSION_ID_MAX_BYTES)
                 }
+                Request::AgentOperation(query) => {
+                    crate::conversion::agent_operation_query_from_v1(query.clone()).map(|_| ())
+                }
+                Request::CancelAgentOperation(request)
+                | Request::AgentCancellationState(request) => {
+                    crate::conversion::agent_cancellation_request_from_v1(*request.clone())
+                        .map(|_| ())
+                }
                 Request::ProjectRecovery(_)
                 | Request::MailboxDrafts
                 | Request::RetireAgent(_)
@@ -3668,6 +3690,9 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
         Response::Success(ResponseResult::ProjectCommand(outcome)) => {
             validate_project_outcome(outcome)
         }
+        Response::Success(ResponseResult::AgentOperation(view)) => {
+            crate::conversion::agent_operation_view_from_v1(*view.clone()).map(|_| ())
+        }
         Response::Success(ResponseResult::ProjectRecovery(view)) => {
             validate_project_recovery_view(view)
         }
@@ -3699,6 +3724,7 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
         }
         Response::Success(
             ResponseResult::InteractionAnswer(_)
+            | ResponseResult::AgentCancellationState(_)
             | ResponseResult::InteractionResponder(_)
             | ResponseResult::Empty,
         ) => Ok(()),

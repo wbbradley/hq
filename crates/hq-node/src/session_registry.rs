@@ -1,11 +1,12 @@
 //! Bounded ownership for authenticated local protocol sessions.
 
-use std::{collections::BTreeMap, error::Error, fmt, num::NonZeroUsize};
+use std::{collections::BTreeMap, error::Error, fmt, num::NonZeroUsize, sync::Arc};
 
 use hq_application::{Application, ApplicationPorts};
 use hq_local_api::{
-    LifecycleControl, RevisionHub, ServerSession, ServerSessionError, ServerWriteDisposition,
-    protocol::v1::{BuildMetadata, Id32},
+    LifecycleControl, OutboundMessage, RevisionHub, ServerSession, ServerSessionError,
+    ServerWriteDisposition,
+    protocol::v1::{BuildMetadata, Id32, Request, WireMessage},
 };
 use tokio::{sync::mpsc, task::JoinSet};
 
@@ -13,6 +14,12 @@ use crate::{
     AcceptedLocalStream, LocalSessionClose, LocalSessionEvent, LocalSessionHandle,
     LocalSessionSendError, LocalSessionStartError, prepare_local_session_io,
 };
+
+type RequestTaskOutput = (
+    Id32,
+    Option<(ServerSession, Result<OutboundMessage, ServerSessionError>)>,
+);
+type RequestTaskJoin = Result<(tokio::task::Id, RequestTaskOutput), tokio::task::JoinError>;
 
 type SessionTaskOutput = (Id32, LocalSessionClose);
 type SessionTaskJoin = Result<(tokio::task::Id, SessionTaskOutput), tokio::task::JoinError>;
@@ -122,6 +129,16 @@ pub enum LocalSessionDisconnectCause {
 /// One bounded unit of progress made by the central session dispatcher.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalSessionDispatch {
+    /// A request was admitted to independent execution for this session.
+    RequestDispatched {
+        /// Connection exclusively owned by the admitted request.
+        session_id: Id32,
+    },
+    /// Session capability cleanup completed on its owned worker.
+    SessionCleanupJoined {
+        /// Connection whose responder and subscription capabilities were released.
+        session_id: Id32,
+    },
     /// A decoded request was handled and its exact response was queued.
     MessageHandled {
         /// Connection that owned the decoded message.
@@ -160,14 +177,13 @@ pub enum LocalSessionDispatch {
 
 #[derive(Debug)]
 struct SessionSlot {
-    session: ServerSession,
+    session: Option<ServerSession>,
     io: LocalSessionHandle,
     closing: bool,
     pending_response: bool,
 }
 
 /// Sole bounded owner of active local server sessions and their I/O tasks.
-#[derive(Debug)]
 pub struct LocalSessionRegistry {
     config: LocalSessionRegistryConfig,
     hub: RevisionHub,
@@ -179,9 +195,29 @@ pub struct LocalSessionRegistry {
     task_sessions: BTreeMap<tokio::task::Id, Id32>,
     accepting: bool,
     accepting_requests: bool,
+    executor: Option<Arc<dyn crate::LocalRequestExecutor>>,
+    requests: JoinSet<RequestTaskOutput>,
+    request_sessions: BTreeMap<tokio::task::Id, Id32>,
+}
+
+impl fmt::Debug for LocalSessionRegistry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalSessionRegistry")
+            .field("sessions", &self.sessions.len())
+            .field("requests", &self.requests.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl LocalSessionRegistry {
+    /// Installs owned capabilities for independent request execution.
+    #[must_use]
+    pub fn with_request_executor(mut self, executor: Arc<dyn crate::LocalRequestExecutor>) -> Self {
+        self.executor = Some(executor);
+        self
+    }
+
     /// Constructs an empty registry with fixed capacities.
     pub fn new(config: LocalSessionRegistryConfig, hub: RevisionHub, build: BuildMetadata) -> Self {
         let (event_tx, events) = mpsc::channel(config.event_capacity.get());
@@ -196,6 +232,9 @@ impl LocalSessionRegistry {
             task_sessions: BTreeMap::new(),
             accepting: true,
             accepting_requests: true,
+            executor: None,
+            requests: JoinSet::new(),
+            request_sessions: BTreeMap::new(),
         }
     }
 
@@ -208,10 +247,17 @@ impl LocalSessionRegistry {
         if !self.accepting {
             return Err(LocalSessionAdmissionError::Closed);
         }
-        if self.sessions.contains_key(&session_id) {
+        if self.sessions.contains_key(&session_id)
+            || self.request_sessions.values().any(|id| *id == session_id)
+        {
             return Err(LocalSessionAdmissionError::Duplicate);
         }
-        if self.sessions.len() >= self.config.session_capacity.get() {
+        let orphaned_requests = self
+            .request_sessions
+            .values()
+            .filter(|id| !self.sessions.contains_key(id))
+            .count();
+        if self.sessions.len() + orphaned_requests >= self.config.session_capacity.get() {
             return Err(LocalSessionAdmissionError::Full);
         }
 
@@ -226,7 +272,7 @@ impl LocalSessionRegistry {
         self.sessions.insert(
             session_id,
             SessionSlot {
-                session,
+                session: Some(session),
                 io,
                 closing: false,
                 pending_response: false,
@@ -252,7 +298,7 @@ impl LocalSessionRegistry {
         P: ApplicationPorts,
         L: LifecycleControl,
     {
-        if self.tasks.is_empty() {
+        if self.tasks.is_empty() && self.requests.is_empty() {
             return None;
         }
         tokio::select! {
@@ -260,7 +306,8 @@ impl LocalSessionRegistry {
             event = self.events.recv() => {
                 event.map(|event| self.dispatch_event(event, application, lifecycle))
             }
-            joined = self.tasks.join_next_with_id() => self.dispatch_join(joined),
+            joined = self.requests.join_next_with_id(), if !self.requests.is_empty() => self.dispatch_request_join(joined),
+            joined = self.tasks.join_next_with_id(), if !self.tasks.is_empty() => self.dispatch_join(joined),
         }
     }
 
@@ -284,6 +331,7 @@ impl LocalSessionRegistry {
                     return None;
                 }
                 slot.session
+                    .as_mut()?
                     .poll_invalidation()
                     .map(|message| slot.io.try_send_invalidation(&message))
             });
@@ -314,9 +362,9 @@ impl LocalSessionRegistry {
         self.sessions.is_empty()
     }
 
-    /// Returns the number of session I/O tasks awaiting a join.
+    /// Returns the number of session I/O and request tasks awaiting a join.
     pub fn task_count(&self) -> usize {
-        self.tasks.len()
+        self.tasks.len() + self.requests.len()
     }
 
     /// Returns responses accepted by session writers but not yet confirmed written.
@@ -370,6 +418,15 @@ impl LocalSessionRegistry {
                 }
             }
         }
+        // Blocking request tasks cannot be detached: they retain application capabilities.
+        while let Some(joined) = self.requests.join_next_with_id().await {
+            joined_tasks += 1;
+            if let Some(LocalSessionDispatch::TaskFailed { failure }) =
+                self.dispatch_request_join(Some(joined))
+            {
+                task_failures.push(failure);
+            }
+        }
         self.sessions.clear();
 
         LocalSessionShutdownReport {
@@ -377,7 +434,70 @@ impl LocalSessionRegistry {
             joined_tasks,
             task_failures,
             retained_sessions: self.sessions.len(),
-            retained_tasks: self.tasks.len(),
+            retained_tasks: self.tasks.len() + self.requests.len(),
+        }
+    }
+
+    fn dispatch_message<P: ApplicationPorts, L: LifecycleControl>(
+        &mut self,
+        session_id: Id32,
+        message: WireMessage,
+        application: &Application<P>,
+        lifecycle: &L,
+    ) -> LocalSessionDispatch {
+        let Some(slot) = self.sessions.get_mut(&session_id) else {
+            return LocalSessionDispatch::StaleEvent { session_id };
+        };
+        if slot.closing {
+            return LocalSessionDispatch::StaleEvent { session_id };
+        }
+        if !self.accepting_requests {
+            self.begin_close(session_id);
+            return LocalSessionDispatch::SessionClosing {
+                session_id,
+                cause: LocalSessionDisconnectCause::RequestIntakeClosed,
+            };
+        }
+        if slot.session.is_none() {
+            self.begin_close(session_id);
+            return LocalSessionDispatch::SessionClosing {
+                session_id,
+                cause: LocalSessionDisconnectCause::Protocol(ServerSessionError::WritePending),
+            };
+        }
+        if independently_executable(&message)
+            && let Some(executor) = self.executor.as_ref()
+            && let Some(mut session) = slot.session.take()
+        {
+            let executor = Arc::clone(executor);
+            slot.pending_response = true;
+            let task = self.requests.spawn_blocking(move || {
+                let result = executor.execute(&mut session, message);
+                (session_id, Some((session, result)))
+            });
+            self.request_sessions.insert(task.id(), session_id);
+            return LocalSessionDispatch::RequestDispatched { session_id };
+        }
+        let routed = slot
+            .session
+            .as_mut()
+            .ok_or(ServerSessionError::Disconnected)
+            .and_then(|session| session.receive(message, application, lifecycle))
+            .map_err(LocalSessionDisconnectCause::Protocol)
+            .and_then(|outbound| {
+                slot.io
+                    .try_send_response(outbound)
+                    .map_err(LocalSessionDisconnectCause::Response)
+            });
+        match routed {
+            Ok(()) => {
+                slot.pending_response = true;
+                LocalSessionDispatch::MessageHandled { session_id }
+            }
+            Err(cause) => {
+                self.begin_close(session_id);
+                LocalSessionDispatch::SessionClosing { session_id, cause }
+            }
         }
     }
 
@@ -395,40 +515,7 @@ impl LocalSessionRegistry {
             LocalSessionEvent::Message {
                 session_id,
                 message,
-            } => {
-                let Some(slot) = self.sessions.get_mut(&session_id) else {
-                    return LocalSessionDispatch::StaleEvent { session_id };
-                };
-                if slot.closing {
-                    return LocalSessionDispatch::StaleEvent { session_id };
-                }
-                if !self.accepting_requests {
-                    self.begin_close(session_id);
-                    return LocalSessionDispatch::SessionClosing {
-                        session_id,
-                        cause: LocalSessionDisconnectCause::RequestIntakeClosed,
-                    };
-                }
-                let routed = slot
-                    .session
-                    .receive(*message, application, lifecycle)
-                    .map_err(LocalSessionDisconnectCause::Protocol)
-                    .and_then(|outbound| {
-                        slot.io
-                            .try_send_response(outbound)
-                            .map_err(LocalSessionDisconnectCause::Response)
-                    });
-                match routed {
-                    Ok(()) => {
-                        slot.pending_response = true;
-                        LocalSessionDispatch::MessageHandled { session_id }
-                    }
-                    Err(cause) => {
-                        self.begin_close(session_id);
-                        LocalSessionDispatch::SessionClosing { session_id, cause }
-                    }
-                }
-            }
+            } => self.dispatch_message(session_id, *message, application, lifecycle),
             LocalSessionEvent::Written { session_id, ticket } => {
                 let Some(slot) = self.sessions.get_mut(&session_id) else {
                     return LocalSessionDispatch::StaleEvent { session_id };
@@ -436,7 +523,12 @@ impl LocalSessionRegistry {
                 if slot.closing {
                     return LocalSessionDispatch::StaleEvent { session_id };
                 }
-                match slot.session.confirm_written(ticket) {
+                match slot
+                    .session
+                    .as_mut()
+                    .ok_or(ServerSessionError::WritePending)
+                    .and_then(|session| session.confirm_written(ticket))
+                {
                     Ok(ServerWriteDisposition::Continue) => {
                         slot.pending_response = false;
                         LocalSessionDispatch::WriteConfirmed { session_id }
@@ -468,6 +560,60 @@ impl LocalSessionRegistry {
         }
     }
 
+    fn dispatch_request_join(
+        &mut self,
+        joined: Option<RequestTaskJoin>,
+    ) -> Option<LocalSessionDispatch> {
+        match joined? {
+            Ok((task_id, (session_id, completion))) => {
+                self.request_sessions.remove(&task_id);
+                let Some((session, result)) = completion else {
+                    return Some(LocalSessionDispatch::SessionCleanupJoined { session_id });
+                };
+                if self
+                    .sessions
+                    .get(&session_id)
+                    .is_none_or(|slot| slot.closing)
+                {
+                    self.disconnect_session(session_id, session);
+                    return Some(LocalSessionDispatch::StaleEvent { session_id });
+                }
+                let slot = self.sessions.get_mut(&session_id)?;
+                slot.session = Some(session);
+                let routed = result
+                    .map_err(LocalSessionDisconnectCause::Protocol)
+                    .and_then(|outbound| {
+                        slot.io
+                            .try_send_response(outbound)
+                            .map_err(LocalSessionDisconnectCause::Response)
+                    });
+                Some(match routed {
+                    Ok(()) => LocalSessionDispatch::MessageHandled { session_id },
+                    Err(cause) => {
+                        self.begin_close(session_id);
+                        LocalSessionDispatch::SessionClosing { session_id, cause }
+                    }
+                })
+            }
+            Err(error) => {
+                let session_id = self.request_sessions.remove(&error.id());
+                if let Some(session_id) = session_id {
+                    self.begin_close(session_id);
+                }
+                Some(LocalSessionDispatch::TaskFailed {
+                    failure: LocalSessionTaskFailure {
+                        session_id,
+                        kind: if error.is_cancelled() {
+                            LocalSessionTaskFailureKind::Cancelled
+                        } else {
+                            LocalSessionTaskFailureKind::Panicked
+                        },
+                    },
+                })
+            }
+        }
+    }
+
     fn dispatch_join(&mut self, joined: Option<SessionTaskJoin>) -> Option<LocalSessionDispatch> {
         match joined? {
             Ok((task_id, (session_id, cause))) => {
@@ -492,19 +638,42 @@ impl LocalSessionRegistry {
         }
     }
 
+    fn disconnect_session(&mut self, session_id: Id32, mut session: ServerSession) {
+        if let Some(executor) = &self.executor {
+            let executor = Arc::clone(executor);
+            let task = self.requests.spawn_blocking(move || {
+                executor.disconnect(&mut session);
+                (session_id, None)
+            });
+            self.request_sessions.insert(task.id(), session_id);
+        } else {
+            session.disconnect();
+        }
+    }
+
     fn begin_close(&mut self, session_id: Id32) {
-        if let Some(slot) = self.sessions.get_mut(&session_id) {
+        let session = self.sessions.get_mut(&session_id).and_then(|slot| {
             slot.closing = true;
             slot.pending_response = false;
-            slot.session.disconnect();
             slot.io.close();
+            slot.session.take()
+        });
+        if let Some(session) = session {
+            self.disconnect_session(session_id, session);
         }
     }
 
     fn remove_session(&mut self, session_id: Id32) {
         if let Some(mut slot) = self.sessions.remove(&session_id) {
-            slot.session.disconnect();
             slot.io.close();
+            if let Some(session) = slot.session.take() {
+                self.disconnect_session(session_id, session);
+            }
         }
     }
+}
+
+fn independently_executable(message: &WireMessage) -> bool {
+    matches!(message, WireMessage::Request(envelope) if !matches!(envelope.request,
+        Request::Lifecycle(_) | Request::InstallationConfiguration | Request::UpdateInstallationConfiguration(_)))
 }

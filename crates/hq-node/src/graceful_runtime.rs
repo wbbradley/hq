@@ -44,6 +44,8 @@ pub struct LocalNodeRuntimeConfig {
 pub enum LocalNodeRuntimeStartError {
     /// Accepted response drain must have a finite positive duration.
     InvalidResponseDrainTimeout,
+    /// Owned request capabilities were absent after startup.
+    ApplicationUnavailable,
     /// Runtime artifact binding, readiness publication, or listener transfer failed.
     Pump(LocalSessionPumpOpenError),
 }
@@ -105,13 +107,18 @@ where
 impl<L, R, H, P> LocalNodeRuntime<L, R, H, P>
 where
     L: NodeComponent,
-    R: NodeComponent + PublishWake + ConfigureRelays,
+    R: NodeComponent + PublishWake + ConfigureRelays + Clone + Send + Sync + 'static,
     H: NodeComponent
+        + Clone
+        + Send
+        + Sync
+        + 'static
         + ControlHarness
         + hq_application::QueryProviders
         + QueryInteractions
         + ControlInteractions,
     P: NodeComponent
+        + crate::ShareProjectApplication
         + InspectResource
         + ControlProjects
         + RetireAgents
@@ -130,6 +137,12 @@ where
         let (pump, readiness) = owner
             .open_local_session_pump(config.pump, config.build.clone())
             .map_err(LocalNodeRuntimeStartError::Pump)?;
+        let ports = owner
+            .owned_application_ports(config.authority_policy)
+            .ok_or(LocalNodeRuntimeStartError::ApplicationUnavailable)?;
+        let pump = pump.with_request_executor(std::sync::Arc::new(
+            crate::ApplicationRequestExecutor::new(Application::new(ports)),
+        ));
         let generation = readiness.boot_nonce;
         Ok((
             Self {

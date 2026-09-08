@@ -1190,6 +1190,40 @@ impl LocalNodeClient {
             .map_err(LocalNodeClientError::Execution)
     }
 
+    /// Queries exact current cancellation capability and canonical turn status.
+    pub fn agent_operation(
+        &mut self,
+        query: hq_local_api::protocol::v1::AgentOperationQueryDto,
+    ) -> Result<ClientEvent, LocalNodeClientError> {
+        self.runner
+            .request(hq_local_api::protocol::v1::Request::AgentOperation(query))
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Admits cancellation; retain the exact request when delivery is uncertain.
+    pub fn cancel_agent_operation(
+        &mut self,
+        request: hq_local_api::protocol::v1::AgentCancellationRequestDto,
+    ) -> Result<ClientEvent, LocalNodeClientError> {
+        self.runner
+            .request(hq_local_api::protocol::v1::Request::CancelAgentOperation(
+                Box::new(request),
+            ))
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Observes a prior cancellation without submitting the request again.
+    pub fn agent_cancellation_state(
+        &mut self,
+        request: hq_local_api::protocol::v1::AgentCancellationRequestDto,
+    ) -> Result<ClientEvent, LocalNodeClientError> {
+        self.runner
+            .request(hq_local_api::protocol::v1::Request::AgentCancellationState(
+                Box::new(request),
+            ))
+            .map_err(LocalNodeClientError::Execution)
+    }
+
     /// Reads passive current recovery evidence for the exact displayed project.
     pub fn project_recovery(
         &mut self,

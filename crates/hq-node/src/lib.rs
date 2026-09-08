@@ -35,6 +35,7 @@ mod project_resource;
 mod project_store;
 mod relay_component;
 mod relay_store;
+mod request_executor;
 mod runtime;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod session_io;
@@ -42,6 +43,7 @@ mod session_io;
 mod session_pump;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod session_registry;
+pub use request_executor::{ApplicationRequestExecutor, LocalRequestExecutor};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod tui_client;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -123,9 +125,10 @@ pub use node_coordinator::{
     ProcessNodeLauncher,
 };
 pub use project_component::{
-    ProjectMessageReconciliation, ProjectNodeComponent, ProjectNodeConfig,
-    ReconcileProjectMessages, ScheduleProjectReconciliation, StandardProjectNodeComponent,
-    StandardProjectWorker, WakingApplicationStore, compose_standard_project_component,
+    ProjectApplicationHandle, ProjectMessageReconciliation, ProjectNodeComponent,
+    ProjectNodeConfig, ReconcileProjectMessages, ScheduleProjectReconciliation,
+    ShareProjectApplication, StandardProjectNodeComponent, StandardProjectWorker,
+    WakingApplicationStore, compose_standard_project_component,
 };
 pub use project_resource::ProjectResourceAdapter;
 pub use project_store::ProjectSagaStoreAdapter;

@@ -143,6 +143,16 @@ pub struct LocalSessionPump {
 }
 
 impl LocalSessionPump {
+    /// Installs independently executable owned application capabilities before serving requests.
+    #[must_use]
+    pub fn with_request_executor(
+        mut self,
+        executor: std::sync::Arc<dyn crate::LocalRequestExecutor>,
+    ) -> Self {
+        self.sessions = self.sessions.with_request_executor(executor);
+        self
+    }
+
     /// Transfers one already-bound foundation listener into the active Tokio reactor.
     pub fn start(
         foundation: &mut NodeFoundation,

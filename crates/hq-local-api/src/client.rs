@@ -1385,6 +1385,8 @@ impl ReconnectingClient {
                 ResponseResult::Lifecycle(_)
                 | ResponseResult::ProjectRecoveryRetry(_)
                 | ResponseResult::ProjectRecovery(_)
+                | ResponseResult::AgentOperation(_)
+                | ResponseResult::AgentCancellationState(_)
                 | ResponseResult::ProviderCatalog(_)
                 | ResponseResult::InstallationConfiguration(_)
                 | ResponseResult::ConversationPage(_)

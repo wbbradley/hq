@@ -2937,21 +2937,49 @@ fn assert_approval_boundary_trace(path: &Path, private_message: &str) {
         .as_str()
         .expect("dialog request identity")
         .to_owned();
-    let expected = [
-        "project_woken",
-        "project_dispatched",
-        "codex_submitted",
-        "provider_event_received",
-        "interaction_published",
-        "local_invalidation_published",
-        "local_invalidation_written",
-        "tui_observation_received",
-        "tui_model_updated",
-        "tui_dialog_drawn",
-    ];
+    assert_ordered_boundary_chain(
+        &records,
+        &request_id,
+        &trace,
+        &[
+            "project_woken",
+            "project_dispatched",
+            "codex_submitted",
+            "provider_interaction_received",
+            "tui_observation_received",
+            "tui_model_updated",
+            "tui_dialog_drawn",
+        ],
+        3,
+    );
+    // Invalidation is a reread hint: an independent query may observe the request first.
+    // Still verify that publication reaches the client and model within the same budget.
+    assert_ordered_boundary_chain(
+        &records,
+        &request_id,
+        &trace,
+        &[
+            "provider_event_received",
+            "interaction_published",
+            "local_invalidation_published",
+            "local_invalidation_written",
+            "tui_observation_received",
+            "tui_model_updated",
+        ],
+        0,
+    );
+}
+
+fn assert_ordered_boundary_chain(
+    records: &[serde_json::Value],
+    request_id: &str,
+    trace: &str,
+    expected: &[&str],
+    budget_start: usize,
+) {
     let mut selected = Vec::new();
     let mut cursor = 0;
-    for kind in expected {
+    for &kind in expected {
         let relative = records[cursor..]
             .iter()
             .position(|record| {
@@ -2961,6 +2989,7 @@ fn assert_approval_boundary_trace(path: &Path, private_message: &str) {
                 !matches!(
                     kind,
                     "provider_event_received"
+                        | "provider_interaction_received"
                         | "interaction_published"
                         | "tui_observation_received"
                         | "tui_model_updated"
@@ -2976,7 +3005,7 @@ fn assert_approval_boundary_trace(path: &Path, private_message: &str) {
         );
         cursor += 1;
     }
-    for pair in selected[3..].windows(2) {
+    for pair in selected[budget_start..].windows(2) {
         assert!(
             pair[1].saturating_sub(pair[0]) <= 500_000_000,
             "HQ notification segment exceeded 500 ms: {selected:?}"

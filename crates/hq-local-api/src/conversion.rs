@@ -1,5 +1,9 @@
 //! Exhaustive local API v1 conversion boundary.
 
+#[path = "agent_operation_conversion.rs"]
+mod agent_operations;
+pub use agent_operations::*;
+
 use crate::protocol::v1::{
     AgentRetirementOutcomeDto, AgentRetirementRequestDto, AgentSelectionCandidateDto,
     AgentSessionBindingDto, AgentSessionNameCandidateDto, AgentSessionRequestDto,

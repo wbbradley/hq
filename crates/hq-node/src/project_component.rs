@@ -217,9 +217,9 @@ pub struct ProjectNodeComponent<W, F, I> {
     config: ProjectNodeConfig,
     worker: Arc<Mutex<W>>,
     recovery_reader: Option<Arc<dyn hq_application::QueryProjectRecovery + Send + Sync>>,
-    resources: F,
+    resources: Arc<F>,
     inputs: Arc<Mutex<I>>,
-    accepting: AtomicBool,
+    accepting: Arc<AtomicBool>,
     reconciliation: watch::Sender<ProjectReconciliationSignal>,
     reconciliation_observer: Option<watch::Receiver<ProjectReconciliationSignal>>,
     store_invalidations: Option<RevisionInvalidations>,
@@ -227,6 +227,55 @@ pub struct ProjectNodeComponent<W, F, I> {
     runtime_stop_receiver: Option<mpsc::Receiver<hq_application::ProjectRuntimeStopped>>,
     reconciliation_task: Option<JoinHandle<Result<(), ComponentError>>>,
     trace: BoundaryTrace,
+}
+
+/// Shared project application capabilities without ownership of lifecycle tasks.
+pub struct ProjectApplicationHandle<W, F> {
+    worker: Arc<Mutex<W>>,
+    resources: Arc<F>,
+    accepting: Arc<AtomicBool>,
+    reconciliation: watch::Sender<ProjectReconciliationSignal>,
+    recovery_reader: Option<Arc<dyn hq_application::QueryProjectRecovery + Send + Sync>>,
+    trace: BoundaryTrace,
+}
+
+/// Produces owned project capabilities for independently dispatched application work.
+pub trait ShareProjectApplication {
+    /// Application capabilities retaining shared state but no lifecycle task ownership.
+    type Handle: ControlProjects
+        + InspectResource
+        + RetireAgents
+        + hq_application::RetryProjectRuntime
+        + hq_application::QueryProjectRecovery
+        + ScheduleProjectReconciliation
+        + Send
+        + Sync
+        + 'static;
+    /// Creates a handle whose lifetime is bounded by the request executor.
+    fn share_project_application(&self) -> Self::Handle;
+}
+
+impl<W, F> ProjectApplicationHandle<W, F> {
+    fn ensure_accepting(&self) -> Result<(), ApplicationError> {
+        if self.accepting.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(ApplicationError::new(
+                ApplicationErrorCode::AdapterUnavailable,
+            ))
+        }
+    }
+}
+
+impl<W, F, I> ShareProjectApplication for ProjectNodeComponent<W, F, I>
+where
+    W: ProjectWorkerPort + RetireAgents + Send + 'static,
+    F: InspectResource + Send + Sync + 'static,
+{
+    type Handle = ProjectApplicationHandle<W, F>;
+    fn share_project_application(&self) -> Self::Handle {
+        self.application_handle()
+    }
 }
 
 struct ProjectStopObserver(mpsc::Sender<hq_application::ProjectRuntimeStopped>);
@@ -246,6 +295,18 @@ struct ProjectReconciliationSignal {
 }
 
 impl<W, F, I> ProjectNodeComponent<W, F, I> {
+    /// Shares command/query capabilities without copying component lifecycle ownership.
+    pub fn application_handle(&self) -> ProjectApplicationHandle<W, F> {
+        ProjectApplicationHandle {
+            worker: Arc::clone(&self.worker),
+            resources: Arc::clone(&self.resources),
+            accepting: Arc::clone(&self.accepting),
+            reconciliation: self.reconciliation.clone(),
+            recovery_reader: self.recovery_reader.clone(),
+            trace: self.trace.clone(),
+        }
+    }
+
     /// Owns one complete project worker and its local inspection capability.
     pub fn new(config: ProjectNodeConfig, worker: W, resources: F, inputs: I) -> Self {
         Self::new_inner(config, worker, resources, inputs, None)
@@ -281,9 +342,9 @@ impl<W, F, I> ProjectNodeComponent<W, F, I> {
             config,
             worker: Arc::new(Mutex::new(worker)),
             recovery_reader: None,
-            resources,
+            resources: Arc::new(resources),
             inputs: Arc::new(Mutex::new(inputs)),
-            accepting: AtomicBool::new(false),
+            accepting: Arc::new(AtomicBool::new(false)),
             reconciliation,
             reconciliation_observer: Some(reconciliation_observer),
             store_invalidations,
@@ -606,9 +667,7 @@ where
     }
 }
 
-impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs + PlanAutomaticProjectCommands>
-    ControlProjects for ProjectNodeComponent<W, F, I>
-{
+impl<W: ProjectWorkerPort, F> ControlProjects for ProjectApplicationHandle<W, F> {
     fn control_project(
         &self,
         request: ProjectCommandRequest,
@@ -620,8 +679,8 @@ impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs + PlanAutomaticProjectCo
     }
 }
 
-impl<W: ProjectWorkerPort, F, I> hq_application::RetryProjectRuntime
-    for ProjectNodeComponent<W, F, I>
+impl<W: ProjectWorkerPort, F> hq_application::RetryProjectRuntime
+    for ProjectApplicationHandle<W, F>
 {
     fn retry_project_runtime(
         &self,
@@ -640,7 +699,7 @@ impl<W: ProjectWorkerPort, F, I> hq_application::RetryProjectRuntime
     }
 }
 
-impl<W: ProjectWorkerPort + RetireAgents, F, I> RetireAgents for ProjectNodeComponent<W, F, I> {
+impl<W: ProjectWorkerPort + RetireAgents, F> RetireAgents for ProjectApplicationHandle<W, F> {
     fn retire_agent(
         &self,
         request: AgentRetirementRequest,
@@ -650,7 +709,7 @@ impl<W: ProjectWorkerPort + RetireAgents, F, I> RetireAgents for ProjectNodeComp
     }
 }
 
-impl<W, F: InspectResource, I> InspectResource for ProjectNodeComponent<W, F, I> {
+impl<W, F: InspectResource> InspectResource for ProjectApplicationHandle<W, F> {
     fn inspect_resource(
         &self,
         request: &EffectRequest<ResourceInspectionRequest>,
@@ -682,7 +741,7 @@ impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs + PlanAutomaticProjectCo
     }
 }
 
-impl<W, F, I> ScheduleProjectReconciliation for ProjectNodeComponent<W, F, I> {
+impl<W, F> ScheduleProjectReconciliation for ProjectApplicationHandle<W, F> {
     fn schedule_project_reconciliation(&self) {
         if !self.accepting.load(Ordering::Acquire) {
             return;
@@ -697,7 +756,7 @@ impl<W, F, I> ScheduleProjectReconciliation for ProjectNodeComponent<W, F, I> {
     }
 }
 
-impl<W, F, I> hq_application::QueryProjectRecovery for ProjectNodeComponent<W, F, I> {
+impl<W, F> hq_application::QueryProjectRecovery for ProjectApplicationHandle<W, F> {
     fn query_project_recovery(
         &self,
         request: hq_application::ProjectRecoveryQuery,
@@ -707,6 +766,54 @@ impl<W, F, I> hq_application::QueryProjectRecovery for ProjectNodeComponent<W, F
             .as_ref()
             .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?
             .query_project_recovery(request)
+    }
+}
+
+impl<W: ProjectWorkerPort, F, I> ControlProjects for ProjectNodeComponent<W, F, I> {
+    fn control_project(
+        &self,
+        request: ProjectCommandRequest,
+    ) -> Result<ProjectCommandOutcome, ApplicationError> {
+        self.application_handle().control_project(request)
+    }
+}
+impl<W: ProjectWorkerPort, F, I> hq_application::RetryProjectRuntime
+    for ProjectNodeComponent<W, F, I>
+{
+    fn retry_project_runtime(
+        &self,
+        request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, ApplicationError> {
+        self.application_handle().retry_project_runtime(request)
+    }
+}
+impl<W: ProjectWorkerPort + RetireAgents, F, I> RetireAgents for ProjectNodeComponent<W, F, I> {
+    fn retire_agent(
+        &self,
+        request: AgentRetirementRequest,
+    ) -> Result<AgentRetirementOutcome, ApplicationError> {
+        self.application_handle().retire_agent(request)
+    }
+}
+impl<W, F: InspectResource, I> InspectResource for ProjectNodeComponent<W, F, I> {
+    fn inspect_resource(
+        &self,
+        request: &EffectRequest<ResourceInspectionRequest>,
+    ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
+        self.application_handle().inspect_resource(request)
+    }
+}
+impl<W, F, I> ScheduleProjectReconciliation for ProjectNodeComponent<W, F, I> {
+    fn schedule_project_reconciliation(&self) {
+        self.application_handle().schedule_project_reconciliation();
+    }
+}
+impl<W, F, I> hq_application::QueryProjectRecovery for ProjectNodeComponent<W, F, I> {
+    fn query_project_recovery(
+        &self,
+        request: hq_application::ProjectRecoveryQuery,
+    ) -> Result<hq_application::ProjectRecoveryView, ApplicationError> {
+        self.application_handle().query_project_recovery(request)
     }
 }
 
