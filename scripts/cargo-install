@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly PROGRAM_NAME="${0##*/}"
+SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIRECTORY
+DEFAULT_REPOSITORY="$(dirname -- "$SCRIPT_DIRECTORY")"
+readonly DEFAULT_REPOSITORY
+readonly REPOSITORY="${HQ_SOURCE_DIR:-$DEFAULT_REPOSITORY}"
+readonly TOOLCHAIN="${HQ_RUST_TOOLCHAIN:-1.98.0}"
+readonly INSTALL_ROOT="${HQ_INSTALL_ROOT:-${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}}"
+readonly HQ_BIN="$INSTALL_ROOT/bin/hq"
+
+usage() {
+  cat <<EOF
+Usage: $PROGRAM_NAME
+
+Build and install HQ from source using cargo install.
+
+Options:
+  -h, --help          Show this help
+
+Environment:
+  HQ_SOURCE_DIR      Source checkout (default: $DEFAULT_REPOSITORY)
+  HQ_RUST_TOOLCHAIN  Rust toolchain (default: 1.98.0)
+  HQ_INSTALL_ROOT    Cargo installation root (default: CARGO_INSTALL_ROOT,
+                     CARGO_HOME, or $HOME/.cargo)
+EOF
+}
+
+die() {
+  printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2
+  exit 1
+}
+
+if (( $# )); then
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    *) die "unexpected argument: $1" ;;
+  esac
+fi
+
+[[ -f "$REPOSITORY/crates/hq-node/Cargo.toml" ]] || die "hq-node crate not found in $REPOSITORY"
+[[ "$INSTALL_ROOT" = /* ]] || die "install root must be an absolute path: $INSTALL_ROOT"
+BUILD_COMMIT="$(git -C "$REPOSITORY" rev-parse --verify HEAD)" || \
+  die "HQ source checkout not found at $REPOSITORY"
+readonly BUILD_COMMIT
+
+printf '\n==> Installing %s\n' "$HQ_BIN"
+HQ_BUILD_COMMIT="$BUILD_COMMIT" \
+  cargo "+$TOOLCHAIN" install \
+    --force \
+    --locked \
+    --root "$INSTALL_ROOT" \
+    --path "$REPOSITORY/crates/hq-node" \
+    --bin hq
+
+[[ -x "$HQ_BIN" ]] || die "cargo did not install an executable at $HQ_BIN"

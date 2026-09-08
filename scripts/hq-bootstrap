@@ -196,16 +196,8 @@ for executable in "$HQ_BIN" "$CARGO_BIN_ROOT" "$RELEASE_BIN"; do
   rm -f -- "$executable"
 done
 
-step "Installing $HQ_BIN"
-HQ_BUILD_COMMIT="$BUILD_COMMIT" \
-  cargo "+$TOOLCHAIN" install \
-    --force \
-    --locked \
-    --root "$INSTALL_ROOT" \
-    --path "$REPOSITORY/crates/hq-node" \
-    --bin hq
-
-[[ -x "$HQ_BIN" ]] || die "cargo did not install an executable at $HQ_BIN"
+HQ_SOURCE_DIR="$REPOSITORY" HQ_RUST_TOOLCHAIN="$TOOLCHAIN" HQ_INSTALL_ROOT="$INSTALL_ROOT" \
+  "$SCRIPT_DIRECTORY/cargo-install"
 
 step "Creating a new installation identity"
 "$HQ_BIN" --state-root "$STATE_ROOT" identity init
