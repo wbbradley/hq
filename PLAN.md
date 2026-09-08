@@ -1,39 +1,3 @@
 # HQ
 
 ## Next Up
-
-### Expose runtime recovery status and schedule bounded retries
-
-**Problem.** Durable assignment eligibility and device connectivity do not describe current agent
-availability. Failed recovery depends on later wake events rather than a bounded retry policy.
-
-**Dependencies.** Exact project-session readiness before dispatch is implemented in
-`0fe3b96`; exact queued versus acceptance-unknown delivery evidence is preserved end to end in
-`f53aff7`. Exact live harness worker ownership and indexed retained-lease reads are available in
-`53e55eb`; integrate their point-in-time evidence without treating retained leases as liveness.
-Extend these behaviors across the project workflow, node event scheduling,
-application/local API types and TUI together.
-
-**Scope and invariants.**
-- Expose stopped, starting, ready, working and blocked observations correlated with exact agent,
-  assignment, provider/session and node-generation/worker-owner identities. Old readiness results
-  must not establish current liveness; device connectivity remains a separate status.
-- Integrate the existing known-queued versus acceptance-unknown outcomes with recovery status
-  and retry scheduling. Reconcile uncertain provider acceptance before retry; preserve submission
-  identity, input sequence and durable messages.
-- Coalesce recovery for an assignment/session and persist bounded transient retries with backoff
-  across restart. Trigger on pending work at startup and process loss with outstanding work. Avoid
-  recurring whole-state scans. An unexpired prior-owner lease must schedule a later attempt without
-  bypassing ownership. Preserve typed failure reasons rather than collapsing every resume error into
-  unavailable. Permanent failure/exhaustion exposes typed Retry and View details.
-- Revalidate and fence against close, reassignment, retirement and ownership changes. Idle stopped
-  assignments need not launch, and missing saved sessions never become fresh conversations silently.
-- Render actionable progress such as “Alice is restarting · Your message is saved.” Publish
-  body-free invalidations; exact runtime/recovery evidence belongs in details. Distinguish submission
-  attempts, proven acceptance and uncertainty in traces, including recovery paths.
-
-**Completion.** A full client journey assigns Alice, receives a reply, restarts HQ and sends another
-message; the same conversation resumes and delivers once with truthful status. Cover pending work
-before startup, process loss, permanent/transient resume failure, concurrent sends, close/reassignment
-races, stale queued work, retry exhaustion/restart and lost acceptance responses. Update
-`docs/projects.md` and `docs/harness-supervisor-v1.md` to describe targeted retries and observations.
