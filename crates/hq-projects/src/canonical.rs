@@ -16,7 +16,7 @@ use hq_domain::{
 };
 use hq_reducer::{
     AgentLifecycle, AgentProjection, AgentProjectionKey, AuthorityProjection,
-    AuthorityProjectionKey, ConversationProjection, ConversationProjectionKey, MembershipState,
+    AuthorityProjectionKey, ConversationProjection, ConversationProjectionKey,
     ProjectAssignmentPhase, ProjectLifecycle, ProjectOutputStatus, ProjectProjection,
     ProjectProjectionKey,
 };
@@ -1036,28 +1036,7 @@ fn active_human_authority(
     account_id: hq_domain::AccountId,
     home: InstallationId,
 ) -> Option<FactId> {
-    if let Some(AuthorityProjection::Account {
-        root_fact, creator, ..
-    }) = snapshot
-        .authority()
-        .projection(AuthorityProjectionKey::Account(account_id))
-        && creator.installation_id() == home
-    {
-        return Some(*root_fact);
-    }
-    match snapshot
-        .authority()
-        .projection(AuthorityProjectionKey::Membership {
-            account: account_id,
-            device: home,
-        }) {
-        Some(AuthorityProjection::Membership(membership))
-            if membership.state() == MembershipState::Active =>
-        {
-            membership.active_acceptances.iter().next().copied()
-        }
-        _ => None,
-    }
+    hq_application::active_human_authority(snapshot, account_id, home)
 }
 
 fn active_local_agent(snapshot: &DomainSnapshot, home: InstallationId, agent_id: AgentId) -> bool {

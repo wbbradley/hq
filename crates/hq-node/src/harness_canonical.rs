@@ -60,6 +60,16 @@ pub enum AgentSessionSelectionOutcome {
 
 /// Narrow canonical capability consumed by managed-session control.
 pub trait AgentSessionCanonicalPort: Send + Sync {
+    /// Authorizes a conversation recipient and selects exact canonical operation evidence.
+    fn operation_evidence(
+        &self,
+        _query: &hq_application::AgentOperationQuery,
+    ) -> Result<hq_application::AgentOperationCanonical, ApplicationError> {
+        Err(ApplicationError::new(
+            ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
     /// Validates active named-agent authority and resolves one absolute launch directory.
     fn prepare(
         &self,
@@ -103,6 +113,21 @@ impl<P> AgentSessionCanonicalPort for ApplicationAgentSessionCanonicalPort<P>
 where
     P: QueryDomain + CommitFacts + Send + Sync,
 {
+    fn operation_evidence(
+        &self,
+        query: &hq_application::AgentOperationQuery,
+    ) -> Result<hq_application::AgentOperationCanonical, ApplicationError> {
+        if query.home != self.home {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::AuthorityRejected,
+            ));
+        }
+        hq_application::agent_operation_evidence(
+            self.ports.authoritative_snapshot()?.domain(),
+            query,
+        )
+    }
+
     fn prepare(
         &self,
         agent_id: AgentId,

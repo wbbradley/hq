@@ -309,6 +309,27 @@ impl<R: ConfigureRelays, H, P> ConfigureRelays for NodeApplicationPorts<'_, R, H
 }
 
 impl<R, H: ControlHarness, P> ControlHarness for NodeApplicationPorts<'_, R, H, P> {
+    fn query_agent_operation(
+        &self,
+        query: hq_application::AgentOperationQuery,
+    ) -> Result<hq_application::AgentOperationView, ApplicationError> {
+        self.harness.query_agent_operation(query)
+    }
+
+    fn cancel_agent_operation(
+        &self,
+        request: hq_application::AgentCancellationRequest,
+    ) -> Result<hq_application::AgentCancellationState, ApplicationError> {
+        self.harness.cancel_agent_operation(request)
+    }
+
+    fn agent_cancellation_state(
+        &self,
+        request: hq_application::AgentCancellationRequest,
+    ) -> Result<hq_application::AgentCancellationState, ApplicationError> {
+        self.harness.agent_cancellation_state(request)
+    }
+
     fn control_harness(
         &self,
         request: &EffectRequest<AgentSessionRequest>,

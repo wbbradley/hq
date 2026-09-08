@@ -1,5 +1,6 @@
 //! Composition root and runtime ownership boundary.
 
+mod agent_cancellation_jobs;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod agent_guidance;
 mod boundary_trace;

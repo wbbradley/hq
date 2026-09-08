@@ -17,7 +17,7 @@ does not itself establish the durable acceptance evidence HQ requires.
 | Registry | `hq-harness/src/registry.rs` rejects providers lacking StableSubmissionIdempotency or SubmissionLookup. | Preserve this admission requirement for future adapters. |
 | Supervisor | `cancellable_worker` and `cancel_owned` use a separately locked handle registry, exact worker descriptors and live lease checks. | Route application cancellation through this path rather than the synchronous cancel convenience method. |
 | Codex | `hq-codex/src/adapter.rs` maps an HQ operation to threadId/turnId and sends turn/interrupt. | Preserve exact targeting and distinguish accepted interruption from observed completion. |
-| Application/node | Project runtime observation already has assignment, session, generation, owner and running-operation evidence. | Add a typed authorized control port, separate from project workflow progression and message submission. |
+| Application/node | ControlHarness exposes typed target queries, bounded cancellation admission and request observation. Canonical agent/session authority and exact generation/lease/operation are revalidated before independent dispatch. | Connect local API callers and prove installed end-to-end behavior. |
 | Local API | `hq-local-api/src/server.rs` handles requests synchronously; `hq-node/src/session_registry.rs` calls receive during dispatch. | Keep control dispatch responsive even when another command is waiting. A separate socket alone does not prove this. |
 | TUI | `hq-node/src/tui_client.rs` processes WorkerCommand values in a receive loop. | Do not enqueue interrupt behind a blocked operation on the same client worker. |
 
@@ -30,10 +30,17 @@ request-ID namespace to bounded waiters; ordinary RPC responses and notification
 still belong to the mutable session. Frame writes are serialized to prevent
 interleaving. No second reader is introduced.
 
-Application dispatch and the TUI command worker remain serialization boundaries.
-They must expose independent, bounded control admission before this feature can
-be considered end-to-end. Ordinary session methods also still use the supervisor
-workers mutex; cancellation must use cancel_owned rather than acquire that lock.
+The node now admits cancellation into a bounded job registry outside ordinary
+provider/workflow execution. Stable request identities retain outcomes; a changed
+target under the same request identity is rejected. Retries of uncertain requests
+cannot overlap their prior dispatch, and shutdown joins admitted controls before
+starting a fresh generation. Query authorization resolves current project
+assignments or selected direct agent sessions; human threads have no target.
+
+The local API and TUI command worker still need this independent admission path
+before the feature is end-to-end. Ordinary session methods also still use the
+supervisor workers mutex; cancellation must use cancel_owned rather than acquire
+that lock.
 
 Generation continues remotely after turn submission, so not every running turn
 holds a Rust lock. This explains why the existing adapter can already interrupt

@@ -1,6 +1,8 @@
 //! Application use cases and inward-facing ports.
 
 mod agent_admin;
+mod agent_operation_authority;
+mod agent_operations;
 mod authority_admin;
 mod error;
 mod harness;
@@ -26,6 +28,12 @@ pub use agent_admin::{
     plan_agent_mailbox_creation, plan_agent_name_claim, plan_agent_retirement,
     plan_agent_session_binding, plan_agent_session_context, plan_agent_session_rename,
     plan_agent_session_selection,
+};
+pub use agent_operation_authority::{active_human_authority, agent_operation_evidence};
+pub use agent_operations::{
+    AgentCancellationRequest, AgentCancellationState, AgentOperationCanonical,
+    AgentOperationProject, AgentOperationQuery, AgentOperationScope, AgentOperationStatus,
+    AgentOperationTarget, AgentOperationView,
 };
 pub use authority_admin::{
     MailboxGrantRequest, MailboxRevokeRequest, PeerRouteRequest, plan_mailbox_grant,

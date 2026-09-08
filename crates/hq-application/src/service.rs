@@ -117,6 +117,30 @@ where
         self.ports.ingest_canonical_evidence(evidence)
     }
 
+    /// Queries exact recipient-specific operation control and tracked terminal evidence.
+    pub fn query_agent_operation(
+        &self,
+        query: crate::AgentOperationQuery,
+    ) -> Result<crate::AgentOperationView, ApplicationError> {
+        self.ports.query_agent_operation(query)
+    }
+
+    /// Admits cancellation without serializing behind provider execution.
+    pub fn cancel_agent_operation(
+        &self,
+        request: crate::AgentCancellationRequest,
+    ) -> Result<crate::AgentCancellationState, ApplicationError> {
+        self.ports.cancel_agent_operation(request)
+    }
+
+    /// Observes the same admitted cancellation request without repeating its side effect.
+    pub fn agent_cancellation_state(
+        &self,
+        request: crate::AgentCancellationRequest,
+    ) -> Result<crate::AgentCancellationState, ApplicationError> {
+        self.ports.agent_cancellation_state(request)
+    }
+
     /// Reads current canonical runtime recovery evidence without executing recovery.
     pub fn query_project_recovery(
         &self,

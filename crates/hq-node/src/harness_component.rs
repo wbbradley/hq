@@ -35,6 +35,9 @@ use crate::{
     boundary_trace::{BoundaryIds, BoundaryKind, BoundaryProcess, BoundaryTrace},
 };
 
+#[path = "harness_operations.rs"]
+mod operations;
+
 /// Node lifecycle owner for the complete neutral managed-runtime supervisor.
 #[derive(Clone)]
 pub struct HarnessNodeComponent {
@@ -55,6 +58,7 @@ struct HarnessNodeInner {
     event_stop: AtomicBool,
     accepting: AtomicBool,
     interaction_answers: Mutex<BTreeMap<hq_domain::OperationId, InteractionCommandRecord>>,
+    cancellation_jobs: crate::agent_cancellation_jobs::AgentCancellationJobs,
     application_state: hq_store::ApplicationStateHandle,
     revisions: Mutex<Option<hq_local_api::RevisionHub>>,
     trace: BoundaryTrace,
@@ -132,6 +136,7 @@ impl HarnessNodeComponent {
                 event_stop: AtomicBool::new(false),
                 accepting: AtomicBool::new(false),
                 interaction_answers: Mutex::new(BTreeMap::new()),
+                cancellation_jobs: crate::agent_cancellation_jobs::AgentCancellationJobs::default(),
                 application_state: store.application_state_handle(),
                 revisions: Mutex::new(None),
                 trace: BoundaryTrace::disabled(BoundaryProcess::Node),
@@ -350,6 +355,7 @@ impl HarnessNodeComponent {
     }
 
     fn shutdown_supervisor(&self) -> Result<ComponentDrain, ComponentError> {
+        let cancellation_failed = self.inner.cancellation_jobs.shutdown().is_err();
         self.inner.event_stop.store(true, Ordering::Release);
         let event_failed = self
             .inner
@@ -380,7 +386,7 @@ impl HarnessNodeComponent {
                 })
                 .map_err(|_| ComponentError::unavailable())
         })?;
-        if event_failed || supervisor_result == ComponentDrain::Escalate {
+        if cancellation_failed || event_failed || supervisor_result == ComponentDrain::Escalate {
             Ok(ComponentDrain::Escalate)
         } else {
             Ok(ComponentDrain::Complete)
@@ -637,11 +643,16 @@ impl NodeComponent for HarnessNodeComponent {
                 .tokens
                 .next_token()
                 .map_err(|_| ComponentError::unavailable())?;
-            *self
+            let mut current_generation = self
                 .inner
                 .runtime_generation
                 .lock()
-                .map_err(|_| ComponentError::unavailable())? =
+                .map_err(|_| ComponentError::unavailable())?;
+            self.inner
+                .cancellation_jobs
+                .restart()
+                .map_err(|_| ComponentError::unavailable())?;
+            *current_generation =
                 hq_application::RuntimeGenerationId::from_bytes(*generation.as_bytes());
             *supervisor = Some(Arc::new(started));
         }
@@ -696,6 +707,30 @@ impl NodeComponent for HarnessNodeComponent {
 }
 
 impl ControlHarness for HarnessNodeComponent {
+    fn query_agent_operation(
+        &self,
+        query: hq_application::AgentOperationQuery,
+    ) -> Result<hq_application::AgentOperationView, ApplicationError> {
+        self.operation_view(&query)
+    }
+
+    fn cancel_agent_operation(
+        &self,
+        request: hq_application::AgentCancellationRequest,
+    ) -> Result<hq_application::AgentCancellationState, ApplicationError> {
+        self.enqueue_cancellation(request)
+    }
+
+    fn agent_cancellation_state(
+        &self,
+        request: hq_application::AgentCancellationRequest,
+    ) -> Result<hq_application::AgentCancellationState, ApplicationError> {
+        self.inner
+            .canonical
+            .operation_evidence(&request.target.query)?;
+        self.inner.cancellation_jobs.observe(&request)
+    }
+
     fn control_harness(
         &self,
         request: &EffectRequest<hq_application::AgentSessionRequest>,
@@ -1721,6 +1756,38 @@ mod tests {
             hq_application::ProjectRuntimeWorkerState::Stopped
         );
         component.stop_intake().expect("stop");
+        cancellation.cancel();
+        component.drain().expect("drain");
+    }
+
+    #[test]
+    fn cancellation_dispatch_reopens_with_each_component_generation() {
+        let database = TestDatabase::new();
+        let store = Store::open(&database.path, NonZeroUsize::MIN).expect("store opens");
+        let mut component = HarnessNodeComponent::without_providers(&store);
+        // Draining before the first start must not permanently close future control intake.
+        component.drain().expect("initial drain");
+        let cancellation = CancellationToken::new();
+        component.start(cancellation.clone()).expect("start");
+        let first = *component
+            .inner
+            .runtime_generation
+            .lock()
+            .expect("generation");
+        assert!(first.is_some());
+        component.stop_intake().expect("stop intake");
+        cancellation.cancel();
+        component.drain().expect("drain");
+        let cancellation = CancellationToken::new();
+        component.start(cancellation.clone()).expect("restart");
+        let second = *component
+            .inner
+            .runtime_generation
+            .lock()
+            .expect("generation");
+        assert!(second.is_some());
+        assert_ne!(first, second);
+        component.stop_intake().expect("stop intake");
         cancellation.cancel();
         component.drain().expect("drain");
     }

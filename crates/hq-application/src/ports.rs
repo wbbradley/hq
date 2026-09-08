@@ -586,6 +586,34 @@ pub enum AgentSessionResult {
 
 /// Neutral managed-runtime control capability.
 pub trait ControlHarness {
+    /// Queries recipient-specific cancellation capability without starting provider work.
+    fn query_agent_operation(
+        &self,
+        _query: crate::AgentOperationQuery,
+    ) -> Result<crate::AgentOperationView, ApplicationError> {
+        Ok(crate::AgentOperationView::default())
+    }
+
+    /// Admits one exact cancellation to independent bounded dispatch.
+    fn cancel_agent_operation(
+        &self,
+        _request: crate::AgentCancellationRequest,
+    ) -> Result<crate::AgentCancellationState, ApplicationError> {
+        Err(ApplicationError::new(
+            crate::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
+    /// Observes a previously admitted request without submitting it again.
+    fn agent_cancellation_state(
+        &self,
+        _request: crate::AgentCancellationRequest,
+    ) -> Result<crate::AgentCancellationState, ApplicationError> {
+        Err(ApplicationError::new(
+            crate::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
     /// Performs or reconciles one stable named-agent session operation.
     fn control_harness(
         &self,
