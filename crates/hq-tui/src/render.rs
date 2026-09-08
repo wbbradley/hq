@@ -4099,10 +4099,7 @@ fn render_conversation(
     frame.render_widget(block, area);
 
     if let Some(conversation) = model.conversation() {
-        let mut header = vec![Line::styled(
-            conversation.title.as_str(),
-            theme.style(UiThemeRole::Heading),
-        )];
+        let mut header = Vec::new();
         append_runtime_header(&mut header, model, theme);
         if let Some(context) = &conversation.context {
             header.push(Line::styled(
@@ -4138,7 +4135,10 @@ fn render_conversation(
                 theme.style(UiThemeRole::TextMuted),
             ));
         }
-        header.push(Line::default());
+        header.push(Line::styled(
+            "─".repeat(usize::from(inner.width)),
+            theme.style(UiThemeRole::BorderUnfocused),
+        ));
         let header_height = u16::try_from(header.len())
             .unwrap_or(u16::MAX)
             .min(inner.height.saturating_sub(1));
@@ -4548,6 +4548,7 @@ fn conversation_entry_layout(
     match &entry.presentation {
         UiConversationEntryPresentation::Message { author, body } => {
             let message = cache.messages.render(&entry.id, body, width, theme);
+            let is_self = matches!(author, UiConversationAuthor::You);
             let (author, author_role) = match author {
                 UiConversationAuthor::You => ("You", UiThemeRole::ConversationAuthorSelf),
                 UiConversationAuthor::Participant(label) => {
@@ -4588,6 +4589,9 @@ fn conversation_entry_layout(
                         theme.style(author_role),
                     ));
                 }
+            }
+            if is_self {
+                rows.push(Line::default());
             }
             if message.text().lines.is_empty() {
                 rows.push(Line::default());
@@ -5684,19 +5688,19 @@ mod tests {
         let mut cache = super::UiRenderCache::new();
         assert_eq!(
             conversation_entry_layout(&message("one\ntwo"), 20, &theme, &mut cache, true).height,
-            3
-        );
-        assert_eq!(
-            conversation_entry_layout(&message("abcdefgh"), 3, &theme, &mut cache, true).height,
-            5
-        );
-        assert_eq!(
-            conversation_entry_layout(&message("界界界"), 4, &theme, &mut cache, true).height,
             4
         );
         assert_eq!(
+            conversation_entry_layout(&message("abcdefgh"), 3, &theme, &mut cache, true).height,
+            6
+        );
+        assert_eq!(
+            conversation_entry_layout(&message("界界界"), 4, &theme, &mut cache, true).height,
+            5
+        );
+        assert_eq!(
             conversation_entry_layout(&message(""), 20, &theme, &mut cache, true).height,
-            3
+            4
         );
     }
 
@@ -6067,9 +6071,9 @@ mod tests {
             assert_eq!(
                 heights,
                 if multiple {
-                    vec![2, 2, 2, 3, 2, 3, 2]
+                    vec![3, 2, 3, 3, 2, 3, 3]
                 } else {
-                    vec![2; 7]
+                    vec![3, 2, 3, 2, 2, 2, 3]
                 }
             );
         }
@@ -6130,11 +6134,11 @@ mod tests {
                 entries: vec![
                     crate::UiConversationEntryGeometry {
                         entry_id: "first".to_owned(),
-                        height: 2,
+                        height: 3,
                     },
                     crate::UiConversationEntryGeometry {
                         entry_id: "second".to_owned(),
-                        height: 2,
+                        height: 3,
                     },
                 ],
             })
@@ -6172,6 +6176,11 @@ message body long enough to wrap",
             }
             let mut cache = super::UiRenderCache::new();
             let layout = conversation_entry_layout(&entry, 16, &theme, &mut cache, false);
+            assert_eq!(
+                layout.rows[0].width() == 0,
+                own,
+                "only your messages have a leading blank row"
+            );
             for first_row in [0, 1] {
                 let mut terminal = Terminal::new(TestBackend::new(16, 2)).expect("terminal");
                 terminal
