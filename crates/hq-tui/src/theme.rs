@@ -2,7 +2,7 @@
 
 use ratatui::style::{Color, Style};
 
-const ROLE_COUNT: usize = 43;
+const ROLE_COUNT: usize = 44;
 
 /// Every independently configurable visual role in the HQ terminal interface.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -26,6 +26,8 @@ pub enum UiThemeRole {
     Accent,
     /// Sender heading for locally authored conversation messages.
     ConversationAuthorSelf,
+    /// Subtle full-width surface for historical messages authored by the local user.
+    ConversationMessageSelf,
     /// Named or fallback counterparty author label in a conversation.
     ConversationAuthorParticipant,
     /// Project name retained as neutral conversation composition context.
@@ -108,6 +110,7 @@ impl UiThemeRole {
         Self::PaneTitleUnfocused,
         Self::Accent,
         Self::ConversationAuthorSelf,
+        Self::ConversationMessageSelf,
         Self::ConversationAuthorParticipant,
         Self::ConversationProjectContext,
         Self::ConversationActivity,
@@ -156,6 +159,7 @@ impl UiThemeRole {
             Self::PaneTitleUnfocused => "ui.pane.title.unfocused",
             Self::Accent => "ui.accent",
             Self::ConversationAuthorSelf => "conversation.author.self",
+            Self::ConversationMessageSelf => "conversation.message.self",
             Self::ConversationAuthorParticipant => "conversation.author.participant",
             Self::ConversationProjectContext => "conversation.project.context",
             Self::ConversationActivity => "conversation.activity",
@@ -271,6 +275,11 @@ impl UiTheme {
             &mut styles,
             UiThemeRole::ConversationAuthorSelf,
             Style::new().fg(Color::Cyan).bold(),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::ConversationMessageSelf,
+            Style::new().bg(Color::Indexed(236)),
         );
         set(
             &mut styles,
@@ -594,6 +603,10 @@ impl UiTheme {
                 Style::new().fg(accent).bold(),
             )
             .with_style(
+                UiThemeRole::ConversationMessageSelf,
+                Style::new().bg(surface),
+            )
+            .with_style(
                 UiThemeRole::ConversationAuthorParticipant,
                 Style::new().fg(participant).bold(),
             )
@@ -761,6 +774,10 @@ mod tests {
         assert_eq!(theme.author(), Some("Theme Author"));
         assert_eq!(theme.style(UiThemeRole::Screen).bg, Some(Color::Indexed(0)));
         assert_eq!(theme.style(UiThemeRole::Text).fg, Some(Color::Indexed(5)));
+        assert_eq!(
+            theme.style(UiThemeRole::ConversationMessageSelf).bg,
+            Some(Color::Indexed(1))
+        );
         let technical = theme.style(UiThemeRole::TextTechnical);
         assert_eq!(technical.fg, Some(Color::Indexed(4)));
         assert!(!technical.add_modifier.contains(Modifier::DIM));

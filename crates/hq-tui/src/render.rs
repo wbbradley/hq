@@ -5041,7 +5041,18 @@ fn render_conversation_entry(
                 },
             )
         });
-    if let Some(surface) = selection {
+    let message_surface = matches!(
+        entry.presentation,
+        UiConversationEntryPresentation::Message {
+            author: UiConversationAuthor::You,
+            ..
+        }
+    )
+    .then(|| theme.style(UiThemeRole::ConversationMessageSelf));
+    if let Some(surface) = message_surface
+        .map(|style| style.patch(selection.unwrap_or_default()))
+        .or(selection)
+    {
         frame.render_widget(Block::new().style(surface), area);
     }
     let lines = layout
@@ -6128,6 +6139,66 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn historical_self_messages_keep_their_surface_when_scrolled() {
+        let normal_background = ratatui::buffer::Cell::default().bg;
+        let theme = UiTheme::terminal();
+        let background = theme
+            .style(UiThemeRole::ConversationMessageSelf)
+            .bg
+            .unwrap_or(normal_background);
+        assert_ne!(background, normal_background);
+        let model = UiModel::new(UiSize {
+            width: 24,
+            height: 8,
+        });
+        for author in [
+            UiConversationAuthor::You,
+            UiConversationAuthor::Participant("Alice".to_owned()),
+            UiConversationAuthor::Unknown,
+        ] {
+            let own = author == UiConversationAuthor::You;
+            let mut entry = message(
+                "# Heading
+
+message body long enough to wrap",
+            );
+            if let UiConversationEntryPresentation::Message { author: actual, .. } =
+                &mut entry.presentation
+            {
+                *actual = author;
+            }
+            let mut cache = super::UiRenderCache::new();
+            let layout = conversation_entry_layout(&entry, 16, &theme, &mut cache, false);
+            for first_row in [0, 1] {
+                let mut terminal = Terminal::new(TestBackend::new(16, 2)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        render_conversation_entry(
+                            frame,
+                            &model,
+                            &entry,
+                            &layout,
+                            &theme,
+                            first_row,
+                            Rect::new(0, 0, 16, 2),
+                        );
+                    })
+                    .expect("message slice");
+                let expected = if own { background } else { normal_background };
+                assert!(
+                    terminal
+                        .backend()
+                        .buffer()
+                        .content()
+                        .iter()
+                        .all(|cell| cell.bg == expected),
+                    "body, row padding, and continuation cues retain the author's surface"
+                );
+            }
+        }
     }
 
     #[test]

@@ -106,6 +106,7 @@ Every configurable role is listed below. A resolved theme always has a style for
 | `ui.heading` | Section headings |
 | `ui.accent` | Primary interactive accent |
 | `conversation.author.self` | Your sender name and horizontal separator |
+| `conversation.message.self` | Subtle full-width background for your historical messages |
 | `conversation.author.participant` | Named or fallback participant author label |
 | `conversation.project.context` | Project name on project-bound composition surfaces |
 | `conversation.activity` | Neutral or running compact transcript activity |
@@ -189,6 +190,8 @@ may approximate them; HQ does not silently rewrite the theme. Prefer `terminal`,
 labels, borders, and selection markers so focus and state remain understandable without color.
 
 Your messages omit the sender name and use `conversation.author.self` for delivery notices.
+Their full-width background uses `conversation.message.self`, including visible slices while
+scrolling. Base16 themes use base01; the terminal theme uses ANSI 236. No-color adds no background.
 Other senders use `conversation.author.participant`. Sender headings appear only in conversations
 with multiple non-user senders and only when the sender changes; grouping uses typed mailbox
 identity, not display names. The sender count covers the entire conversation rather than the
