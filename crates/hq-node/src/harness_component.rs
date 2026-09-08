@@ -919,8 +919,23 @@ impl ControlInteractions for HarnessNodeComponent {
         &self,
         responder_id: hq_domain::OperationId,
     ) -> Result<Box<dyn InteractionResponderLease>, ApplicationError> {
+        use sha2::{Digest, Sha256};
+        HarnessResponderId::from_bytes(*responder_id.as_bytes()).map_err(map_harness_error)?;
+        // A logical registration is idempotent within its ServerSession, but independent
+        // connections (including reconnect overlap) own distinct responder leases. Closing
+        // one must never unregister a sibling that supplied the same logical identity.
+        let nonce = self
+            .inner
+            .dependencies
+            .tokens
+            .next_token()
+            .map_err(map_harness_error)?;
+        let mut digest = Sha256::new();
+        digest.update(b"hq.interaction.responder-lease.v1\0");
+        digest.update(responder_id.as_bytes());
+        digest.update(nonce.as_bytes());
         let responder_id =
-            HarnessResponderId::from_bytes(*responder_id.as_bytes()).map_err(map_harness_error)?;
+            HarnessResponderId::from_bytes(digest.finalize().into()).map_err(map_harness_error)?;
         Ok(Box::new(HarnessInteractionResponderLease {
             inner: Arc::downgrade(&self.inner),
             responder_id,
@@ -2244,6 +2259,10 @@ mod tests {
             .prepare_interaction_responder(OperationId::from_bytes([84; 32]))
             .expect("responder prepared");
         responder.activate().expect("responder activates");
+        let mut remaining = component
+            .prepare_interaction_responder(OperationId::from_bytes([84; 32]))
+            .expect("second connection prepares the same logical ID");
+        remaining.activate().expect("second connection activates");
         component
             .inner
             .supervisor
@@ -2270,6 +2289,16 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
+        drop(responder);
+        assert_eq!(
+            component
+                .pending_interactions(1)
+                .expect("remaining connection")
+                .len(),
+            1,
+            "closing one connection cannot revoke a sibling responder lease"
+        );
+        assert!(answers.lock().expect("answers").is_empty());
         let command_id = OperationId::from_bytes([85; 32]);
         let request = InteractionAnswerRequest::new(
             command_id,
@@ -2304,7 +2333,7 @@ mod tests {
         );
         assert_eq!(answers.lock().expect("answers lock").len(), 1);
 
-        drop(responder);
+        drop(remaining);
         component.stop_intake().expect("intake closes");
         cancellation.cancel();
         assert_eq!(component.drain(), Ok(ComponentDrain::Complete));
