@@ -294,6 +294,11 @@ pub enum UiRoute {
         /// Stable conversation summary row.
         row_id: String,
     },
+    /// Runtime and recovery details for an exact conversation.
+    ConversationDetails {
+        /// Stable containing conversation row.
+        row_id: String,
+    },
     /// Technical evidence for an exact transcript item.
     ConversationEvidence {
         /// Stable containing conversation row.
@@ -494,7 +499,8 @@ impl UiRoute {
                     adjacent: UiAdjacentView::None,
                 }
             }
-            Self::ConversationEvidence { .. }
+            Self::ConversationDetails { .. }
+            | Self::ConversationEvidence { .. }
             | Self::ProjectEvidence { .. }
             | Self::AgentEvidence { .. }
             | Self::Help(_) => UiRouteContract {
@@ -672,7 +678,7 @@ fn canonical_parent(parent: &UiRoute, child: &UiRoute) -> bool {
             parent,
             UiRoute::Workspace(UiWorkspace::Inbox | UiWorkspace::Sent | UiWorkspace::Archived)
         ),
-        UiRoute::ConversationEvidence { row_id, .. } => {
+        UiRoute::ConversationDetails { row_id } | UiRoute::ConversationEvidence { row_id, .. } => {
             matches!(parent, UiRoute::Conversation { row_id: parent_id } if parent_id == row_id)
         }
         UiRoute::Project { .. } => {
@@ -3537,7 +3543,7 @@ pub struct UiModel {
     runtime_target: Option<([u8; 32], [u8; 32])>,
     runtime_pending: Option<EffectId>,
     runtime_timer: Option<EffectId>,
-    runtime_details: Option<u16>,
+    runtime_details_scroll: u16,
     runtime_retry_pending: Option<EffectId>,
     runtime_retry_target: Option<crate::UiRuntimeRetryTarget>,
     runtime_retry_notice: Option<String>,
@@ -3635,7 +3641,7 @@ impl UiModel {
             runtime_target: None,
             runtime_pending: None,
             runtime_timer: None,
-            runtime_details: None,
+            runtime_details_scroll: 0,
             runtime_retry_pending: None,
             runtime_retry_target: None,
             runtime_retry_notice: None,
@@ -3985,15 +3991,15 @@ impl UiModel {
     }
 
     /// Whether exact recovery details replace the conversation reading surface.
-    pub const fn runtime_details_visible(&self) -> bool {
-        self.runtime_details.is_some()
+    pub fn runtime_details_visible(&self) -> bool {
+        matches!(
+            self.navigation.active(),
+            UiRoute::ConversationDetails { .. }
+        )
     }
     /// Scroll offset of the recovery details surface.
     pub const fn runtime_details_scroll(&self) -> u16 {
-        match self.runtime_details {
-            Some(scroll) => scroll,
-            None => 0,
-        }
+        self.runtime_details_scroll
     }
     /// Exact retry progress or response uncertainty.
     pub fn runtime_retry_notice(&self) -> Option<&str> {
@@ -4007,7 +4013,6 @@ impl UiModel {
                 self.focus,
                 UiFocus::Conversation | UiFocus::Draft | UiFocus::Approval
             )
-            && self.runtime_details.is_none()
             && self.help_page.is_none()
             && self.new_modal().is_none()
             && self.agent_modal().is_none()
@@ -5172,9 +5177,9 @@ impl UiModel {
 
     fn active_conversation_row(&self) -> Option<&str> {
         match self.navigation.active() {
-            UiRoute::Conversation { row_id } | UiRoute::ConversationEvidence { row_id, .. } => {
-                Some(row_id)
-            }
+            UiRoute::Conversation { row_id }
+            | UiRoute::ConversationDetails { row_id }
+            | UiRoute::ConversationEvidence { row_id, .. } => Some(row_id),
             _ => None,
         }
     }
@@ -5716,6 +5721,15 @@ impl UiModel {
             UiRoute::Conversation { row_id } if row_id == prior => Some(vec![
                 UiRoute::Workspace(self.navigation.workspace()),
                 UiRoute::Conversation {
+                    row_id: alias.to_owned(),
+                },
+            ]),
+            UiRoute::ConversationDetails { row_id } if row_id == prior => Some(vec![
+                UiRoute::Workspace(self.navigation.workspace()),
+                UiRoute::Conversation {
+                    row_id: alias.to_owned(),
+                },
+                UiRoute::ConversationDetails {
                     row_id: alias.to_owned(),
                 },
             ]),
@@ -14694,26 +14708,42 @@ fn apply_runtime_input(
     input: &UiInput,
     effects: &mut Vec<UiEffect>,
 ) -> Result<bool, UiError> {
-    if let Some(scroll) = model.runtime_details {
+    if model.runtime_details_visible() {
         match input {
-            UiInput::Escape | UiInput::Character('D') => {
-                model.runtime_details = None;
+            UiInput::Escape | UiInput::MoveCursorLeft | UiInput::Character('D') => {
+                let _ = model.navigation.pop();
+                model.runtime_details_scroll = 0;
                 return Ok(true);
             }
             UiInput::NextItem => {
-                model.runtime_details = Some(scroll.saturating_add(1));
+                model.runtime_details_scroll = model.runtime_details_scroll.saturating_add(1);
                 return Ok(true);
             }
             UiInput::PreviousItem => {
-                model.runtime_details = Some(scroll.saturating_sub(1));
+                model.runtime_details_scroll = model.runtime_details_scroll.saturating_sub(1);
                 return Ok(true);
             }
-            _ => {}
+            UiInput::Character('R') => {}
+            UiInput::Quit | UiInput::Character('q' | 'Q' | '?') => return Ok(false),
+            UiInput::Character(character) if UiSection::from_shortcut(*character).is_some() => {
+                return Ok(false);
+            }
+            _ => return Ok(true),
         }
     }
-    if matches!(input, UiInput::Character('D')) && model.runtime_recovery.is_some() {
-        model.runtime_details = Some(0);
-        return Ok(true);
+    if matches!(input, UiInput::Character('D'))
+        && model.runtime_recovery.is_some()
+        && let UiRoute::Conversation { row_id } = model.navigation.active()
+    {
+        let row_id = row_id.clone();
+        if model
+            .navigation
+            .push(UiRoute::ConversationDetails { row_id })
+            .is_ok()
+        {
+            model.runtime_details_scroll = 0;
+            return Ok(true);
+        }
     }
     if matches!(input, UiInput::Character('R')) && model.runtime_retry_pending.is_none() {
         let target = model.runtime_retry_target.clone().or_else(|| {
@@ -14731,7 +14761,7 @@ fn apply_runtime_input(
             return Ok(true);
         }
     }
-    Ok(false)
+    Ok(model.runtime_details_visible())
 }
 
 fn synchronize_agent_operation(
@@ -14798,7 +14828,10 @@ fn synchronize_runtime_recovery(
         });
     if model.runtime_target != target {
         model.runtime_target = target;
-        model.runtime_details = None;
+        if model.runtime_details_visible() {
+            let _ = model.navigation.pop();
+        }
+        model.runtime_details_scroll = 0;
         model.runtime_retry_pending = None;
         model.runtime_retry_target = None;
         model.runtime_retry_notice = None;
@@ -14905,9 +14938,164 @@ mod tests {
     use super::{UiAgentModal, UiConnectionState, synchronize_runtime_recovery};
     use std::num::NonZeroU64;
 
+    fn runtime_details_model() -> UiModel {
+        let mut model = cancellable_conversation_model();
+        model.viewport = UiSize {
+            width: 100,
+            height: 24,
+        };
+        model.focus = UiFocus::Conversation;
+        model.conversation = Some(super::UiConversation {
+            window: None,
+            multiple_non_user_senders: false,
+            row_id: model.selected_row.clone().expect("selected conversation"),
+            title: "Alice".to_owned(),
+            context: Some("Project · release".to_owned()),
+            entries: Vec::new(),
+            next_cursor: None,
+        });
+        model.runtime_recovery = Some(crate::UiRuntimeRecovery {
+            project_id: [5; 32],
+            thread_id: [6; 32],
+            availability: crate::UiRuntimeAvailability::Blocked,
+            agent_name: Some("Alice".to_owned()),
+            input_saved: true,
+            details: vec![("Failure".to_owned(), "SessionNotFound".to_owned())],
+            retry: None,
+        });
+        model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
+            draft: crate::UiMailboxDraft {
+                draft_id: [9; 32],
+                target: UiMailboxDraftTarget::Conversation {
+                    conversation: crate::UiConversationId::Project {
+                        project_id: [5; 32],
+                        thread_id: [6; 32],
+                    },
+                },
+                content: "unsent draft".to_owned(),
+                version: 3,
+            },
+            dirty: true,
+            submitting: false,
+            closing: false,
+        });
+        model.conversation_viewport_position = Some(crate::UiConversationViewportPosition {
+            entry_id: "saved-position".to_owned(),
+            row: 12,
+        });
+        model
+    }
+
+    #[test]
+    fn runtime_details_are_a_child_destination_without_composer_navigation() {
+        let mut model = runtime_details_model();
+        let draft = model.mailbox_draft.clone();
+        let position = model.conversation_viewport_position.clone();
+        let mut effects = Vec::new();
+        super::apply_input(&mut model, &UiInput::Character('D'), &mut effects).expect("details");
+        assert_eq!(model.navigation_path().len(), 3);
+        assert!(rendered_control_text(&model).contains("HQ / Inbox / Alice / Details"));
+        for size in [
+            UiSize {
+                width: 100,
+                height: 24,
+            },
+            UiSize {
+                width: 40,
+                height: 12,
+            },
+        ] {
+            model.viewport = size;
+            let text = rendered_control_text(&model);
+            assert!(text.contains("Details"), "{text}");
+            assert!(text.contains("SessionNotFound"), "{text}");
+            assert!(!text.contains("Tab to compose"), "{text}");
+            assert!(!text.contains("unsent draft"), "{text}");
+        }
+        for input in [
+            UiInput::NextFocus,
+            UiInput::PreviousFocus,
+            UiInput::Activate,
+            UiInput::Character('r'),
+            UiInput::Character('R'),
+            UiInput::Character('N'),
+            UiInput::PageUp,
+            UiInput::PageDown,
+            UiInput::MoveCursorHome,
+            UiInput::MoveCursorEnd,
+        ] {
+            super::apply_input(&mut model, &input, &mut effects).expect("details owns input");
+            assert!(model.runtime_details_visible());
+            assert_eq!(model.focus, UiFocus::Conversation);
+        }
+        super::apply_input(&mut model, &UiInput::NextItem, &mut effects).expect("scroll details");
+        assert_eq!(model.runtime_details_scroll(), 1);
+        super::apply_input(&mut model, &UiInput::Escape, &mut effects).expect("back");
+        assert_eq!(model.navigation_path().len(), 2);
+        assert_eq!(model.mailbox_draft, draft);
+        assert_eq!(model.conversation_viewport_position, position);
+    }
+
+    #[test]
+    fn runtime_details_follow_a_stable_conversation_alias_and_close_when_removed() {
+        let mut model = runtime_details_model();
+        let mut effects = Vec::new();
+        super::apply_input(&mut model, &UiInput::Character('D'), &mut effects).expect("details");
+        let prior = model
+            .active_conversation_row()
+            .expect("conversation")
+            .to_owned();
+        model.reidentify_conversation_row(&prior, "canonical-alias");
+        assert_eq!(model.active_conversation_row(), Some("canonical-alias"));
+        assert!(model.runtime_details_visible());
+        model
+            .snapshot
+            .as_mut()
+            .expect("snapshot")
+            .inbox_rows
+            .clear();
+        model.reconcile_current_section();
+        synchronize_runtime_recovery(&mut model, &mut effects).expect("target removed");
+        assert!(!model.runtime_details_visible());
+        assert!(model.runtime_recovery.is_none());
+    }
+
+    #[test]
+    fn runtime_details_close_when_the_same_row_changes_conversation_target() {
+        let mut model = runtime_details_model();
+        let mut effects = Vec::new();
+        super::apply_input(&mut model, &UiInput::Character('D'), &mut effects).expect("details");
+        model.snapshot.as_mut().expect("snapshot").inbox_rows[0].conversation_target =
+            Some(UiConversationTarget::Project {
+                project_id: [5; 32],
+                thread_id: [20; 32],
+                root_message: [21; 32],
+            });
+        synchronize_runtime_recovery(&mut model, &mut effects).expect("target changes");
+        assert!(!model.runtime_details_visible());
+        assert!(model.runtime_recovery.is_none());
+        assert_eq!(model.runtime_target, Some(([5; 32], [20; 32])));
+    }
+
+    #[test]
+    fn composer_hides_runtime_shortcuts_and_keeps_d_as_draft_input() {
+        let mut model = runtime_details_model();
+        assert!(rendered_control_text(&model).contains("D view details"));
+        model.focus = UiFocus::Draft;
+        let text = rendered_control_text(&model);
+        assert!(!text.contains("D view details"), "{text}");
+        let mut effects = Vec::new();
+        super::apply_input(&mut model, &UiInput::Character('D'), &mut effects).expect("type D");
+        assert!(!model.runtime_details_visible());
+        assert!(
+            matches!(&model.mailbox_draft, Some(UiMailboxDraftPane::Editing { draft, .. })
+            if draft.content.contains('D'))
+        );
+    }
+
     #[test]
     fn runtime_actions_use_displayed_scope_and_do_not_select_a_message() {
-        let mut model = model();
+        let mut model = project_conversation_model();
         let target = crate::UiRuntimeRetryTarget {
             account_id: [1; 32],
             home: [2; 32],
@@ -14946,7 +15134,7 @@ mod tests {
         );
         effects.clear();
         assert!(
-            !super::apply_runtime_input(&mut model, &UiInput::Character('R'), &mut effects)
+            super::apply_runtime_input(&mut model, &UiInput::Character('R'), &mut effects)
                 .expect("in flight")
         );
         assert!(effects.is_empty());
@@ -15354,10 +15542,18 @@ mod tests {
             height: 24,
         };
         assert!(rendered_control_text(&model).contains("Ctrl-G stop agent"));
-        model.runtime_details = Some(0);
+        model
+            .navigation
+            .push(UiRoute::ConversationDetails {
+                row_id: model
+                    .active_conversation_row()
+                    .expect("conversation")
+                    .to_owned(),
+            })
+            .expect("details route");
         assert!(!rendered_control_text(&model).contains("Ctrl-G stop agent"));
         assert!(!model.can_cancel_agent_operation());
-        model.runtime_details = None;
+        model.navigation.pop().expect("back");
         let transition =
             update(model, UiEvent::Input(UiInput::CancelAgentOperation)).expect("stop");
         let (id, intent_id) = transition

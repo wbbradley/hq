@@ -2758,6 +2758,7 @@ fn route_breadcrumb_label(model: &UiModel, route: &UiRoute) -> String {
             .conversation()
             .map_or("Conversation", |conversation| conversation.title.as_str())
             .to_owned(),
+        UiRoute::ConversationDetails { .. } => "Details".to_owned(),
         UiRoute::ConversationEvidence { .. }
         | UiRoute::ProjectEvidence { .. }
         | UiRoute::AgentEvidence { .. } => "Technical details".to_owned(),
@@ -2864,6 +2865,8 @@ fn render_route_surface(
         render_agent_modal(frame, model, theme, area);
     } else if model.project_interaction().is_some() {
         render_project_interaction(frame, model, theme, area, true);
+    } else if model.runtime_details_visible() {
+        render_runtime_details(frame, model, theme, area);
     } else if matches!(model.active_route(), UiRoute::ConversationEvidence { .. }) {
         render_technical_inspector(frame, model, theme, area, Borders::NONE, cache);
     } else if matches!(model.active_route(), UiRoute::Conversation { .. }) {
@@ -4026,6 +4029,7 @@ fn empty_section_lines(section: UiSection, theme: &UiTheme) -> Vec<Line<'static>
 fn runtime_header_lines(
     recovery: &crate::UiRuntimeRecovery,
     theme: &UiTheme,
+    actions_visible: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::styled(
         recovery.status_text(),
@@ -4043,20 +4047,27 @@ fn runtime_header_lines(
             theme.style(UiThemeRole::TextMuted),
         ));
     }
-    lines.push(Line::styled(
-        if recovery.retry.is_some() {
-            "R retry · D view details"
-        } else {
-            "D view details"
-        },
-        theme.style(UiThemeRole::TextMuted),
-    ));
+    if actions_visible {
+        lines.push(Line::styled(
+            if recovery.retry.is_some() {
+                "R retry · D view details"
+            } else {
+                "D view details"
+            },
+            theme.style(UiThemeRole::TextMuted),
+        ));
+    }
     lines
 }
 
 fn append_runtime_header(header: &mut Vec<Line<'_>>, model: &UiModel, theme: &UiTheme) {
     if let Some(recovery) = model.runtime_recovery() {
-        header.extend(runtime_header_lines(recovery, theme));
+        header.extend(runtime_header_lines(
+            recovery,
+            theme,
+            model.focus() == UiFocus::Conversation
+                && matches!(model.active_route(), UiRoute::Conversation { .. }),
+        ));
     }
     if let Some(notice) = model.runtime_retry_notice() {
         header.push(Line::styled(
@@ -4089,19 +4100,6 @@ fn render_runtime_details(frame: &mut Frame<'_>, model: &UiModel, theme: &UiThem
     );
 }
 
-fn render_recovery_if_selected(
-    frame: &mut Frame<'_>,
-    model: &UiModel,
-    theme: &UiTheme,
-    area: Rect,
-) -> bool {
-    if !model.runtime_details_visible() {
-        return false;
-    }
-    render_runtime_details(frame, model, theme, area);
-    true
-}
-
 fn render_conversation(
     frame: &mut Frame<'_>,
     model: &UiModel,
@@ -4110,9 +4108,6 @@ fn render_conversation(
     divider: Borders,
     cache: &mut UiRenderCache,
 ) {
-    if render_recovery_if_selected(frame, model, theme, area) {
-        return;
-    }
     let block = Block::new().borders(divider).border_style(
         if matches!(model.focus(), UiFocus::Conversation | UiFocus::Approval) {
             theme.style(UiThemeRole::BorderFocused)
@@ -5270,6 +5265,15 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         } else {
             " Enter send · Ctrl-J/Shift-Enter newline · Esc close · ? help · q quit".to_owned()
         }
+    } else if model.runtime_details_visible() {
+        if model
+            .runtime_recovery()
+            .is_some_and(|recovery| recovery.retry.is_some())
+        {
+            " j/k scroll · R retry · Esc conversation · ? help · q quit".to_owned()
+        } else {
+            " j/k scroll · Esc conversation · ? help · q quit".to_owned()
+        }
     } else if matches!(model.active_route(), UiRoute::ConversationEvidence { .. }) {
         " j/k scroll · Esc conversation · ? help · q quit".to_owned()
     } else if matches!(
@@ -5541,6 +5545,7 @@ mod tests {
         Paragraph::new(super::runtime_header_lines(
             &recovery,
             &crate::UiTheme::terminal(),
+            true,
         ))
         .render(area, &mut buffer);
         let text: String = buffer
