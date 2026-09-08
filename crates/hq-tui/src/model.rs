@@ -2845,6 +2845,12 @@ struct UiGuidedSubmission {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum UiNewOrigin {
+    Launcher,
+    InboxAgent { agent_id: [u8; 32], row_id: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum UiNewWorkflow {
     ChoosingProject {
         selected: Option<[u8; 32]>,
@@ -3615,7 +3621,7 @@ pub struct UiModel {
     completion_notice: Option<UiCompletionNotice>,
     completion_context: Option<UiPendingCompletion>,
     new_workflow: Option<UiNewWorkflow>,
-    preferred_new_agent: Option<[u8; 32]>,
+    new_origin: UiNewOrigin,
     started: bool,
     should_exit: bool,
 }
@@ -3718,7 +3724,7 @@ impl UiModel {
             completion_notice: None,
             completion_context: None,
             new_workflow: None,
-            preferred_new_agent: None,
+            new_origin: UiNewOrigin::Launcher,
             started: false,
             should_exit: false,
         }
@@ -5062,6 +5068,7 @@ impl UiModel {
     }
 
     fn replace_with_workspace_root(&mut self, next: UiSection) {
+        self.new_origin = UiNewOrigin::Launcher;
         self.list_selections
             .save(self.navigation.workspace(), self.selected_row.clone());
         let next_workspace = UiWorkspace::from(next);
@@ -8589,9 +8596,17 @@ fn apply_new_modal_input(
             UiNewModal::Launcher { .. } | UiNewModal::ChangeSetupAgent { .. } => None,
             UiNewModal::ChooseProject { .. } => {
                 model.new_workflow = None;
-                Some(UiNewModal::Launcher {
-                    selected: UiNewChoice::ProjectWork,
-                })
+                match std::mem::replace(&mut model.new_origin, UiNewOrigin::Launcher) {
+                    UiNewOrigin::InboxAgent { row_id, .. } => {
+                        model.replace_with_workspace_root(UiSection::Inbox);
+                        model.selected_row = Some(row_id);
+                        model.reconcile_current_section();
+                        None
+                    }
+                    UiNewOrigin::Launcher => Some(UiNewModal::Launcher {
+                        selected: UiNewChoice::ProjectWork,
+                    }),
+                }
             }
             UiNewModal::ChooseAgent { ref project, .. }
             | UiNewModal::ProjectUnavailable { ref project, .. } => {
@@ -8625,6 +8640,7 @@ fn apply_new_modal_input(
                 Ok(true)
             }
             UiInput::Activate => {
+                model.new_origin = UiNewOrigin::Launcher;
                 model.new_modal = None;
                 match selected {
                     UiNewChoice::ProjectWork => {
@@ -9027,7 +9043,11 @@ fn open_project_inbox_draft(
 }
 
 fn guided_agent_picker(model: &UiModel, project: UiProject) -> UiNewModal {
-    guided_agent_picker_from_snapshot(model.snapshot.as_ref(), project, model.preferred_new_agent)
+    let preferred = match &model.new_origin {
+        UiNewOrigin::InboxAgent { agent_id, .. } => Some(*agent_id),
+        UiNewOrigin::Launcher => None,
+    };
+    guided_agent_picker_from_snapshot(model.snapshot.as_ref(), project, preferred)
 }
 
 fn guided_agent_picker_from_snapshot(
@@ -9072,7 +9092,6 @@ fn open_guided_agent(
     agent: UiAgent,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
-    model.preferred_new_agent = None;
     let competing = match &agent.status {
         UiAgentStatus::Assigned(assignment) if assignment.project_id != project.project_id => {
             Some((assignment.project_id, assignment.project_name.clone()))
@@ -12267,6 +12286,7 @@ fn mailbox_shortcut(
             Ok(true)
         }
         'n' => {
+            model.new_origin = UiNewOrigin::Launcher;
             model.new_modal = Some(UiNewModal::Launcher {
                 selected: UiNewChoice::ProjectWork,
             });
@@ -12429,7 +12449,10 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
         let Some(agent_id) = selected_agent(model).map(|agent| agent.agent_id) else {
             return Ok(false);
         };
-        model.preferred_new_agent = Some(agent_id);
+        let Some(row_id) = model.selected_row.clone() else {
+            return Ok(false);
+        };
+        model.new_origin = UiNewOrigin::InboxAgent { agent_id, row_id };
         if let Some(project_id) = selected_agent(model).and_then(|agent| match &agent.status {
             UiAgentStatus::Assigned(assignment) => Some(assignment.project_id),
             UiAgentStatus::Unassigned

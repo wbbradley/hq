@@ -6599,6 +6599,7 @@ fn entering_an_unbound_inbox_agent_joins_project_setup_with_that_agent_selected(
         Some(UiNewModal::ChooseProject { selected: Some(project_id), .. })
             if *project_id == [5; 32]
     ));
+    assert_inbox_setup_can_be_abandoned(choosing_project.model.clone(), &agent_row_id(7));
     let choosing_agent = update(choosing_project.model, UiEvent::Input(UiInput::Activate))
         .expect("project choice joins shared agent step");
     assert!(matches!(
@@ -6606,6 +6607,54 @@ fn entering_an_unbound_inbox_agent_joins_project_setup_with_that_agent_selected(
         Some(UiNewModal::ChooseAgent { selected: Some(agent_id), .. })
             if *agent_id == preferred.agent_id
     ));
+}
+
+fn assert_inbox_setup_can_be_abandoned(model: UiModel, original_row: &str) {
+    let mut snapshot = model.snapshot().expect("loaded catalog").clone();
+    snapshot.revision += 1;
+    let cancelled = update(model, UiEvent::Input(UiInput::Escape))
+        .expect("leave whole flow")
+        .model;
+    assert!(cancelled.new_modal().is_none());
+    assert_eq!(
+        cancelled.active_route(),
+        &UiRoute::Workspace(UiWorkspace::Inbox)
+    );
+    assert_eq!(cancelled.selected_row(), Some(original_row));
+    let refreshed = update(
+        cancelled,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot,
+                conversation: None,
+            },
+        },
+    )
+    .expect("late catalog update")
+    .model;
+    assert!(refreshed.new_modal().is_none());
+    assert_eq!(refreshed.selected_row(), Some(original_row));
+    let launcher = update(refreshed, UiEvent::Input(UiInput::Character('n')))
+        .expect("new flow")
+        .model;
+    let projects = update(launcher, UiEvent::Input(UiInput::Activate))
+        .expect("generic projects")
+        .model;
+    let back = update(projects.clone(), UiEvent::Input(UiInput::Escape))
+        .expect("normal back")
+        .model;
+    assert!(matches!(
+        back.new_modal(),
+        Some(UiNewModal::Launcher { .. })
+    ));
+    let agents = update(projects, UiEvent::Input(UiInput::Activate))
+        .expect("generic agents")
+        .model;
+    assert!(
+        matches!(agents.new_modal(), Some(UiNewModal::ChooseAgent { selected: Some(agent), .. })
+        if *agent == [3; 32]),
+        "abandoned agent preference must not leak"
+    );
 }
 
 #[test]
