@@ -1,8 +1,9 @@
 # Agent cancellation and ACP integration
 
 Assessment against the repository and ACP v1 documentation on 2026-09-07.
-This is the design for the queued cancellation implementation, not a claim that
-the conversation UI already exposes cancellation.
+This records the cancellation design and implemented control path. Installed
+provider cancellation qualification and accepted-input recovery audits remain
+required before the parent implementation task is complete.
 
 Implement cancellation through HQ's existing neutral harness contract now. Defer
 an arbitrary ACP provider adapter until its submission-recovery guarantees can be
@@ -19,7 +20,7 @@ does not itself establish the durable acceptance evidence HQ requires.
 | Codex | `hq-codex/src/adapter.rs` maps an HQ operation to threadId/turnId and sends turn/interrupt. | Preserve exact targeting and distinguish accepted interruption from observed completion. |
 | Application/node | ControlHarness exposes typed target queries, bounded cancellation admission and request observation. Canonical agent/session authority and exact generation/lease/operation are revalidated before independent dispatch. | Connect local API callers and prove installed end-to-end behavior. |
 | Local API | Exact target/query/request-state DTOs route through independently owned per-session application work; responder cleanup also runs outside the coordinator. | Prove the installed cancellation action through the full TUI/provider path. |
-| TUI | `hq-node/src/tui_client.rs` processes WorkerCommand values in a receive loop. | Do not enqueue interrupt behind a blocked operation on the same client worker. |
+| TUI | A dedicated bounded control worker owns a separate local client; Ctrl-G acts on the exact capability offered by the daemon. | Prove installed terminal persistence and continuation after cancellation. |
 
 Paths in this table are relative to `crates/`.
 
@@ -45,9 +46,26 @@ responder cleanup remain bounded and joined before application shutdown. Gate
 tests prove that a second client's control can release both a blocked request and
 blocked cleanup on another connection.
 
-The TUI command worker still needs an independent control path before the feature
-is end-to-end. Ordinary session methods also still use the supervisor workers
-mutex; cancellation must use cancel_owned rather than acquire that lock.
+The TUI now owns three joined workers: ordinary commands, subscribed observations,
+and agent controls. A gate test proves the control worker can release an already
+blocked ordinary command. Ctrl-G is offered only on an eligible conversation,
+composer, or approval surface; it preserves the draft and reading position.
+Uncertain retries retain the complete original target and wire request identity.
+Request acknowledgement displays “Stopping…”; only a later exact canonical
+terminal status establishes interruption or natural completion. Reads and receipts
+are correlated to the selected conversation and effect identity, so navigation or
+disconnect fences late responses. Human message threads have no control action.
+
+Ordinary session methods still use the supervisor workers mutex; cancellation
+uses cancel_owned rather than acquiring that lock.
+
+Temporary submission backpressure retains the durable input in reconciliation
+instead of rejecting it permanently. Since the submission attempt was already
+recorded as uncertain, retries perform authoritative acceptance lookup first.
+Project deliveries still require the project workflow's fresh eligibility check;
+a generic worker wake does not drain them. Recovery tests cover both direct and
+project input, exact retained identity, and acceptance after restart without
+resubmitting accepted work.
 
 Generation continues remotely after turn submission, so not every running turn
 holds a Rust lock. This explains why the existing adapter can already interrupt

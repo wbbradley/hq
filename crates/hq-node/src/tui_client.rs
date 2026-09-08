@@ -67,6 +67,11 @@ use crate::{
     resolve_tui_theme,
 };
 
+#[path = "tui_agent_control.rs"]
+mod agent_control;
+pub use agent_control::TuiAgentControlPort;
+use agent_control::{AgentControlCommand, LocalTuiAgentControl};
+
 const CLIENT_COMMAND_CAPACITY: usize = 8;
 const CLIENT_EVENT_CAPACITY: usize = 16;
 
@@ -128,6 +133,11 @@ pub enum TuiClientObservation {
 
 /// Capability boundary consumed by the worker-owned effect executor.
 pub trait TuiClientPort: Send {
+    /// Transfers an independently owned control client before ordinary worker startup.
+    fn take_agent_control(&mut self) -> Option<Box<dyn TuiAgentControlPort>> {
+        None
+    }
+
     /// Loads and maps one complete authoritative snapshot for every semantic section.
     fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure>;
 
@@ -351,6 +361,7 @@ pub struct TuiDraftError {
 
 /// Ordinary local-API implementation of the TUI client capability.
 pub struct LocalTuiClient {
+    agent_control: Option<LocalNodeClient>,
     client: LocalNodeClient,
     state: StatePaths,
     presentation: SharedTuiPresentation,
@@ -396,6 +407,7 @@ struct TuiPresentationData {
     providers: ProviderCatalogDto,
     agent_names: BTreeMap<[u8; 32], String>,
     project_names: BTreeMap<[u8; 32], String>,
+    control_accounts: BTreeMap<[u8; 32], [u8; 32]>,
     recovery_queries: BTreeMap<[u8; 32], hq_local_api::protocol::v1::ProjectRecoveryQueryDto>,
     project_threads: Vec<ProjectThreadPresentation>,
     running_operations: BTreeMap<String, Vec<RunningOperationPresentation>>,
@@ -431,6 +443,7 @@ impl Default for TuiPresentationData {
             },
             agent_names: BTreeMap::new(),
             project_names: BTreeMap::new(),
+            control_accounts: BTreeMap::new(),
             recovery_queries: BTreeMap::new(),
             project_threads: Vec::new(),
             running_operations: BTreeMap::new(),
@@ -446,6 +459,7 @@ impl SharedTuiPresentation {
         let Ok(mut presentation) = self.inner.lock() else {
             return;
         };
+        presentation.control_accounts = agent_control::control_accounts(snapshot);
         presentation.recovery_queries = recovery_query_targets(snapshot);
         presentation.conversation_keys = snapshot
             .items
@@ -897,6 +911,13 @@ impl TuiObservationControl for LocalTuiObservationControl {
 }
 
 impl LocalTuiClient {
+    /// Adds the separately connected client owned only by the agent-control worker.
+    #[must_use]
+    pub fn with_agent_control(mut self, client: LocalNodeClient) -> Self {
+        self.agent_control = Some(client);
+        self
+    }
+
     /// Wraps one already-ready ordinary local API command client.
     pub fn new(client: LocalNodeClient, state: StatePaths) -> Self {
         Self {
@@ -905,6 +926,7 @@ impl LocalTuiClient {
             presentation: SharedTuiPresentation::default(),
             project_operations: BTreeMap::new(),
             runtime_retry_requests: BTreeMap::new(),
+            agent_control: None,
         }
     }
 
@@ -919,6 +941,7 @@ impl LocalTuiClient {
             presentation,
             project_operations: BTreeMap::new(),
             runtime_retry_requests: BTreeMap::new(),
+            agent_control: None,
         }
     }
 }
@@ -1506,6 +1529,14 @@ impl TuiObservationInterrupt for UnixClientInterrupt {
 }
 
 impl TuiClientPort for LocalTuiClient {
+    fn take_agent_control(&mut self) -> Option<Box<dyn TuiAgentControlPort>> {
+        Some(Box::new(LocalTuiAgentControl {
+            client: self.agent_control.take()?,
+            presentation: self.presentation.clone(),
+            requests: BTreeMap::new(),
+        }))
+    }
+
     fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
         let local_installation = *self.client.installation_id().as_bytes();
         let snapshot = self
@@ -2687,6 +2718,7 @@ enum WorkerCommand {
 pub struct TuiEffectExecutor<C: TuiClock> {
     clock: C,
     commands: SyncSender<WorkerCommand>,
+    controls: SyncSender<AgentControlCommand>,
     events: Receiver<UiEvent>,
     event_wake: TuiEventWake,
     workers: Option<TuiWorkers>,
@@ -2767,6 +2799,7 @@ impl Drop for TuiWorkerExitWake {
 }
 
 struct TuiWorkers {
+    controls: JoinHandle<()>,
     commands: JoinHandle<()>,
     observations: JoinHandle<()>,
 }
@@ -2780,12 +2813,15 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
         Self::spawn_with_observer(client, ParkedTuiObserver::default(), clock)
     }
 
-    /// Starts independent named workers for commands and subscribed observations.
+    /// Starts independently owned command, observation, and agent-control workers.
+    #[allow(clippy::too_many_lines)] // Keep startup failure cleanup beside worker ownership.
     pub fn spawn_with_observer<P: TuiClientPort + 'static, O: TuiObservationPort + 'static>(
-        client: P,
+        mut client: P,
         observer: O,
         clock: C,
     ) -> Result<Self, TuiExecutorError> {
+        let control_port = client.take_agent_control();
+        let (controls, control_receiver) = mpsc::sync_channel(CLIENT_COMMAND_CAPACITY);
         let (commands, command_receiver) = mpsc::sync_channel(CLIENT_COMMAND_CAPACITY);
         let (event_sender, events) = mpsc::sync_channel(CLIENT_EVENT_CAPACITY);
         let (event_wake, event_notifier) = TuiEventWake::pair()?;
@@ -2815,7 +2851,8 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
         let observation_interrupt = observer.interrupt_handle();
         let observation_control = observer.control_handle();
         let observation_cancellation = Arc::clone(&cancellation);
-        let observation_notifier = event_notifier;
+        let observation_notifier = event_notifier.clone();
+        let control_events = event_sender.clone();
         let observation_stopped = Arc::clone(&worker_stopped);
         let Ok(observation_worker) = thread::Builder::new()
             .name("hq-tui-observations".to_owned())
@@ -2837,12 +2874,44 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             let _ = command_worker.join();
             return Err(TuiExecutorError::WorkerSpawn);
         };
+        let control_cancellation = Arc::clone(&cancellation);
+        let control_stopped = Arc::clone(&worker_stopped);
+        let Ok(control_worker) = thread::Builder::new()
+            .name("hq-tui-agent-controls".to_owned())
+            .spawn(move || {
+                let _exit_wake = TuiWorkerExitWake {
+                    notifier: event_notifier.clone(),
+                    stopped: control_stopped,
+                    cancellation: Arc::clone(&control_cancellation),
+                };
+                agent_control::worker(
+                    control_port,
+                    &control_receiver,
+                    &control_events,
+                    &control_cancellation,
+                    &event_notifier,
+                );
+            })
+        else {
+            cancellation.store(true, Ordering::SeqCst);
+            observation_interrupt.interrupt();
+            drop(commands);
+            while !command_worker.is_finished() || !observation_worker.is_finished() {
+                while events.try_recv().is_ok() {}
+                thread::yield_now();
+            }
+            let _ = command_worker.join();
+            let _ = observation_worker.join();
+            return Err(TuiExecutorError::WorkerSpawn);
+        };
         Ok(Self {
             clock,
+            controls,
             commands,
             events,
             event_wake,
             workers: Some(TuiWorkers {
+                controls: control_worker,
                 commands: command_worker,
                 observations: observation_worker,
             }),
@@ -2865,6 +2934,40 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
     ) -> Result<(), TuiExecutorError> {
         for effect in effects {
             match effect {
+                UiEffect::LoadAgentOperation {
+                    id,
+                    conversation,
+                    tracked_operation,
+                } => {
+                    self.enqueue_control(
+                        id,
+                        AgentControlCommand::Query {
+                            id,
+                            conversation,
+                            tracked_operation,
+                        },
+                    )?;
+                }
+                UiEffect::CancelAgentOperation { id, intent } => {
+                    self.enqueue_control(
+                        id,
+                        AgentControlCommand::Cancel {
+                            id,
+                            intent,
+                            observe: false,
+                        },
+                    )?;
+                }
+                UiEffect::ObserveAgentCancellation { id, intent } => {
+                    self.enqueue_control(
+                        id,
+                        AgentControlCommand::Cancel {
+                            id,
+                            intent,
+                            observe: true,
+                        },
+                    )?;
+                }
                 UiEffect::LoadSnapshot { id } => {
                     if self.effect_is_outstanding(id) {
                         return Err(TuiExecutorError::DuplicateEffectIdentity);
@@ -3093,13 +3196,17 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                 }
             }
         }
-        while !workers.commands.is_finished() || !workers.observations.is_finished() {
+        while !workers.commands.is_finished()
+            || !workers.observations.is_finished()
+            || !workers.controls.is_finished()
+        {
             while self.events.try_recv().is_ok() {}
             thread::yield_now();
         }
+        let control_result = workers.controls.join();
         let command_result = workers.commands.join();
         let observation_result = workers.observations.join();
-        if command_result.is_err() || observation_result.is_err() {
+        if command_result.is_err() || observation_result.is_err() || control_result.is_err() {
             Err(TuiExecutorError::WorkerPanicked)
         } else {
             Ok(())
@@ -3108,6 +3215,21 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
 
     fn effect_is_outstanding(&self, id: EffectId) -> bool {
         self.outstanding_snapshots.contains(&id) || self.timers.iter().any(|timer| timer.id == id)
+    }
+
+    fn enqueue_control(
+        &mut self,
+        id: EffectId,
+        command: AgentControlCommand,
+    ) -> Result<(), TuiExecutorError> {
+        if self.effect_is_outstanding(id) {
+            return Err(TuiExecutorError::DuplicateEffectIdentity);
+        }
+        self.controls
+            .try_send(command)
+            .map_err(|_| TuiExecutorError::WorkerUnavailable)?;
+        self.outstanding_snapshots.push(id);
+        Ok(())
     }
 
     fn enqueue_client_effect(
@@ -3131,7 +3253,9 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
 
     fn complete_snapshot_identity(&mut self, event: &UiEvent) {
         let completed = match event {
-            UiEvent::SnapshotLoaded { effect_id, .. }
+            UiEvent::AgentOperationLoaded { effect_id, .. }
+            | UiEvent::AgentCancellationCompleted { effect_id, .. }
+            | UiEvent::SnapshotLoaded { effect_id, .. }
             | UiEvent::SnapshotFailed { effect_id, .. }
             | UiEvent::ConfigurationLoaded { effect_id, .. }
             | UiEvent::ConfigurationSaved { effect_id, .. }
@@ -5507,6 +5631,7 @@ const fn timer_kind_order(kind: UiTimerKind) -> u8 {
         UiTimerKind::ContinueProject => 3,
         UiTimerKind::RefreshCreatedProject => 4,
         UiTimerKind::RefreshRuntime => 5,
+        UiTimerKind::RefreshAgentOperation => 6,
     }
 }
 

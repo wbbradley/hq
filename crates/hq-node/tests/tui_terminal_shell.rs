@@ -133,6 +133,26 @@ fn crossterm_events_normalize_to_the_closed_ui_vocabulary() {
 }
 
 #[test]
+fn agent_stop_has_a_distinct_control_key_and_preserves_printable_g() {
+    for key in ['g', 'G'] {
+        assert_eq!(
+            normalize_crossterm_event(&Event::Key(KeyEvent::new(
+                KeyCode::Char(key),
+                KeyModifiers::CONTROL
+            ))),
+            Some(TuiTerminalEvent::Input(UiInput::CancelAgentOperation))
+        );
+        assert_eq!(
+            normalize_crossterm_event(&Event::Key(KeyEvent::new(
+                KeyCode::Char(key),
+                KeyModifiers::NONE
+            ))),
+            Some(TuiTerminalEvent::Input(UiInput::Character(key)))
+        );
+    }
+}
+
+#[test]
 fn compose_control_keys_normalize_to_text_editing_intents() {
     for (character, expected) in [
         ('a', UiInput::MoveCursorHome),

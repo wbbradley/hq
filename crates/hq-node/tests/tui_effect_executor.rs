@@ -758,6 +758,106 @@ fn executor_forwards_subscription_and_connection_observations() {
     executor.shutdown().expect("joined shutdown");
 }
 
+struct ReleasingAgentControl(mpsc::Sender<()>);
+
+impl hq_node::TuiAgentControlPort for ReleasingAgentControl {
+    fn query(
+        &mut self,
+        _: hq_tui::UiConversationId,
+        _: Option<[u8; 32]>,
+    ) -> Result<hq_tui::UiAgentOperationView, UiFailure> {
+        Ok(hq_tui::UiAgentOperationView::default())
+    }
+    fn cancel(
+        &mut self,
+        _: &hq_tui::UiAgentCancellationIntent,
+        observe: bool,
+    ) -> hq_tui::UiAgentCancellationOutcome {
+        assert!(!observe, "explicit cancellation must be submitted");
+        self.0
+            .send(())
+            .expect("cancellation releases ordinary command");
+        hq_tui::UiAgentCancellationOutcome::Requested
+    }
+}
+
+#[test]
+fn agent_cancellation_releases_an_already_blocked_command() {
+    use hq_tui::{
+        UiAgentCancellationIntent, UiAgentOperationQuery, UiAgentOperationScope,
+        UiAgentOperationTarget, UiConversationId,
+    };
+    let started = Arc::new(AtomicBool::new(false));
+    let (release, receiver) = mpsc::channel();
+    let client = BlockingSnapshotClient {
+        started: Arc::clone(&started),
+        release: receiver,
+        control_release: Some(release),
+    };
+    let mut executor =
+        TuiEffectExecutor::spawn(client, ManualClock::default()).expect("independent executor");
+    let mut effects = snapshot_load_effects(2).into_iter();
+    executor
+        .execute([effects.next().expect("blocked effect")])
+        .expect("queue work");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !started.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "ordinary command did not begin");
+        thread::yield_now();
+    }
+    assert!(executor.poll_event().is_none());
+    let UiEffect::LoadSnapshot { id } = effects.next().expect("unique effect") else {
+        panic!("snapshot effect");
+    };
+    let intent_id = std::num::NonZeroU64::new(id.value()).expect("effect identity");
+    let target = UiAgentOperationTarget {
+        query: UiAgentOperationQuery {
+            account_id: [1; 32],
+            home: [2; 32],
+            tracked_operation: None,
+            conversation: UiConversationId::ProviderSession {
+                counterparty_installation: [2; 32],
+                counterparty_mailbox: [3; 32],
+                provider: "provider".to_owned(),
+                session: "session".to_owned(),
+            },
+        },
+        scope: UiAgentOperationScope {
+            agent_id: [4; 32],
+            mailbox_installation: [2; 32],
+            mailbox_id: [3; 32],
+            provider: "provider".to_owned(),
+            session: "session".to_owned(),
+            project: None,
+        },
+        generation: [5; 32],
+        owner: [6; 32],
+        operation_id: [7; 32],
+        sequence: std::num::NonZeroU64::MIN,
+    };
+    executor
+        .execute([UiEffect::CancelAgentOperation {
+            id,
+            intent: Box::new(UiAgentCancellationIntent {
+                id: intent_id,
+                target,
+            }),
+        }])
+        .expect("independent stop");
+    let events = [receive_event(&mut executor), receive_event(&mut executor)];
+    assert!(events.iter().any(
+        |event| matches!(event, UiEvent::AgentCancellationCompleted {
+        effect_id, intent_id: completed, outcome: hq_tui::UiAgentCancellationOutcome::Requested,
+    } if *effect_id == id && *completed == intent_id)
+    ));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, UiEvent::SnapshotLoaded { .. }))
+    );
+    executor.shutdown().expect("all three workers joined");
+}
+
 #[test]
 fn blocked_command_cannot_delay_a_subscribed_invalidation() {
     let command_started = Arc::new(AtomicBool::new(false));
@@ -765,6 +865,7 @@ fn blocked_command_cannot_delay_a_subscribed_invalidation() {
     let client = BlockingSnapshotClient {
         started: Arc::clone(&command_started),
         release: command_release,
+        control_release: None,
     };
     let observer = CommandGatedObserver::new(command_started, 41);
     let mut executor =
@@ -806,6 +907,7 @@ fn blocked_command_cannot_delay_latest_conversation_selection_control() {
     let client = BlockingSnapshotClient {
         started: Arc::clone(&command_started),
         release: command_release,
+        control_release: None,
     };
     let selected = Arc::new(Mutex::new(TestSelection::Unchanged));
     let observer = ControlledIdleObserver::new(Arc::clone(&selected));
@@ -2188,14 +2290,23 @@ impl TuiObservationPort for PanickingObserver {
 }
 
 struct BlockingSnapshotClient {
+    control_release: Option<mpsc::Sender<()>>,
     started: Arc<AtomicBool>,
     release: mpsc::Receiver<()>,
 }
 
 impl TuiClientPort for BlockingSnapshotClient {
+    fn take_agent_control(&mut self) -> Option<Box<dyn hq_node::TuiAgentControlPort>> {
+        Some(Box::new(ReleasingAgentControl(
+            self.control_release.take()?,
+        )))
+    }
+
     fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
         self.started.store(true, Ordering::SeqCst);
-        self.release.recv().expect("command release");
+        self.release
+            .recv_timeout(Duration::from_secs(5))
+            .expect("command release");
         Ok(empty_snapshot(1))
     }
 

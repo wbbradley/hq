@@ -4,6 +4,12 @@
 //! capability. A shell feeds [`UiEvent`] values into [`update`], executes returned [`UiEffect`]
 //! values, and borrows the resulting [`UiModel`] for [`render`].
 
+mod agent_operation;
+pub use agent_operation::{
+    UiAgentCancellationIntent, UiAgentCancellationOutcome, UiAgentOperationControl,
+    UiAgentOperationProject, UiAgentOperationQuery, UiAgentOperationScope, UiAgentOperationStatus,
+    UiAgentOperationTarget, UiAgentOperationView,
+};
 mod message_markdown;
 mod model;
 mod render;

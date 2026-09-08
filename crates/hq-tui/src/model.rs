@@ -757,6 +757,8 @@ pub enum UiHelpPage {
 /// Shell-normalized terminal input understood by the pure model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiInput {
+    /// Stop the exact running agent operation when the recipient supports it.
+    CancelAgentOperation,
     /// Exit the UI.
     Quit,
     /// Open contextual help from any screen or dialog.
@@ -2867,6 +2869,8 @@ enum UiNewWorkflow {
 /// Closed timer purpose owned by the shell effect executor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiTimerKind {
+    /// Refresh current agent control capability and cancellation progress.
+    RefreshAgentOperation,
     /// Refresh only the currently visible project runtime.
     RefreshRuntime,
     /// Bounded retry after a failed snapshot request.
@@ -2885,6 +2889,22 @@ pub enum UiTimerKind {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiEvent {
+    /// Correlated independent agent capability read.
+    AgentOperationLoaded {
+        /// Exact pending read.
+        effect_id: EffectId,
+        /// Authoritative capability/status, or an unavailable read.
+        result: Result<crate::UiAgentOperationView, UiFailure>,
+    },
+    /// Receipt or passive observation of one immutable cancellation intent.
+    AgentCancellationCompleted {
+        /// Exact outstanding submission or observation.
+        effect_id: EffectId,
+        /// Original intent identity across retries.
+        intent_id: NonZeroU64,
+        /// Delivery progress, never authoritative terminal status.
+        outcome: crate::UiAgentCancellationOutcome,
+    },
     /// A passive status read failed without establishing current liveness.
     RuntimeRecoveryFailed {
         /// Exact outstanding read.
@@ -3116,6 +3136,29 @@ pub enum UiEvent {
 /// Closed side effects emitted by pure UI transitions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiEffect {
+    /// Read capability and canonical work state through the independent control client.
+    LoadAgentOperation {
+        /// Correlated read identity.
+        id: EffectId,
+        /// Exact selected conversation.
+        conversation: UiConversationId,
+        /// Prior targeted operation whose terminal result remains relevant.
+        tracked_operation: Option<[u8; 32]>,
+    },
+    /// Submit an explicit stop or retry of the exact original request.
+    CancelAgentOperation {
+        /// Correlated completion identity.
+        id: EffectId,
+        /// Immutable original intent.
+        intent: Box<crate::UiAgentCancellationIntent>,
+    },
+    /// Observe request delivery without resubmitting work.
+    ObserveAgentCancellation {
+        /// Correlated completion identity.
+        id: EffectId,
+        /// Immutable original intent.
+        intent: Box<crate::UiAgentCancellationIntent>,
+    },
     /// Execute or reconcile an explicit exact-scope retry.
     RetryRuntime {
         /// Completion identity.
@@ -3486,6 +3529,10 @@ pub struct UiModel {
     selected_row: Option<String>,
     conversation: Option<UiConversation>,
     conversation_setup: Option<UiProjectConversationSetup>,
+    agent_operation: Option<Box<crate::UiAgentOperationControl>>,
+    agent_operation_pending: Option<EffectId>,
+    agent_cancellation_pending: Option<EffectId>,
+    agent_operation_timer: Option<EffectId>,
     runtime_recovery: Option<UiRuntimeRecovery>,
     runtime_target: Option<([u8; 32], [u8; 32])>,
     runtime_pending: Option<EffectId>,
@@ -3580,6 +3627,10 @@ impl UiModel {
             selected_row: None,
             conversation: None,
             conversation_setup: None,
+            agent_operation: None,
+            agent_operation_pending: None,
+            agent_cancellation_pending: None,
+            agent_operation_timer: None,
             runtime_recovery: None,
             runtime_target: None,
             runtime_pending: None,
@@ -3949,7 +4000,38 @@ impl UiModel {
         self.runtime_retry_notice.as_deref()
     }
 
-    /// Current runtime evidence for the displayed conversation only.
+    /// Whether the current conversation surface can display agent controls.
+    pub fn agent_control_surface_active(&self) -> bool {
+        matches!(self.active_route(), UiRoute::Conversation { .. })
+            && matches!(
+                self.focus,
+                UiFocus::Conversation | UiFocus::Draft | UiFocus::Approval
+            )
+            && self.runtime_details.is_none()
+            && self.help_page.is_none()
+            && self.new_modal().is_none()
+            && self.agent_modal().is_none()
+            && self.mailbox_modal().is_none()
+            && self.project_interaction().is_none()
+            && self.interaction_modal().is_none()
+    }
+
+    /// Whether an explicit stop shortcut is available on the current surface.
+    pub fn can_cancel_agent_operation(&self) -> bool {
+        self.agent_control_surface_active()
+            && self.agent_cancellation_pending.is_none()
+            && self
+                .agent_operation
+                .as_deref()
+                .is_some_and(crate::UiAgentOperationControl::can_cancel)
+    }
+
+    /// Exact current control capability and separately tracked request progress.
+    pub fn agent_operation(&self) -> Option<&crate::UiAgentOperationControl> {
+        self.agent_operation.as_deref()
+    }
+
+    /// Passive runtime evidence for the selected project conversation.
     pub const fn runtime_recovery(&self) -> Option<&UiRuntimeRecovery> {
         self.runtime_recovery.as_ref()
     }
@@ -5109,6 +5191,7 @@ impl UiModel {
     ) -> Result<(), UiError> {
         let id = self.allocate_effect()?;
         match kind {
+            UiTimerKind::RefreshAgentOperation => self.agent_operation_timer = Some(id),
             UiTimerKind::RefreshRuntime => self.runtime_timer = Some(id),
             UiTimerKind::RetrySnapshot => self.retry_timer = Some(id),
             UiTimerKind::AutosaveDraft => self.autosave_timer = Some(id),
@@ -6123,6 +6206,33 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         .map(|target| target.conversation_id());
     let mut effects = Vec::new();
     match event {
+        UiEvent::AgentOperationLoaded { effect_id, result } => {
+            if model.agent_operation_pending == Some(effect_id) {
+                model.agent_operation_pending = None;
+                if let Some(control) = &mut model.agent_operation {
+                    control.observe(result.unwrap_or_default());
+                }
+                model.schedule_timer(
+                    UiTimerKind::RefreshAgentOperation,
+                    Duration::from_secs(1),
+                    &mut effects,
+                )?;
+                effects.push(UiEffect::RequestRedraw);
+            }
+        }
+        UiEvent::AgentCancellationCompleted {
+            effect_id,
+            intent_id,
+            outcome,
+        } => {
+            if model.agent_cancellation_pending == Some(effect_id) {
+                model.agent_cancellation_pending = None;
+                if let Some(control) = &mut model.agent_operation {
+                    control.acknowledge(intent_id, outcome);
+                }
+                effects.push(UiEffect::RequestRedraw);
+            }
+        }
         UiEvent::RuntimeRetryCompleted { effect_id, outcome } => {
             if model.runtime_retry_pending == Some(effect_id) {
                 model.runtime_retry_pending = None;
@@ -6333,6 +6443,7 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         open_conversation_composer(&mut model, entering, &mut effects)?;
     }
     synchronize_runtime_recovery(&mut model, &mut effects)?;
+    synchronize_agent_operation(&mut model, &mut effects)?;
     Ok(UiTransition { model, effects })
 }
 
@@ -7253,6 +7364,25 @@ fn apply_input(
         }
         return Ok(());
     }
+    if matches!(input, UiInput::CancelAgentOperation) {
+        if model.can_cancel_agent_operation() {
+            let id = model.allocate_effect()?;
+            if let Some(intent) = model
+                .agent_operation
+                .as_mut()
+                .and_then(|control| control.begin(id.0))
+            {
+                model.agent_cancellation_pending = Some(id);
+                model.agent_operation_timer = None;
+                effects.push(UiEffect::CancelAgentOperation {
+                    id,
+                    intent: Box::new(intent),
+                });
+                effects.push(UiEffect::RequestRedraw);
+            }
+        }
+        return Ok(());
+    }
     if let Some(changed) = apply_open_modal_input(model, input, effects)? {
         if changed || dismissed_completion {
             effects.push(UiEffect::RequestRedraw);
@@ -7372,7 +7502,8 @@ fn apply_input(
         UiInput::MoveCursorEnd if model.focus == UiFocus::Conversation => {
             model.follow_conversation_tail()
         }
-        UiInput::Paste(_)
+        UiInput::CancelAgentOperation
+        | UiInput::Paste(_)
         | UiInput::InsertNewline
         | UiInput::Help
         | UiInput::Refresh
@@ -12436,7 +12567,23 @@ fn timer_elapsed(
     effect_id: EffectId,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
-    if model.runtime_timer == Some(effect_id) {
+    if model.agent_operation_timer == Some(effect_id) {
+        model.agent_operation_timer = None;
+        if model.agent_cancellation_pending.is_none()
+            && let Some(intent) = model
+                .agent_operation
+                .as_deref()
+                .and_then(crate::UiAgentOperationControl::pending_intent)
+                .cloned()
+        {
+            let id = model.allocate_effect()?;
+            model.agent_cancellation_pending = Some(id);
+            effects.push(UiEffect::ObserveAgentCancellation {
+                id,
+                intent: Box::new(intent),
+            });
+        }
+    } else if model.runtime_timer == Some(effect_id) {
         model.runtime_timer = None;
     } else if model.retry_timer == Some(effect_id) {
         model.retry_timer = None;
@@ -14577,6 +14724,53 @@ fn apply_runtime_input(
     Ok(false)
 }
 
+fn synchronize_agent_operation(
+    model: &mut UiModel,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    let conversation = model
+        .active_conversation_row()
+        .and_then(|_| selected_conversation_target(model))
+        .map(|target| target.conversation_id())
+        .filter(|target| !matches!(target, UiConversationId::Thread { .. }));
+    if model
+        .agent_operation
+        .as_deref()
+        .map(crate::UiAgentOperationControl::conversation)
+        != conversation.as_ref()
+    {
+        model.agent_operation = conversation
+            .map(crate::UiAgentOperationControl::new)
+            .map(Box::new);
+        model.agent_operation_pending = None;
+        model.agent_cancellation_pending = None;
+        model.agent_operation_timer = None;
+    }
+    let connected = model.connection == UiConnectionState::Ready;
+    let Some(control) = &mut model.agent_operation else {
+        return Ok(());
+    };
+    control.set_connected(connected);
+    if !connected {
+        model.agent_operation_pending = None;
+        model.agent_cancellation_pending = None;
+        model.agent_operation_timer = None;
+        return Ok(());
+    }
+    if model.agent_operation_pending.is_none() && model.agent_operation_timer.is_none() {
+        let conversation = control.conversation().clone();
+        let tracked_operation = control.tracked_operation();
+        let id = model.allocate_effect()?;
+        model.agent_operation_pending = Some(id);
+        effects.push(UiEffect::LoadAgentOperation {
+            id,
+            conversation,
+            tracked_operation,
+        });
+    }
+    Ok(())
+}
+
 fn synchronize_runtime_recovery(
     model: &mut UiModel,
     effects: &mut Vec<UiEffect>,
@@ -14967,8 +15161,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn project_conversation_selection_uses_the_typed_agent_row_identity() {
+    fn project_conversation_model() -> UiModel {
         let mut model = model();
         let project_id = [5; 32];
         let thread_id = [6; 32];
@@ -15001,6 +15194,195 @@ mod tests {
 
         select_project_conversation(&mut model, project_id, thread_id);
 
+        model
+    }
+
+    fn cancellable_conversation_model() -> UiModel {
+        let mut model = project_conversation_model();
+        model.connection = UiConnectionState::Ready;
+        let mut effects = Vec::new();
+        super::synchronize_agent_operation(&mut model, &mut effects).expect("capability read");
+        let pending = model.agent_operation_pending.expect("pending read");
+        let mut target = crate::agent_operation::tests::target();
+        target.query.conversation = crate::UiConversationId::Project {
+            project_id: [5; 32],
+            thread_id: [6; 32],
+        };
+        target.scope.project = Some(crate::UiAgentOperationProject {
+            project_id: [5; 32],
+            assignment_id: [8; 32],
+            thread_id: [6; 32],
+        });
+        update(
+            model,
+            UiEvent::AgentOperationLoaded {
+                effect_id: pending,
+                result: Ok(crate::UiAgentOperationView {
+                    target: Some(target),
+                    tracked: None,
+                }),
+            },
+        )
+        .expect("capability response")
+        .model
+    }
+
+    #[test]
+    fn agent_stop_preserves_composer_and_reading_state_on_all_conversation_surfaces() {
+        for focus in [UiFocus::Conversation, UiFocus::Draft, UiFocus::Approval] {
+            let mut model = cancellable_conversation_model();
+            model.focus = focus;
+            model.mailbox_draft = Some(UiMailboxDraftPane::Editing {
+                draft: crate::UiMailboxDraft {
+                    draft_id: [9; 32],
+                    target: UiMailboxDraftTarget::Project {
+                        project_id: [5; 32],
+                        thread_id: Some([6; 32]),
+                    },
+                    content: "unsent next message".to_owned(),
+                    version: 3,
+                },
+                dirty: true,
+                submitting: false,
+                closing: false,
+            });
+            model.conversation_viewport_position = Some(crate::UiConversationViewportPosition {
+                entry_id: "fact".to_owned(),
+                row: 12,
+            });
+            let draft = model.mailbox_draft.clone();
+            let position = model.conversation_viewport_position.clone();
+            let anchor = model.conversation_anchor.clone();
+            let mut effects = Vec::new();
+            super::apply_input(&mut model, &UiInput::CancelAgentOperation, &mut effects)
+                .expect("stop input");
+            assert!(
+                effects
+                    .iter()
+                    .any(|effect| matches!(effect, UiEffect::CancelAgentOperation { .. }))
+            );
+            assert_eq!(model.focus, focus);
+            assert_eq!(model.mailbox_draft, draft);
+            assert_eq!(model.conversation_viewport_position, position);
+            assert_eq!(model.conversation_anchor, anchor);
+            effects.clear();
+            super::apply_input(&mut model, &UiInput::CancelAgentOperation, &mut effects)
+                .expect("duplicate key");
+            assert!(effects.is_empty(), "in-flight request is coalesced");
+        }
+    }
+
+    #[test]
+    fn navigation_and_disconnect_fence_late_agent_control_responses() {
+        let mut model = cancellable_conversation_model();
+        let mut effects = Vec::new();
+        super::apply_input(&mut model, &UiInput::CancelAgentOperation, &mut effects).expect("stop");
+        let (id, intent_id) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::CancelAgentOperation { id, intent } => Some((*id, intent.id)),
+                _ => None,
+            })
+            .expect("stop effect");
+        model.connection = UiConnectionState::Reconnecting;
+        super::synchronize_agent_operation(&mut model, &mut effects).expect("disconnect");
+        assert!(!model.can_cancel_agent_operation());
+        let model = update(
+            model,
+            UiEvent::AgentCancellationCompleted {
+                effect_id: id,
+                intent_id,
+                outcome: crate::UiAgentCancellationOutcome::Requested,
+            },
+        )
+        .expect("late ack")
+        .model;
+        assert_eq!(
+            model
+                .agent_operation()
+                .and_then(crate::UiAgentOperationControl::notice),
+            Some("Requesting agent stop…")
+        );
+        let mut model = model;
+        model.replace_with_workspace_root(UiSection::Inbox);
+        super::synchronize_agent_operation(&mut model, &mut effects).expect("leave conversation");
+        assert!(model.agent_operation().is_none());
+        let model = update(
+            model,
+            UiEvent::AgentCancellationCompleted {
+                effect_id: id,
+                intent_id,
+                outcome: crate::UiAgentCancellationOutcome::Requested,
+            },
+        )
+        .expect("stale target ack")
+        .model;
+        assert!(model.agent_operation().is_none());
+    }
+
+    fn rendered_control_text(model: &UiModel) -> String {
+        let backend =
+            ratatui::backend::TestBackend::new(model.viewport.width, model.viewport.height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| crate::render(frame, model, &crate::UiTheme::terminal()))
+            .expect("draw");
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    #[test]
+    fn agent_stop_hint_is_capability_gated_and_its_receipt_does_not_render_as_stopped() {
+        let mut model = cancellable_conversation_model();
+        model.viewport = UiSize {
+            width: 100,
+            height: 24,
+        };
+        assert!(rendered_control_text(&model).contains("Ctrl-G stop agent"));
+        model.runtime_details = Some(0);
+        assert!(!rendered_control_text(&model).contains("Ctrl-G stop agent"));
+        assert!(!model.can_cancel_agent_operation());
+        model.runtime_details = None;
+        let transition =
+            update(model, UiEvent::Input(UiInput::CancelAgentOperation)).expect("stop");
+        let (id, intent_id) = transition
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::CancelAgentOperation { id, intent } => Some((*id, intent.id)),
+                _ => None,
+            })
+            .expect("stop effect");
+        let model = update(
+            transition.model,
+            UiEvent::AgentCancellationCompleted {
+                effect_id: id,
+                intent_id,
+                outcome: crate::UiAgentCancellationOutcome::Requested,
+            },
+        )
+        .expect("acknowledged")
+        .model;
+        let text = rendered_control_text(&model);
+        assert!(text.contains("Stopping agent…"));
+        assert!(!text.contains("Agent stopped"));
+        assert!(!text.contains("Ctrl-G stop agent"));
+        assert!(
+            !rendered_control_text(&project_conversation_model()).contains("Ctrl-G stop agent")
+        );
+    }
+
+    #[test]
+    fn project_conversation_selection_uses_the_typed_agent_row_identity() {
+        let mut model = project_conversation_model();
+        let project_id = [5; 32];
+        let thread_id = [6; 32];
+        let agent_row = "alice-agent".to_owned();
         assert_eq!(model.selected_row.as_deref(), Some(agent_row.as_str()));
         assert_eq!(model.focus, UiFocus::Conversation);
         model.connection = UiConnectionState::Ready;

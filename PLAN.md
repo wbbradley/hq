@@ -4,17 +4,18 @@
 
 ### Capability-aware cancellation of agent work
 
-Problem: The conversation view cannot stop a running agent turn. Offer cancellation only for recipients with the capability; human recipients and unsupported harnesses must not offer or accept it.
+Problem: The independent cancellation control now reaches the conversation model, but installed stop-and-continue behavior and stale provider-history handling still need qualification. Offer cancellation only for recipients with the capability; human recipients and unsupported harnesses must not offer or accept it.
 
-Existing foundation: `crates/hq-harness/src/contract.rs` defines `HarnessCapability::OperationCancellation`, `HarnessSession::cancel_operation`, and cancellation outcomes. `HarnessSupervisor::cancel` in `supervisor.rs` routes through the live session. `crates/hq-codex/src/adapter.rs` maps an exact HQ operation to Codex `turn/interrupt` with provider thread and turn IDs. Extend these neutral abstractions rather than introducing a Codex-specific UI verb.
+Existing foundation: `docs/agent-cancellation.md` records the neutral target, daemon job registry, independently owned local API/TUI control workers, immutable request replay, and canonical terminal-state presentation. `HarnessSupervisor::cancel_owned` bypasses the ordinary worker lock; temporary submission backpressure retains saved input for authoritative acceptance lookup. Qualify the remaining behavior through these paths.
 
 Scope and dependencies:
 
 - Follow the completed control-path and ACP assessment in `docs/agent-cancellation.md`: implement neutral cancellation now, defer arbitrary ACP integration, and preserve the safe-submission registry gate.
-- Expose typed recipient capabilities and an exact active cancellation target through application ports, the local API, node composition, TUI client, and model. Derive availability from authoritative capabilities and current operation state; revalidate authorization and exact scope in the daemon.
-- Add a discoverable conversation/composer action with clear request/result states. Cancellation is a control operation, distinct from ordinary message content, question-thread cancellation, and rejecting a pending approval.
-- Trace dispatch and lock ownership through `crates/hq-node/src/tui_client.rs`, `crates/hq-local-api/src/server.rs`, `crates/hq-node/src/harness_component.rs`, and the supervisor. Ensure cancellation reaches the adapter while generation or a tool is running. The supervisor currently holds its worker mutex during cancellation RPC; prevent long work, blocked submission/response handling, or other sessions from indefinitely serializing the control path.
-- Distinguish an interrupt request from authoritative terminal cancellation. Audit the Codex adapter's immediate Cancelled result after the interrupt RPC succeeds. Handle completion races, duplicates, stale targets, transport uncertainty, and pending interactive requests without stopping a newer turn or reviving cancelled work.
+- Extend the installed provider fixture in `crates/hq-node/tests/unix_tui_terminal.rs` to hold generation/tool execution until the actual interrupt arrives. Exercise Ctrl-G through the installed TUI/local API, verify exact provider thread/turn identity, persist and display authoritative interruption, then successfully send another message.
+- Qualify blocked provider RPC handling and sibling responsiveness through the actual control path. Preserve the existing independent executor, server-session, responder-cleanup, and supervisor gate guarantees.
+- Audit `CodexSession::read_thread`, `lookup_internal`, live lifecycle notifications, and `CodexOperationControl::activate`. A history response currently replaces `active_turn` and can reactivate an old operation after newer live evidence. Add deterministic late-history tests and preserve current-turn and terminal evidence without selecting authority from turn list position.
+- Exercise natural completion races, duplicate/stale requests, uncertain acknowledgements, and cancellation while awaiting approval through the installed path. Preserve the clear distinction between requesting a stop and observing canonical terminal status, exact immutable retries, and draft/reading position.
+- Verify that a future message sent while cancellation is pending survives temporary backpressure, retains its exact input identity, and proceeds afterward. Accepted work must be looked up rather than resubmitted, including across restart; project retries still require canonical eligibility.
 
 Invariants: Scope cancellation to the authorized recipient/session/operation, never display prose. Unsupported recipients cannot invoke it. Preserve accepted-work recovery guarantees and sibling conversation responsiveness.
 

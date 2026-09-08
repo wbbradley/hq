@@ -569,9 +569,43 @@ fn contextual_help_lines(model: &UiModel, theme: &UiTheme) -> Vec<Line<'static>>
         theme.style(UiThemeRole::Heading),
     ));
     lines.extend(section_help_actions(model));
+    if model
+        .agent_operation()
+        .is_some_and(crate::UiAgentOperationControl::can_cancel)
+    {
+        lines.push(Line::from("Ctrl-G stop the running agent; keep your draft"));
+    }
     lines.push(Line::from(
         "q quit · t technical details · F1/?/Esc close help",
     ));
+    lines
+}
+
+fn composer_help_lines(model: &UiModel, theme: &UiTheme) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::styled(
+            "Help for writing a message",
+            theme.style(UiThemeRole::Heading),
+        ),
+        Line::from("HQ saves this draft as you type and retains it if sending needs attention."),
+        Line::default(),
+        Line::styled("Editing keys", theme.style(UiThemeRole::Heading)),
+        Line::from(CHARACTER_MOVEMENT_HELP),
+        Line::from(WORD_MOVEMENT_HELP),
+        Line::from("↑/↓ move one line"),
+        Line::from("Ctrl-A/Home line start · Ctrl-E/End line end"),
+        Line::from("Backspace delete left · Delete/Ctrl-D delete right"),
+        Line::from("Ctrl-K delete to line end · Ctrl-U delete to line start"),
+        Line::from("Ctrl-J/Shift-Enter newline · Enter send · Esc close"),
+        Line::default(),
+        Line::from("t — technical details · F1 / Esc — close help"),
+    ];
+    if model
+        .agent_operation()
+        .is_some_and(crate::UiAgentOperationControl::can_cancel)
+    {
+        lines.push(Line::from("Ctrl-G stop the running agent; keep your draft"));
+    }
     lines
 }
 
@@ -582,26 +616,7 @@ fn dialog_help_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'stati
         && model.mailbox_modal().is_none()
         && model.mailbox_draft().is_some()
     {
-        return Some(vec![
-            Line::styled(
-                "Help for writing a message",
-                theme.style(UiThemeRole::Heading),
-            ),
-            Line::from(
-                "HQ saves this draft as you type and retains it if sending needs attention.",
-            ),
-            Line::default(),
-            Line::styled("Editing keys", theme.style(UiThemeRole::Heading)),
-            Line::from(CHARACTER_MOVEMENT_HELP),
-            Line::from(WORD_MOVEMENT_HELP),
-            Line::from("↑/↓ move one line"),
-            Line::from("Ctrl-A/Home line start · Ctrl-E/End line end"),
-            Line::from("Backspace delete left · Delete/Ctrl-D delete right"),
-            Line::from("Ctrl-K delete to line end · Ctrl-U delete to line start"),
-            Line::from("Ctrl-J/Shift-Enter newline · Enter send · Esc close"),
-            Line::default(),
-            Line::from("t — technical details · F1 / Esc — close help"),
-        ]);
+        return Some(composer_help_lines(model, theme));
     }
     let (title, purpose) = if let Some(dialog) = model.new_modal() {
         match dialog {
@@ -5306,6 +5321,33 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         " Enter open · n New… · d archive conversation · ? help · q quit".to_owned()
     } else {
         " Enter open · n New… · ? help · q quit".to_owned()
+    };
+    let content = if model.agent_control_surface_active() {
+        let notice = model
+            .agent_operation()
+            .and_then(crate::UiAgentOperationControl::notice);
+        let action = model.can_cancel_agent_operation().then(|| {
+            if model
+                .agent_operation()
+                .is_some_and(crate::UiAgentOperationControl::retry_is_uncertain)
+            {
+                "Ctrl-G retry stop"
+            } else {
+                "Ctrl-G stop agent"
+            }
+        });
+        let control = notice
+            .into_iter()
+            .chain(action)
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if control.is_empty() {
+            content
+        } else {
+            format!(" {control} ·{content}")
+        }
+    } else {
+        content
     };
     let view_shortcuts_available = model.help_page().is_none()
         && model.new_modal().is_none()

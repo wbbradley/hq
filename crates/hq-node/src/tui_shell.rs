@@ -521,6 +521,7 @@ fn normalize_key(key: KeyEvent) -> Option<TuiTerminalEvent> {
     }
     if key.modifiers == KeyModifiers::CONTROL {
         let input = match key.code {
+            KeyCode::Char('g' | 'G') => UiInput::CancelAgentOperation,
             KeyCode::Char('b' | 'B') => UiInput::MoveCharacterBackward,
             KeyCode::Char('f' | 'F') => UiInput::MoveCharacterForward,
             KeyCode::Left => UiInput::MoveWordBackward,
@@ -749,6 +750,8 @@ fn trace_tui_event(trace: &BoundaryTrace, kind: BoundaryKind, event: &UiEvent) {
         | UiEvent::ManagedSessionFailed { effect_id, .. }
         | UiEvent::RuntimeRetryCompleted { effect_id, .. }
         | UiEvent::RuntimeRecoveryFailed { effect_id, .. }
+        | UiEvent::AgentOperationLoaded { effect_id, .. }
+        | UiEvent::AgentCancellationCompleted { effect_id, .. }
         | UiEvent::RuntimeRecoveryLoaded { effect_id, .. }
         | UiEvent::ProjectCommandCompleted { effect_id, .. }
         | UiEvent::ProjectCommandFailed { effect_id, .. } => trace.record(
@@ -868,10 +871,13 @@ pub fn run_installed_tui(state: StatePaths) -> Result<(), TuiShellError> {
         .activate_subscription()
         .map_err(|_| TuiShellError::Client)?;
     let command_client =
-        LocalNodeClient::connect(client_config).map_err(|_| TuiShellError::Client)?;
+        LocalNodeClient::connect(client_config.clone()).map_err(|_| TuiShellError::Client)?;
     let (client, observer) =
         compose_tui_clients(command_client, event_client, state, &subscription_base)
             .map_err(|_| TuiShellError::Client)?;
+    let control_client =
+        LocalNodeClient::connect(client_config).map_err(|_| TuiShellError::Client)?;
+    let client = client.with_agent_control(control_client);
     let terminal = CrosstermTerminal::new(theme).map_err(|error| {
         record_terminal_failure(&trace, error);
         TuiShellError::Terminal(error)
