@@ -357,6 +357,17 @@ impl hq_application::ControlProjects for DormantNodeComponent {
     }
 }
 
+impl hq_application::RetryProjectRuntime for DormantNodeComponent {
+    fn retry_project_runtime(
+        &self,
+        _request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
+
 impl hq_application::RetireAgents for DormantNodeComponent {
     fn retire_agent(
         &self,
@@ -386,6 +397,17 @@ impl crate::ReconcileProjectMessages for DormantNodeComponent {
 
 impl crate::ScheduleProjectReconciliation for DormantNodeComponent {
     fn schedule_project_reconciliation(&self) {}
+}
+
+impl hq_application::QueryProjectRecovery for DormantNodeComponent {
+    fn query_project_recovery(
+        &self,
+        _request: hq_application::ProjectRecoveryQuery,
+    ) -> Result<hq_application::ProjectRecoveryView, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
 }
 
 #[cfg(test)]

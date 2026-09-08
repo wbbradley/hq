@@ -1190,6 +1190,30 @@ impl LocalNodeClient {
             .map_err(LocalNodeClientError::Execution)
     }
 
+    /// Reads passive current recovery evidence for the exact displayed project.
+    pub fn project_recovery(
+        &mut self,
+        request: hq_local_api::protocol::v1::ProjectRecoveryQueryDto,
+    ) -> Result<ClientEvent, LocalNodeClientError> {
+        self.runner
+            .request(hq_local_api::protocol::v1::Request::ProjectRecovery(
+                request,
+            ))
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Sends one exact recovery retry; callers retain its identity for response-loss replay.
+    pub fn retry_project_runtime(
+        &mut self,
+        request: hq_local_api::protocol::v1::ProjectRecoveryRetryRequestDto,
+    ) -> Result<ClientEvent, LocalNodeClientError> {
+        self.runner
+            .request(hq_local_api::protocol::v1::Request::RetryProjectRuntime(
+                Box::new(request),
+            ))
+            .map_err(LocalNodeClientError::Execution)
+    }
+
     /// Executes or reconciles one retry-safe node-owned named-agent retirement.
     pub fn agent_retirement(
         &mut self,

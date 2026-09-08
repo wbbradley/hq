@@ -48,6 +48,8 @@ struct HarnessNodeInner {
     configuration: Option<crate::ConfigurationManager>,
     canonical: Arc<dyn AgentSessionCanonicalPort>,
     supervisor: Mutex<Option<Arc<HarnessSupervisor>>>,
+    runtime_generation: Mutex<Option<hq_application::RuntimeGenerationId>>,
+    runtime_stop_observer: Mutex<Option<Arc<dyn hq_projects::ProjectRuntimeStopObserver>>>,
     event_task: Mutex<Option<JoinHandle<Result<(), HarnessError>>>>,
     event_notifications: HarnessEventNotifier,
     event_stop: AtomicBool,
@@ -123,6 +125,8 @@ impl HarnessNodeComponent {
                 configuration: None,
                 canonical,
                 supervisor: Mutex::new(None),
+                runtime_generation: Mutex::new(None),
+                runtime_stop_observer: Mutex::new(None),
                 event_task: Mutex::new(None),
                 event_notifications,
                 event_stop: AtomicBool::new(false),
@@ -459,6 +463,7 @@ fn run_harness_events(
                         || report.workers_closed > 0
                         || report.workers_failed > 0 =>
                 {
+                    publish_runtime_stops(inner, &report);
                     if let Ok(pending) =
                         supervisor.pending_interactions(hq_application::MAX_PENDING_INTERACTIONS)
                     {
@@ -625,6 +630,18 @@ impl NodeComponent for HarnessNodeComponent {
             let started =
                 HarnessSupervisor::new(self.inner.config.clone(), self.inner.dependencies.clone())
                     .map_err(|_| ComponentError::unavailable())?;
+            let generation = self
+                .inner
+                .dependencies
+                .tokens
+                .next_token()
+                .map_err(|_| ComponentError::unavailable())?;
+            *self
+                .inner
+                .runtime_generation
+                .lock()
+                .map_err(|_| ComponentError::unavailable())? =
+                hq_application::RuntimeGenerationId::from_bytes(*generation.as_bytes());
             *supervisor = Some(Arc::new(started));
         }
         self.inner.event_stop.store(false, Ordering::Release);
@@ -876,6 +893,84 @@ impl ControlInteractions for HarnessNodeComponent {
     }
 }
 
+fn project_owned_observation(
+    scope: &hq_application::ProjectRuntimeScope,
+    ready: &hq_harness::HarnessReadyWorker,
+    active_turn: Option<(hq_domain::OperationId, std::num::NonZeroU64)>,
+) -> Result<hq_application::ProjectRuntimeWorkerState, ApplicationError> {
+    use hq_application::{
+        ProjectRuntimeFailure, ProjectRuntimeWorkerState as State, RuntimeFailureReason,
+        RuntimeWorkerOwner,
+    };
+    if ready.agent_id != scope.binding.agent_id
+        || ready.project_id != Some(scope.project_id)
+        || ready.provider_id != scope.binding.provider
+        || ready.session_id != scope.binding.session
+    {
+        return Ok(State::Failed(ProjectRuntimeFailure {
+            reason: RuntimeFailureReason::SessionIdentityMismatch,
+            lease: None,
+        }));
+    }
+    let owner = RuntimeWorkerOwner::from_bytes(*ready.owner_token.as_bytes())
+        .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::StateCorrupt))?;
+    Ok(match active_turn {
+        Some((operation_id, sequence)) => State::Working {
+            owner,
+            operation_id,
+            sequence,
+        },
+        None => State::Ready { owner },
+    })
+}
+
+fn publish_runtime_stops(inner: &HarnessNodeInner, report: &hq_harness::HarnessEventPumpReport) {
+    let observer = inner
+        .runtime_stop_observer
+        .lock()
+        .ok()
+        .and_then(|observer| observer.clone());
+    let Some(observer) = observer else {
+        return;
+    };
+    // The event task is joined before its supervisor is replaced, so this generation
+    // belongs to the supervisor whose event batch supplied these stop hints.
+    let Some(generation) = inner
+        .runtime_generation
+        .lock()
+        .ok()
+        .and_then(|generation| *generation)
+    else {
+        return;
+    };
+    for stopped in &report.stopped_workers {
+        let Some(project_id) = stopped.project_id else {
+            continue;
+        };
+        let Some(owner) =
+            hq_application::RuntimeWorkerOwner::from_bytes(*stopped.owner_token.as_bytes())
+        else {
+            continue;
+        };
+        observer.stopped(hq_application::ProjectRuntimeStopped {
+            project_id,
+            agent_id: stopped.agent_id,
+            provider: stopped.provider_id.clone(),
+            session: stopped.session_id.clone(),
+            generation,
+            owner,
+            reason: match stopped.reason {
+                hq_harness::HarnessWorkerStopReason::Closed => {
+                    hq_application::RuntimeFailureReason::TransportClosed
+                }
+                hq_harness::HarnessWorkerStopReason::Failed(class) => {
+                    project_runtime_failure_reason(class)
+                }
+            },
+        });
+    }
+}
+
 fn publish_interaction_invalidation(inner: &HarnessNodeInner) {
     let Ok(revision) = inner.application_state.current_revision() else {
         return;
@@ -930,6 +1025,117 @@ fn project_launch_environment() -> Result<HarnessEnvironment, ApplicationError> 
 }
 
 impl ProjectRuntimePort for HarnessNodeComponent {
+    fn observe_runtime(
+        &self,
+        scope: &hq_application::ProjectRuntimeScope,
+    ) -> Result<hq_application::ProjectRuntimeObservation, ApplicationError> {
+        use hq_application::{
+            ProjectRuntimeFailure, ProjectRuntimeWorkerState as State, RuntimeFailureReason,
+            RuntimeWorkerOwner,
+        };
+        let mut observation = hq_application::ProjectRuntimeObservation {
+            scope: scope.clone(),
+            generation: None,
+            worker: State::Stopped,
+        };
+        let supervisor = match self.inner.supervisor.try_lock() {
+            Ok(guard) => {
+                observation.generation = self
+                    .inner
+                    .runtime_generation
+                    .try_lock()
+                    .ok()
+                    .and_then(|generation| *generation);
+                guard.clone()
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                observation.generation = self
+                    .inner
+                    .runtime_generation
+                    .try_lock()
+                    .ok()
+                    .and_then(|generation| *generation);
+                observation.worker = State::Busy;
+                return Ok(observation);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::AdapterUnavailable,
+                ));
+            }
+        };
+        let Some(supervisor) = supervisor else {
+            observation.generation = None;
+            return Ok(observation);
+        };
+        if observation.generation.is_none() {
+            observation.worker = State::Busy;
+            return Ok(observation);
+        }
+        observation.worker = match supervisor
+            .observe_worker(scope.binding.agent_id)
+            .map_err(map_harness_error)?
+        {
+            hq_harness::HarnessWorkerObservation::Stopped => State::Stopped,
+            hq_harness::HarnessWorkerObservation::Busy => State::Busy,
+            hq_harness::HarnessWorkerObservation::Owned(ready) => {
+                project_owned_observation(scope, &ready, None)?
+            }
+            hq_harness::HarnessWorkerObservation::Working {
+                worker,
+                operation_id,
+                sequence,
+            } => project_owned_observation(scope, &worker, Some((operation_id, sequence)))?,
+            hq_harness::HarnessWorkerObservation::LeaseLost(lease) => {
+                State::Failed(ProjectRuntimeFailure {
+                    reason: RuntimeFailureReason::OwnershipConflict,
+                    lease: lease
+                        .map(|lease| {
+                            Ok(hq_application::RuntimeLeaseEvidence {
+                                owner: RuntimeWorkerOwner::from_bytes(
+                                    *lease.owner_token.as_bytes(),
+                                )
+                                .ok_or_else(|| {
+                                    ApplicationError::new(ApplicationErrorCode::StateCorrupt)
+                                })?,
+                                expires_at_millis: lease.expires_at_millis,
+                            })
+                        })
+                        .transpose()?,
+                })
+            }
+        };
+        Ok(observation)
+    }
+
+    fn observe_runtime_stops(
+        &self,
+        observer: Option<Arc<dyn hq_projects::ProjectRuntimeStopObserver>>,
+    ) -> Result<(), ApplicationError> {
+        *self
+            .inner
+            .runtime_stop_observer
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))? =
+            observer;
+        Ok(())
+    }
+
+    fn recovery_context(&self) -> Result<hq_application::RuntimeRecoveryContext, ApplicationError> {
+        self.with_supervisor(|_| {
+            let generation = self
+                .inner
+                .runtime_generation
+                .lock()
+                .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?
+                .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
+            Ok(hq_application::RuntimeRecoveryContext {
+                generation,
+                now_millis: self.inner.dependencies.clock.now_millis(),
+            })
+        })
+    }
+
     fn start_or_resume(
         &self,
         request: &EffectRequest<ProjectRuntimeRequest>,
@@ -981,26 +1187,77 @@ impl ProjectRuntimePort for HarnessNodeComponent {
         })
     }
 
-    fn ensure_ready(&self, request: &ProjectRuntimeRequest) -> Result<(), ApplicationError> {
-        let session_id = request
-            .resume_session
-            .clone()
-            .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::InvalidRequest))?;
+    fn ensure_ready(
+        &self,
+        request: &hq_application::ProjectReadinessRequest,
+    ) -> Result<hq_application::ProjectReadinessOutcome, ApplicationError> {
+        use hq_application::{
+            ProjectReadinessOutcome, ProjectRuntimeFailure, ProjectRuntimeReady,
+            RuntimeFailureReason, RuntimeLeaseEvidence, RuntimeWorkerOwner,
+        };
         let environment = project_launch_environment()?;
         let result = self.with_supervisor(|supervisor| {
-            supervisor
-                .ensure_resumed(HarnessLaunchRequest {
-                    agent_id: request.agent_id,
-                    project_id: Some(request.project_id),
-                    launch_directory: request.launch_directory.clone(),
-                    provider_id: request.provider.clone(),
-                    session: HarnessSessionRequest::Resume { session_id },
-                    environment,
-                })
-                .map(|_| ())
+            let generation = self
+                .inner
+                .runtime_generation
+                .lock()
+                .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?
+                .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
+            if generation != request.generation {
+                return Ok(ProjectReadinessOutcome::Failed(ProjectRuntimeFailure {
+                    reason: RuntimeFailureReason::GenerationChanged,
+                    lease: None,
+                }));
+            }
+            match supervisor.ensure_resumed(HarnessLaunchRequest {
+                agent_id: request.scope.binding.agent_id,
+                project_id: Some(request.scope.project_id),
+                launch_directory: Some(request.launch_directory.clone()),
+                provider_id: request.scope.binding.provider.clone(),
+                session: HarnessSessionRequest::Resume {
+                    session_id: request.scope.binding.session.clone(),
+                },
+                environment,
+            }) {
+                Ok(ready) => Ok(ProjectReadinessOutcome::Ready(ProjectRuntimeReady {
+                    scope: request.scope.clone(),
+                    generation,
+                    owner: RuntimeWorkerOwner::from_bytes(*ready.owner_token.as_bytes())
+                        .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?,
+                })),
+                Err(error) => {
+                    let lease = if error.class == HarnessErrorClass::OwnershipConflict {
+                        supervisor
+                            .worker_lease(request.scope.binding.agent_id)?
+                            .map(|lease| {
+                                Ok(RuntimeLeaseEvidence {
+                                    owner: RuntimeWorkerOwner::from_bytes(
+                                        *lease.owner_token.as_bytes(),
+                                    )
+                                    .ok_or_else(|| {
+                                        HarnessError::new(HarnessErrorClass::InvalidInput)
+                                    })?,
+                                    expires_at_millis: lease.expires_at_millis,
+                                })
+                            })
+                            .transpose()?
+                    } else {
+                        None
+                    };
+                    Ok(ProjectReadinessOutcome::Failed(ProjectRuntimeFailure {
+                        reason: project_runtime_failure_reason(error.class),
+                        lease,
+                    }))
+                }
+            }
         });
         self.wake_event_task();
-        result
+        Ok(
+            result.unwrap_or(ProjectReadinessOutcome::Failed(ProjectRuntimeFailure {
+                reason: RuntimeFailureReason::Unavailable,
+                lease: None,
+            })),
+        )
     }
 
     fn deliver(
@@ -1107,6 +1364,39 @@ impl ProjectRuntimePort for HarnessNodeComponent {
                 .stop(request.body.agent_id)
                 .map(|_| EffectOutcome::Accepted(()))
         })
+    }
+}
+
+fn project_runtime_failure_reason(
+    class: HarnessErrorClass,
+) -> hq_application::RuntimeFailureReason {
+    use hq_application::RuntimeFailureReason;
+    match class {
+        HarnessErrorClass::InvalidInput => RuntimeFailureReason::InvalidInput,
+        HarnessErrorClass::Unsupported => RuntimeFailureReason::Unsupported,
+        HarnessErrorClass::ProviderNotRegistered => RuntimeFailureReason::ProviderNotRegistered,
+        HarnessErrorClass::RegistrationConflict => RuntimeFailureReason::RegistrationConflict,
+        HarnessErrorClass::UnsafeRecovery => RuntimeFailureReason::UnsafeRecovery,
+        HarnessErrorClass::SessionIdentityMismatch => RuntimeFailureReason::SessionIdentityMismatch,
+        HarnessErrorClass::SessionNotFound => RuntimeFailureReason::SessionNotFound,
+        HarnessErrorClass::SubmissionIdentityConflict => {
+            RuntimeFailureReason::SubmissionIdentityConflict
+        }
+        HarnessErrorClass::InteractiveAlreadyAnswered => {
+            RuntimeFailureReason::InteractiveAlreadyAnswered
+        }
+        HarnessErrorClass::SecretInputRejected => RuntimeFailureReason::SecretInputRejected,
+        HarnessErrorClass::IntakeClosed => RuntimeFailureReason::IntakeClosed,
+        HarnessErrorClass::Crashed => RuntimeFailureReason::Crashed,
+        HarnessErrorClass::ProtocolViolation => RuntimeFailureReason::ProtocolViolation,
+        HarnessErrorClass::TransportClosed => RuntimeFailureReason::TransportClosed,
+        HarnessErrorClass::ProcessFailed => RuntimeFailureReason::ProcessFailed,
+        HarnessErrorClass::CompatibilityMismatch => RuntimeFailureReason::CompatibilityMismatch,
+        HarnessErrorClass::Unavailable => RuntimeFailureReason::Unavailable,
+        HarnessErrorClass::CleanupFailed => RuntimeFailureReason::CleanupFailed,
+        HarnessErrorClass::OwnershipConflict => RuntimeFailureReason::OwnershipConflict,
+        HarnessErrorClass::Backpressure => RuntimeFailureReason::Backpressure,
+        HarnessErrorClass::PersistenceCollision => RuntimeFailureReason::PersistenceCollision,
     }
 }
 
@@ -1285,6 +1575,153 @@ mod tests {
         cancellation.cancel();
         component.drain().expect("drain");
         fs::remove_file(trace_path).expect("remove trace");
+    }
+
+    #[test]
+    fn project_readiness_preserves_provider_failure_and_foreign_lease_deadline() {
+        use hq_application::{
+            ProjectReadinessOutcome, ProjectRuntimeFailure, RuntimeFailureReason,
+        };
+        let database = TestDatabase::new();
+        let store = Store::open(&database.path, NonZeroUsize::MIN).expect("store");
+        let mut component = HarnessNodeComponent::new(
+            HarnessSupervisorConfig::default(),
+            &store,
+            Arc::new(HarnessRegistry::new()),
+            Arc::new(CountingPersistence::default()),
+            Arc::new(SystemHarnessClock),
+            Arc::new(RandomHarnessTokens),
+            Arc::new(UnavailableAgentSessionCanonical),
+        );
+        let cancellation = CancellationToken::new();
+        component.start(cancellation.child()).expect("start");
+        let delivery = delivery_request().body;
+        let request = hq_application::ProjectReadinessRequest {
+            generation: component
+                .recovery_context()
+                .expect("runtime context")
+                .generation,
+            scope: hq_application::ProjectRuntimeScope {
+                project_id: delivery.project_id,
+                binding: delivery.binding,
+                thread_id: delivery.thread_id,
+            },
+            launch_directory: hq_domain::ResourceLocator::new(
+                hq_domain::ResourceScheme::WorkingTree,
+                hq_domain::BoundedText::new("/tmp").expect("directory"),
+            ),
+        };
+        assert_eq!(
+            component
+                .ensure_ready(&request)
+                .expect("typed provider failure"),
+            ProjectReadinessOutcome::Failed(ProjectRuntimeFailure {
+                reason: RuntimeFailureReason::ProviderNotRegistered,
+                lease: None,
+            })
+        );
+        let owner = HarnessOwnerToken::from_bytes([99; 32]).expect("foreign owner");
+        let now = component.inner.dependencies.clock.now_millis();
+        component
+            .inner
+            .dependencies
+            .state
+            .apply(hq_harness::HarnessStateMutation::ClaimLease {
+                agent_id: request.scope.binding.agent_id,
+                owner_token: owner,
+                now_millis: now,
+                expires_at_millis: now + 60_000,
+            })
+            .expect("foreign claim");
+        assert_eq!(
+            component.ensure_ready(&request).expect("foreign lease"),
+            ProjectReadinessOutcome::Failed(ProjectRuntimeFailure {
+                reason: RuntimeFailureReason::OwnershipConflict,
+                lease: Some(hq_application::RuntimeLeaseEvidence {
+                    owner: hq_application::RuntimeWorkerOwner::from_bytes(*owner.as_bytes())
+                        .expect("owner evidence"),
+                    expires_at_millis: now + 60_000,
+                }),
+            })
+        );
+        component.stop_intake().expect("stop");
+        cancellation.cancel();
+        component.drain().expect("drain");
+
+        let restarted = CancellationToken::new();
+        component.start(restarted.child()).expect("restart");
+        let current = component.recovery_context().expect("new runtime context");
+        assert_ne!(current.generation, request.generation);
+        assert_eq!(
+            component.ensure_ready(&request).expect("stale generation"),
+            ProjectReadinessOutcome::Failed(ProjectRuntimeFailure {
+                reason: RuntimeFailureReason::GenerationChanged,
+                lease: None,
+            })
+        );
+        // A stale request must stop before consulting the retained foreign lease.
+        let mut current_request = request;
+        current_request.generation = current.generation;
+        assert!(matches!(
+            component
+                .ensure_ready(&current_request)
+                .expect("current generation"),
+            ProjectReadinessOutcome::Failed(ProjectRuntimeFailure {
+                reason: RuntimeFailureReason::OwnershipConflict,
+                ..
+            })
+        ));
+        component.stop_intake().expect("stop restarted runtime");
+        restarted.cancel();
+        component.drain().expect("drain restarted runtime");
+    }
+
+    #[test]
+    fn runtime_observation_does_not_wait_for_a_launch_transition() {
+        let database = TestDatabase::new();
+        let store = Store::open(&database.path, NonZeroUsize::MIN).expect("store");
+        let mut component = HarnessNodeComponent::without_providers(&store);
+        let delivery = delivery_request().body;
+        let scope = hq_application::ProjectRuntimeScope {
+            project_id: delivery.project_id,
+            binding: delivery.binding,
+            thread_id: delivery.thread_id,
+        };
+        assert_eq!(
+            component
+                .observe_runtime(&scope)
+                .expect("not started")
+                .worker,
+            hq_application::ProjectRuntimeWorkerState::Stopped
+        );
+        let cancellation = CancellationToken::new();
+        component.start(cancellation.child()).expect("start");
+        let generation = component.recovery_context().expect("generation").generation;
+        {
+            let _launch_guard = component
+                .inner
+                .supervisor
+                .lock()
+                .expect("simulated launch transition");
+            let observed = component
+                .observe_runtime(&scope)
+                .expect("nonblocking observation");
+            assert_eq!(
+                observed.worker,
+                hq_application::ProjectRuntimeWorkerState::Busy
+            );
+            assert_eq!(observed.generation, Some(generation));
+        }
+        assert_eq!(
+            component
+                .observe_runtime(&scope)
+                .expect("no live worker")
+                .worker,
+            hq_application::ProjectRuntimeWorkerState::Stopped
+        );
+        component.stop_intake().expect("stop");
+        cancellation.cancel();
+        component.drain().expect("drain");
     }
 
     #[test]
@@ -1504,6 +1941,11 @@ mod tests {
         component
             .start(cancellation.child())
             .expect("component starts event task");
+        let (stops, stopped) = std::sync::mpsc::channel();
+        component
+            .observe_runtime_stops(Some(Arc::new(RecordingStopObserver(stops))))
+            .expect("stop observer");
+        let generation = component.recovery_context().expect("generation").generation;
         component
             .inner
             .supervisor
@@ -1513,9 +1955,9 @@ mod tests {
             .expect("supervisor started")
             .launch(HarnessLaunchRequest {
                 agent_id: AgentId::from_bytes([73; 32]),
-                project_id: None,
+                project_id: Some(hq_domain::ProjectId::from_bytes([74; 32])),
                 launch_directory: None,
-                provider_id,
+                provider_id: provider_id.clone(),
                 session: HarnessSessionRequest::Start,
                 environment: HarnessEnvironment::default(),
             })
@@ -1534,6 +1976,21 @@ mod tests {
                 .is_some()
         );
 
+        let stopped = stopped
+            .recv_timeout(Duration::from_secs(1))
+            .expect("project worker stop notification");
+        assert_eq!(
+            stopped.project_id,
+            hq_domain::ProjectId::from_bytes([74; 32])
+        );
+        assert_eq!(stopped.agent_id, AgentId::from_bytes([73; 32]));
+        assert_eq!(stopped.provider, provider_id);
+        assert_eq!(stopped.session, session_id);
+        assert_eq!(stopped.generation, generation);
+        assert_eq!(
+            stopped.reason,
+            hq_application::RuntimeFailureReason::TransportClosed
+        );
         let shutdown_started = Instant::now();
         component.stop_intake().expect("intake closes");
         cancellation.cancel();
@@ -1632,7 +2089,16 @@ mod tests {
         let query_component = component.clone();
         let (result_tx, result_rx) = mpsc::channel();
         let query = thread::spawn(move || {
-            let _ = result_tx.send(query_component.pending_interactions(1));
+            let delivery = delivery_request().body;
+            let mut scope = hq_application::ProjectRuntimeScope {
+                project_id: delivery.project_id,
+                binding: delivery.binding,
+                thread_id: delivery.thread_id,
+            };
+            scope.binding.agent_id = AgentId::from_bytes([0x52; 32]);
+            let interactions = query_component.pending_interactions(1);
+            let observation = query_component.observe_runtime(&scope);
+            let _ = result_tx.send((interactions, observation));
         });
         let response = result_rx.recv_timeout(Duration::from_millis(100));
 
@@ -1641,7 +2107,12 @@ mod tests {
         component.stop_intake().expect("intake closes");
         cancellation.cancel();
         assert_eq!(component.drain(), Ok(ComponentDrain::Complete));
-        assert!(response.is_ok(), "interaction query waited on persistence");
+        let (interactions, observation) = response.expect("queries must not wait on persistence");
+        assert!(interactions.is_ok());
+        assert_eq!(
+            observation.expect("runtime observation").worker,
+            hq_application::ProjectRuntimeWorkerState::Busy
+        );
     }
 
     #[test]
@@ -1898,6 +2369,13 @@ mod tests {
             _activity: &HarnessActivity,
         ) -> Result<(), HarnessError> {
             Ok(())
+        }
+    }
+
+    struct RecordingStopObserver(std::sync::mpsc::Sender<hq_application::ProjectRuntimeStopped>);
+    impl hq_projects::ProjectRuntimeStopObserver for RecordingStopObserver {
+        fn stopped(&self, stopped: hq_application::ProjectRuntimeStopped) {
+            let _ = self.0.send(stopped);
         }
     }
 

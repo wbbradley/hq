@@ -13,12 +13,16 @@ use hq_store::{
 #[derive(Clone, Debug)]
 pub struct ProjectSagaStoreAdapter {
     state: ProjectSagaStateHandle,
+    recovery: hq_store::ProjectRecoveryStateHandle,
 }
 
 impl ProjectSagaStoreAdapter {
-    /// Creates an adapter around the narrow store capability.
-    pub const fn new(state: ProjectSagaStateHandle) -> Self {
-        Self { state }
+    /// Creates an adapter around the saga and recovery store capabilities.
+    pub const fn new(
+        state: ProjectSagaStateHandle,
+        recovery: hq_store::ProjectRecoveryStateHandle,
+    ) -> Self {
+        Self { state, recovery }
     }
 }
 
@@ -207,5 +211,47 @@ const fn map_store_error(error: StoreError) -> SagaStoreError {
         | StoreErrorClass::RebuildableStateCorrupt
         | StoreErrorClass::IncompatibleSchema => SagaStoreError::Corrupt,
         _ => SagaStoreError::Unavailable,
+    }
+}
+
+impl hq_projects::ProjectRecoveryStore for ProjectSagaStoreAdapter {
+    fn recovery_find(
+        &self,
+        operation: hq_domain::OperationId,
+    ) -> Result<Option<hq_application::ProjectRecoveryRecord>, SagaStoreError> {
+        self.recovery.find(operation).map_err(map_store_error)
+    }
+    fn recovery_active(
+        &self,
+        project: hq_domain::ProjectId,
+    ) -> Result<Option<hq_application::ProjectRecoveryRecord>, SagaStoreError> {
+        self.recovery.active(project).map_err(map_store_error)
+    }
+    fn recovery_compare_exchange(
+        &self,
+        expected: Option<u64>,
+        record: hq_application::ProjectRecoveryRecord,
+        now: u64,
+    ) -> Result<hq_application::ProjectRecoveryWriteOutcome, SagaStoreError> {
+        self.recovery
+            .compare_exchange(expected, record, now)
+            .map_err(map_store_error)
+    }
+    fn recovery_due(
+        &self,
+        now: u64,
+        limit: usize,
+    ) -> Result<Vec<hq_application::ProjectRecoveryRecord>, SagaStoreError> {
+        self.recovery.due(now, limit).map_err(map_store_error)
+    }
+    fn recovery_deadline(&self) -> Result<Option<u64>, SagaStoreError> {
+        self.recovery.next_deadline().map_err(map_store_error)
+    }
+    fn recovery_retry(
+        &self,
+        request: hq_application::ProjectRecoveryRetryRequest,
+        now: u64,
+    ) -> Result<hq_application::ProjectRecoveryWriteOutcome, SagaStoreError> {
+        self.recovery.retry(request, now).map_err(map_store_error)
     }
 }

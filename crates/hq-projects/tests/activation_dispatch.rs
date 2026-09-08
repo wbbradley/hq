@@ -32,7 +32,11 @@ use hq_projects::{
 use hq_resources::{PathReleaseAssessment, PathReleaseState};
 
 #[derive(Clone, Default)]
-struct MemorySagaStore(Arc<Mutex<Vec<ProjectSagaRecord>>>);
+struct MemorySagaStore(
+    Arc<Mutex<Vec<ProjectSagaRecord>>>,
+    recovery::RecoveryDatabase,
+    Arc<Mutex<usize>>,
+);
 
 impl ProjectSagaStore for MemorySagaStore {
     fn find(&self, operation_id: OperationId) -> Result<Option<ProjectSagaRecord>, SagaStoreError> {
@@ -82,6 +86,7 @@ impl ProjectSagaStore for MemorySagaStore {
     }
 
     fn runnable(&self, limit: usize) -> Result<Vec<ProjectSagaRecord>, SagaStoreError> {
+        *self.2.lock().map_err(|_| SagaStoreError::Unavailable)? += 1;
         if limit == 0 {
             return Err(SagaStoreError::Conflict);
         }
@@ -611,6 +616,7 @@ struct ScriptedRuntime(Arc<Mutex<RuntimeState>>);
     reason = "independent one-shot failure switches keep this workflow fake explicit"
 )]
 struct RuntimeState {
+    recovery_now_millis: u64,
     reject_start: bool,
     unavailable_start_once: bool,
     uncertain_start_once: bool,
@@ -625,9 +631,12 @@ struct RuntimeState {
     delivery_order: Vec<MessageId>,
     delivery_calls: usize,
     start_requests: Vec<ProjectRuntimeRequest>,
-    readiness_requests: Vec<ProjectRuntimeRequest>,
+    readiness_requests: Vec<hq_application::ProjectReadinessRequest>,
     close_during_readiness: Option<ScriptedCanonical>,
+    close_during_observation: Option<ScriptedCanonical>,
     reject_readiness: bool,
+    readiness_failure: Option<hq_application::ProjectRuntimeFailure>,
+    stale_readiness: bool,
     starts: usize,
     stops: usize,
 }
@@ -679,6 +688,36 @@ impl ScriptedRuntime {
 }
 
 impl ProjectRuntimePort for ScriptedRuntime {
+    fn observe_runtime(
+        &self,
+        scope: &hq_application::ProjectRuntimeScope,
+    ) -> Result<hq_application::ProjectRuntimeObservation, ApplicationError> {
+        if let Some(canonical) = &self.0.lock().expect("runtime").close_during_observation {
+            canonical.0.lock().expect("canonical").snapshot.lifecycle =
+                CanonicalProjectLifecycle::Closing;
+        }
+        Ok(hq_application::ProjectRuntimeObservation {
+            scope: scope.clone(),
+            generation: None,
+            worker: hq_application::ProjectRuntimeWorkerState::Stopped,
+        })
+    }
+
+    fn observe_runtime_stops(
+        &self,
+        _observer: Option<std::sync::Arc<dyn hq_projects::ProjectRuntimeStopObserver>>,
+    ) -> Result<(), ApplicationError> {
+        Ok(())
+    }
+
+    fn recovery_context(&self) -> Result<hq_application::RuntimeRecoveryContext, ApplicationError> {
+        Ok(hq_application::RuntimeRecoveryContext {
+            generation: hq_application::RuntimeGenerationId::from_bytes([71; 32])
+                .expect("generation"),
+            now_millis: self.0.lock().expect("runtime").recovery_now_millis,
+        })
+    }
+
     fn start_or_resume(
         &self,
         request: &EffectRequest<ProjectRuntimeRequest>,
@@ -714,7 +753,10 @@ impl ProjectRuntimePort for ScriptedRuntime {
         Ok(state.deliveries.get(&request.body.submission_id) == Some(&request.request_digest))
     }
 
-    fn ensure_ready(&self, request: &ProjectRuntimeRequest) -> Result<(), ApplicationError> {
+    fn ensure_ready(
+        &self,
+        request: &hq_application::ProjectReadinessRequest,
+    ) -> Result<hq_application::ProjectReadinessOutcome, ApplicationError> {
         let mut state = self.0.lock().expect("runtime lock");
         state.readiness_requests.push(request.clone());
         if let Some(canonical) = &state.close_during_readiness {
@@ -725,12 +767,27 @@ impl ProjectRuntimePort for ScriptedRuntime {
                 .snapshot
                 .lifecycle = CanonicalProjectLifecycle::Closing;
         }
+        if let Some(failure) = &state.readiness_failure {
+            return Ok(hq_application::ProjectReadinessOutcome::Failed(
+                failure.clone(),
+            ));
+        }
         if state.reject_readiness {
             return Err(ApplicationError::new(
                 ApplicationErrorCode::AdapterUnavailable,
             ));
         }
-        Ok(())
+        let mut scope = request.scope.clone();
+        if state.stale_readiness {
+            scope.binding.assignment_id = hq_domain::AssignmentId::from_bytes([99; 32]);
+        }
+        Ok(hq_application::ProjectReadinessOutcome::Ready(
+            hq_application::ProjectRuntimeReady {
+                scope,
+                generation: request.generation,
+                owner: hq_application::RuntimeWorkerOwner::from_bytes([72; 32]).expect("owner"),
+            },
+        ))
     }
 
     fn deliver(
@@ -1341,6 +1398,7 @@ fn changed_input_under_one_submission_identity_is_rejected_and_remains_pending()
         .pending_inputs[0]
         .body = hq_domain::ContentText::new("changed input").expect("body");
 
+    runtime.0.lock().expect("runtime").recovery_now_millis = 30_000;
     let replay = manager.control(request).expect("changed replay");
 
     let ProjectCommandOutcome::Rejected { error, .. } = replay else {
@@ -2992,10 +3050,10 @@ fn dispatch_checks_exact_session_readiness_before_delivery() {
     let state = runtime.0.lock().expect("runtime lock");
     assert_eq!(state.readiness_requests.len(), 1);
     let request = &state.readiness_requests[0];
-    assert_eq!(request.agent_id, binding.agent_id);
-    assert_eq!(request.provider, binding.provider);
-    assert_eq!(request.resume_session.as_ref(), Some(&binding.session));
-    assert_eq!(request.launch_directory, Some(locator("/work/project")));
+    assert_eq!(request.scope.binding.agent_id, binding.agent_id);
+    assert_eq!(request.scope.binding.provider, binding.provider);
+    assert_eq!(request.scope.binding.session, binding.session);
+    assert_eq!(request.launch_directory, locator("/work/project"));
     assert_eq!(state.delivery_calls, 1);
 }
 
@@ -3009,8 +3067,9 @@ fn dispatch_does_not_submit_when_readiness_fails_or_project_closes_during_resume
             state.reject_readiness = !close;
             state.close_during_readiness = close.then(|| canonical.clone());
         }
+        let store = MemorySagaStore::default();
         let _outcome = ProjectWorkflowManager::new(
-            MemorySagaStore::default(),
+            store.clone(),
             canonical.clone(),
             runtime.clone(),
             HealthyResources,
@@ -3019,6 +3078,23 @@ fn dispatch_does_not_submit_when_readiness_fails_or_project_closes_during_resume
         .expect("retained recovery outcome");
         assert_eq!(runtime.0.lock().expect("runtime lock").delivery_calls, 0);
         assert_eq!(canonical.snapshot_value().pending_inputs.len(), 1);
+        if close {
+            let scope = runtime.0.lock().expect("runtime").readiness_requests[0]
+                .scope
+                .clone();
+            let episode =
+                hq_projects::project_recovery_operation(&scope, pending_input().message_id);
+            assert_eq!(
+                store
+                    .1
+                    .handle()
+                    .find(episode)
+                    .expect("episode")
+                    .expect("stored")
+                    .state,
+                hq_application::ProjectRecoveryState::Cancelled
+            );
+        }
     }
 }
 
@@ -3178,15 +3254,12 @@ fn queued_delivery_replays_without_spinning_or_consuming_unaccepted_input() {
         HealthyResources,
     );
     let request = dispatch_request();
-    for expected_calls in 1..=2 {
+    for _ in 0..2 {
         let outcome = manager.control(request.clone()).expect("queue outcome");
         assert!(
             matches!(outcome, ProjectCommandOutcome::Queued { operation_id, stage: ProjectCommandStage::DispatchingInputs } if operation_id == request.operation_id)
         );
-        assert_eq!(
-            runtime.0.lock().expect("runtime").delivery_calls,
-            expected_calls
-        );
+        assert_eq!(runtime.0.lock().expect("runtime").delivery_calls, 1);
         assert_eq!(canonical.snapshot_value().pending_inputs.len(), 1);
         assert!(!canonical.mutations().iter().any(|mutation| matches!(
             mutation,
@@ -3205,7 +3278,11 @@ fn queued_delivery_replays_without_spinning_or_consuming_unaccepted_input() {
             hq_projects::SagaEffectState::Pending
         );
     }
-    runtime.0.lock().expect("runtime").queue_delivery = false;
+    {
+        let mut state = runtime.0.lock().expect("runtime");
+        state.queue_delivery = false;
+        state.recovery_now_millis = 30_000;
+    }
     let outcomes = manager.repair(16).expect("repair queue");
     assert!(matches!(
         outcomes.as_slice(),
@@ -3224,7 +3301,7 @@ fn queued_delivery_replays_without_spinning_or_consuming_unaccepted_input() {
         1
     );
     let state = runtime.0.lock().expect("runtime");
-    assert_eq!(state.delivery_calls, 3);
+    assert_eq!(state.delivery_calls, 2);
     assert!(
         state
             .delivery_requests
@@ -3282,7 +3359,11 @@ fn accepted_input_does_not_authorize_a_later_queued_input() {
             vec![first_id]
         );
     }
-    runtime.0.lock().expect("runtime").queue_submission = None;
+    {
+        let mut state = runtime.0.lock().expect("runtime");
+        state.queue_submission = None;
+        state.recovery_now_millis = 30_000;
+    }
     assert!(matches!(
         manager.repair(16).expect("repair").as_slice(),
         [ProjectCommandOutcome::Completed { .. }]
@@ -3290,7 +3371,7 @@ fn accepted_input_does_not_authorize_a_later_queued_input() {
     assert!(canonical.snapshot_value().pending_inputs.is_empty());
     let state = runtime.0.lock().expect("runtime");
     assert_eq!(state.delivery_order, vec![first_id, second_id]);
-    assert_eq!(state.delivery_calls, 4);
+    assert_eq!(state.delivery_calls, 3);
     assert_ne!(state.delivery_operations[0], state.delivery_operations[1]);
     assert!(
         state.delivery_operations[1..]
@@ -3308,4 +3389,596 @@ fn accepted_input_does_not_authorize_a_later_queued_input() {
             .count(),
         2
     );
+}
+
+#[test]
+fn readiness_failures_preserve_reason_and_stale_assignment_cannot_dispatch() {
+    for (reason, stale, expected) in [
+        (
+            hq_application::RuntimeFailureReason::SessionNotFound,
+            false,
+            "project_runtime_resume_session_not_found",
+        ),
+        (
+            hq_application::RuntimeFailureReason::TransportClosed,
+            false,
+            "project_runtime_resume_transport_closed",
+        ),
+        (
+            hq_application::RuntimeFailureReason::Unavailable,
+            true,
+            "project_runtime_resume_session_identity_mismatch",
+        ),
+    ] {
+        let canonical = ScriptedCanonical::new(runnable_snapshot());
+        let runtime = ScriptedRuntime::default();
+        {
+            let mut state = runtime.0.lock().expect("runtime");
+            state.stale_readiness = stale;
+            state.readiness_failure = (!stale).then_some(hq_application::ProjectRuntimeFailure {
+                reason,
+                lease: None,
+            });
+        }
+        let result = ProjectWorkflowManager::new(
+            MemorySagaStore::default(),
+            canonical.clone(),
+            runtime.clone(),
+            HealthyResources,
+        )
+        .control(dispatch_request())
+        .expect("readiness failure");
+        let ProjectCommandOutcome::Reconcilable { error, .. } = result else {
+            panic!("expected retained recovery");
+        };
+        assert_eq!(error.code().as_str(), expected);
+        assert_eq!(runtime.0.lock().expect("runtime").delivery_calls, 0);
+        assert_eq!(canonical.snapshot_value().pending_inputs.len(), 1);
+    }
+}
+
+#[test]
+fn transient_readiness_wakes_obey_persisted_backoff() {
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::default();
+    runtime.0.lock().expect("runtime").readiness_failure =
+        Some(hq_application::ProjectRuntimeFailure {
+            reason: hq_application::RuntimeFailureReason::TransportClosed,
+            lease: None,
+        });
+    let workflow = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    );
+    for _ in 0..3 {
+        assert!(matches!(
+            workflow
+                .control(dispatch_request())
+                .expect("retained failure"),
+            ProjectCommandOutcome::Reconcilable { .. }
+        ));
+    }
+    assert_eq!(
+        runtime.0.lock().expect("runtime").readiness_requests.len(),
+        1
+    );
+    runtime.0.lock().expect("runtime").recovery_now_millis = 999;
+    workflow.repair(16).expect("not due");
+    assert_eq!(
+        runtime.0.lock().expect("runtime").readiness_requests.len(),
+        1
+    );
+    {
+        let mut state = runtime.0.lock().expect("runtime");
+        state.recovery_now_millis = 1_000;
+        state.readiness_failure = None;
+    }
+    assert!(matches!(
+        workflow.control(dispatch_request()).expect("due recovery"),
+        ProjectCommandOutcome::Completed { .. }
+    ));
+    assert!(canonical.snapshot_value().pending_inputs.is_empty());
+    assert_eq!(
+        runtime.0.lock().expect("runtime").readiness_requests.len(),
+        2
+    );
+}
+
+#[path = "support/recovery.rs"]
+mod recovery;
+recovery::recovery_store!(MemorySagaStore);
+
+#[test]
+fn blocked_readiness_budget_survives_manager_recreation_and_ordinary_wakes() {
+    use hq_application::{RuntimeFailureReason, RuntimeRecoveryStop};
+    for (reason, times, stop) in [
+        (
+            RuntimeFailureReason::SessionNotFound,
+            vec![0],
+            RuntimeRecoveryStop::PermanentFailure,
+        ),
+        (
+            RuntimeFailureReason::TransportClosed,
+            vec![0, 1_000, 3_000, 7_000, 15_000],
+            RuntimeRecoveryStop::AttemptsExhausted,
+        ),
+    ] {
+        let canonical = ScriptedCanonical::new(runnable_snapshot());
+        let runtime = ScriptedRuntime::default();
+        runtime.0.lock().expect("runtime").readiness_failure =
+            Some(hq_application::ProjectRuntimeFailure {
+                reason,
+                lease: None,
+            });
+        let store = MemorySagaStore::default();
+        for now in &times {
+            runtime.0.lock().expect("runtime").recovery_now_millis = *now;
+            let manager = ProjectWorkflowManager::new(
+                store.clone(),
+                canonical.clone(),
+                runtime.clone(),
+                HealthyResources,
+            );
+            manager
+                .control(dispatch_request())
+                .expect("bounded attempt");
+        }
+        let request = runtime.0.lock().expect("runtime").readiness_requests[0].clone();
+        let episode =
+            hq_projects::project_recovery_operation(&request.scope, pending_input().message_id);
+        let blocked = store
+            .1
+            .handle()
+            .find(episode)
+            .expect("recovery")
+            .expect("episode");
+        assert_eq!(
+            blocked.state,
+            hq_application::ProjectRecoveryState::Blocked { reason: stop }
+        );
+        assert_eq!(store.1.handle().next_deadline().expect("deadline"), None);
+        runtime.0.lock().expect("runtime").recovery_now_millis = 1_000_000;
+        runtime.0.lock().expect("runtime").readiness_failure = None;
+        for _ in 0..3 {
+            let manager = ProjectWorkflowManager::new(
+                store.clone(),
+                canonical.clone(),
+                runtime.clone(),
+                HealthyResources,
+            );
+            manager.repair(16).expect("blocked repair");
+        }
+        assert_eq!(
+            runtime.0.lock().expect("runtime").readiness_requests.len(),
+            times.len()
+        );
+        assert_eq!(runtime.0.lock().expect("runtime").delivery_calls, 0);
+        assert_eq!(
+            store.1.handle().find(episode).expect("unchanged"),
+            Some(blocked)
+        );
+        assert_eq!(canonical.snapshot_value().pending_inputs.len(), 1);
+    }
+}
+
+#[test]
+fn changed_assignment_cancels_old_recovery_before_admitting_the_new_session() {
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::default();
+    runtime.0.lock().expect("runtime").readiness_failure =
+        Some(hq_application::ProjectRuntimeFailure {
+            reason: hq_application::RuntimeFailureReason::TransportClosed,
+            lease: None,
+        });
+    let store = MemorySagaStore::default();
+    let manager = ProjectWorkflowManager::new(
+        store.clone(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    );
+    manager.control(dispatch_request()).expect("first failure");
+    let old = store
+        .1
+        .handle()
+        .active(dispatch_request().project_id)
+        .expect("active")
+        .expect("old attempt");
+    {
+        let mut state = canonical.0.lock().expect("canonical");
+        let assignment = state.snapshot.assignment.as_mut().expect("assignment");
+        let binding = assignment.binding.as_mut().expect("binding");
+        binding.assignment_id = hq_domain::AssignmentId::from_bytes([92; 32]);
+        binding.session = ProviderSessionId::new("replacement-session").expect("session");
+        assignment.intent.assignment_id = binding.assignment_id;
+    }
+    runtime.0.lock().expect("runtime").readiness_failure = None;
+    assert!(matches!(
+        manager.control(dispatch_request()).expect("new assignment"),
+        ProjectCommandOutcome::Completed { .. }
+    ));
+    let cancelled = store
+        .1
+        .handle()
+        .find(old.operation_id)
+        .expect("retained")
+        .expect("cancelled");
+    assert_eq!(
+        cancelled.state,
+        hq_application::ProjectRecoveryState::Cancelled
+    );
+    assert_eq!(cancelled.attempts, old.attempts);
+    assert_eq!(cancelled.scope, old.scope);
+    assert!(
+        store
+            .1
+            .handle()
+            .active(dispatch_request().project_id)
+            .expect("active")
+            .is_none()
+    );
+    let state = runtime.0.lock().expect("runtime");
+    assert_eq!(state.readiness_requests.len(), 2);
+    assert_eq!(state.delivery_calls, 1);
+    assert_eq!(
+        state.delivery_requests[0].binding.session.as_str(),
+        "replacement-session"
+    );
+}
+
+#[test]
+fn due_recovery_targets_the_retained_saga_without_a_runnable_scan() {
+    use hq_projects::ScheduleProjectRecovery;
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::default();
+    runtime.0.lock().expect("runtime").readiness_failure =
+        Some(hq_application::ProjectRuntimeFailure {
+            reason: hq_application::RuntimeFailureReason::TransportClosed,
+            lease: None,
+        });
+    let store = MemorySagaStore::default();
+    let manager = ProjectWorkflowManager::new(
+        store.clone(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    );
+    manager
+        .control(dispatch_request())
+        .expect("initial failure");
+    assert_eq!(
+        manager
+            .recovery_schedule()
+            .expect("schedule")
+            .next_due_millis,
+        Some(1_000)
+    );
+    assert!(manager.repair_due(16).expect("not due").is_empty());
+    runtime.0.lock().expect("runtime").recovery_now_millis = 1_000;
+    runtime.0.lock().expect("runtime").readiness_failure = None;
+    assert!(matches!(
+        manager.repair_due(16).expect("due input").as_slice(),
+        [ProjectCommandOutcome::Completed { .. }]
+    ));
+    assert_eq!(
+        manager
+            .recovery_schedule()
+            .expect("completed")
+            .next_due_millis,
+        None
+    );
+    assert_eq!(*store.2.lock().expect("scan count"), 0);
+    assert!(canonical.snapshot_value().pending_inputs.is_empty());
+}
+
+#[test]
+fn stopped_worker_hints_require_exact_owner_and_generation_before_scheduling_retry() {
+    use hq_projects::ScheduleProjectRecovery;
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::default();
+    runtime.0.lock().expect("runtime").queue_delivery = true;
+    let store = MemorySagaStore::default();
+    let manager = ProjectWorkflowManager::new(
+        store.clone(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    );
+    manager.control(dispatch_request()).expect("queued");
+    let ready = store
+        .1
+        .handle()
+        .active(dispatch_request().project_id)
+        .expect("active")
+        .expect("ready");
+    let hq_application::ProjectRecoveryState::Ready {
+        generation, owner, ..
+    } = ready.state
+    else {
+        panic!("expected ready");
+    };
+    let hint = hq_application::ProjectRuntimeStopped {
+        project_id: ready.scope.project_id,
+        agent_id: ready.scope.binding.agent_id,
+        provider: ready.scope.binding.provider.clone(),
+        session: ready.scope.binding.session.clone(),
+        generation,
+        owner,
+        reason: hq_application::RuntimeFailureReason::TransportClosed,
+    };
+    let mut stale = hint.clone();
+    stale.owner = hq_application::RuntimeWorkerOwner::from_bytes([99; 32]).expect("stale owner");
+    manager.runtime_stopped(&stale).expect("old owner ignored");
+    stale = hint.clone();
+    stale.generation =
+        hq_application::RuntimeGenerationId::from_bytes([99; 32]).expect("old generation");
+    manager
+        .runtime_stopped(&stale)
+        .expect("old generation ignored");
+    assert_eq!(
+        store.1.handle().find(ready.operation_id).expect("retained"),
+        Some(ready.clone())
+    );
+    manager
+        .runtime_stopped(&hint)
+        .expect("exact stopped worker");
+    let waiting = store
+        .1
+        .handle()
+        .find(ready.operation_id)
+        .expect("retained")
+        .expect("waiting");
+    assert_eq!(waiting.attempts, ready.attempts);
+    assert_eq!(
+        waiting.state,
+        hq_application::ProjectRecoveryState::Waiting {
+            retry_at_millis: 1_000
+        }
+    );
+    manager.runtime_stopped(&hint).expect("duplicate hint");
+    assert_eq!(
+        store
+            .1
+            .handle()
+            .find(ready.operation_id)
+            .expect("unchanged"),
+        Some(waiting)
+    );
+    runtime.0.lock().expect("runtime").recovery_now_millis = 1_000;
+    runtime.0.lock().expect("runtime").queue_delivery = false;
+    assert!(matches!(
+        manager.repair_due(16).expect("recovery").as_slice(),
+        [ProjectCommandOutcome::Completed { .. }]
+    ));
+    manager
+        .runtime_stopped(&hint)
+        .expect("completed input needs no recovery");
+    assert_eq!(
+        runtime.0.lock().expect("runtime").readiness_requests.len(),
+        2
+    );
+    assert_eq!(*store.2.lock().expect("scan count"), 0);
+}
+
+#[test]
+fn explicit_retry_schedules_once_and_replays_after_delivery_without_resetting_again() {
+    use hq_application::{ProjectRecoveryRetryOutcome, RetryProjectRuntime};
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::default();
+    runtime.0.lock().expect("runtime").readiness_failure =
+        Some(hq_application::ProjectRuntimeFailure {
+            reason: hq_application::RuntimeFailureReason::SessionNotFound,
+            lease: None,
+        });
+    let store = MemorySagaStore::default();
+    let manager = ProjectWorkflowManager::new(
+        store.clone(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    );
+    manager
+        .control(dispatch_request())
+        .expect("permanent failure");
+    let blocked = store
+        .1
+        .handle()
+        .active(dispatch_request().project_id)
+        .expect("active")
+        .expect("blocked");
+    let request = hq_application::ProjectRecoveryRetryRequest {
+        account_id: dispatch_request().account_id,
+        home: dispatch_request().home,
+        retry_id: OperationId::from_bytes([88; 32]),
+        operation_id: blocked.operation_id,
+        scope: blocked.scope,
+        expected_revision: blocked.revision,
+    };
+    assert_eq!(
+        manager
+            .retry_project_runtime(request.clone())
+            .expect("explicit retry"),
+        ProjectRecoveryRetryOutcome::Scheduled
+    );
+    assert_eq!(
+        runtime.0.lock().expect("runtime").readiness_requests.len(),
+        1,
+        "retry only schedules"
+    );
+    assert_eq!(
+        manager
+            .retry_project_runtime(request.clone())
+            .expect("lost acknowledgement"),
+        ProjectRecoveryRetryOutcome::AlreadyScheduled
+    );
+    runtime.0.lock().expect("runtime").readiness_failure = None;
+    hq_projects::ScheduleProjectRecovery::repair_due(&manager, 16).expect("due retry");
+    assert!(canonical.snapshot_value().pending_inputs.is_empty());
+    let completed = store.1.handle().find(request.operation_id).expect("record");
+    assert_eq!(
+        manager
+            .retry_project_runtime(request.clone())
+            .expect("late response replay"),
+        ProjectRecoveryRetryOutcome::AlreadyScheduled
+    );
+    assert_eq!(
+        store
+            .1
+            .handle()
+            .find(request.operation_id)
+            .expect("unchanged"),
+        completed
+    );
+}
+
+#[test]
+fn explicit_retry_rejects_changed_authority_or_target_without_resetting_budget() {
+    use hq_application::{ProjectRecoveryRetryOutcome, RetryProjectRuntime};
+    for scenario in [
+        "account",
+        "home",
+        "inactive",
+        "closed",
+        "assignment",
+        "input",
+        "revision",
+    ] {
+        let canonical = ScriptedCanonical::new(runnable_snapshot());
+        let runtime = ScriptedRuntime::default();
+        runtime.0.lock().expect("runtime").readiness_failure =
+            Some(hq_application::ProjectRuntimeFailure {
+                reason: hq_application::RuntimeFailureReason::SessionNotFound,
+                lease: None,
+            });
+        let store = MemorySagaStore::default();
+        let manager = ProjectWorkflowManager::new(
+            store.clone(),
+            canonical.clone(),
+            runtime.clone(),
+            HealthyResources,
+        );
+        manager.control(dispatch_request()).expect("blocked");
+        let blocked = store
+            .1
+            .handle()
+            .active(dispatch_request().project_id)
+            .expect("active")
+            .expect("blocked");
+        let mut request = hq_application::ProjectRecoveryRetryRequest {
+            account_id: dispatch_request().account_id,
+            home: dispatch_request().home,
+            retry_id: OperationId::from_bytes([88; 32]),
+            operation_id: blocked.operation_id,
+            scope: blocked.scope.clone(),
+            expected_revision: blocked.revision,
+        };
+        match scenario {
+            "account" => request.account_id = AccountId::from_bytes([99; 32]),
+            "home" => request.home = InstallationId::from_bytes([99; 32]),
+            "inactive" => canonical.0.lock().expect("canonical").snapshot.active_human = false,
+            "closed" => {
+                canonical.0.lock().expect("canonical").snapshot.lifecycle =
+                    CanonicalProjectLifecycle::Closed;
+            }
+            "assignment" => canonical.0.lock().expect("canonical").snapshot.assignment = None,
+            "input" => canonical
+                .0
+                .lock()
+                .expect("canonical")
+                .snapshot
+                .pending_inputs
+                .clear(),
+            "revision" => request.expected_revision += 1,
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(
+                manager
+                    .retry_project_runtime(request)
+                    .expect("typed rejection"),
+                ProjectRecoveryRetryOutcome::Rejected(_)
+            ),
+            "{scenario}"
+        );
+        assert_eq!(
+            store
+                .1
+                .handle()
+                .find(blocked.operation_id)
+                .expect("unchanged"),
+            Some(blocked),
+            "{scenario}"
+        );
+        assert_eq!(
+            runtime.0.lock().expect("runtime").readiness_requests.len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn recovery_query_observes_idle_assignment_without_starting_runtime() {
+    use hq_application::QueryProjectRecovery;
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::default();
+    let reader = hq_projects::ProjectRecoveryReader::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+    );
+    let command = dispatch_request();
+    let status = reader
+        .query_project_recovery(hq_application::ProjectRecoveryQuery {
+            project_id: command.project_id,
+            account_id: command.account_id,
+            home: command.home,
+        })
+        .expect("status");
+    assert_eq!(status.head, canonical.snapshot_value().head);
+    assert!(status.recovery.is_none());
+    assert!(matches!(
+        status.observation.expect("assignment").worker,
+        hq_application::ProjectRuntimeWorkerState::Stopped
+    ));
+    assert_eq!(runtime.0.lock().expect("runtime").starts, 0);
+}
+
+#[test]
+fn recovery_query_rejects_wrong_home_before_returning_runtime_evidence() {
+    use hq_application::QueryProjectRecovery;
+    let reader = hq_projects::ProjectRecoveryReader::new(
+        MemorySagaStore::default(),
+        ScriptedCanonical::new(runnable_snapshot()),
+        ScriptedRuntime::default(),
+    );
+    let command = dispatch_request();
+    let error = reader
+        .query_project_recovery(hq_application::ProjectRecoveryQuery {
+            project_id: command.project_id,
+            account_id: command.account_id,
+            home: InstallationId::from_bytes([99; 32]),
+        })
+        .expect_err("wrong home");
+    assert_eq!(error.code(), ApplicationErrorCode::AuthorityRejected);
+}
+
+#[test]
+fn recovery_query_fences_assignment_closed_during_observation() {
+    use hq_application::QueryProjectRecovery;
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::default();
+    runtime.0.lock().expect("runtime").close_during_observation = Some(canonical.clone());
+    let reader =
+        hq_projects::ProjectRecoveryReader::new(MemorySagaStore::default(), canonical, runtime);
+    let command = dispatch_request();
+    let error = reader
+        .query_project_recovery(hq_application::ProjectRecoveryQuery {
+            project_id: command.project_id,
+            account_id: command.account_id,
+            home: command.home,
+        })
+        .expect_err("closed while reading");
+    assert_eq!(error.code(), ApplicationErrorCode::StateIdentityConflict);
 }

@@ -186,6 +186,17 @@ impl hq_application::ControlProjects for UnavailableNodeComponent {
     }
 }
 
+impl hq_application::RetryProjectRuntime for UnavailableNodeComponent {
+    fn retry_project_runtime(
+        &self,
+        _request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, ApplicationError> {
+        Err(ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
+
 impl hq_application::RetireAgents for UnavailableNodeComponent {
     fn retire_agent(
         &self,
@@ -310,6 +321,17 @@ impl hq_application::ControlProjects for UnavailableApplicationPorts {
     }
 }
 
+impl hq_application::RetryProjectRuntime for UnavailableApplicationPorts {
+    fn retry_project_runtime(
+        &self,
+        _request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
+
 impl hq_application::RetireAgents for UnavailableApplicationPorts {
     fn retire_agent(
         &self,
@@ -404,3 +426,25 @@ pub fn assert_private_mode(path: &Path, expected: u32) {
 
 #[cfg(not(unix))]
 pub fn assert_private_mode(_: &Path, _: u32) {}
+
+impl hq_application::QueryProjectRecovery for UnavailableNodeComponent {
+    fn query_project_recovery(
+        &self,
+        _request: hq_application::ProjectRecoveryQuery,
+    ) -> Result<hq_application::ProjectRecoveryView, ApplicationError> {
+        Err(ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
+
+impl hq_application::QueryProjectRecovery for UnavailableApplicationPorts {
+    fn query_project_recovery(
+        &self,
+        _request: hq_application::ProjectRecoveryQuery,
+    ) -> Result<hq_application::ProjectRecoveryView, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}

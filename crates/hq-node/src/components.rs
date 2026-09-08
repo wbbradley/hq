@@ -343,6 +343,17 @@ impl<R, H, P: ControlProjects> ControlProjects for NodeApplicationPorts<'_, R, H
     }
 }
 
+impl<R, H, P: hq_application::RetryProjectRuntime> hq_application::RetryProjectRuntime
+    for NodeApplicationPorts<'_, R, H, P>
+{
+    fn retry_project_runtime(
+        &self,
+        request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, ApplicationError> {
+        self.project.retry_project_runtime(request)
+    }
+}
+
 impl<R, H, P: RetireAgents> RetireAgents for NodeApplicationPorts<'_, R, H, P> {
     fn retire_agent(
         &self,
@@ -401,7 +412,12 @@ impl<R, H, P> ApplicationPorts for NodeApplicationPorts<'_, R, H, P>
 where
     R: PublishWake + ConfigureRelays,
     H: ControlHarness + hq_application::QueryProviders + QueryInteractions + ControlInteractions,
-    P: InspectResource + ControlProjects + RetireAgents + ScheduleProjectReconciliation,
+    P: InspectResource
+        + ControlProjects
+        + RetireAgents
+        + ScheduleProjectReconciliation
+        + hq_application::RetryProjectRuntime
+        + hq_application::QueryProjectRecovery,
 {
 }
 
@@ -496,7 +512,12 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
     where
         R: PublishWake + ConfigureRelays,
         H: ControlHarness + QueryInteractions + ControlInteractions,
-        P: InspectResource + ControlProjects + RetireAgents + ScheduleProjectReconciliation,
+        P: InspectResource
+            + ControlProjects
+            + RetireAgents
+            + ScheduleProjectReconciliation
+            + hq_application::RetryProjectRuntime
+            + hq_application::QueryProjectRecovery,
     {
         let foundation = self.foundation.as_ref()?;
         let components = self.components.as_ref()?;
@@ -789,5 +810,16 @@ fn rollback_one(component: &mut dyn NodeComponent) {
         Ok(ComponentDrain::Escalate) | Err(_) => {
             let _ = component.force_stop();
         }
+    }
+}
+
+impl<R, H, P: hq_application::QueryProjectRecovery> hq_application::QueryProjectRecovery
+    for NodeApplicationPorts<'_, R, H, P>
+{
+    fn query_project_recovery(
+        &self,
+        request: hq_application::ProjectRecoveryQuery,
+    ) -> Result<hq_application::ProjectRecoveryView, ApplicationError> {
+        self.project.query_project_recovery(request)
     }
 }

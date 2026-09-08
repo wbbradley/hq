@@ -1496,6 +1496,34 @@ pub struct ProjectCommandRequestDto {
     pub action: ProjectCommandActionDto,
 }
 
+/// Exact explicit retry of a displayed blocked project recovery revision.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRecoveryRetryRequestDto {
+    pub retry_id: Id32,
+    pub operation_id: Id32,
+    pub account_id: Id32,
+    pub home: Id32,
+    pub project_id: Id32,
+    pub assignment_id: Id32,
+    pub agent_id: Id32,
+    pub provider: String,
+    pub session: String,
+    pub thread_id: Id32,
+    pub expected_revision: u64,
+}
+
+/// Receipt or typed rejection of one explicit recovery retry.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProjectRecoveryRetryOutcomeDto {
+    Scheduled,
+    AlreadyScheduled,
+    Rejected { error: DomainErrorDto },
+}
+
 /// Stable exact node-owned named-agent retirement request.
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1886,6 +1914,10 @@ pub enum Request {
     InspectResource(EffectRequestDto<ResourceInspectionRequestDto>),
     /// Execute, route, or reconcile one exact project command.
     ControlProject(Box<ProjectCommandRequestDto>),
+    /// Authorize and schedule an exact blocked runtime recovery retry.
+    RetryProjectRuntime(Box<ProjectRecoveryRetryRequestDto>),
+    /// Reads current exact runtime recovery evidence.
+    ProjectRecovery(ProjectRecoveryQueryDto),
     /// Execute or reconcile one exact node-owned named-agent retirement.
     RetireAgent(Box<AgentRetirementRequestDto>),
     /// Load one bounded passive pending-interaction view.
@@ -3122,6 +3154,10 @@ pub enum ResponseResult {
     ResourceInspection(EffectOutcomeDto<ResourceInspectionResultDto>),
     /// Project command submission or durable progress.
     ProjectCommand(ProjectCommandOutcomeDto),
+    /// Durable explicit runtime-retry receipt or rejection.
+    ProjectRecoveryRetry(ProjectRecoveryRetryOutcomeDto),
+    /// Exact current project recovery evidence.
+    ProjectRecovery(Box<ProjectRecoveryViewDto>),
     /// Named-agent retirement progress or terminal result.
     AgentRetirement(AgentRetirementOutcomeDto),
     /// Bounded passive pending interactions.
@@ -3407,7 +3443,12 @@ impl WireMessage {
                     Ok(())
                 }
                 Request::ControlProject(request) => validate_project_request(request),
-                Request::MailboxDrafts
+                Request::RetryProjectRuntime(request) => {
+                    validate_text(&request.provider, PROVIDER_ID_MAX_BYTES)?;
+                    validate_text(&request.session, PROVIDER_SESSION_ID_MAX_BYTES)
+                }
+                Request::ProjectRecovery(_)
+                | Request::MailboxDrafts
                 | Request::RetireAgent(_)
                 | Request::Lifecycle(_)
                 | Request::AuthoritativeSnapshot
@@ -3627,6 +3668,14 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
         Response::Success(ResponseResult::ProjectCommand(outcome)) => {
             validate_project_outcome(outcome)
         }
+        Response::Success(ResponseResult::ProjectRecovery(view)) => {
+            validate_project_recovery_view(view)
+        }
+        Response::Success(ResponseResult::ProjectRecoveryRetry(outcome)) => match outcome {
+            ProjectRecoveryRetryOutcomeDto::Rejected { error } => validate_domain_error(error),
+            ProjectRecoveryRetryOutcomeDto::Scheduled
+            | ProjectRecoveryRetryOutcomeDto::AlreadyScheduled => Ok(()),
+        },
         Response::Success(ResponseResult::AgentRetirement(outcome)) => {
             validate_agent_retirement_outcome(outcome)
         }
@@ -4709,3 +4758,250 @@ impl fmt::Display for DecodeError {
 }
 
 impl Error for DecodeError {}
+
+/// Exact home-authorized passive runtime query.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRecoveryQueryDto {
+    pub account_id: Id32,
+    pub home: Id32,
+    pub project_id: Id32,
+}
+
+/// Exact immutable runtime scope.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRuntimeScopeDto {
+    pub project_id: Id32,
+    pub assignment_id: Id32,
+    pub agent_id: Id32,
+    pub provider: String,
+    pub session: String,
+    pub thread_id: Id32,
+}
+
+/// Passive retained lease evidence; never worker liveness.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeLeaseEvidenceDto {
+    pub owner: Id32,
+    pub expires_at_millis: u64,
+}
+
+/// Closed failure evidence without provider prose.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRuntimeFailureDto {
+    pub reason: RuntimeFailureReasonDto,
+    pub lease: Option<RuntimeLeaseEvidenceDto>,
+}
+
+/// Current local worker observation.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProjectRuntimeWorkerStateDto {
+    Stopped,
+    Ready {
+        owner: Id32,
+    },
+    Working {
+        owner: Id32,
+        operation_id: Id32,
+        sequence: u64,
+    },
+    Busy,
+    Failed {
+        failure: ProjectRuntimeFailureDto,
+    },
+}
+
+/// Observed runtime identity and local state.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRuntimeObservationDto {
+    pub scope: ProjectRuntimeScopeDto,
+    pub generation: Option<Id32>,
+    pub worker: ProjectRuntimeWorkerStateDto,
+}
+
+/// Durable scheduling disposition, separate from current worker state.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProjectRecoveryStateDto {
+    Waiting {
+        retry_at_millis: u64,
+    },
+    Attempting {
+        generation: Id32,
+        recover_at_millis: u64,
+    },
+    Blocked {
+        reason: RuntimeRecoveryStopDto,
+    },
+    Ready {
+        generation: Id32,
+        owner: Id32,
+        recover_at_millis: u64,
+    },
+    Completed,
+    Cancelled,
+}
+
+/// Durable recovery details for one exact input.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRecoveryRecordDto {
+    pub operation_id: Id32,
+    pub saga_operation_id: Id32,
+    pub submission_id: Id32,
+    pub sequence: u64,
+    pub scope: ProjectRuntimeScopeDto,
+    pub revision: u64,
+    pub attempts: u32,
+    pub state: ProjectRecoveryStateDto,
+    pub failure: Option<ProjectRuntimeFailureDto>,
+}
+
+/// Canonically fenced recovery evidence and exact retry eligibility.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRecoveryViewDto {
+    pub head: Id32,
+    pub observation: Option<ProjectRuntimeObservationDto>,
+    pub recovery: Option<ProjectRecoveryRecordDto>,
+    pub retry_allowed: bool,
+}
+
+/// Closed typed recovery classification.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeFailureReasonDto {
+    GenerationChanged,
+    InvalidInput,
+    Unsupported,
+    ProviderNotRegistered,
+    RegistrationConflict,
+    UnsafeRecovery,
+    SessionIdentityMismatch,
+    SessionNotFound,
+    SubmissionIdentityConflict,
+    InteractiveAlreadyAnswered,
+    SecretInputRejected,
+    IntakeClosed,
+    Crashed,
+    ProtocolViolation,
+    TransportClosed,
+    ProcessFailed,
+    CompatibilityMismatch,
+    Unavailable,
+    CleanupFailed,
+    OwnershipConflict,
+    Backpressure,
+    PersistenceCollision,
+}
+
+/// Closed typed recovery classification.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRecoveryStopDto {
+    PermanentFailure,
+    AttemptsExhausted,
+    ClockRange,
+    InvalidPolicy,
+}
+
+fn validate_project_recovery_view(view: &ProjectRecoveryViewDto) -> Result<(), ValueError> {
+    let nonzero = |id: &Id32| {
+        if id.bytes() == [0; 32] {
+            Err(ValueError::InvalidValueCombination)
+        } else {
+            Ok(())
+        }
+    };
+    if let Some(observation) = &view.observation {
+        validate_runtime_scope(&observation.scope)?;
+        if let Some(generation) = &observation.generation {
+            nonzero(generation)?;
+        }
+        match &observation.worker {
+            ProjectRuntimeWorkerStateDto::Ready { owner }
+            | ProjectRuntimeWorkerStateDto::Working { owner, .. } => {
+                nonzero(owner)?;
+                if observation.generation.is_none() {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                if matches!(
+                    observation.worker,
+                    ProjectRuntimeWorkerStateDto::Working { sequence: 0, .. }
+                ) {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+            }
+            ProjectRuntimeWorkerStateDto::Failed { failure } => validate_runtime_failure(failure)?,
+            ProjectRuntimeWorkerStateDto::Stopped | ProjectRuntimeWorkerStateDto::Busy => {}
+        }
+    }
+    if let Some(record) = &view.recovery {
+        validate_runtime_scope(&record.scope)?;
+        if record.sequence == 0
+            || !view
+                .observation
+                .as_ref()
+                .is_some_and(|obs| obs.scope == record.scope)
+        {
+            return Err(ValueError::InvalidValueCombination);
+        }
+        match &record.state {
+            ProjectRecoveryStateDto::Attempting { generation, .. } => nonzero(generation)?,
+            ProjectRecoveryStateDto::Ready {
+                generation, owner, ..
+            } => {
+                nonzero(generation)?;
+                nonzero(owner)?;
+            }
+            ProjectRecoveryStateDto::Completed | ProjectRecoveryStateDto::Cancelled => {
+                return Err(ValueError::InvalidValueCombination);
+            }
+            ProjectRecoveryStateDto::Waiting { .. } | ProjectRecoveryStateDto::Blocked { .. } => {}
+        }
+        if let Some(failure) = &record.failure {
+            validate_runtime_failure(failure)?;
+        }
+    }
+    if view.retry_allowed
+        && !view
+            .recovery
+            .as_ref()
+            .is_some_and(|record| matches!(record.state, ProjectRecoveryStateDto::Blocked { .. }))
+    {
+        return Err(ValueError::InvalidValueCombination);
+    }
+    Ok(())
+}
+
+fn validate_runtime_scope(scope: &ProjectRuntimeScopeDto) -> Result<(), ValueError> {
+    validate_text(&scope.provider, PROVIDER_ID_MAX_BYTES)?;
+    validate_text(&scope.session, PROVIDER_SESSION_ID_MAX_BYTES)
+}
+
+fn validate_runtime_failure(failure: &ProjectRuntimeFailureDto) -> Result<(), ValueError> {
+    if failure
+        .lease
+        .as_ref()
+        .is_some_and(|lease| lease.owner.bytes() == [0; 32])
+    {
+        return Err(ValueError::InvalidValueCombination);
+    }
+    Ok(())
+}

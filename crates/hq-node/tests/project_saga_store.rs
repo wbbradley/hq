@@ -41,7 +41,10 @@ fn exact_command_checkpoint_survives_store_and_adapter_restart() {
     let directory = TestDirectory::new();
     let database = directory.path().join("state").join("project-saga.sqlite3");
     let store = Store::open(&database, NonZeroUsize::MIN).expect("store opens");
-    let adapter = ProjectSagaStoreAdapter::new(store.project_saga_state_handle());
+    let adapter = ProjectSagaStoreAdapter::new(
+        store.project_saga_state_handle(),
+        store.project_recovery_state_handle(),
+    );
     let manager = ProjectSagaManager::new(adapter.clone());
     let first = manager.accept(request()).expect("command accepts");
     assert!(matches!(first, ProjectCommandOutcome::Accepted { .. }));
@@ -81,7 +84,10 @@ fn exact_command_checkpoint_survives_store_and_adapter_restart() {
     store.close().expect("store closes");
 
     let reopened = Store::open(&database, NonZeroUsize::MIN).expect("store reopens");
-    let reopened_adapter = ProjectSagaStoreAdapter::new(reopened.project_saga_state_handle());
+    let reopened_adapter = ProjectSagaStoreAdapter::new(
+        reopened.project_saga_state_handle(),
+        reopened.project_recovery_state_handle(),
+    );
     assert_eq!(
         reopened_adapter
             .find(checkpoint.operation_id)
@@ -107,7 +113,10 @@ fn queued_dispatch_survives_reopen_and_keeps_the_project_reserved() {
     let directory = TestDirectory::new();
     let database = directory.path().join("state").join("queued.sqlite3");
     let store = Store::open(&database, NonZeroUsize::MIN).expect("open");
-    let adapter = ProjectSagaStoreAdapter::new(store.project_saga_state_handle());
+    let adapter = ProjectSagaStoreAdapter::new(
+        store.project_saga_state_handle(),
+        store.project_recovery_state_handle(),
+    );
     let manager = ProjectSagaManager::new(adapter.clone());
     let mut request = request();
     request.action = ProjectCommandAction::DispatchPending;
@@ -124,7 +133,10 @@ fn queued_dispatch_survives_reopen_and_keeps_the_project_reserved() {
     drop(manager);
     store.close().expect("close");
     let store = Store::open(&database, NonZeroUsize::MIN).expect("reopen");
-    let adapter = ProjectSagaStoreAdapter::new(store.project_saga_state_handle());
+    let adapter = ProjectSagaStoreAdapter::new(
+        store.project_saga_state_handle(),
+        store.project_recovery_state_handle(),
+    );
     assert_eq!(
         adapter.find(request.operation_id).expect("find reopened"),
         Some(queued.clone())

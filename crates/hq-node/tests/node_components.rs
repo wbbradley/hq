@@ -231,6 +231,17 @@ impl hq_application::ControlProjects for FakeComponent {
     }
 }
 
+impl hq_application::RetryProjectRuntime for FakeComponent {
+    fn retry_project_runtime(
+        &self,
+        _request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
+
 impl hq_application::RetireAgents for FakeComponent {
     fn retire_agent(
         &self,
@@ -663,4 +674,15 @@ fn shutdown_issues_never_skip_later_components_tasks_or_foundation_release() {
     assert_eq!(report.escalated, [ComponentKind::ProjectWorkflows]);
     let owner = StateDirectoryOwner::acquire(state).expect("issues do not leak foundation");
     drop(owner);
+}
+
+impl hq_application::QueryProjectRecovery for FakeComponent {
+    fn query_project_recovery(
+        &self,
+        _request: hq_application::ProjectRecoveryQuery,
+    ) -> Result<hq_application::ProjectRecoveryView, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
 }

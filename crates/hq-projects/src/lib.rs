@@ -8,6 +8,9 @@ mod claim;
 mod command_codec;
 mod git_worktree;
 mod input;
+mod recovery;
+mod recovery_execution;
+mod recovery_reader;
 mod remote;
 mod remote_canonical;
 mod workflow;
@@ -29,11 +32,17 @@ pub use command_codec::{
     encode_project_command_action, project_command_request_digest,
 };
 pub use git_worktree::{GitWorktreeAdapter, GitWorktreeAdapterConfig};
+pub use hq_application::RuntimeRecoveryStop;
 pub use input::{
     ApplicationProjectInputReconciler, AutomaticProjectCommandPlan, PlanAutomaticProjectCommands,
     ProjectInputAcceptanceRequest, ProjectInputReconciliation, ReconcileProjectInputs,
     plan_automatic_project_commands, plan_project_input_acceptance,
 };
+pub use recovery::{ProjectRecoveryStore, RuntimeRecoveryDecision, RuntimeRecoveryPolicy};
+pub use recovery_execution::{
+    ProjectRecoveryAdmission, ProjectRecoveryCoordinator, project_recovery_operation,
+};
+pub use recovery_reader::ProjectRecoveryReader;
 pub use remote::*;
 pub use remote_canonical::ApplicationRemoteProjectCommandPort;
 pub use workflow::*;
@@ -41,14 +50,51 @@ pub use workflow::*;
 /// Maximum records returned by one startup recovery scan.
 pub const MAX_RUNNABLE_SAGAS: usize = 1_024;
 
+/// Indexed recovery deadline observed against the runtime's injected clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProjectRecoverySchedule {
+    /// Current semantic time in milliseconds.
+    pub now_millis: u64,
+    /// Earliest retained deadline, absent when no automatic recovery is scheduled.
+    pub next_due_millis: Option<u64>,
+}
+
+/// Nonblocking sink for body-free worker-stop hints; durable deadlines remain the fallback.
+pub trait ProjectRuntimeStopObserver: Send + Sync {
+    /// Publishes one hint without waiting for project workflow execution.
+    fn stopped(&self, stopped: hq_application::ProjectRuntimeStopped);
+}
+
+/// Targeted recovery scheduling, independent of whole-workflow startup discovery.
+pub trait ScheduleProjectRecovery {
+    /// Installs or removes the node-owned stop observer without transferring workflow ownership.
+    fn observe_runtime_stops(
+        &self,
+        observer: Option<std::sync::Arc<dyn ProjectRuntimeStopObserver>>,
+    ) -> Result<(), ApplicationError>;
+
+    /// Rechecks one exact stopped-worker hint before adjusting an outstanding input's deadline.
+    fn runtime_stopped(
+        &self,
+        stopped: &hq_application::ProjectRuntimeStopped,
+    ) -> Result<(), ApplicationError>;
+
+    /// Reads the earliest indexed deadline and current injected clock.
+    fn recovery_schedule(&self) -> Result<ProjectRecoverySchedule, ApplicationError>;
+    /// Runs at most `limit` exact due episodes through their retained parent workflows.
+    fn repair_due(&self, limit: usize) -> Result<Vec<ProjectCommandOutcome>, ApplicationError>;
+}
+
 /// Bounded local workflow recovery used by the node-owned project worker.
-pub trait RepairLocalProjectWorkflows: ControlProjects {
+pub trait RepairLocalProjectWorkflows: ControlProjects + ScheduleProjectRecovery {
     /// Repairs one deterministic bounded prefix of durable local workflows.
     fn repair_local(&self, limit: usize) -> Result<Vec<ProjectCommandOutcome>, ApplicationError>;
 }
 
 /// Complete project intake plus local and home-targeted startup recovery.
-pub trait ProjectWorkerPort: ControlProjects {
+pub trait ProjectWorkerPort:
+    ControlProjects + ScheduleProjectRecovery + hq_application::RetryProjectRuntime
+{
     /// Repairs bounded local and remote workflow prefixes at one explicit semantic time.
     fn repair_pending(
         &self,

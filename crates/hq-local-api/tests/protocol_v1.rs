@@ -1953,3 +1953,88 @@ fn queued_project_delivery_round_trips_separately_from_uncertain_acceptance() {
         ResponseResult::ProjectCommand(dto),
     )));
 }
+
+#[test]
+fn recovery_wire_preserves_live_owner_and_separate_blocked_retry_evidence() {
+    use hq_local_api::protocol::v1::*;
+    let scope = ProjectRuntimeScopeDto {
+        project_id: Id32::new([1; 32]),
+        assignment_id: Id32::new([2; 32]),
+        agent_id: Id32::new([3; 32]),
+        provider: "provider".to_owned(),
+        session: "saved".to_owned(),
+        thread_id: Id32::new([4; 32]),
+    };
+    let view = ProjectRecoveryViewDto {
+        head: Id32::new([5; 32]),
+        observation: Some(ProjectRuntimeObservationDto {
+            scope: scope.clone(),
+            generation: Some(Id32::new([6; 32])),
+            worker: ProjectRuntimeWorkerStateDto::Working {
+                owner: Id32::new([7; 32]),
+                operation_id: Id32::new([8; 32]),
+                sequence: 19,
+            },
+        }),
+        recovery: Some(ProjectRecoveryRecordDto {
+            operation_id: Id32::new([9; 32]),
+            saga_operation_id: Id32::new([10; 32]),
+            submission_id: Id32::new([11; 32]),
+            sequence: 20,
+            scope,
+            revision: 12,
+            attempts: 5,
+            state: ProjectRecoveryStateDto::Blocked {
+                reason: RuntimeRecoveryStopDto::AttemptsExhausted,
+            },
+            failure: Some(ProjectRuntimeFailureDto {
+                reason: RuntimeFailureReasonDto::OwnershipConflict,
+                lease: Some(RuntimeLeaseEvidenceDto {
+                    owner: Id32::new([12; 32]),
+                    expires_at_millis: 12345,
+                }),
+            }),
+        }),
+        retry_allowed: true,
+    };
+    let wire = |view| {
+        WireMessage::Response(ResponseEnvelope {
+            id: RequestId::new(1).expect("request id"),
+            response: Response::Success(ResponseResult::ProjectRecovery(Box::new(view))),
+        })
+    };
+    let message = wire(view.clone());
+    assert_eq!(
+        WireMessage::decode_frame(&message.encode_frame().expect("encode")).expect("decode"),
+        message
+    );
+    let mut invalid = view.clone();
+    invalid
+        .observation
+        .as_mut()
+        .expect("observation")
+        .generation = None;
+    assert!(
+        wire(invalid).encode_frame().is_err(),
+        "live worker requires current generation"
+    );
+    let mut invalid = view.clone();
+    invalid
+        .recovery
+        .as_mut()
+        .expect("recovery")
+        .scope
+        .assignment_id = Id32::new([99; 32]);
+    assert!(
+        wire(invalid).encode_frame().is_err(),
+        "retry scope must match observed assignment"
+    );
+    let mut invalid = view;
+    invalid.recovery.as_mut().expect("recovery").state = ProjectRecoveryStateDto::Waiting {
+        retry_at_millis: 400,
+    };
+    assert!(
+        wire(invalid).encode_frame().is_err(),
+        "retry requires blocked evidence"
+    );
+}

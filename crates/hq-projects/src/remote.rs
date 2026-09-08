@@ -310,9 +310,43 @@ where
     }
 }
 
+impl<L: RepairLocalProjectWorkflows, R> crate::ScheduleProjectRecovery
+    for ProjectCommandRouter<L, R>
+{
+    fn observe_runtime_stops(
+        &self,
+        observer: Option<std::sync::Arc<dyn crate::ProjectRuntimeStopObserver>>,
+    ) -> Result<(), ApplicationError> {
+        self.local.observe_runtime_stops(observer)
+    }
+    fn runtime_stopped(
+        &self,
+        stopped: &hq_application::ProjectRuntimeStopped,
+    ) -> Result<(), ApplicationError> {
+        self.local.runtime_stopped(stopped)
+    }
+    fn recovery_schedule(&self) -> Result<crate::ProjectRecoverySchedule, ApplicationError> {
+        self.local.recovery_schedule()
+    }
+    fn repair_due(&self, limit: usize) -> Result<Vec<ProjectCommandOutcome>, ApplicationError> {
+        self.local.repair_due(limit)
+    }
+}
+
+impl<L: hq_application::RetryProjectRuntime, R> hq_application::RetryProjectRuntime
+    for ProjectCommandRouter<L, R>
+{
+    fn retry_project_runtime(
+        &self,
+        request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, ApplicationError> {
+        self.local.retry_project_runtime(request)
+    }
+}
+
 impl<L, R> ProjectWorkerPort for ProjectCommandRouter<L, R>
 where
-    L: RepairLocalProjectWorkflows,
+    L: RepairLocalProjectWorkflows + hq_application::RetryProjectRuntime,
     R: RemoteProjectCommandPort,
 {
     fn repair_pending(

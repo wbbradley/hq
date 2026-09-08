@@ -115,6 +115,8 @@ where
         + InspectResource
         + ControlProjects
         + RetireAgents
+        + hq_application::RetryProjectRuntime
+        + hq_application::QueryProjectRecovery
         + ScheduleProjectReconciliation,
 {
     /// Opens runtime artifacts for one already-ready node owner.

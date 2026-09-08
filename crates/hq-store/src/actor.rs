@@ -314,6 +314,7 @@ enum Request {
     Relay(Box<RelayRequest>),
     Harness(Box<HarnessRequest>),
     ProjectSaga(Box<ProjectSagaRequest>),
+    ProjectRecovery(Box<ProjectRecoveryRequest>),
     Close {
         reply: SyncSender<()>,
     },
@@ -378,6 +379,36 @@ enum HarnessRequest {
     },
 }
 
+enum ProjectRecoveryRequest {
+    Retry {
+        request: Box<crate::ProjectRecoveryRetryRequest>,
+        now: u64,
+        reply: SyncSender<Result<crate::ProjectRecoveryWriteOutcome, StoreError>>,
+    },
+    Find {
+        operation: OperationId,
+        reply: SyncSender<Result<Option<crate::ProjectRecoveryRecord>, StoreError>>,
+    },
+    Active {
+        project: hq_domain::ProjectId,
+        reply: SyncSender<Result<Option<crate::ProjectRecoveryRecord>, StoreError>>,
+    },
+    Write {
+        expected: Option<u64>,
+        record: Box<crate::ProjectRecoveryRecord>,
+        now: u64,
+        reply: SyncSender<Result<crate::ProjectRecoveryWriteOutcome, StoreError>>,
+    },
+    Due {
+        now: u64,
+        limit: usize,
+        reply: SyncSender<Result<Vec<crate::ProjectRecoveryRecord>, StoreError>>,
+    },
+    Deadline {
+        reply: SyncSender<Result<Option<u64>, StoreError>>,
+    },
+}
+
 enum ProjectSagaRequest {
     Load {
         operation_id: OperationId,
@@ -417,6 +448,19 @@ pub struct RelayStateHandle {
 #[derive(Clone)]
 pub struct HarnessStateHandle {
     requests: SyncSender<Request>,
+}
+
+/// Exact durable recovery queries and conditional updates without store-worker ownership.
+#[derive(Clone)]
+pub struct ProjectRecoveryStateHandle {
+    requests: SyncSender<Request>,
+}
+impl fmt::Debug for ProjectRecoveryStateHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProjectRecoveryStateHandle")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Cloneable project-workflow state capability without store-worker ownership.
@@ -889,6 +933,110 @@ impl fmt::Debug for HarnessStateHandle {
     }
 }
 
+impl ProjectRecoveryStateHandle {
+    /// Resets one exact blocked budget once for a stable explicit retry identity.
+    pub fn retry(
+        &self,
+        request: crate::ProjectRecoveryRetryRequest,
+        now: u64,
+    ) -> Result<crate::ProjectRecoveryWriteOutcome, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::ProjectRecovery(Box::new(
+                ProjectRecoveryRequest::Retry {
+                    request: Box::new(request),
+                    now,
+                    reply,
+                },
+            )))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one exact saga-linked recovery episode.
+    pub fn find(
+        &self,
+        operation: OperationId,
+    ) -> Result<Option<crate::ProjectRecoveryRecord>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::ProjectRecovery(Box::new(
+                ProjectRecoveryRequest::Find { operation, reply },
+            )))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+    /// Loads the active recovery reservation for one exact project.
+    pub fn active(
+        &self,
+        project: hq_domain::ProjectId,
+    ) -> Result<Option<crate::ProjectRecoveryRecord>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::ProjectRecovery(Box::new(
+                ProjectRecoveryRequest::Active { project, reply },
+            )))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+    /// Commits an exact revision and validated attempt transition; equal replay is idempotent.
+    pub fn compare_exchange(
+        &self,
+        expected: Option<u64>,
+        record: crate::ProjectRecoveryRecord,
+        now: u64,
+    ) -> Result<crate::ProjectRecoveryWriteOutcome, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::ProjectRecovery(Box::new(
+                ProjectRecoveryRequest::Write {
+                    expected,
+                    record: Box::new(record),
+                    now,
+                    reply,
+                },
+            )))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+    /// Loads a bounded indexed prefix of due recovery episodes.
+    pub fn due(
+        &self,
+        now: u64,
+        limit: usize,
+    ) -> Result<Vec<crate::ProjectRecoveryRecord>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::ProjectRecovery(Box::new(
+                ProjectRecoveryRequest::Due { now, limit, reply },
+            )))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+    /// Reads the earliest indexed recovery deadline without scanning projects.
+    pub fn next_deadline(&self) -> Result<Option<u64>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::ProjectRecovery(Box::new(
+                ProjectRecoveryRequest::Deadline { reply },
+            )))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+}
+
 impl ProjectSagaStateHandle {
     /// Loads one exact retained project workflow by stable operation identity.
     pub fn load(&self, operation_id: OperationId) -> Result<Option<StoredProjectSaga>, StoreError> {
@@ -1014,6 +1162,13 @@ impl Store {
     /// Creates a harness-state request capability for owned supervisor tasks.
     pub fn harness_state_handle(&self) -> HarnessStateHandle {
         HarnessStateHandle {
+            requests: self.requests.clone(),
+        }
+    }
+
+    /// Creates an exact recovery-state capability without store shutdown ownership.
+    pub fn project_recovery_state_handle(&self) -> ProjectRecoveryStateHandle {
+        ProjectRecoveryStateHandle {
             requests: self.requests.clone(),
         }
     }
@@ -1413,6 +1568,9 @@ fn run(
             }
             Request::Relay(request) => handle_relay_request(&mut database, *request),
             Request::Harness(request) => handle_harness_request(&mut database, *request),
+            Request::ProjectRecovery(request) => {
+                handle_project_recovery_request(&mut database, *request);
+            }
             Request::ProjectSaga(request) => handle_project_saga_request(&mut database, *request),
             Request::Close { reply } => {
                 let _ = reply.send(());
@@ -1508,6 +1666,38 @@ fn canonical_evidence_closure(
                 .ok_or_else(|| StoreError::new(StoreErrorClass::InvalidOperationalRequest))
         })
         .collect()
+}
+
+fn handle_project_recovery_request(database: &mut Database, request: ProjectRecoveryRequest) {
+    match request {
+        ProjectRecoveryRequest::Retry {
+            request,
+            now,
+            reply,
+        } => {
+            let _ = reply.send(database.retry_project_recovery(&request, now));
+        }
+        ProjectRecoveryRequest::Find { operation, reply } => {
+            let _ = reply.send(database.find_project_recovery(operation));
+        }
+        ProjectRecoveryRequest::Active { project, reply } => {
+            let _ = reply.send(database.active_project_recovery(project));
+        }
+        ProjectRecoveryRequest::Write {
+            expected,
+            record,
+            now,
+            reply,
+        } => {
+            let _ = reply.send(database.write_project_recovery(expected, &record, now));
+        }
+        ProjectRecoveryRequest::Due { now, limit, reply } => {
+            let _ = reply.send(database.due_project_recovery(now, limit));
+        }
+        ProjectRecoveryRequest::Deadline { reply } => {
+            let _ = reply.send(database.next_project_recovery_deadline());
+        }
+    }
 }
 
 fn handle_project_saga_request(database: &mut Database, request: ProjectSagaRequest) {

@@ -746,6 +746,8 @@ pub trait ApplicationPorts:
     + QueryProviders
     + ControlHarness
     + crate::ControlProjects
+    + crate::RetryProjectRuntime
+    + crate::QueryProjectRecovery
     + crate::RetireAgents
     + InspectResource
     + ObserveRevisions

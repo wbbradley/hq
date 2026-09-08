@@ -2278,3 +2278,255 @@ fn _pin_wire_resource_locator(_value: ResourceLocatorDto) {}
 
 #[allow(dead_code)]
 fn _pin_wire_ids(_command_id: CommandId, _operation_id: OperationId, _revision: Revision) {}
+
+/// Decodes the exact actor, home, assignment, session, and displayed revision for a retry.
+pub fn project_recovery_retry_from_v1(
+    request: crate::protocol::v1::ProjectRecoveryRetryRequestDto,
+) -> Result<hq_application::ProjectRecoveryRetryRequest, ValueError> {
+    Ok(hq_application::ProjectRecoveryRetryRequest {
+        retry_id: OperationId::from_bytes(request.retry_id.bytes()),
+        operation_id: OperationId::from_bytes(request.operation_id.bytes()),
+        account_id: hq_domain::AccountId::from_bytes(request.account_id.bytes()),
+        home: hq_domain::InstallationId::from_bytes(request.home.bytes()),
+        scope: hq_application::ProjectRuntimeScope {
+            project_id: hq_domain::ProjectId::from_bytes(request.project_id.bytes()),
+            binding: hq_domain::AssignmentBinding {
+                assignment_id: hq_domain::AssignmentId::from_bytes(request.assignment_id.bytes()),
+                agent_id: AgentId::from_bytes(request.agent_id.bytes()),
+                provider: ProviderId::new(request.provider).map_err(|_| ValueError::InvalidText)?,
+                session: ProviderSessionId::new(request.session)
+                    .map_err(|_| ValueError::InvalidText)?,
+            },
+            thread_id: hq_domain::ThreadId::from_bytes(request.thread_id.bytes()),
+        },
+        expected_revision: request.expected_revision,
+    })
+}
+
+/// Encodes a durable retry receipt without changing its disposition.
+pub fn project_recovery_retry_to_v1(
+    outcome: &hq_application::ProjectRecoveryRetryOutcome,
+) -> crate::protocol::v1::ProjectRecoveryRetryOutcomeDto {
+    use crate::protocol::v1::ProjectRecoveryRetryOutcomeDto as Dto;
+    match outcome {
+        hq_application::ProjectRecoveryRetryOutcome::Scheduled => Dto::Scheduled,
+        hq_application::ProjectRecoveryRetryOutcome::AlreadyScheduled => Dto::AlreadyScheduled,
+        hq_application::ProjectRecoveryRetryOutcome::Rejected(error) => Dto::Rejected {
+            error: domain_error_to_v1(error),
+        },
+    }
+}
+
+/// Decodes the exact human and authoritative project target.
+pub fn project_recovery_query_from_v1(
+    request: crate::protocol::v1::ProjectRecoveryQueryDto,
+) -> hq_application::ProjectRecoveryQuery {
+    hq_application::ProjectRecoveryQuery {
+        account_id: hq_domain::AccountId::from_bytes(request.account_id.bytes()),
+        home: hq_domain::InstallationId::from_bytes(request.home.bytes()),
+        project_id: hq_domain::ProjectId::from_bytes(request.project_id.bytes()),
+    }
+}
+
+/// Encodes live observations separately from retained recovery evidence.
+pub fn project_recovery_view_to_v1(
+    view: &hq_application::ProjectRecoveryView,
+) -> crate::protocol::v1::ProjectRecoveryViewDto {
+    use crate::protocol::v1::{
+        ProjectRecoveryViewDto, ProjectRuntimeObservationDto, ProjectRuntimeWorkerStateDto as W,
+    };
+    use hq_application::ProjectRuntimeWorkerState as A;
+    ProjectRecoveryViewDto {
+        head: id32(view.head.as_bytes()),
+        observation: view
+            .observation
+            .as_ref()
+            .map(|obs| ProjectRuntimeObservationDto {
+                scope: runtime_scope_to_v1(&obs.scope),
+                generation: obs.generation.map(|id| id32(id.as_bytes())),
+                worker: match &obs.worker {
+                    A::Stopped => W::Stopped,
+                    A::Busy => W::Busy,
+                    A::Ready { owner } => W::Ready {
+                        owner: id32(owner.as_bytes()),
+                    },
+                    A::Working {
+                        owner,
+                        operation_id,
+                        sequence,
+                    } => W::Working {
+                        owner: id32(owner.as_bytes()),
+                        operation_id: id32(operation_id.as_bytes()),
+                        sequence: sequence.get(),
+                    },
+                    A::Failed(failure) => W::Failed {
+                        failure: runtime_failure_to_v1(failure),
+                    },
+                },
+            }),
+        recovery: view.recovery.as_ref().map(recovery_record_to_v1),
+        retry_allowed: view.retry_allowed,
+    }
+}
+
+fn runtime_scope_to_v1(
+    scope: &hq_application::ProjectRuntimeScope,
+) -> crate::protocol::v1::ProjectRuntimeScopeDto {
+    crate::protocol::v1::ProjectRuntimeScopeDto {
+        project_id: id32(scope.project_id.as_bytes()),
+        assignment_id: id32(scope.binding.assignment_id.as_bytes()),
+        agent_id: id32(scope.binding.agent_id.as_bytes()),
+        provider: scope.binding.provider.as_str().to_owned(),
+        session: scope.binding.session.as_str().to_owned(),
+        thread_id: id32(scope.thread_id.as_bytes()),
+    }
+}
+
+fn runtime_failure_to_v1(
+    failure: &hq_application::ProjectRuntimeFailure,
+) -> crate::protocol::v1::ProjectRuntimeFailureDto {
+    crate::protocol::v1::ProjectRuntimeFailureDto {
+        reason: runtime_failure_reason_to_v1(failure.reason),
+        lease: failure
+            .lease
+            .map(|lease| crate::protocol::v1::RuntimeLeaseEvidenceDto {
+                owner: id32(lease.owner.as_bytes()),
+                expires_at_millis: lease.expires_at_millis,
+            }),
+    }
+}
+
+fn recovery_record_to_v1(
+    record: &hq_application::ProjectRecoveryRecord,
+) -> crate::protocol::v1::ProjectRecoveryRecordDto {
+    use crate::protocol::v1::ProjectRecoveryStateDto as D;
+    use hq_application::ProjectRecoveryState as A;
+    crate::protocol::v1::ProjectRecoveryRecordDto {
+        operation_id: id32(record.operation_id.as_bytes()),
+        saga_operation_id: id32(record.input.saga_operation_id.as_bytes()),
+        submission_id: id32(record.input.submission_id.as_bytes()),
+        sequence: record.input.sequence.get(),
+        scope: runtime_scope_to_v1(&record.scope),
+        revision: record.revision,
+        attempts: record.attempts,
+        state: match &record.state {
+            A::Waiting { retry_at_millis } => D::Waiting {
+                retry_at_millis: *retry_at_millis,
+            },
+            A::Attempting {
+                generation,
+                recover_at_millis,
+            } => D::Attempting {
+                generation: id32(generation.as_bytes()),
+                recover_at_millis: *recover_at_millis,
+            },
+            A::Ready {
+                generation,
+                owner,
+                recover_at_millis,
+            } => D::Ready {
+                generation: id32(generation.as_bytes()),
+                owner: id32(owner.as_bytes()),
+                recover_at_millis: *recover_at_millis,
+            },
+            A::Blocked { reason } => D::Blocked {
+                reason: recovery_stop_to_v1(*reason),
+            },
+            A::Completed => D::Completed,
+            A::Cancelled => D::Cancelled,
+        },
+        failure: record.failure.as_ref().map(runtime_failure_to_v1),
+    }
+}
+
+const fn runtime_failure_reason_to_v1(
+    value: hq_application::RuntimeFailureReason,
+) -> crate::protocol::v1::RuntimeFailureReasonDto {
+    match value {
+        hq_application::RuntimeFailureReason::GenerationChanged => {
+            crate::protocol::v1::RuntimeFailureReasonDto::GenerationChanged
+        }
+        hq_application::RuntimeFailureReason::InvalidInput => {
+            crate::protocol::v1::RuntimeFailureReasonDto::InvalidInput
+        }
+        hq_application::RuntimeFailureReason::Unsupported => {
+            crate::protocol::v1::RuntimeFailureReasonDto::Unsupported
+        }
+        hq_application::RuntimeFailureReason::ProviderNotRegistered => {
+            crate::protocol::v1::RuntimeFailureReasonDto::ProviderNotRegistered
+        }
+        hq_application::RuntimeFailureReason::RegistrationConflict => {
+            crate::protocol::v1::RuntimeFailureReasonDto::RegistrationConflict
+        }
+        hq_application::RuntimeFailureReason::UnsafeRecovery => {
+            crate::protocol::v1::RuntimeFailureReasonDto::UnsafeRecovery
+        }
+        hq_application::RuntimeFailureReason::SessionIdentityMismatch => {
+            crate::protocol::v1::RuntimeFailureReasonDto::SessionIdentityMismatch
+        }
+        hq_application::RuntimeFailureReason::SessionNotFound => {
+            crate::protocol::v1::RuntimeFailureReasonDto::SessionNotFound
+        }
+        hq_application::RuntimeFailureReason::SubmissionIdentityConflict => {
+            crate::protocol::v1::RuntimeFailureReasonDto::SubmissionIdentityConflict
+        }
+        hq_application::RuntimeFailureReason::InteractiveAlreadyAnswered => {
+            crate::protocol::v1::RuntimeFailureReasonDto::InteractiveAlreadyAnswered
+        }
+        hq_application::RuntimeFailureReason::SecretInputRejected => {
+            crate::protocol::v1::RuntimeFailureReasonDto::SecretInputRejected
+        }
+        hq_application::RuntimeFailureReason::IntakeClosed => {
+            crate::protocol::v1::RuntimeFailureReasonDto::IntakeClosed
+        }
+        hq_application::RuntimeFailureReason::Crashed => {
+            crate::protocol::v1::RuntimeFailureReasonDto::Crashed
+        }
+        hq_application::RuntimeFailureReason::ProtocolViolation => {
+            crate::protocol::v1::RuntimeFailureReasonDto::ProtocolViolation
+        }
+        hq_application::RuntimeFailureReason::TransportClosed => {
+            crate::protocol::v1::RuntimeFailureReasonDto::TransportClosed
+        }
+        hq_application::RuntimeFailureReason::ProcessFailed => {
+            crate::protocol::v1::RuntimeFailureReasonDto::ProcessFailed
+        }
+        hq_application::RuntimeFailureReason::CompatibilityMismatch => {
+            crate::protocol::v1::RuntimeFailureReasonDto::CompatibilityMismatch
+        }
+        hq_application::RuntimeFailureReason::Unavailable => {
+            crate::protocol::v1::RuntimeFailureReasonDto::Unavailable
+        }
+        hq_application::RuntimeFailureReason::CleanupFailed => {
+            crate::protocol::v1::RuntimeFailureReasonDto::CleanupFailed
+        }
+        hq_application::RuntimeFailureReason::OwnershipConflict => {
+            crate::protocol::v1::RuntimeFailureReasonDto::OwnershipConflict
+        }
+        hq_application::RuntimeFailureReason::Backpressure => {
+            crate::protocol::v1::RuntimeFailureReasonDto::Backpressure
+        }
+        hq_application::RuntimeFailureReason::PersistenceCollision => {
+            crate::protocol::v1::RuntimeFailureReasonDto::PersistenceCollision
+        }
+    }
+}
+
+const fn recovery_stop_to_v1(
+    value: hq_application::RuntimeRecoveryStop,
+) -> crate::protocol::v1::RuntimeRecoveryStopDto {
+    match value {
+        hq_application::RuntimeRecoveryStop::PermanentFailure => {
+            crate::protocol::v1::RuntimeRecoveryStopDto::PermanentFailure
+        }
+        hq_application::RuntimeRecoveryStop::AttemptsExhausted => {
+            crate::protocol::v1::RuntimeRecoveryStopDto::AttemptsExhausted
+        }
+        hq_application::RuntimeRecoveryStop::ClockRange => {
+            crate::protocol::v1::RuntimeRecoveryStopDto::ClockRange
+        }
+        hq_application::RuntimeRecoveryStop::InvalidPolicy => {
+            crate::protocol::v1::RuntimeRecoveryStopDto::InvalidPolicy
+        }
+    }
+}

@@ -213,6 +213,17 @@ impl hq_application::ControlProjects for ScriptedPorts {
     }
 }
 
+impl hq_application::RetryProjectRuntime for ScriptedPorts {
+    fn retry_project_runtime(
+        &self,
+        _request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
+
 impl hq_application::RetireAgents for ScriptedPorts {
     fn retire_agent(
         &self,
@@ -430,4 +441,15 @@ fn failed_snapshot_cancels_pending_subscription() -> Result<(), Box<dyn Error>> 
         &["register", "query", "cancel"]
     );
     Ok(())
+}
+
+impl hq_application::QueryProjectRecovery for ScriptedPorts {
+    fn query_project_recovery(
+        &self,
+        _request: hq_application::ProjectRecoveryQuery,
+    ) -> Result<hq_application::ProjectRecoveryView, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
 }

@@ -353,9 +353,37 @@ action exposed only when stalled-delivery evidence requires intervention.
 Post-commit wakes contain no message or project payload and may coalesce. The worker rereads durable
 state, crosses the mailbox/projection handoff with one bounded immediate follow-up pass, and
 self-schedules an immediate continuation while bounded work remains. Startup, an explicit control
-operation, a later committed revision, or final drain also wakes reconciliation. A failed attempt
-remains durable for one of those explicit recovery triggers; no recurring repair scan drives normal
-dispatch.
+operation, a later committed revision, or final drain also wakes reconciliation. Runtime recovery
+also has persisted deadlines: the background timer reads the earliest deadline and selects only due
+recovery records, following each record's exact parent workflow instead of scanning runnable
+projects. Event-driven repair uses the current clock rather than the startup receipt time.
+
+Each pending input has a durable recovery budget scoped to its project and assignment epoch.
+Transient readiness failures retry after 1, 2, 4, and 8 seconds, stopping after five attempts;
+a retained foreign-owner lease can extend the next deadline. Permanent failures do not schedule
+another automatic attempt. Restarting the node or repeating a command does not reset the budget.
+Explicit retry requests are bound to the active account that originally requested the work, the
+project's home, the exact assignment and pending input, and the blocked revision the user observed.
+A committed retry resets the budget once and schedules background work. Its receipt also retains
+the requesting account and home: repeated acknowledgements cannot reset the budget again, even
+if delivery has since completed. Changed authority or eligibility leaves the old budget untouched.
+
+An admitted attempt keeps a 30-second recovery deadline until canonical dispatch commits, including
+when readiness succeeds but delivery remains queued or uncertain. Exact proven acceptance can
+repair canonical attribution before that deadline without requiring another resume.
+
+When a project worker stops, the harness publishes a body-free hint carrying its exact project,
+agent, provider session, node generation, and worker owner. The project event loop rereads the
+matching active recovery record and canonical eligibility before scheduling backoff. Hints from
+old owners or generations, duplicate hints, and completed inputs do not start another worker or
+reset the retry budget. This notification path is bounded and nonblocking; a lost hint leaves the
+persisted attempt deadline available as a fallback.
+
+Closing or replacing an assignment cancels its ineligible recovery reservation without consuming
+the saved input. Cancellation and attempt admission use exact revision checks, so a stale write
+cannot revive a cancelled attempt. Readiness carries the node generation and worker owner; an old
+generation cannot authorize a new launch. Retained readiness records describe an observation and
+must not be treated as proof that a worker is still live.
 
 Agent output retains immutable agent, thread, and assignment-epoch provenance. The project mailbox
 remains the conversation address and reply target. UIs present dual attribution such as
@@ -556,3 +584,16 @@ outside the existing protected diagnostic boundary.
 - Project-message cancellation.
 - Project deletion, destructive worktree cleanup, or automatic branch deletion.
 - Rich project-lineage branching or merging semantics.
+
+
+The conversation header observes the named agent independently of device connectivity and message
+delivery receipts. While an exact canonical input is pending, it says “Your message is saved.”
+This confirms durable input, not provider acceptance. Known queued and acceptance-unknown delivery
+remain distinct in the message evidence. Status reads refresh only the visible project conversation;
+they do not reload history or move its reading position.
+
+With the conversation focused, **D** opens recovery details in the reading area while the composer
+stays visible. **Esc** returns to the messages. A blocked recovery offers **R** to schedule another
+bounded retry budget. If that request loses its response, **R** checks the same retained request
+identity; it does not create another retry intent. Details expose the exact assignment, saved session,
+node generation, worker owner, input sequence, attempt count, failure reason, and retained lease.

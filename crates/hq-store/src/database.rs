@@ -6,6 +6,7 @@ mod conversation;
 mod harness;
 mod operational;
 mod project;
+mod project_recovery;
 mod project_saga;
 mod relay;
 mod repair;
@@ -53,7 +54,7 @@ use crate::{
 const APPLICATION_ID: i64 = 0x4851_5253;
 const SCHEMA_VERSION: i64 = 1;
 const SCHEMA_MARKER: &str = "hq-store-v1";
-const SCHEMA_TABLES: [&str; 121] = [
+const SCHEMA_TABLES: [&str; 123] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -173,14 +174,18 @@ const SCHEMA_TABLES: [&str; 121] = [
     "harness_session_operations",
     "harness_deliveries",
     "harness_event_checkpoints",
+    "project_runtime_recovery",
+    "project_runtime_recovery_retries",
     "project_sagas",
     "project_saga_reservations",
 ];
-const OPERATIONAL_TABLE_COUNT: usize = 19;
-const SCHEMA_INDEXES: [&str; 3] = [
+const OPERATIONAL_TABLE_COUNT: usize = 21;
+const SCHEMA_INDEXES: [&str; 5] = [
     "conversation_messages_by_fact_id",
     "conversation_activities_by_fact_id",
     "project_sagas_one_active",
+    "project_runtime_recovery_due",
+    "project_runtime_recovery_one_active",
 ];
 const MAXIMUM_CORPUS_FACTS: i64 = 1_000_000;
 
@@ -1423,6 +1428,47 @@ CREATE TABLE harness_event_checkpoints (
     PRIMARY KEY (agent_id, event_id)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE project_runtime_recovery (
+    operation_id BLOB PRIMARY KEY CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
+    saga_operation_id BLOB NOT NULL CHECK(typeof(saga_operation_id) = 'blob' AND length(saga_operation_id) = 32),
+    submission_id BLOB NOT NULL CHECK(typeof(submission_id) = 'blob' AND length(submission_id) = 32),
+    input_sequence BLOB NOT NULL CHECK(typeof(input_sequence) = 'blob' AND length(input_sequence) = 8 AND input_sequence != x'0000000000000000'),
+    project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),
+    assignment_id BLOB NOT NULL CHECK(typeof(assignment_id) = 'blob' AND length(assignment_id) = 32),
+    agent_id BLOB NOT NULL CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
+    thread_id BLOB NOT NULL CHECK(typeof(thread_id) = 'blob' AND length(thread_id) = 32),
+    provider TEXT NOT NULL CHECK(length(CAST(provider AS BLOB)) BETWEEN 1 AND 64),
+    session TEXT NOT NULL CHECK(length(CAST(session AS BLOB)) BETWEEN 1 AND 256),
+    revision BLOB NOT NULL CHECK(typeof(revision) = 'blob' AND length(revision) = 8),
+    attempts INTEGER NOT NULL CHECK(attempts BETWEEN 0 AND 4294967295),
+    state_kind INTEGER NOT NULL CHECK(state_kind BETWEEN 1 AND 6),
+    due_at BLOB CHECK(due_at IS NULL OR (typeof(due_at) = 'blob' AND length(due_at) = 8)),
+    generation BLOB CHECK(generation IS NULL OR (typeof(generation) = 'blob' AND length(generation) = 32)),
+    owner BLOB CHECK(owner IS NULL OR (typeof(owner) = 'blob' AND length(owner) = 32)),
+    failure_reason TEXT CHECK(failure_reason IS NULL OR length(failure_reason) BETWEEN 1 AND 64),
+    lease_owner BLOB CHECK(lease_owner IS NULL OR (typeof(lease_owner) = 'blob' AND length(lease_owner) = 32)),
+    lease_deadline BLOB CHECK(lease_deadline IS NULL OR (typeof(lease_deadline) = 'blob' AND length(lease_deadline) = 8)),
+    blocked_reason INTEGER CHECK(blocked_reason IS NULL OR blocked_reason BETWEEN 1 AND 4),
+    UNIQUE(project_id, assignment_id, submission_id),
+    CHECK((lease_owner IS NULL AND lease_deadline IS NULL) OR (lease_owner IS NOT NULL AND lease_deadline IS NOT NULL AND failure_reason IS NOT NULL)),
+    CHECK((state_kind = 1 AND due_at IS NOT NULL AND generation IS NULL AND owner IS NULL AND blocked_reason IS NULL)
+       OR (state_kind = 2 AND due_at IS NOT NULL AND generation IS NOT NULL AND owner IS NULL AND blocked_reason IS NULL AND attempts > 0)
+       OR (state_kind = 3 AND due_at IS NULL AND generation IS NULL AND owner IS NULL AND blocked_reason IS NOT NULL AND failure_reason IS NOT NULL)
+       OR (state_kind = 4 AND due_at IS NOT NULL AND generation IS NOT NULL AND owner IS NOT NULL AND blocked_reason IS NULL AND failure_reason IS NULL AND attempts > 0)
+       OR (state_kind IN (5, 6) AND due_at IS NULL AND generation IS NULL AND owner IS NULL AND blocked_reason IS NULL))
+) STRICT, WITHOUT ROWID;
+CREATE INDEX project_runtime_recovery_due ON project_runtime_recovery(due_at, operation_id) WHERE due_at IS NOT NULL;
+CREATE UNIQUE INDEX project_runtime_recovery_one_active ON project_runtime_recovery(project_id) WHERE state_kind IN (1, 2, 3, 4);
+
+CREATE TABLE project_runtime_recovery_retries (
+    retry_id BLOB PRIMARY KEY CHECK(typeof(retry_id) = 'blob' AND length(retry_id) = 32),
+    operation_id BLOB NOT NULL REFERENCES project_runtime_recovery(operation_id)
+        CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
+    account_id BLOB NOT NULL CHECK(typeof(account_id) = 'blob' AND length(account_id) = 32),
+    home BLOB NOT NULL CHECK(typeof(home) = 'blob' AND length(home) = 32),
+    expected_revision BLOB NOT NULL CHECK(typeof(expected_revision) = 'blob' AND length(expected_revision) = 8)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE project_sagas (
     operation_id BLOB PRIMARY KEY NOT NULL
         CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
@@ -2019,6 +2065,45 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<crate::StoredHarnessDelivery>, StoreError> {
         harness::load_runnable_deliveries(&self.connection, agent_id, limit)
+    }
+
+    pub(super) fn retry_project_recovery(
+        &mut self,
+        request: &crate::ProjectRecoveryRetryRequest,
+        now: u64,
+    ) -> Result<crate::ProjectRecoveryWriteOutcome, StoreError> {
+        project_recovery::retry(&mut self.connection, request, now)
+    }
+
+    pub(super) fn find_project_recovery(
+        &self,
+        operation: hq_domain::OperationId,
+    ) -> Result<Option<crate::ProjectRecoveryRecord>, StoreError> {
+        project_recovery::find(&self.connection, operation)
+    }
+    pub(super) fn active_project_recovery(
+        &self,
+        project: hq_domain::ProjectId,
+    ) -> Result<Option<crate::ProjectRecoveryRecord>, StoreError> {
+        project_recovery::active(&self.connection, project)
+    }
+    pub(super) fn write_project_recovery(
+        &mut self,
+        expected: Option<u64>,
+        record: &crate::ProjectRecoveryRecord,
+        now: u64,
+    ) -> Result<crate::ProjectRecoveryWriteOutcome, StoreError> {
+        project_recovery::compare_exchange(&mut self.connection, expected, record, now)
+    }
+    pub(super) fn due_project_recovery(
+        &self,
+        now: u64,
+        limit: usize,
+    ) -> Result<Vec<crate::ProjectRecoveryRecord>, StoreError> {
+        project_recovery::due(&self.connection, now, limit)
+    }
+    pub(super) fn next_project_recovery_deadline(&self) -> Result<Option<u64>, StoreError> {
+        project_recovery::next_deadline(&self.connection)
     }
 
     pub(super) fn begin_project_saga(

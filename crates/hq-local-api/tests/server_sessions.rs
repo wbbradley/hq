@@ -50,6 +50,7 @@ struct Ports {
     hub: RevisionHub,
     trace: std::rc::Rc<RefCell<Vec<&'static str>>>,
     fail_view: bool,
+    retry_requests: std::rc::Rc<RefCell<Vec<hq_application::ProjectRecoveryRetryRequest>>>,
     responder_activations: Arc<AtomicUsize>,
     responder_drops: Arc<AtomicUsize>,
 }
@@ -60,6 +61,7 @@ impl Ports {
             hub,
             trace: std::rc::Rc::new(RefCell::new(Vec::new())),
             fail_view: false,
+            retry_requests: std::rc::Rc::new(RefCell::new(Vec::new())),
             responder_activations: Arc::new(AtomicUsize::new(0)),
             responder_drops: Arc::new(AtomicUsize::new(0)),
         }
@@ -70,6 +72,7 @@ impl Ports {
             hub,
             trace: std::rc::Rc::new(RefCell::new(Vec::new())),
             fail_view: true,
+            retry_requests: std::rc::Rc::new(RefCell::new(Vec::new())),
             responder_activations: Arc::new(AtomicUsize::new(0)),
             responder_drops: Arc::new(AtomicUsize::new(0)),
         }
@@ -282,6 +285,17 @@ impl hq_application::ControlProjects for Ports {
             operation_id: request.operation_id,
             stage: hq_application::ProjectCommandStage::AwaitingHome,
         })
+    }
+}
+
+impl hq_application::RetryProjectRuntime for Ports {
+    fn retry_project_runtime(
+        &self,
+        request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, ApplicationError> {
+        self.trace.borrow_mut().push("retry_project_runtime");
+        self.retry_requests.borrow_mut().push(request);
+        Ok(hq_application::ProjectRecoveryRetryOutcome::Scheduled)
     }
 }
 
@@ -1142,4 +1156,119 @@ fn dropping_one_call_scoped_session_cancels_only_its_revision_registration() {
         sibling.poll_invalidation(),
         Some(WireMessage::Invalidation(invalidation)) if invalidation.revision == 9
     ));
+}
+
+#[test]
+fn recovery_retry_preserves_exact_scope_and_rejects_invalid_provider_text() {
+    use hq_local_api::protocol::v1::{
+        ProjectRecoveryRetryOutcomeDto, ProjectRecoveryRetryRequestDto,
+    };
+    let (mut server, application) = session(RevisionHub::default());
+    negotiate(&mut server, &application);
+    let dto = ProjectRecoveryRetryRequestDto {
+        retry_id: Id32::new([1; 32]),
+        operation_id: Id32::new([2; 32]),
+        account_id: Id32::new([3; 32]),
+        home: Id32::new([4; 32]),
+        project_id: Id32::new([5; 32]),
+        assignment_id: Id32::new([6; 32]),
+        agent_id: Id32::new([7; 32]),
+        provider: "provider".to_owned(),
+        session: "saved-session".to_owned(),
+        thread_id: Id32::new([8; 32]),
+        expected_revision: 19,
+    };
+    let wire = request(1, Request::RetryProjectRuntime(Box::new(dto.clone())));
+    let decoded =
+        WireMessage::decode_frame(&wire.encode_frame().expect("bounded frame")).expect("decode");
+    assert_eq!(decoded, wire);
+    let outbound = server
+        .receive(decoded, &application, &Lifecycle)
+        .expect("retry routes");
+    assert!(matches!(outbound.message(), WireMessage::Response(response)
+        if matches!(response.response, Response::Success(ResponseResult::ProjectRecoveryRetry(ProjectRecoveryRetryOutcomeDto::Scheduled)))));
+    server
+        .confirm_written(outbound.ticket())
+        .expect("receipt written");
+    {
+        let retained = application.ports().retry_requests.borrow();
+        assert_eq!(retained.len(), 1);
+        let actual = &retained[0];
+        assert_eq!(actual.retry_id.as_bytes(), &dto.retry_id.bytes());
+        assert_eq!(actual.operation_id.as_bytes(), &dto.operation_id.bytes());
+        assert_eq!(actual.account_id.as_bytes(), &dto.account_id.bytes());
+        assert_eq!(actual.home.as_bytes(), &dto.home.bytes());
+        assert_eq!(actual.scope.project_id.as_bytes(), &dto.project_id.bytes());
+        assert_eq!(
+            actual.scope.binding.assignment_id.as_bytes(),
+            &dto.assignment_id.bytes()
+        );
+        assert_eq!(
+            actual.scope.binding.agent_id.as_bytes(),
+            &dto.agent_id.bytes()
+        );
+        assert_eq!(actual.scope.binding.provider.as_str(), dto.provider);
+        assert_eq!(actual.scope.binding.session.as_str(), dto.session);
+        assert_eq!(actual.scope.thread_id.as_bytes(), &dto.thread_id.bytes());
+        assert_eq!(actual.expected_revision, dto.expected_revision);
+    }
+    let mut invalid = dto;
+    invalid.provider = "x".repeat(hq_domain::PROVIDER_ID_MAX_BYTES + 1);
+    let invalid = request(2, Request::RetryProjectRuntime(Box::new(invalid)));
+    assert!(invalid.encode_frame().is_err());
+    let rejected = server
+        .receive(invalid, &application, &Lifecycle)
+        .expect("invalid request response");
+    assert!(
+        matches!(rejected.message(), WireMessage::Response(response) if matches!(response.response, Response::Error(_)))
+    );
+    assert_eq!(application.ports().retry_requests.borrow().len(), 1);
+}
+
+#[test]
+fn recovery_query_routes_exact_authorized_target() {
+    use hq_local_api::protocol::v1::ProjectRecoveryQueryDto;
+    let (mut server, application) = session(RevisionHub::default());
+    negotiate(&mut server, &application);
+    let wire = request(
+        1,
+        Request::ProjectRecovery(ProjectRecoveryQueryDto {
+            account_id: Id32::new([3; 32]),
+            home: Id32::new([4; 32]),
+            project_id: Id32::new([5; 32]),
+        }),
+    );
+    let decoded = WireMessage::decode_frame(&wire.encode_frame().expect("frame")).expect("decode");
+    let outbound = server
+        .receive(decoded, &application, &Lifecycle)
+        .expect("route");
+    assert!(matches!(outbound.message(), WireMessage::Response(response)
+        if matches!(&response.response, Response::Success(ResponseResult::ProjectRecovery(view))
+            if view.head == Id32::new([9; 32]) && view.observation.is_none()
+                && view.recovery.is_none() && !view.retry_allowed)));
+    assert!(
+        application
+            .ports()
+            .trace
+            .borrow()
+            .contains(&"query_project_recovery")
+    );
+}
+
+impl hq_application::QueryProjectRecovery for Ports {
+    fn query_project_recovery(
+        &self,
+        request: hq_application::ProjectRecoveryQuery,
+    ) -> Result<hq_application::ProjectRecoveryView, ApplicationError> {
+        self.trace.borrow_mut().push("query_project_recovery");
+        assert_eq!(request.account_id.as_bytes(), &[3; 32]);
+        assert_eq!(request.home.as_bytes(), &[4; 32]);
+        assert_eq!(request.project_id.as_bytes(), &[5; 32]);
+        Ok(hq_application::ProjectRecoveryView {
+            head: hq_domain::FactId::from_bytes([9; 32]),
+            observation: None,
+            recovery: None,
+            retry_allowed: false,
+        })
+    }
 }

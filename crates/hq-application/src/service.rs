@@ -117,6 +117,22 @@ where
         self.ports.ingest_canonical_evidence(evidence)
     }
 
+    /// Reads current canonical runtime recovery evidence without executing recovery.
+    pub fn query_project_recovery(
+        &self,
+        request: crate::ProjectRecoveryQuery,
+    ) -> Result<crate::ProjectRecoveryView, ApplicationError> {
+        self.ports.query_project_recovery(request)
+    }
+
+    /// Authorizes and schedules one explicit exact-scope recovery retry.
+    pub fn retry_project_runtime(
+        &self,
+        request: crate::ProjectRecoveryRetryRequest,
+    ) -> Result<crate::ProjectRecoveryRetryOutcome, ApplicationError> {
+        self.ports.retry_project_runtime(request)
+    }
+
     /// Executes, routes, or reconciles one exact project command.
     pub fn control_project(
         &self,

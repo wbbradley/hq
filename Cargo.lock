@@ -800,6 +800,7 @@ dependencies = [
  "hq-domain",
  "hq-reducer",
  "hq-resources",
+ "hq-store",
  "serde",
  "serde_json",
  "sha2",

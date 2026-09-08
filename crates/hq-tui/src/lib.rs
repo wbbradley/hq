@@ -7,6 +7,10 @@
 mod message_markdown;
 mod model;
 mod render;
+mod runtime_recovery;
+pub use runtime_recovery::{
+    UiRuntimeAvailability, UiRuntimeRecovery, UiRuntimeRetryOutcome, UiRuntimeRetryTarget,
+};
 mod shell_highlight;
 mod theme;
 

@@ -41,7 +41,10 @@ use hq_resources::{ExecGit, GitCommandConfig, PathReleaseAssessment};
 static NEXT_GIT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Default)]
-struct MemoryStore(Arc<Mutex<BTreeMap<OperationId, ProjectSagaRecord>>>);
+struct MemoryStore(
+    Arc<Mutex<BTreeMap<OperationId, ProjectSagaRecord>>>,
+    recovery::RecoveryDatabase,
+);
 
 impl ProjectSagaStore for MemoryStore {
     fn find(&self, operation_id: OperationId) -> Result<Option<ProjectSagaRecord>, SagaStoreError> {
@@ -348,6 +351,28 @@ fn existing_resource_creation_identifies_then_replays_exact_no_head_mutation() {
 struct UnusedRuntime;
 
 impl ProjectRuntimePort for UnusedRuntime {
+    fn observe_runtime(
+        &self,
+        scope: &hq_application::ProjectRuntimeScope,
+    ) -> Result<hq_application::ProjectRuntimeObservation, ApplicationError> {
+        Ok(hq_application::ProjectRuntimeObservation {
+            scope: scope.clone(),
+            generation: None,
+            worker: hq_application::ProjectRuntimeWorkerState::Stopped,
+        })
+    }
+
+    fn observe_runtime_stops(
+        &self,
+        _observer: Option<std::sync::Arc<dyn hq_projects::ProjectRuntimeStopObserver>>,
+    ) -> Result<(), ApplicationError> {
+        Ok(())
+    }
+
+    fn recovery_context(&self) -> Result<hq_application::RuntimeRecoveryContext, ApplicationError> {
+        unavailable()
+    }
+
     fn start_or_resume(
         &self,
         _request: &EffectRequest<ProjectRuntimeRequest>,
@@ -362,7 +387,10 @@ impl ProjectRuntimePort for UnusedRuntime {
         unavailable()
     }
 
-    fn ensure_ready(&self, _request: &ProjectRuntimeRequest) -> Result<(), ApplicationError> {
+    fn ensure_ready(
+        &self,
+        _request: &hq_application::ProjectReadinessRequest,
+    ) -> Result<hq_application::ProjectReadinessOutcome, ApplicationError> {
         unavailable()
     }
 
@@ -779,3 +807,7 @@ fn unavailable<T>() -> Result<T, ApplicationError> {
 fn domain_error(category: ErrorCategory, code: &'static str) -> DomainError {
     DomainError::new(category, ErrorCode::new(code).expect("code"))
 }
+
+#[path = "support/recovery.rs"]
+mod recovery;
+recovery::recovery_store!(MemoryStore);

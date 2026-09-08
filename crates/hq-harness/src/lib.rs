@@ -28,7 +28,8 @@ pub use supervisor::{
     HarnessPendingInteraction, HarnessPersistencePort, HarnessProjectDelivery, HarnessReadySession,
     HarnessReadyWorker, HarnessResponderId, HarnessSessionControlOutcome, HarnessSessionOperation,
     HarnessSessionOperationKind, HarnessSessionOperationState, HarnessStateMutation,
-    HarnessStatePort, HarnessStateSnapshot, HarnessSupervisor, HarnessSupervisorConfig,
-    HarnessSupervisorDependencies, HarnessSupervisorReport, HarnessTokenSource, HarnessWorkerLease,
+    HarnessStatePort, HarnessStateSnapshot, HarnessStoppedWorker, HarnessSupervisor,
+    HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessSupervisorReport,
+    HarnessTokenSource, HarnessWorkerLease, HarnessWorkerObservation, HarnessWorkerStopReason,
     MAX_HARNESS_SUPERVISOR_STATE_ITEMS,
 };

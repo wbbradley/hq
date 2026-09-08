@@ -27,7 +27,10 @@ use hq_protocol::Bip340Signer;
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 use hq_resources::ExecGit;
 use hq_store::{RevisionInvalidations, Store, StoreGateway};
-use tokio::{runtime::Builder, sync::watch};
+use tokio::{
+    runtime::Builder,
+    sync::{mpsc, watch},
+};
 
 use crate::{
     CancellationToken, ComponentDrain, ComponentError, NodeComponent, ProjectResourceAdapter,
@@ -152,7 +155,7 @@ pub trait ScheduleProjectReconciliation {
     clippy::too_many_arguments,
     reason = "complete foreground capability composition"
 )]
-pub fn compose_standard_project_component<R: ProjectRuntimePort>(
+pub fn compose_standard_project_component<R: ProjectRuntimePort + Clone + Send + Sync + 'static>(
     config: ProjectNodeConfig,
     store: &Store,
     policy: AuthorityPolicy,
@@ -166,8 +169,19 @@ pub fn compose_standard_project_component<R: ProjectRuntimePort>(
         .with_boundary_trace(trace.clone());
     let inputs = ApplicationProjectInputReconciler::new(gateway.clone(), home);
     let resources = ProjectResourceAdapter::system(home);
+    let reader = Arc::new(hq_projects::ProjectRecoveryReader::new(
+        ProjectSagaStoreAdapter::new(
+            store.project_saga_state_handle(),
+            store.project_recovery_state_handle(),
+        ),
+        ApplicationCanonicalProjectPort::new(gateway.clone()),
+        runtime.clone(),
+    ));
     let workflow = ProjectWorkflowManager::with_git(
-        ProjectSagaStoreAdapter::new(store.project_saga_state_handle()),
+        ProjectSagaStoreAdapter::new(
+            store.project_saga_state_handle(),
+            store.project_recovery_state_handle(),
+        ),
         ApplicationCanonicalProjectPort::new(gateway.clone()),
         runtime,
         resources.clone(),
@@ -185,6 +199,7 @@ pub fn compose_standard_project_component<R: ProjectRuntimePort>(
         inputs,
         store.subscribe_invalidations(),
     )
+    .with_recovery_reader(reader)
     .with_boundary_trace(trace)
 }
 
@@ -201,14 +216,26 @@ pub struct ProjectNodeConfig {
 pub struct ProjectNodeComponent<W, F, I> {
     config: ProjectNodeConfig,
     worker: Arc<Mutex<W>>,
+    recovery_reader: Option<Arc<dyn hq_application::QueryProjectRecovery + Send + Sync>>,
     resources: F,
     inputs: Arc<Mutex<I>>,
     accepting: AtomicBool,
     reconciliation: watch::Sender<ProjectReconciliationSignal>,
     reconciliation_observer: Option<watch::Receiver<ProjectReconciliationSignal>>,
     store_invalidations: Option<RevisionInvalidations>,
+    runtime_stops: mpsc::Sender<hq_application::ProjectRuntimeStopped>,
+    runtime_stop_receiver: Option<mpsc::Receiver<hq_application::ProjectRuntimeStopped>>,
     reconciliation_task: Option<JoinHandle<Result<(), ComponentError>>>,
     trace: BoundaryTrace,
+}
+
+struct ProjectStopObserver(mpsc::Sender<hq_application::ProjectRuntimeStopped>);
+impl hq_projects::ProjectRuntimeStopObserver for ProjectStopObserver {
+    fn stopped(&self, stopped: hq_application::ProjectRuntimeStopped) {
+        // These are hints: bounded overflow leaves the persisted attempt deadline intact.
+        // Never wait here while the harness may own a supervisor or provider lock.
+        let _ = self.0.try_send(stopped);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -244,18 +271,37 @@ impl<W, F, I> ProjectNodeComponent<W, F, I> {
     ) -> Self {
         let (reconciliation, reconciliation_observer) =
             watch::channel(ProjectReconciliationSignal::default());
+        let (runtime_stops, runtime_stop_receiver) = mpsc::channel(
+            config
+                .recovery_limit
+                .get()
+                .min(hq_projects::MAX_RUNNABLE_SAGAS),
+        );
         Self {
             config,
             worker: Arc::new(Mutex::new(worker)),
+            recovery_reader: None,
             resources,
             inputs: Arc::new(Mutex::new(inputs)),
             accepting: AtomicBool::new(false),
             reconciliation,
             reconciliation_observer: Some(reconciliation_observer),
             store_invalidations,
+            runtime_stops,
+            runtime_stop_receiver: Some(runtime_stop_receiver),
             reconciliation_task: None,
             trace: BoundaryTrace::disabled(BoundaryProcess::Node),
         }
+    }
+
+    /// Installs independent passive reads that remain available during workflow execution.
+    #[must_use]
+    pub fn with_recovery_reader(
+        mut self,
+        reader: Arc<dyn hq_application::QueryProjectRecovery + Send + Sync>,
+    ) -> Self {
+        self.recovery_reader = Some(reader);
+        self
     }
 
     /// Installs a best-effort diagnostic sink before component startup.
@@ -379,45 +425,78 @@ async fn run_project_reconciliation<W, I>(
     inputs: &Mutex<I>,
     mut control: watch::Receiver<ProjectReconciliationSignal>,
     mut store_invalidations: Option<RevisionInvalidations>,
+    mut runtime_stops: mpsc::Receiver<hq_application::ProjectRuntimeStopped>,
     scheduler: &watch::Sender<ProjectReconciliationSignal>,
     limit: usize,
-    recovery_time: Timestamp,
     trace: &BoundaryTrace,
 ) -> Result<(), ComponentError>
 where
     W: ProjectWorkerPort,
     I: ReconcileProjectInputs + PlanAutomaticProjectCommands,
 {
+    let mut retry_after = None;
+    let mut stops_closed = false;
     loop {
-        match store_invalidations.as_mut() {
-            Some(invalidations) => {
-                tokio::select! {
-                    changed = control.changed() => {
-                        if changed.is_err() {
-                            return Ok(());
-                        }
-                    }
-                    revision = invalidations.next_revision() => {
-                        if revision.is_none() {
-                            store_invalidations = None;
-                            continue;
-                        }
-                    }
-                }
+        let schedule = lock_capability(worker).and_then(|worker| worker.recovery_schedule());
+        let delay = match &schedule {
+            Ok(schedule) => schedule.next_due_millis.map(|deadline| {
+                std::time::Duration::from_millis(
+                    deadline.saturating_sub(schedule.now_millis).min(86_400_000),
+                )
+            }),
+            Err(_) => Some(std::time::Duration::from_secs(1)),
+        };
+        let delay = delay.map(|delay| {
+            retry_after.map_or(delay, |deadline: tokio::time::Instant| {
+                delay.max(deadline.saturating_duration_since(tokio::time::Instant::now()))
+            })
+        });
+        let deadline_wake = tokio::select! {
+            stopped = runtime_stops.recv(), if !stops_closed => {
+                if let Some(stopped) = stopped {
+                    let _ = lock_capability(worker).and_then(|worker| worker.runtime_stopped(&stopped));
+                } else { stops_closed = true; }
+                continue;
             }
-            None => {
-                if control.changed().await.is_err() {
-                    return Ok(());
-                }
+            changed = control.changed() => {
+                if changed.is_err() { return Ok(()); }
+                false
             }
-        }
+            revision = async {
+                match store_invalidations.as_mut() {
+                    Some(invalidations) => invalidations.next_revision().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if revision.is_none() { store_invalidations = None; continue; }
+                false
+            }
+            () = async {
+                match delay {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => std::future::pending().await,
+                }
+            } => true,
+        };
         let signal = *control.borrow_and_update();
         if signal.force_stop {
             return Ok(());
         }
+        if deadline_wake && !signal.stopping {
+            let result = lock_capability(worker).and_then(|worker| worker.repair_due(limit));
+            retry_after = result
+                .err()
+                .map(|_| tokio::time::Instant::now() + std::time::Duration::from_secs(1));
+            continue;
+        }
         trace.record(BoundaryKind::ProjectWoken, BoundaryIds::default());
         let reconciliation = lock_capability(worker)
-            .and_then(|worker| worker.repair_pending(recovery_time, limit))
+            .and_then(|worker| {
+                let now = worker.recovery_schedule()?.now_millis;
+                let received_at = i64::try_from(now)
+                    .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvalidRequest))?;
+                worker.repair_pending(Timestamp::from_unix_millis(received_at), limit)
+            })
             .and_then(|_| reconcile_shared(worker, inputs, limit))
             .and_then(|first| {
                 if first.inputs.accepted == 0 && !first.truncated {
@@ -462,20 +541,31 @@ where
     I: Send + 'static,
 {
     fn start(&mut self, _cancellation: CancellationToken) -> Result<(), ComponentError> {
+        lock_capability(&self.worker)
+            .and_then(|worker| {
+                worker.observe_runtime_stops(Some(Arc::new(ProjectStopObserver(
+                    self.runtime_stops.clone(),
+                ))))
+            })
+            .map_err(|_| ComponentError::unavailable())?;
         self.repair()?;
         let observer = self
             .reconciliation_observer
             .take()
             .ok_or_else(ComponentError::unavailable)?;
         let store_invalidations = self.store_invalidations.take();
+        let runtime_stops = self
+            .runtime_stop_receiver
+            .take()
+            .ok_or_else(ComponentError::unavailable)?;
         let runtime = Builder::new_current_thread()
+            .enable_time()
             .build()
             .map_err(|_| ComponentError::unavailable())?;
         let worker = Arc::clone(&self.worker);
         let inputs = Arc::clone(&self.inputs);
         let scheduler = self.reconciliation.clone();
         let limit = self.config.recovery_limit.get();
-        let recovery_time = self.config.recovery_time;
         let trace = self.trace.clone();
         self.reconciliation_task = Some(
             thread::Builder::new()
@@ -486,9 +576,9 @@ where
                         &inputs,
                         observer,
                         store_invalidations,
+                        runtime_stops,
                         &scheduler,
                         limit,
-                        recovery_time,
                         &trace,
                     ))
                 })
@@ -504,12 +594,14 @@ where
     }
 
     fn drain(&mut self) -> Result<ComponentDrain, ComponentError> {
+        let _ = lock_capability(&self.worker).and_then(|worker| worker.observe_runtime_stops(None));
         self.stop_reconciliation(false)?;
         Ok(ComponentDrain::Complete)
     }
 
     fn force_stop(&mut self) -> Result<(), ComponentError> {
         self.accepting.store(false, Ordering::Release);
+        let _ = lock_capability(&self.worker).and_then(|worker| worker.observe_runtime_stops(None));
         self.stop_reconciliation(true)
     }
 }
@@ -524,6 +616,26 @@ impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs + PlanAutomaticProjectCo
         self.ensure_accepting()?;
         let outcome = lock_capability(&self.worker)?.control_project(request)?;
         self.schedule_project_reconciliation();
+        Ok(outcome)
+    }
+}
+
+impl<W: ProjectWorkerPort, F, I> hq_application::RetryProjectRuntime
+    for ProjectNodeComponent<W, F, I>
+{
+    fn retry_project_runtime(
+        &self,
+        request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, ApplicationError> {
+        self.ensure_accepting()?;
+        let outcome = lock_capability(&self.worker)?.retry_project_runtime(request)?;
+        if matches!(
+            outcome,
+            hq_application::ProjectRecoveryRetryOutcome::Scheduled
+                | hq_application::ProjectRecoveryRetryOutcome::AlreadyScheduled
+        ) {
+            self.schedule_project_reconciliation();
+        }
         Ok(outcome)
     }
 }
@@ -582,5 +694,65 @@ impl<W, F, I> ScheduleProjectReconciliation for ProjectNodeComponent<W, F, I> {
                 state.generation = state.generation.wrapping_add(1);
             }
         });
+    }
+}
+
+impl<W, F, I> hq_application::QueryProjectRecovery for ProjectNodeComponent<W, F, I> {
+    fn query_project_recovery(
+        &self,
+        request: hq_application::ProjectRecoveryQuery,
+    ) -> Result<hq_application::ProjectRecoveryView, ApplicationError> {
+        self.ensure_accepting()?;
+        self.recovery_reader
+            .as_ref()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?
+            .query_project_recovery(request)
+    }
+}
+
+#[cfg(test)]
+mod recovery_reader_tests {
+    use super::*;
+    use hq_application::{ProjectRecoveryQuery, ProjectRecoveryView, QueryProjectRecovery};
+
+    struct Reader;
+    impl QueryProjectRecovery for Reader {
+        fn query_project_recovery(
+            &self,
+            _request: ProjectRecoveryQuery,
+        ) -> Result<ProjectRecoveryView, ApplicationError> {
+            Ok(ProjectRecoveryView {
+                head: hq_domain::FactId::from_bytes([1; 32]),
+                observation: None,
+                recovery: None,
+                retry_allowed: false,
+            })
+        }
+    }
+
+    #[test]
+    fn passive_query_does_not_acquire_busy_workflow_lock() -> Result<(), ApplicationError> {
+        let component = ProjectNodeComponent::new(
+            ProjectNodeConfig {
+                recovery_limit: NonZeroUsize::MIN,
+                recovery_time: Timestamp::from_unix_millis(0),
+            },
+            (),
+            (),
+            (),
+        )
+        .with_recovery_reader(Arc::new(Reader));
+        component.accepting.store(true, Ordering::Release);
+        let _busy_worker = component
+            .worker
+            .lock()
+            .map_err(|_| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?;
+        let view = component.query_project_recovery(ProjectRecoveryQuery {
+            account_id: hq_domain::AccountId::from_bytes([2; 32]),
+            project_id: hq_domain::ProjectId::from_bytes([3; 32]),
+            home: hq_domain::InstallationId::from_bytes([4; 32]),
+        })?;
+        assert_eq!(view.head, hq_domain::FactId::from_bytes([1; 32]));
+        Ok(())
     }
 }

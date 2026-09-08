@@ -529,6 +529,23 @@ pub enum ProjectDeliveryOutcome {
 
 /// Project-bound runtime and durable exact-delivery capability.
 pub trait ProjectRuntimePort {
+    /// Observes the exact local worker without launching or renewing it.
+    fn observe_runtime(
+        &self,
+        scope: &hq_application::ProjectRuntimeScope,
+    ) -> Result<hq_application::ProjectRuntimeObservation, hq_application::ApplicationError>;
+
+    /// Installs or removes a nonblocking observer of exact worker-stop hints.
+    fn observe_runtime_stops(
+        &self,
+        observer: Option<std::sync::Arc<dyn crate::ProjectRuntimeStopObserver>>,
+    ) -> Result<(), hq_application::ApplicationError>;
+
+    /// Reads the current injected clock and node generation before durable attempt admission.
+    fn recovery_context(
+        &self,
+    ) -> Result<hq_application::RuntimeRecoveryContext, hq_application::ApplicationError>;
+
     /// Starts or exactly resumes one project-bound logical worker.
     fn start_or_resume(
         &self,
@@ -545,8 +562,8 @@ pub trait ProjectRuntimePort {
     /// Success is current process evidence, not replay of a previous launch receipt.
     fn ensure_ready(
         &self,
-        request: &ProjectRuntimeRequest,
-    ) -> Result<(), hq_application::ApplicationError>;
+        request: &hq_application::ProjectReadinessRequest,
+    ) -> Result<hq_application::ProjectReadinessOutcome, hq_application::ApplicationError>;
 
     /// Reconciles before retry and reports acceptance only from the sole durable delivery ledger.
     fn deliver(
@@ -572,7 +589,7 @@ pub struct ProjectWorkflowManager<S, C, R, F, G = UnavailableGitWorktreePort> {
 
 impl<S, C, R, F> ProjectWorkflowManager<S, C, R, F, UnavailableGitWorktreePort>
 where
-    S: ProjectSagaStore,
+    S: ProjectSagaStore + crate::ProjectRecoveryStore,
     C: CanonicalProjectPort,
     R: ProjectRuntimePort,
     F: ProjectResourcePort,
@@ -591,7 +608,7 @@ where
 
 impl<S, C, R, F, G> ProjectWorkflowManager<S, C, R, F, G>
 where
-    S: ProjectSagaStore,
+    S: ProjectSagaStore + crate::ProjectRecoveryStore,
     C: CanonicalProjectPort,
     R: ProjectRuntimePort,
     F: ProjectResourcePort,
@@ -2767,6 +2784,10 @@ where
                 ),
             };
         }
+        if !self.cancel_stale_recovery(record)? {
+            record.state = ProjectSagaState::Queued(ProjectCommandStage::DispatchingInputs);
+            return persist(&self.store, record);
+        }
         if current_stage(record) == ProjectCommandStage::Accepted {
             if Some(snapshot.head) != record.expected_head {
                 return reject(
@@ -2899,6 +2920,122 @@ where
         }
     }
 
+    fn cancel_stale_recovery(
+        &self,
+        record: &ProjectSagaRecord,
+    ) -> Result<bool, hq_application::ApplicationError> {
+        let Some(active) = self
+            .store
+            .recovery_active(record.project_id)
+            .map_err(store_error)?
+        else {
+            return Ok(true);
+        };
+        // Read canonical eligibility after the retained revision: an earlier caller snapshot
+        // must not cancel a newer assignment's newly acquired recovery reservation.
+        let snapshot = self
+            .canonical
+            .snapshot(record.project_id, record.account_id, None)?;
+        if snapshot.home != record.home {
+            return Ok(false);
+        }
+        let eligible = snapshot.lifecycle == CanonicalProjectLifecycle::Open
+            && !snapshot.archived
+            && snapshot.claimable
+            && snapshot.assignment.as_ref().is_some_and(|assignment| {
+                assignment.runnable
+                    && assignment.binding.as_ref() == Some(&active.scope.binding)
+                    && assignment.thread_id == Some(active.scope.thread_id)
+            })
+            && snapshot.pending_inputs.iter().any(|input| {
+                input.message_id == active.input.submission_id
+                    && input.sequence == active.input.sequence
+            });
+        if eligible {
+            return Ok(true);
+        }
+        crate::ProjectRecoveryCoordinator::new(&self.store, crate::RuntimeRecoveryPolicy::default())
+            .cancel(active)
+            .map(|cancelled| cancelled.is_some())
+            .map_err(store_error)
+    }
+
+    fn dispatch_runtime_context(
+        &self,
+        record: &mut ProjectSagaRecord,
+    ) -> Result<Option<hq_application::RuntimeRecoveryContext>, hq_application::ApplicationError>
+    {
+        if let Ok(context) = self.runtime.recovery_context() {
+            Ok(Some(context))
+        } else {
+            reconcile(
+                &self.store,
+                record,
+                ProjectCommandStage::DispatchingInputs,
+                effect_error("project_runtime_resume_unavailable"),
+                EffectKind::None,
+            )?;
+            Ok(None)
+        }
+    }
+
+    fn resume_dispatch_runtime(
+        &self,
+        record: &mut ProjectSagaRecord,
+        input: &PendingProjectInput,
+        request: &hq_application::ProjectReadinessRequest,
+        context: hq_application::RuntimeRecoveryContext,
+    ) -> Result<Option<hq_application::ProjectRecoveryRecord>, hq_application::ApplicationError>
+    {
+        let recovery = crate::ProjectRecoveryCoordinator::new(
+            &self.store,
+            crate::RuntimeRecoveryPolicy::default(),
+        );
+        let admission = recovery
+            .admit(
+                &request.scope,
+                &hq_application::ProjectRecoveryInput {
+                    saga_operation_id: record.operation_id,
+                    submission_id: input.message_id,
+                    sequence: input.sequence,
+                },
+                context,
+            )
+            .map_err(store_error)?;
+        let Some(attempt) = admission.into_attempt() else {
+            if matches!(record.state, ProjectSagaState::Running(_)) {
+                record.state = ProjectSagaState::Queued(ProjectCommandStage::DispatchingInputs);
+                persist(&self.store, record)?;
+            }
+            return Ok(None);
+        };
+        let readiness =
+            crate::recovery::validate_readiness(self.runtime.ensure_ready(request), request);
+        let ready = match readiness {
+            Ok(ready) => ready,
+            Err(failure) => {
+                recovery
+                    .failed(
+                        attempt,
+                        failure.clone(),
+                        self.runtime
+                            .recovery_context()
+                            .map_or(context.now_millis, |current| current.now_millis),
+                    )
+                    .map_err(store_error)?;
+                reconcile(
+                    &self.store,
+                    record,
+                    ProjectCommandStage::DispatchingInputs,
+                    effect_error(crate::recovery::runtime_failure_code(failure.reason)),
+                    EffectKind::None,
+                )?;
+                return Ok(None);
+            }
+        };
+        recovery.ready(attempt, &ready).map_err(store_error)
+    }
+
     fn prepare_dispatch_runtime(
         &self,
         record: &mut ProjectSagaRecord,
@@ -2919,8 +3056,11 @@ where
         let Some(assignment) = &snapshot.assignment else {
             return Ok(None);
         };
-        let (Some(binding), Some(directory)) = (&assignment.binding, &assignment.launch_directory)
-        else {
+        let (Some(binding), Some(directory), Some(thread_id)) = (
+            &assignment.binding,
+            &assignment.launch_directory,
+            assignment.thread_id,
+        ) else {
             reject(
                 &self.store,
                 record,
@@ -2953,23 +3093,22 @@ where
             )?;
             return Ok(None);
         }
-        let request = ProjectRuntimeRequest {
-            project_id: record.project_id,
-            agent_id: binding.agent_id,
-            provider: binding.provider.clone(),
-            resume_session: Some(binding.session.clone()),
-            launch_directory: Some(directory.clone()),
-        };
-        if self.runtime.ensure_ready(&request).is_err() {
-            reconcile(
-                &self.store,
-                record,
-                ProjectCommandStage::DispatchingInputs,
-                effect_error("project_runtime_resume_unavailable"),
-                EffectKind::None,
-            )?;
+        let Some(context) = self.dispatch_runtime_context(record)? else {
             return Ok(None);
-        }
+        };
+        let request = hq_application::ProjectReadinessRequest {
+            generation: context.generation,
+            scope: hq_application::ProjectRuntimeScope {
+                project_id: record.project_id,
+                binding: binding.clone(),
+                thread_id,
+            },
+            launch_directory: directory.clone(),
+        };
+        let Some(ready_record) = self.resume_dispatch_runtime(record, input, &request, context)?
+        else {
+            return Ok(None);
+        };
         // Resume crosses an external boundary. The queue may not confer delivery rights after it.
         let current = self
             .canonical
@@ -2983,6 +3122,12 @@ where
             || current.resources != snapshot.resources
             || current.pending_inputs.first() != Some(input)
         {
+            crate::ProjectRecoveryCoordinator::new(
+                &self.store,
+                crate::RuntimeRecoveryPolicy::default(),
+            )
+            .cancel(ready_record)
+            .map_err(store_error)?;
             reject(
                 &self.store,
                 record,
@@ -3132,6 +3277,51 @@ where
         record: &mut ProjectSagaRecord,
         outcome: CanonicalProjectMutationOutcome,
     ) -> Result<CanonicalProjectMutationOutcome, hq_application::ApplicationError> {
+        if matches!(outcome, CanonicalProjectMutationOutcome::Committed { .. })
+            && let Some(CanonicalProjectMutation {
+                action:
+                    CanonicalProjectMutationAction::RecordDispatch {
+                        input,
+                        binding,
+                        thread_id,
+                        ..
+                    },
+                ..
+            }) = &record.pending_canonical_mutation
+        {
+            let scope = hq_application::ProjectRuntimeScope {
+                project_id: record.project_id,
+                binding: binding.clone(),
+                thread_id: *thread_id,
+            };
+            let episode = crate::project_recovery_operation(&scope, input.message_id);
+            if let Some(recovery_record) = self.store.recovery_find(episode).map_err(store_error)? {
+                crate::ProjectRecoveryCoordinator::new(
+                    &self.store,
+                    crate::RuntimeRecoveryPolicy::default(),
+                )
+                .completed(recovery_record)
+                .map_err(store_error)?;
+            }
+        }
+        if matches!(outcome, CanonicalProjectMutationOutcome::Committed { .. })
+            && record
+                .pending_canonical_mutation
+                .as_ref()
+                .is_some_and(|mutation| {
+                    matches!(
+                        mutation.action,
+                        CanonicalProjectMutationAction::EndAssignment { .. }
+                            | CanonicalProjectMutationAction::BlockAssignment { .. }
+                            | CanonicalProjectMutationAction::BeginClosing
+                            | CanonicalProjectMutationAction::FinishClosing { .. }
+                            | CanonicalProjectMutationAction::Archive
+                    )
+                })
+            && !self.cancel_stale_recovery(record)?
+        {
+            return Ok(CanonicalProjectMutationOutcome::Uncertain);
+        }
         if !matches!(outcome, CanonicalProjectMutationOutcome::Uncertain) {
             record.pending_canonical_mutation = None;
             persist(&self.store, record)?;
@@ -3203,7 +3393,7 @@ fn exact_normalized_path(locator: &ResourceLocator, schemes: &[ResourceScheme]) 
 
 impl<S, C, R, F, G> hq_application::ControlProjects for ProjectWorkflowManager<S, C, R, F, G>
 where
-    S: ProjectSagaStore,
+    S: ProjectSagaStore + crate::ProjectRecoveryStore,
     C: CanonicalProjectPort,
     R: ProjectRuntimePort,
     F: ProjectResourcePort,
@@ -3219,7 +3409,7 @@ where
 
 impl<S, C, R, F, G> hq_application::RetireAgents for ProjectWorkflowManager<S, C, R, F, G>
 where
-    S: ProjectSagaStore,
+    S: ProjectSagaStore + crate::ProjectRecoveryStore,
     C: CanonicalProjectPort,
     R: ProjectRuntimePort,
     F: ProjectResourcePort,
@@ -3332,9 +3522,219 @@ fn retirement_rejected(operation_id: OperationId, code: &'static str) -> AgentRe
     }
 }
 
+impl<S, C, R, F, G> hq_application::RetryProjectRuntime for ProjectWorkflowManager<S, C, R, F, G>
+where
+    S: ProjectSagaStore + crate::ProjectRecoveryStore,
+    C: CanonicalProjectPort,
+    R: ProjectRuntimePort,
+    F: ProjectResourcePort,
+    G: GitWorktreePort,
+{
+    fn retry_project_runtime(
+        &self,
+        request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, hq_application::ApplicationError> {
+        use hq_application::{
+            ProjectRecoveryRetryOutcome as Outcome, ProjectRecoveryState as State,
+        };
+        let rejected = |category, code| Ok(Outcome::Rejected(error(category, code)));
+        let Some(record) = self
+            .store
+            .recovery_find(request.operation_id)
+            .map_err(store_error)?
+        else {
+            return rejected(ErrorCategory::Conflict, "project_recovery_not_found");
+        };
+        if record.scope != request.scope {
+            return rejected(ErrorCategory::Conflict, "project_recovery_target_changed");
+        }
+        let parent = self
+            .store
+            .find(record.input.saga_operation_id)
+            .map_err(store_error)?
+            .ok_or_else(|| store_error(SagaStoreError::Corrupt))?;
+        if parent.project_id != record.scope.project_id {
+            return Err(store_error(SagaStoreError::Corrupt));
+        }
+        if parent.home != request.home {
+            return rejected(ErrorCategory::Unauthorized, "project_recovery_wrong_home");
+        }
+        if parent.account_id != request.account_id {
+            return rejected(
+                ErrorCategory::Unauthorized,
+                "project_recovery_wrong_account",
+            );
+        }
+        let snapshot =
+            self.canonical
+                .snapshot(record.scope.project_id, request.account_id, None)?;
+        if snapshot.home != request.home || !snapshot.active_human {
+            return rejected(
+                ErrorCategory::Unauthorized,
+                "project_recovery_not_authorized",
+            );
+        }
+        // A strictly newer revision cannot satisfy this reset. The store can only return
+        // its exact existing receipt or conflict, including after canonical delivery completed.
+        let replay = record.revision > request.expected_revision;
+        if !replay {
+            if record.revision != request.expected_revision
+                || !matches!(record.state, State::Blocked { .. })
+                || parent.state.is_terminal()
+            {
+                return rejected(ErrorCategory::Conflict, "project_recovery_stale_retry");
+            }
+            if snapshot.lifecycle != CanonicalProjectLifecycle::Open
+                || snapshot.archived
+                || !snapshot.claimable
+                || !snapshot.assignment.as_ref().is_some_and(|assignment| {
+                    assignment.runnable
+                        && assignment.binding.as_ref() == Some(&request.scope.binding)
+                        && assignment.thread_id == Some(request.scope.thread_id)
+                })
+                || !snapshot.pending_inputs.first().is_some_and(|input| {
+                    input.message_id == record.input.submission_id
+                        && input.sequence == record.input.sequence
+                })
+            {
+                return rejected(ErrorCategory::Conflict, "project_recovery_target_changed");
+            }
+        }
+        let now = if replay {
+            0
+        } else {
+            self.runtime.recovery_context()?.now_millis
+        };
+        Ok(
+            match self
+                .store
+                .recovery_retry(request, now)
+                .map_err(store_error)?
+            {
+                hq_application::ProjectRecoveryWriteOutcome::Applied => Outcome::Scheduled,
+                hq_application::ProjectRecoveryWriteOutcome::AlreadyApplied => {
+                    Outcome::AlreadyScheduled
+                }
+                hq_application::ProjectRecoveryWriteOutcome::Conflict => Outcome::Rejected(error(
+                    ErrorCategory::Conflict,
+                    "project_recovery_stale_retry",
+                )),
+            },
+        )
+    }
+}
+
+impl<S, C, R, F, G> crate::ScheduleProjectRecovery for ProjectWorkflowManager<S, C, R, F, G>
+where
+    S: ProjectSagaStore + crate::ProjectRecoveryStore,
+    C: CanonicalProjectPort,
+    R: ProjectRuntimePort,
+    F: ProjectResourcePort,
+    G: GitWorktreePort,
+{
+    fn observe_runtime_stops(
+        &self,
+        observer: Option<std::sync::Arc<dyn crate::ProjectRuntimeStopObserver>>,
+    ) -> Result<(), hq_application::ApplicationError> {
+        self.runtime.observe_runtime_stops(observer)
+    }
+    fn runtime_stopped(
+        &self,
+        stopped: &hq_application::ProjectRuntimeStopped,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let context = self.runtime.recovery_context()?;
+        if stopped.generation != context.generation {
+            return Ok(());
+        }
+        let Some(episode) = self
+            .store
+            .recovery_active(stopped.project_id)
+            .map_err(store_error)?
+        else {
+            return Ok(());
+        };
+        if episode.scope.binding.agent_id != stopped.agent_id
+            || episode.scope.binding.provider != stopped.provider
+            || episode.scope.binding.session != stopped.session
+            || !matches!(episode.state, hq_application::ProjectRecoveryState::Ready { generation, owner, .. }
+                if generation == stopped.generation && owner == stopped.owner)
+        {
+            return Ok(());
+        }
+        let parent = self
+            .store
+            .find(episode.input.saga_operation_id)
+            .map_err(store_error)?
+            .ok_or_else(|| store_error(SagaStoreError::Corrupt))?;
+        if parent.project_id != stopped.project_id {
+            return Err(store_error(SagaStoreError::Corrupt));
+        }
+        if !self.cancel_stale_recovery(&parent)? {
+            return Ok(());
+        }
+        crate::ProjectRecoveryCoordinator::new(
+            &self.store,
+            crate::RuntimeRecoveryPolicy::default(),
+        )
+        .failed(
+            episode,
+            hq_application::ProjectRuntimeFailure {
+                reason: stopped.reason,
+                lease: None,
+            },
+            context.now_millis,
+        )
+        .map_err(store_error)?;
+        Ok(())
+    }
+
+    fn recovery_schedule(
+        &self,
+    ) -> Result<crate::ProjectRecoverySchedule, hq_application::ApplicationError> {
+        Ok(crate::ProjectRecoverySchedule {
+            now_millis: self.runtime.recovery_context()?.now_millis,
+            next_due_millis: self.store.recovery_deadline().map_err(store_error)?,
+        })
+    }
+    fn repair_due(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ProjectCommandOutcome>, hq_application::ApplicationError> {
+        if limit == 0 || limit > crate::MAX_RUNNABLE_SAGAS {
+            return Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::InvalidRequest,
+            ));
+        }
+        let now = self.runtime.recovery_context()?.now_millis;
+        let due = self.store.recovery_due(now, limit).map_err(store_error)?;
+        let mut outcomes = Vec::with_capacity(due.len());
+        for episode in due {
+            let record = self
+                .store
+                .find(episode.input.saga_operation_id)
+                .map_err(store_error)?
+                .ok_or_else(|| store_error(SagaStoreError::Corrupt))?;
+            if record.project_id != episode.scope.project_id {
+                return Err(store_error(SagaStoreError::Corrupt));
+            }
+            if record.state.is_terminal() {
+                crate::ProjectRecoveryCoordinator::new(
+                    &self.store,
+                    crate::RuntimeRecoveryPolicy::default(),
+                )
+                .cancel(episode)
+                .map_err(store_error)?;
+                continue;
+            }
+            outcomes.push(self.run(record)?);
+        }
+        Ok(outcomes)
+    }
+}
+
 impl<S, C, R, F, G> crate::RepairLocalProjectWorkflows for ProjectWorkflowManager<S, C, R, F, G>
 where
-    S: ProjectSagaStore,
+    S: ProjectSagaStore + crate::ProjectRecoveryStore,
     C: CanonicalProjectPort,
     R: ProjectRuntimePort,
     F: ProjectResourcePort,
@@ -4040,7 +4440,7 @@ fn error(category: ErrorCategory, code: &'static str) -> DomainError {
     )
 }
 
-const fn store_error(error: SagaStoreError) -> hq_application::ApplicationError {
+pub(crate) const fn store_error(error: SagaStoreError) -> hq_application::ApplicationError {
     let code = match error {
         SagaStoreError::Conflict => hq_application::ApplicationErrorCode::StateIdentityConflict,
         SagaStoreError::Unavailable => hq_application::ApplicationErrorCode::AdapterUnavailable,

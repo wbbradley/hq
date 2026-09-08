@@ -1,5 +1,6 @@
 //! Pure identity-aware TUI transition algebra.
 
+use crate::UiRuntimeRecovery;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroU64,
@@ -2866,6 +2867,8 @@ enum UiNewWorkflow {
 /// Closed timer purpose owned by the shell effect executor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiTimerKind {
+    /// Refresh only the currently visible project runtime.
+    RefreshRuntime,
     /// Bounded retry after a failed snapshot request.
     RetrySnapshot,
     /// Debounced local draft autosave.
@@ -2882,6 +2885,28 @@ pub enum UiTimerKind {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiEvent {
+    /// A passive status read failed without establishing current liveness.
+    RuntimeRecoveryFailed {
+        /// Exact outstanding read.
+        effect_id: EffectId,
+        /// Typed client failure.
+        failure: UiFailure,
+    },
+    /// Exact retry intent completion, independent of eventual runtime readiness.
+    RuntimeRetryCompleted {
+        /// Completion identity.
+        effect_id: EffectId,
+        /// Durable receipt, definite rejection, or uncertain response.
+        outcome: crate::UiRuntimeRetryOutcome,
+    },
+    /// Completion of one passive runtime read.
+    RuntimeRecoveryLoaded {
+        /// Exact outstanding effect.
+        effect_id: EffectId,
+        /// Current evidence or absence when no exact assignment applies.
+        recovery: Option<UiRuntimeRecovery>,
+    },
+
     /// Start the model exactly once.
     Started,
     /// Normalized terminal input.
@@ -3091,6 +3116,23 @@ pub enum UiEvent {
 /// Closed side effects emitted by pure UI transitions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiEffect {
+    /// Execute or reconcile an explicit exact-scope retry.
+    RetryRuntime {
+        /// Completion identity.
+        id: EffectId,
+        /// Complete displayed blocked target.
+        target: crate::UiRuntimeRetryTarget,
+    },
+    /// Read current runtime evidence independently of conversation history.
+    LoadRuntimeRecovery {
+        /// Exact completion identity.
+        id: EffectId,
+        /// Selected project.
+        project_id: [u8; 32],
+        /// Selected conversation.
+        thread_id: [u8; 32],
+    },
+
     /// Request one complete authoritative snapshot through the ordinary client.
     LoadSnapshot {
         /// Identity required on the completion event.
@@ -3437,6 +3479,14 @@ pub struct UiModel {
     selected_row: Option<String>,
     conversation: Option<UiConversation>,
     conversation_setup: Option<UiProjectConversationSetup>,
+    runtime_recovery: Option<UiRuntimeRecovery>,
+    runtime_target: Option<([u8; 32], [u8; 32])>,
+    runtime_pending: Option<EffectId>,
+    runtime_timer: Option<EffectId>,
+    runtime_details: Option<u16>,
+    runtime_retry_pending: Option<EffectId>,
+    runtime_retry_target: Option<crate::UiRuntimeRetryTarget>,
+    runtime_retry_notice: Option<String>,
     retained_conversations: BTreeMap<String, RetainedConversationPage>,
     retained_conversation_order: VecDeque<String>,
     desired_conversation: Option<String>,
@@ -3522,6 +3572,14 @@ impl UiModel {
             selected_row: None,
             conversation: None,
             conversation_setup: None,
+            runtime_recovery: None,
+            runtime_target: None,
+            runtime_pending: None,
+            runtime_timer: None,
+            runtime_details: None,
+            runtime_retry_pending: None,
+            runtime_retry_target: None,
+            runtime_retry_notice: None,
             retained_conversations: BTreeMap::new(),
             retained_conversation_order: VecDeque::new(),
             desired_conversation: None,
@@ -3866,7 +3924,28 @@ impl UiModel {
         self.help_page
     }
 
-    /// Borrows the reducer-ordered conversation loaded for the selected row.
+    /// Whether exact recovery details replace the conversation reading surface.
+    pub const fn runtime_details_visible(&self) -> bool {
+        self.runtime_details.is_some()
+    }
+    /// Scroll offset of the recovery details surface.
+    pub const fn runtime_details_scroll(&self) -> u16 {
+        match self.runtime_details {
+            Some(scroll) => scroll,
+            None => 0,
+        }
+    }
+    /// Exact retry progress or response uncertainty.
+    pub fn runtime_retry_notice(&self) -> Option<&str> {
+        self.runtime_retry_notice.as_deref()
+    }
+
+    /// Current runtime evidence for the displayed conversation only.
+    pub const fn runtime_recovery(&self) -> Option<&UiRuntimeRecovery> {
+        self.runtime_recovery.as_ref()
+    }
+
+    /// Borrows the currently displayed conversation.
     pub const fn conversation(&self) -> Option<&UiConversation> {
         self.conversation.as_ref()
     }
@@ -5006,6 +5085,7 @@ impl UiModel {
     ) -> Result<(), UiError> {
         let id = self.allocate_effect()?;
         match kind {
+            UiTimerKind::RefreshRuntime => self.runtime_timer = Some(id),
             UiTimerKind::RetrySnapshot => self.retry_timer = Some(id),
             UiTimerKind::AutosaveDraft => self.autosave_timer = Some(id),
             UiTimerKind::DismissCompletion => self.completion_timer = Some(id),
@@ -6019,6 +6099,70 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         .map(|target| target.conversation_id());
     let mut effects = Vec::new();
     match event {
+        UiEvent::RuntimeRetryCompleted { effect_id, outcome } => {
+            if model.runtime_retry_pending == Some(effect_id) {
+                model.runtime_retry_pending = None;
+                model.runtime_retry_notice = Some(match outcome {
+                    crate::UiRuntimeRetryOutcome::Unknown => {
+                        "Retry response unknown · R check the same request".to_owned()
+                    }
+                    crate::UiRuntimeRetryOutcome::Scheduled => {
+                        model.runtime_retry_target = None;
+                        "Retry scheduled · Your message is saved".to_owned()
+                    }
+                    crate::UiRuntimeRetryOutcome::Rejected(code) => {
+                        model.runtime_retry_target = None;
+                        format!("Retry could not be scheduled: {code}")
+                    }
+                });
+                model.runtime_timer = None;
+                model.runtime_pending = None;
+                effects.push(UiEffect::RequestRedraw);
+            }
+        }
+        UiEvent::RuntimeRecoveryFailed { effect_id, failure } => {
+            if model.runtime_pending == Some(effect_id) {
+                model.runtime_pending = None;
+                model.runtime_recovery =
+                    model
+                        .runtime_target
+                        .map(|(project_id, thread_id)| UiRuntimeRecovery {
+                            project_id,
+                            thread_id,
+                            availability: crate::UiRuntimeAvailability::Checking,
+                            agent_name: None,
+                            input_saved: false,
+                            details: vec![
+                                ("Status unavailable".to_owned(), failure.code),
+                                ("Next action".to_owned(), failure.action),
+                            ],
+                            retry: None,
+                        });
+                model.schedule_timer(
+                    UiTimerKind::RefreshRuntime,
+                    Duration::from_secs(1),
+                    &mut effects,
+                )?;
+                effects.push(UiEffect::RequestRedraw);
+            }
+        }
+        UiEvent::RuntimeRecoveryLoaded {
+            effect_id,
+            recovery,
+        } => {
+            if model.runtime_pending == Some(effect_id) {
+                model.runtime_pending = None;
+                model.runtime_recovery = recovery.filter(|value| {
+                    model.runtime_target == Some((value.project_id, value.thread_id))
+                });
+                model.schedule_timer(
+                    UiTimerKind::RefreshRuntime,
+                    Duration::from_secs(1),
+                    &mut effects,
+                )?;
+                effects.push(UiEffect::RequestRedraw);
+            }
+        }
         UiEvent::Started => start(&mut model, &mut effects)?,
         UiEvent::Input(value) => apply_input(&mut model, &value, &mut effects)?,
         UiEvent::Resized(viewport) => {
@@ -6164,6 +6308,7 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
             || target != previous_target;
         open_conversation_composer(&mut model, entering, &mut effects)?;
     }
+    synchronize_runtime_recovery(&mut model, &mut effects)?;
     Ok(UiTransition { model, effects })
 }
 
@@ -7088,6 +7233,10 @@ fn apply_input(
         if changed || dismissed_completion {
             effects.push(UiEffect::RequestRedraw);
         }
+        return Ok(());
+    }
+    if model.focus == UiFocus::Conversation && apply_runtime_input(model, input, effects)? {
+        effects.push(UiEffect::RequestRedraw);
         return Ok(());
     }
     if !text_input_is_active(model)
@@ -12226,7 +12375,9 @@ fn timer_elapsed(
     effect_id: EffectId,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
-    if model.retry_timer == Some(effect_id) {
+    if model.runtime_timer == Some(effect_id) {
+        model.runtime_timer = None;
+    } else if model.retry_timer == Some(effect_id) {
         model.retry_timer = None;
         model.connection = UiConnectionState::Connecting;
         model.request_snapshot(effects)?;
@@ -14304,11 +14455,95 @@ fn client_failed(
     effects.push(UiEffect::RequestRedraw);
 }
 
+fn apply_runtime_input(
+    model: &mut UiModel,
+    input: &UiInput,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    if let Some(scroll) = model.runtime_details {
+        match input {
+            UiInput::Escape | UiInput::Character('D') => {
+                model.runtime_details = None;
+                return Ok(true);
+            }
+            UiInput::NextItem => {
+                model.runtime_details = Some(scroll.saturating_add(1));
+                return Ok(true);
+            }
+            UiInput::PreviousItem => {
+                model.runtime_details = Some(scroll.saturating_sub(1));
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+    if matches!(input, UiInput::Character('D')) && model.runtime_recovery.is_some() {
+        model.runtime_details = Some(0);
+        return Ok(true);
+    }
+    if matches!(input, UiInput::Character('R')) && model.runtime_retry_pending.is_none() {
+        let target = model.runtime_retry_target.clone().or_else(|| {
+            model
+                .runtime_recovery
+                .as_ref()
+                .and_then(|value| value.retry.clone())
+        });
+        if let Some(target) = target {
+            let id = model.allocate_effect()?;
+            model.runtime_retry_target = Some(target.clone());
+            model.runtime_retry_pending = Some(id);
+            model.runtime_retry_notice = Some("Scheduling retry…".to_owned());
+            effects.push(UiEffect::RetryRuntime { id, target });
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn synchronize_runtime_recovery(
+    model: &mut UiModel,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    let target = (model.connection == UiConnectionState::Ready)
+        .then(|| model.active_conversation_row())
+        .flatten()
+        .and_then(|_| selected_conversation_target(model))
+        .and_then(|target| match target.conversation_id() {
+            UiConversationId::Project {
+                project_id,
+                thread_id,
+            } => Some((project_id, thread_id)),
+            _ => None,
+        });
+    if model.runtime_target != target {
+        model.runtime_target = target;
+        model.runtime_details = None;
+        model.runtime_retry_pending = None;
+        model.runtime_retry_target = None;
+        model.runtime_retry_notice = None;
+        model.runtime_recovery = None;
+        model.runtime_pending = None;
+        model.runtime_timer = None;
+    }
+    if let Some((project_id, thread_id)) = target
+        && model.runtime_pending.is_none()
+        && model.runtime_timer.is_none()
+    {
+        let id = model.allocate_effect()?;
+        model.runtime_pending = Some(id);
+        effects.push(UiEffect::LoadRuntimeRecovery {
+            id,
+            project_id,
+            thread_id,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use super::UiAgentModal;
     use super::{
         ConfigurationFreshness, EffectId, TextEdit, UiAdjacentView, UiAgent, UiAgentLifecycle,
         UiAgentStatus, UiConfigField, UiConfiguration, UiConversationTarget, UiEffect, UiError,
@@ -14323,7 +14558,60 @@ mod tests {
         apply_project_interaction_input, edit_text, normalize_path_input,
         refresh_project_interaction, select_project_conversation, update,
     };
+    use super::{UiAgentModal, UiConnectionState, synchronize_runtime_recovery};
     use std::num::NonZeroU64;
+
+    #[test]
+    fn runtime_actions_use_displayed_scope_and_do_not_select_a_message() {
+        let mut model = model();
+        let target = crate::UiRuntimeRetryTarget {
+            account_id: [1; 32],
+            home: [2; 32],
+            project_id: [3; 32],
+            assignment_id: [4; 32],
+            agent_id: [5; 32],
+            provider: "provider".to_owned(),
+            session: "saved".to_owned(),
+            thread_id: [6; 32],
+            operation_id: [7; 32],
+            expected_revision: 8,
+        };
+        model.runtime_recovery = Some(crate::UiRuntimeRecovery {
+            project_id: target.project_id,
+            thread_id: target.thread_id,
+            availability: crate::UiRuntimeAvailability::Blocked,
+            agent_name: Some("Alice".to_owned()),
+            input_saved: true,
+            details: vec![("Failure".to_owned(), "SessionNotFound".to_owned())],
+            retry: Some(target.clone()),
+        });
+        let anchor = model.conversation_anchor.clone();
+        let mut effects = Vec::new();
+        assert!(
+            super::apply_runtime_input(&mut model, &UiInput::Character('D'), &mut effects)
+                .expect("details")
+        );
+        assert!(model.runtime_details_visible());
+        assert_eq!(model.conversation_anchor, anchor);
+        assert!(
+            super::apply_runtime_input(&mut model, &UiInput::Character('R'), &mut effects)
+                .expect("retry")
+        );
+        assert!(
+            matches!(effects.as_slice(), [UiEffect::RetryRuntime { target: actual, .. }] if actual == &target)
+        );
+        effects.clear();
+        assert!(
+            !super::apply_runtime_input(&mut model, &UiInput::Character('R'), &mut effects)
+                .expect("in flight")
+        );
+        assert!(effects.is_empty());
+        assert!(
+            super::apply_runtime_input(&mut model, &UiInput::Escape, &mut effects).expect("back")
+        );
+        assert!(!model.runtime_details_visible());
+        assert_eq!(model.conversation_anchor, anchor);
+    }
 
     fn effect_id(value: u64) -> EffectId {
         EffectId(NonZeroU64::new(value).expect("test effect identity is nonzero"))
@@ -14575,6 +14863,23 @@ mod tests {
 
         assert_eq!(model.selected_row.as_deref(), Some(agent_row.as_str()));
         assert_eq!(model.focus, UiFocus::Conversation);
+        model.connection = UiConnectionState::Ready;
+        let mut effects = Vec::new();
+        synchronize_runtime_recovery(&mut model, &mut effects).expect("status request");
+        assert!(
+            matches!(effects.as_slice(), [UiEffect::LoadRuntimeRecovery { project_id: p, thread_id: t, .. }]
+            if *p == project_id && *t == thread_id)
+        );
+        effects.clear();
+        synchronize_runtime_recovery(&mut model, &mut effects).expect("coalesced request");
+        assert!(
+            effects.is_empty(),
+            "an outstanding read must not trigger another request"
+        );
+        model.connection = UiConnectionState::Reconnecting;
+        synchronize_runtime_recovery(&mut model, &mut effects).expect("disconnect");
+        assert!(model.runtime_pending.is_none());
+        assert!(model.runtime_recovery.is_none());
     }
 
     #[test]

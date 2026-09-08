@@ -58,6 +58,29 @@ return control without immediately retrying. Repair still checks exact acceptanc
 and canonical attribution. The saga's cumulative dispatch effect is not proof that a later input
 was accepted: every input requires its own exact ledger evidence.
 
+Project readiness is admitted through a persisted per-input recovery record before calling the
+supervisor. The request carries the expected node generation; a generation mismatch stops before
+`ensure_resumed`. Exact failure classes and foreign-owner lease deadlines survive the adapter
+boundary and determine bounded backoff. A successful readiness observation retains its attempt
+deadline until canonical dispatch commits. The project timer selects due records through the
+recovery deadline index and follows their stored saga identities; it does not ask the supervisor
+to drain project deliveries or run a recurring whole-project recovery scan. Canonical close and
+assignment changes cancel ineligible recovery using revision-fenced writes. The readiness owner
+and generation are correlation evidence, not durable proof of current worker liveness.
+
+Read-only worker observation checks the live registry and unexpired exact ownership without
+launching or renewing a session. A bounded canonical running-agent-turn query supplies an operation
+ID and source sequence for working status; activity display text is not status evidence. Ownership
+is checked again after that query. Busy registry or persistence locks yield an indeterminate
+observation immediately. Exact resume interrupts prior-owner running turns before publishing the
+new local worker, so old activity does not establish current work.
+
+The event pump retains bounded exact stopped-worker evidence before releasing ownership. The node
+forwards project worker stops to a bounded nonblocking queue, separate from ordinary project
+reconciliation wakes. The project worker validates the current generation, owner, saved session,
+and canonical assignment before updating a pending recovery deadline. Direct-session stops do not
+enter this project path. Overflow does not erase durable deadlines or authorize another submission.
+
 Body-free project delivery traces distinguish `project_delivery_requested`,
 `project_delivery_queued`, and `project_delivery_acceptance_unknown`. Existing `project_dispatched`
 and `codex_submitted` boundaries report ledger-confirmed acceptance, including replayed receipts;

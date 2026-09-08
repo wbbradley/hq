@@ -3998,6 +3998,85 @@ fn empty_section_lines(section: UiSection, theme: &UiTheme) -> Vec<Line<'static>
     }
 }
 
+fn runtime_header_lines(
+    recovery: &crate::UiRuntimeRecovery,
+    theme: &UiTheme,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled(
+        recovery.status_text(),
+        theme.style(
+            if recovery.availability == crate::UiRuntimeAvailability::Blocked {
+                UiThemeRole::Attention
+            } else {
+                UiThemeRole::TextMuted
+            },
+        ),
+    )];
+    if recovery.input_saved {
+        lines.push(Line::styled(
+            "Your message is saved",
+            theme.style(UiThemeRole::TextMuted),
+        ));
+    }
+    lines.push(Line::styled(
+        if recovery.retry.is_some() {
+            "R retry · D view details"
+        } else {
+            "D view details"
+        },
+        theme.style(UiThemeRole::TextMuted),
+    ));
+    lines
+}
+
+fn append_runtime_header(header: &mut Vec<Line<'_>>, model: &UiModel, theme: &UiTheme) {
+    if let Some(recovery) = model.runtime_recovery() {
+        header.extend(runtime_header_lines(recovery, theme));
+    }
+    if let Some(notice) = model.runtime_retry_notice() {
+        header.push(Line::styled(
+            notice.to_owned(),
+            theme.style(UiThemeRole::Attention),
+        ));
+    }
+}
+
+fn render_runtime_details(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
+    let mut lines = vec![
+        Line::styled("Agent recovery details", theme.style(UiThemeRole::Heading)),
+        Line::from("Esc back · ↑/↓ scroll"),
+        Line::default(),
+    ];
+    append_runtime_header(&mut lines, model, theme);
+    if let Some(recovery) = model.runtime_recovery() {
+        for (label, value) in &recovery.details {
+            lines.push(Line::from(format!("{label}: {value}")));
+        }
+    }
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let maximum = paragraph
+        .line_count(area.width)
+        .saturating_sub(usize::from(area.height));
+    let scroll = usize::from(model.runtime_details_scroll()).min(maximum);
+    frame.render_widget(
+        paragraph.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        area,
+    );
+}
+
+fn render_recovery_if_selected(
+    frame: &mut Frame<'_>,
+    model: &UiModel,
+    theme: &UiTheme,
+    area: Rect,
+) -> bool {
+    if !model.runtime_details_visible() {
+        return false;
+    }
+    render_runtime_details(frame, model, theme, area);
+    true
+}
+
 fn render_conversation(
     frame: &mut Frame<'_>,
     model: &UiModel,
@@ -4006,7 +4085,9 @@ fn render_conversation(
     divider: Borders,
     cache: &mut UiRenderCache,
 ) {
-    let conversation = model.conversation();
+    if render_recovery_if_selected(frame, model, theme, area) {
+        return;
+    }
     let block = Block::new().borders(divider).border_style(
         if matches!(model.focus(), UiFocus::Conversation | UiFocus::Approval) {
             theme.style(UiThemeRole::BorderFocused)
@@ -4017,11 +4098,12 @@ fn render_conversation(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if let Some(conversation) = conversation {
+    if let Some(conversation) = model.conversation() {
         let mut header = vec![Line::styled(
             conversation.title.as_str(),
             theme.style(UiThemeRole::Heading),
         )];
+        append_runtime_header(&mut header, model, theme);
         if let Some(context) = &conversation.context {
             header.push(Line::styled(
                 context.as_str(),
@@ -5356,6 +5438,55 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn narrow_recovery_header_keeps_saved_input_and_actions_visible() {
+        use ratatui::{
+            buffer::Buffer,
+            layout::Rect,
+            widgets::{Paragraph, Widget},
+        };
+        let recovery = crate::UiRuntimeRecovery {
+            project_id: [1; 32],
+            thread_id: [2; 32],
+            availability: crate::UiRuntimeAvailability::Blocked,
+            agent_name: Some("Alice".to_owned()),
+            input_saved: true,
+            details: Vec::new(),
+            retry: Some(crate::UiRuntimeRetryTarget {
+                account_id: [3; 32],
+                home: [4; 32],
+                project_id: [1; 32],
+                assignment_id: [5; 32],
+                agent_id: [6; 32],
+                provider: "provider".to_owned(),
+                session: "saved".to_owned(),
+                thread_id: [2; 32],
+                operation_id: [7; 32],
+                expected_revision: 8,
+            }),
+        };
+        let area = Rect::new(0, 0, 26, 3);
+        let mut buffer = Buffer::empty(area);
+        Paragraph::new(super::runtime_header_lines(
+            &recovery,
+            &crate::UiTheme::terminal(),
+        ))
+        .render(area, &mut buffer);
+        let text: String = buffer
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        for expected in [
+            "Alice needs attention",
+            "Your message is saved",
+            "R retry",
+            "D view details",
+        ] {
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+    }
+
     use super::{
         activity_preview, completed_item_detail_lines, completed_item_detail_styled,
         conversation_entry_layout, conversation_viewport_slices, conversation_viewport_tail_origin,

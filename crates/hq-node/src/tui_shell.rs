@@ -747,6 +747,9 @@ fn trace_tui_event(trace: &BoundaryTrace, kind: BoundaryKind, event: &UiEvent) {
         | UiEvent::AgentCommandFailed { effect_id, .. }
         | UiEvent::ManagedSessionCompleted { effect_id, .. }
         | UiEvent::ManagedSessionFailed { effect_id, .. }
+        | UiEvent::RuntimeRetryCompleted { effect_id, .. }
+        | UiEvent::RuntimeRecoveryFailed { effect_id, .. }
+        | UiEvent::RuntimeRecoveryLoaded { effect_id, .. }
         | UiEvent::ProjectCommandCompleted { effect_id, .. }
         | UiEvent::ProjectCommandFailed { effect_id, .. } => trace.record(
             kind,

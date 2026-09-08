@@ -888,6 +888,7 @@ fn installed_guided_work_resumes_exact_conversation_after_node_restart() {
         true,
         PtyInteraction::SendToProjectConversation {
             name,
+            agent,
             initial: content,
             content: follow_up,
             next_content: next_message,
@@ -902,8 +903,8 @@ fn installed_guided_work_resumes_exact_conversation_after_node_restart() {
     assert!(
         reply
             .bytes
-            .windows("Agent is working".len())
-            .any(|window| window == b"Agent is working"),
+            .windows(format!("{agent} is working").len())
+            .any(|window| window == format!("{agent} is working").as_bytes()),
         "guided reply did not render working status: {:?}",
         reply.bytes
     );
@@ -1434,6 +1435,7 @@ enum PtyInteraction<'content> {
     },
     SendToProjectConversation {
         name: &'content str,
+        agent: &'content str,
         initial: &'content str,
         content: &'content str,
         next_content: &'content str,
@@ -2146,15 +2148,32 @@ fn run_in_pty_with_trace(
             managed_provider_sent = true;
             completion_offset = Some(bytes.len());
         }
+        if matches!(
+            interaction,
+            PtyInteraction::SendToProjectConversation { .. }
+        ) && managed_provider_sent
+            && !resource_commit_sent
+            && Instant::now() >= next_state_probe_at
+        {
+            // A named status may change only its final word in Ratatui's differential output.
+            // Resize before testing the complete visible marker instead of searching fragments.
+            resize_phase ^= 1;
+            set_pty_dimensions(&pair.slave, 30, 79 + u16::from(resize_phase));
+            let process_id = Pid::from_raw(i32::try_from(child.id()).expect("TUI PID"));
+            kill(process_id, Signal::SIGWINCH).expect("runtime status repaint");
+            next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
+        }
         if let PtyInteraction::SendToProjectConversation {
-            completion_gate, ..
+            completion_gate,
+            agent,
+            ..
         } = interaction
             && managed_provider_sent
             && !resource_commit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Agent is working".len())
-                    .any(|window| window == b"Agent is working")
+                    .windows(format!("{agent} is working").len())
+                    .any(|window| window == format!("{agent} is working").as_bytes())
                     && bytes[offset..]
                         .windows("Pending".len())
                         .any(|window| window == "Pending".as_bytes())

@@ -11,6 +11,7 @@ mod messaging;
 mod mutation;
 mod ports;
 mod project;
+mod project_recovery;
 mod service;
 mod snapshot;
 
@@ -82,6 +83,15 @@ pub use project::{
     AgentRetirementOutcome, AgentRetirementRequest, ControlProjects, ProjectCommandAction,
     ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest,
     RetireAgents, WorktreeProvisioningRequest,
+};
+pub use project_recovery::{
+    ProjectReadinessOutcome, ProjectReadinessRequest, ProjectRecoveryInput, ProjectRecoveryQuery,
+    ProjectRecoveryRecord, ProjectRecoveryRetryOutcome, ProjectRecoveryRetryRequest,
+    ProjectRecoveryState, ProjectRecoveryView, ProjectRecoveryWriteOutcome, ProjectRuntimeFailure,
+    ProjectRuntimeObservation, ProjectRuntimeReady, ProjectRuntimeScope, ProjectRuntimeStopped,
+    ProjectRuntimeWorkerState, QueryProjectRecovery, RetryProjectRuntime, RuntimeFailureReason,
+    RuntimeGenerationId, RuntimeLeaseEvidence, RuntimeRecoveryContext, RuntimeRecoveryStop,
+    RuntimeWorkerOwner,
 };
 pub use service::{Application, MutationCompletion, PreparedSubscription};
 pub use snapshot::{

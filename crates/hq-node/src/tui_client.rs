@@ -228,6 +228,23 @@ pub trait TuiClientPort: Send {
         })
     }
 
+    /// Schedules or reconciles one exact explicit recovery intent.
+    fn retry_runtime(
+        &mut self,
+        _target: hq_tui::UiRuntimeRetryTarget,
+    ) -> hq_tui::UiRuntimeRetryOutcome {
+        hq_tui::UiRuntimeRetryOutcome::Unknown
+    }
+
+    /// Reads one exact project conversation's current runtime without loading history.
+    fn load_runtime_recovery(
+        &mut self,
+        _project_id: [u8; 32],
+        _thread_id: [u8; 32],
+    ) -> Result<Option<hq_tui::UiRuntimeRecovery>, UiFailure> {
+        Err(observation_control_failure())
+    }
+
     /// Executes or reconciles one stable project command.
     fn submit_project_command(
         &mut self,
@@ -338,6 +355,10 @@ pub struct LocalTuiClient {
     state: StatePaths,
     presentation: SharedTuiPresentation,
     project_operations: BTreeMap<[u8; 32], crate::local_client::LocalProjectResult>,
+    runtime_retry_requests: BTreeMap<
+        hq_tui::UiRuntimeRetryTarget,
+        hq_local_api::protocol::v1::ProjectRecoveryRetryRequestDto,
+    >,
 }
 
 /// Subscribed local-API observation adapter with no command or query authority.
@@ -375,6 +396,7 @@ struct TuiPresentationData {
     providers: ProviderCatalogDto,
     agent_names: BTreeMap<[u8; 32], String>,
     project_names: BTreeMap<[u8; 32], String>,
+    recovery_queries: BTreeMap<[u8; 32], hq_local_api::protocol::v1::ProjectRecoveryQueryDto>,
     project_threads: Vec<ProjectThreadPresentation>,
     running_operations: BTreeMap<String, Vec<RunningOperationPresentation>>,
     active_conversation_row: Option<String>,
@@ -409,6 +431,7 @@ impl Default for TuiPresentationData {
             },
             agent_names: BTreeMap::new(),
             project_names: BTreeMap::new(),
+            recovery_queries: BTreeMap::new(),
             project_threads: Vec::new(),
             running_operations: BTreeMap::new(),
             active_conversation_row: None,
@@ -423,6 +446,7 @@ impl SharedTuiPresentation {
         let Ok(mut presentation) = self.inner.lock() else {
             return;
         };
+        presentation.recovery_queries = recovery_query_targets(snapshot);
         presentation.conversation_keys = snapshot
             .items
             .iter()
@@ -880,6 +904,7 @@ impl LocalTuiClient {
             state,
             presentation: SharedTuiPresentation::default(),
             project_operations: BTreeMap::new(),
+            runtime_retry_requests: BTreeMap::new(),
         }
     }
 
@@ -893,6 +918,7 @@ impl LocalTuiClient {
             state,
             presentation,
             project_operations: BTreeMap::new(),
+            runtime_retry_requests: BTreeMap::new(),
         }
     }
 }
@@ -2081,6 +2107,89 @@ impl TuiClientPort for LocalTuiClient {
         })
     }
 
+    fn retry_runtime(
+        &mut self,
+        target: hq_tui::UiRuntimeRetryTarget,
+    ) -> hq_tui::UiRuntimeRetryOutcome {
+        use hq_local_api::protocol::v1::ProjectRecoveryRetryOutcomeDto as D;
+        use hq_tui::UiRuntimeRetryOutcome as O;
+        let Ok(request) = retain_runtime_retry_request(
+            &mut self.runtime_retry_requests,
+            &target,
+            random_identity,
+        ) else {
+            return O::Unknown;
+        };
+        let outcome = match self.client.retry_project_runtime(request) {
+            Ok(ClientEvent::Response {
+                result: ResponseResult::ProjectRecoveryRetry(D::Scheduled | D::AlreadyScheduled),
+                ..
+            }) => O::Scheduled,
+            Ok(ClientEvent::Response {
+                result: ResponseResult::ProjectRecoveryRetry(D::Rejected { error }),
+                ..
+            }) => O::Rejected(error.code),
+            _ => O::Unknown,
+        };
+        if !matches!(outcome, O::Unknown) {
+            self.runtime_retry_requests.remove(&target);
+        }
+        outcome
+    }
+
+    fn load_runtime_recovery(
+        &mut self,
+        project_id: [u8; 32],
+        thread_id: [u8; 32],
+    ) -> Result<Option<hq_tui::UiRuntimeRecovery>, UiFailure> {
+        let query = self
+            .presentation
+            .inner
+            .lock()
+            .ok()
+            .and_then(|data| data.recovery_queries.get(&project_id).copied())
+            .ok_or_else(observation_control_failure)?;
+        let response = self
+            .client
+            .project_recovery(query)
+            .map_err(|error| client_failure(&error))?;
+        let ClientEvent::Response {
+            result: ResponseResult::ProjectRecovery(view),
+            ..
+        } = response
+        else {
+            return Err(observation_control_failure());
+        };
+        let mut recovery = tui_runtime_recovery(project_id, thread_id, &view);
+        if let Some(recovery) = recovery.as_mut() {
+            recovery.agent_name = view.observation.as_ref().and_then(|observation| {
+                self.presentation.inner.lock().ok().and_then(|data| {
+                    data.agent_names
+                        .get(&observation.scope.agent_id.bytes())
+                        .cloned()
+                })
+            });
+
+            recovery.retry = view
+                .recovery
+                .as_ref()
+                .filter(|_| view.retry_allowed)
+                .map(|record| hq_tui::UiRuntimeRetryTarget {
+                    account_id: query.account_id.bytes(),
+                    home: query.home.bytes(),
+                    project_id,
+                    thread_id,
+                    assignment_id: record.scope.assignment_id.bytes(),
+                    agent_id: record.scope.agent_id.bytes(),
+                    provider: record.scope.provider.clone(),
+                    session: record.scope.session.clone(),
+                    operation_id: record.operation_id.bytes(),
+                    expected_revision: record.revision,
+                });
+        }
+        Ok(recovery)
+    }
+
     fn submit_project_command(
         &mut self,
         action: UiProjectAction,
@@ -2510,6 +2619,15 @@ struct ScheduledTimer {
 }
 
 enum WorkerCommand {
+    RetryRuntime {
+        id: EffectId,
+        target: hq_tui::UiRuntimeRetryTarget,
+    },
+    LoadRuntimeRecovery {
+        id: EffectId,
+        project_id: [u8; 32],
+        thread_id: [u8; 32],
+    },
     LoadSnapshot {
         id: EffectId,
     },
@@ -2854,6 +2972,23 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                         WorkerCommand::SubmitProjectCommand { id, action },
                     )?;
                 }
+                UiEffect::RetryRuntime { id, target } => {
+                    self.enqueue_client_effect(id, WorkerCommand::RetryRuntime { id, target })?;
+                }
+                UiEffect::LoadRuntimeRecovery {
+                    id,
+                    project_id,
+                    thread_id,
+                } => {
+                    self.enqueue_client_effect(
+                        id,
+                        WorkerCommand::LoadRuntimeRecovery {
+                            id,
+                            project_id,
+                            thread_id,
+                        },
+                    )?;
+                }
                 UiEffect::ContinueProjectCommand { id, operation } => {
                     self.enqueue_client_effect(
                         id,
@@ -3014,6 +3149,9 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             | UiEvent::AgentCommandFailed { effect_id, .. }
             | UiEvent::ManagedSessionCompleted { effect_id, .. }
             | UiEvent::ManagedSessionFailed { effect_id, .. }
+            | UiEvent::RuntimeRetryCompleted { effect_id, .. }
+            | UiEvent::RuntimeRecoveryFailed { effect_id, .. }
+            | UiEvent::RuntimeRecoveryLoaded { effect_id, .. }
             | UiEvent::ProjectCommandCompleted { effect_id, .. }
             | UiEvent::ProjectCommandFailed { effect_id, .. } => Some(*effect_id),
             UiEvent::Started
@@ -3273,6 +3411,38 @@ fn client_worker<P: TuiClientPort>(
                         result,
                     },
                     Err(failure) => UiEvent::ProjectCommandFailed {
+                        effect_id: id,
+                        failure,
+                    },
+                };
+                if !send_tui_event(events, notifier, event) {
+                    break;
+                }
+            }
+            Ok(WorkerCommand::RetryRuntime { id, target }) => {
+                let outcome = client.retry_runtime(target);
+                if !send_tui_event(
+                    events,
+                    notifier,
+                    UiEvent::RuntimeRetryCompleted {
+                        effect_id: id,
+                        outcome,
+                    },
+                ) {
+                    break;
+                }
+            }
+            Ok(WorkerCommand::LoadRuntimeRecovery {
+                id,
+                project_id,
+                thread_id,
+            }) => {
+                let event = match client.load_runtime_recovery(project_id, thread_id) {
+                    Ok(recovery) => UiEvent::RuntimeRecoveryLoaded {
+                        effect_id: id,
+                        recovery,
+                    },
+                    Err(failure) => UiEvent::RuntimeRecoveryFailed {
                         effect_id: id,
                         failure,
                     },
@@ -5336,11 +5506,340 @@ const fn timer_kind_order(kind: UiTimerKind) -> u8 {
         UiTimerKind::DismissCompletion => 2,
         UiTimerKind::ContinueProject => 3,
         UiTimerKind::RefreshCreatedProject => 4,
+        UiTimerKind::RefreshRuntime => 5,
     }
+}
+
+fn recovery_query_targets(
+    snapshot: &AuthoritativeSnapshotDto,
+) -> BTreeMap<[u8; 32], hq_local_api::protocol::v1::ProjectRecoveryQueryDto> {
+    snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Project {
+                project_id,
+                home,
+                account_id,
+                ..
+            } => Some((
+                project_id.bytes(),
+                hq_local_api::protocol::v1::ProjectRecoveryQueryDto {
+                    project_id: *project_id,
+                    home: *home,
+                    account_id: *account_id,
+                },
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn runtime_availability(
+    observation: &hq_local_api::protocol::v1::ProjectRuntimeObservationDto,
+    recovery: Option<&hq_local_api::protocol::v1::ProjectRecoveryRecordDto>,
+) -> hq_tui::UiRuntimeAvailability {
+    use hq_local_api::protocol::v1::{
+        ProjectRecoveryStateDto as R, ProjectRuntimeWorkerStateDto as W,
+    };
+    use hq_tui::UiRuntimeAvailability as A;
+    match recovery.map(|record| &record.state) {
+        Some(R::Blocked { .. }) => A::Blocked,
+        _ => match &observation.worker {
+            W::Working { .. } => A::Working,
+            W::Ready { .. } => A::Ready,
+            W::Failed { .. } => {
+                if recovery.is_some_and(|record| {
+                    matches!(
+                        record.state,
+                        R::Waiting { .. } | R::Attempting { .. } | R::Ready { .. }
+                    )
+                }) {
+                    A::Waiting
+                } else {
+                    A::Blocked
+                }
+            }
+            W::Stopped | W::Busy => match recovery.map(|record| &record.state) {
+                Some(R::Attempting { generation, .. })
+                    if observation.generation == Some(*generation) =>
+                {
+                    A::Starting
+                }
+                Some(R::Waiting { .. } | R::Attempting { .. } | R::Ready { .. }) => A::Waiting,
+                _ if matches!(observation.worker, W::Busy) => A::Checking,
+                _ => A::Stopped,
+            },
+        },
+    }
+}
+
+fn tui_runtime_recovery(
+    project_id: [u8; 32],
+    thread_id: [u8; 32],
+    view: &hq_local_api::protocol::v1::ProjectRecoveryViewDto,
+) -> Option<hq_tui::UiRuntimeRecovery> {
+    use hq_local_api::protocol::v1::{
+        ProjectRecoveryStateDto as R, ProjectRuntimeWorkerStateDto as W,
+    };
+    let observation = view.observation.as_ref()?;
+    if observation.scope.project_id.bytes() != project_id
+        || observation.scope.thread_id.bytes() != thread_id
+    {
+        return None;
+    }
+    let availability = runtime_availability(observation, view.recovery.as_ref());
+    let mut details = runtime_scope_details(observation, view.head);
+    if let Some(generation) = observation.generation {
+        details.push(("Node generation".to_owned(), runtime_id_text(generation)));
+    }
+    match &observation.worker {
+        W::Ready { owner } | W::Working { owner, .. } => {
+            details.push(("Worker owner".to_owned(), runtime_id_text(*owner)));
+        }
+        _ => {}
+    }
+    if let W::Working {
+        operation_id,
+        sequence,
+        ..
+    } = &observation.worker
+    {
+        details.push((
+            "Running operation".to_owned(),
+            runtime_id_text(*operation_id),
+        ));
+        details.push(("Operation source sequence".to_owned(), sequence.to_string()));
+    }
+    if let Some(record) = &view.recovery {
+        details.push((
+            "Recovery operation".to_owned(),
+            runtime_id_text(record.operation_id),
+        ));
+        details.push(("Recovery revision".to_owned(), record.revision.to_string()));
+        details.push(("Attempts".to_owned(), record.attempts.to_string()));
+        details.push(("Input".to_owned(), runtime_id_text(record.submission_id)));
+        details.push(("Input sequence".to_owned(), record.sequence.to_string()));
+    }
+    if let W::Failed { failure } = &observation.worker {
+        append_runtime_failure_details(&mut details, "Current failure", failure);
+    }
+    if let Some(record) = &view.recovery {
+        if let Some(failure) = &record.failure {
+            append_runtime_failure_details(&mut details, "Last recovery failure", failure);
+        }
+        match record.state {
+            R::Waiting { retry_at_millis } => details.push((
+                "Next attempt (Unix ms)".to_owned(),
+                retry_at_millis.to_string(),
+            )),
+            R::Attempting {
+                recover_at_millis, ..
+            }
+            | R::Ready {
+                recover_at_millis, ..
+            } => details.push((
+                "Recovery deadline (Unix ms)".to_owned(),
+                recover_at_millis.to_string(),
+            )),
+            R::Blocked { reason } => details.push((
+                "Automatic retries stopped".to_owned(),
+                format!("{reason:?}"),
+            )),
+            R::Completed | R::Cancelled => {}
+        }
+    }
+    Some(hq_tui::UiRuntimeRecovery {
+        project_id,
+        thread_id,
+        availability,
+        agent_name: None,
+        input_saved: view.recovery.is_some(),
+        details,
+        retry: None,
+    })
+}
+
+fn runtime_scope_details(
+    observation: &hq_local_api::protocol::v1::ProjectRuntimeObservationDto,
+    head: Id32,
+) -> Vec<(String, String)> {
+    vec![
+        (
+            "Project".to_owned(),
+            runtime_id_text(observation.scope.project_id),
+        ),
+        (
+            "Assignment".to_owned(),
+            runtime_id_text(observation.scope.assignment_id),
+        ),
+        (
+            "Agent".to_owned(),
+            runtime_id_text(observation.scope.agent_id),
+        ),
+        (
+            "Provider".to_owned(),
+            terminal_text(&observation.scope.provider),
+        ),
+        (
+            "Saved session".to_owned(),
+            terminal_text(&observation.scope.session),
+        ),
+        (
+            "Conversation".to_owned(),
+            runtime_id_text(observation.scope.thread_id),
+        ),
+        ("Canonical head".to_owned(), runtime_id_text(head)),
+    ]
+}
+
+fn append_runtime_failure_details(
+    details: &mut Vec<(String, String)>,
+    label: &str,
+    failure: &hq_local_api::protocol::v1::ProjectRuntimeFailureDto,
+) {
+    details.push((label.to_owned(), format!("{:?}", failure.reason)));
+    if let Some(lease) = &failure.lease {
+        details.push((
+            "Retained lease owner".to_owned(),
+            runtime_id_text(lease.owner),
+        ));
+        details.push((
+            "Retained lease expires (Unix ms)".to_owned(),
+            lease.expires_at_millis.to_string(),
+        ));
+    }
+}
+
+fn retain_runtime_retry_request(
+    retained: &mut BTreeMap<
+        hq_tui::UiRuntimeRetryTarget,
+        hq_local_api::protocol::v1::ProjectRecoveryRetryRequestDto,
+    >,
+    target: &hq_tui::UiRuntimeRetryTarget,
+    identity: impl FnOnce() -> Result<[u8; 32], UiFailure>,
+) -> Result<hq_local_api::protocol::v1::ProjectRecoveryRetryRequestDto, UiFailure> {
+    if let Some(request) = retained.get(target) {
+        return Ok(request.clone());
+    }
+    let request = runtime_retry_request(target, identity()?);
+    retained.insert(target.clone(), request.clone());
+    Ok(request)
+}
+
+fn runtime_retry_request(
+    target: &hq_tui::UiRuntimeRetryTarget,
+    retry_id: [u8; 32],
+) -> hq_local_api::protocol::v1::ProjectRecoveryRetryRequestDto {
+    hq_local_api::protocol::v1::ProjectRecoveryRetryRequestDto {
+        retry_id: Id32::new(retry_id),
+        operation_id: Id32::new(target.operation_id),
+        account_id: Id32::new(target.account_id),
+        home: Id32::new(target.home),
+        project_id: Id32::new(target.project_id),
+        assignment_id: Id32::new(target.assignment_id),
+        agent_id: Id32::new(target.agent_id),
+        provider: target.provider.clone(),
+        session: target.session.clone(),
+        thread_id: Id32::new(target.thread_id),
+        expected_revision: target.expected_revision,
+    }
+}
+
+fn runtime_id_text(id: Id32) -> String {
+    use std::fmt::Write;
+    let mut text = String::with_capacity(64);
+    for byte in id.bytes() {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn retry_response_loss_keeps_identity_and_complete_original_target() {
+        let target = hq_tui::UiRuntimeRetryTarget {
+            account_id: [1; 32],
+            home: [2; 32],
+            project_id: [3; 32],
+            assignment_id: [4; 32],
+            agent_id: [5; 32],
+            provider: "provider".to_owned(),
+            session: "saved".to_owned(),
+            thread_id: [6; 32],
+            operation_id: [7; 32],
+            expected_revision: 18,
+        };
+        let mut retained = std::collections::BTreeMap::new();
+        let first = super::retain_runtime_retry_request(&mut retained, &target, || Ok([8; 32]))
+            .expect("first");
+        let replay = super::retain_runtime_retry_request(&mut retained, &target, || {
+            Err(super::observation_control_failure())
+        })
+        .expect("no new identity needed");
+        assert_eq!(first, replay);
+        assert_eq!(replay.retry_id.bytes(), [8; 32]);
+        assert_eq!(replay.expected_revision, 18);
+        assert_eq!(replay.session, "saved");
+        assert_eq!(replay.account_id.bytes(), target.account_id);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn runtime_status_never_promotes_retained_ready_to_live_after_restart() {
+        use hq_local_api::protocol::v1::*;
+        let scope = ProjectRuntimeScopeDto {
+            project_id: Id32::new([1; 32]),
+            assignment_id: Id32::new([2; 32]),
+            agent_id: Id32::new([3; 32]),
+            provider: "provider".to_owned(),
+            session: "saved".to_owned(),
+            thread_id: Id32::new([4; 32]),
+        };
+        let mut view = ProjectRecoveryViewDto {
+            head: Id32::new([5; 32]),
+            observation: Some(ProjectRuntimeObservationDto {
+                scope: scope.clone(),
+                generation: Some(Id32::new([6; 32])),
+                worker: ProjectRuntimeWorkerStateDto::Stopped,
+            }),
+            recovery: Some(ProjectRecoveryRecordDto {
+                operation_id: Id32::new([7; 32]),
+                saga_operation_id: Id32::new([8; 32]),
+                submission_id: Id32::new([9; 32]),
+                sequence: 1,
+                scope,
+                revision: 3,
+                attempts: 1,
+                state: ProjectRecoveryStateDto::Ready {
+                    generation: Id32::new([10; 32]),
+                    owner: Id32::new([11; 32]),
+                    recover_at_millis: 3000,
+                },
+                failure: None,
+            }),
+            retry_allowed: false,
+        };
+        let read = |view: &ProjectRecoveryViewDto| {
+            super::tui_runtime_recovery([1; 32], [4; 32], view)
+                .expect("matching scope")
+                .availability
+        };
+        assert_eq!(read(&view), hq_tui::UiRuntimeAvailability::Waiting);
+        view.recovery = None;
+        assert_eq!(read(&view), hq_tui::UiRuntimeAvailability::Stopped);
+        view.observation.as_mut().expect("observation").worker =
+            ProjectRuntimeWorkerStateDto::Working {
+                owner: Id32::new([12; 32]),
+                operation_id: Id32::new([13; 32]),
+                sequence: 42,
+            };
+        assert_eq!(read(&view), hq_tui::UiRuntimeAvailability::Working);
+        assert!(super::tui_runtime_recovery([1; 32], [99; 32], &view).is_none());
+    }
+
     use super::{
         ConversationPresentationContext, ProjectThreadPresentation, RunningOperationPresentation,
         SharedTuiPresentation, conversation_identity, conversation_title, inbox_activity_ranks,

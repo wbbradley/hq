@@ -144,6 +144,27 @@ reconnecting client retains the original encoded frame, replays the same bytes a
 or an uncertain result, rejects changed identity reuse across all retryable command families, and
 retires the frame only on a definite accepted/rejected outcome.
 
+`project_recovery` reads current recovery evidence for an exact account, home, and project.
+Its response keeps the live worker observation (including node generation, owner, and any running
+operation/source sequence) separate from durable recovery state, input identity, retry deadline,
+attempt count, and typed failure/lease evidence. Persisted readiness does not establish liveness.
+The reader checks canonical authority before reading evidence and fences the result against a
+changed project snapshot. It does not take the workflow execution lock or launch a worker.
+A blocked record includes exact scope/revision and whether the viewing human may request Retry.
+Device connectivity remains independent.
+
+`retry_project_runtime` schedules another bounded attempt budget for one exact blocked recovery
+revision. Its request carries the retry ID, recovery operation ID, account, home, project,
+assignment, agent, provider/session, thread, and expected revision. Provider and session text use
+their domain byte limits. The response is `project_recovery_retry` with `scheduled`,
+`already_scheduled`, or a typed `rejected` error. The workflow checks current authority and
+eligibility; transport acceptance alone does not authorize another provider call.
+
+The ordinary request path does not automatically resend this method after response loss. A caller
+retains the request and reuses its retry ID and exact fields when reconciling the result. The durable
+receipt prevents another budget reset, including when delivery completed before the response was
+recovered. A new retry ID represents new user intent and still requires the current blocked revision.
+
 Named-agent retirement is an exact retryable request family rather than a generic effect or a
 client-authored mutation. It carries command and operation identities, exact request digest,
 authorizing account, agent, expected claim, immutable home, issue time, and explicit force policy.

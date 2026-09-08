@@ -537,6 +537,54 @@ pub struct HarnessSupervisorReport {
     pub failures: Vec<HarnessErrorClass>,
 }
 
+/// Point-in-time local worker observation without launching or renewing ownership.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HarnessWorkerObservation {
+    /// No local worker is retained, regardless of durable session or lease records.
+    Stopped,
+    /// A current local worker has matching unexpired ownership.
+    Owned(HarnessReadyWorker),
+    /// A current owned worker has a typed running agent turn in canonical persistence.
+    Working {
+        /// Exact live worker ownership and routing.
+        worker: HarnessReadyWorker,
+        /// One currently running operation, selected by the authoritative activity query.
+        operation_id: OperationId,
+        /// Exact source sequence of that running-turn evidence.
+        sequence: NonZeroU64,
+    },
+    /// Another supervisor operation owns the registry lock; liveness is not established.
+    Busy,
+    /// A retained local worker no longer has matching unexpired ownership.
+    LeaseLost(Option<HarnessWorkerLease>),
+}
+
+/// Why one exact worker stopped producing events.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HarnessWorkerStopReason {
+    /// The provider closed its event stream normally.
+    Closed,
+    /// The provider or worker lease failed with a stable redacted class.
+    Failed(HarnessErrorClass),
+}
+
+/// Body-free evidence about a worker removed from the live worker registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HarnessStoppedWorker {
+    /// Exact agent whose worker ended.
+    pub agent_id: AgentId,
+    /// Project routing, absent for direct sessions.
+    pub project_id: Option<ProjectId>,
+    /// Provider selected for this worker.
+    pub provider_id: ProviderId,
+    /// Exact provider conversation; never replaced by a fresh-session fallback.
+    pub session_id: ProviderSessionId,
+    /// Removed worker's ownership token, redacted in diagnostics.
+    pub owner_token: HarnessOwnerToken,
+    /// Typed terminal event, without provider diagnostic prose.
+    pub reason: HarnessWorkerStopReason,
+}
+
 /// One bounded polling pass over every currently live exact worker.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct HarnessEventPumpReport {
@@ -552,6 +600,10 @@ pub struct HarnessEventPumpReport {
     pub workers_closed: usize,
     /// Workers whose provider poll failed in this pass.
     pub workers_failed: usize,
+    /// Exact removed workers retained up to the configured worker bound.
+    pub stopped_workers: Vec<HarnessStoppedWorker>,
+    /// More workers stopped than fit in the bounded evidence list.
+    pub stopped_workers_truncated: bool,
     /// Normalized persistence items still owned after this pass.
     pub pending_values: usize,
     /// Highest pending normalized value count observed across merged passes.
@@ -853,6 +905,75 @@ impl HarnessSupervisor {
         })
     }
 
+    /// Observes a local worker without waiting for launch, resuming, or renewing its lease.
+    pub fn observe_worker(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<HarnessWorkerObservation, HarnessError> {
+        let workers = match self.workers.try_lock() {
+            Ok(workers) => workers,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(HarnessWorkerObservation::Busy),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(HarnessError::new(HarnessErrorClass::Unavailable));
+            }
+        };
+        let Some(worker) = workers.get(&agent_id) else {
+            return Ok(HarnessWorkerObservation::Stopped);
+        };
+        let lease = self.dependencies.state.worker_lease(agent_id)?;
+        if !lease.as_ref().is_some_and(|lease| {
+            lease.owner_token == worker.token
+                && lease.expires_at_millis > self.dependencies.clock.now_millis()
+        }) {
+            return Ok(HarnessWorkerObservation::LeaseLost(lease));
+        }
+        let _persistence = match self.persistence.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(HarnessWorkerObservation::Busy),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(HarnessError::new(HarnessErrorClass::Unavailable));
+            }
+        };
+        let turns = self.dependencies.persistence.running_agent_turns(
+            agent_id,
+            &worker.provider_id,
+            &worker.session_id,
+            1,
+        )?;
+        if turns.len() > 1
+            || turns.iter().any(|turn| {
+                turn.kind != ActivityKind::AgentTurn || turn.status != ActivityStatus::Running
+            })
+        {
+            return Err(HarnessError::new(HarnessErrorClass::PersistenceCollision));
+        }
+        // The activity query may cross a store boundary. Recheck ownership before joining
+        // its evidence with the still-retained local worker.
+        let lease = self.dependencies.state.worker_lease(agent_id)?;
+        if !lease.as_ref().is_some_and(|lease| {
+            lease.owner_token == worker.token
+                && lease.expires_at_millis > self.dependencies.clock.now_millis()
+        }) {
+            return Ok(HarnessWorkerObservation::LeaseLost(lease));
+        }
+        let ready = HarnessReadyWorker {
+            agent_id,
+            project_id: worker.project_id,
+            provider_id: worker.provider_id.clone(),
+            session_id: worker.session_id.clone(),
+            owner_token: worker.token,
+        };
+        Ok(turns
+            .first()
+            .map_or(HarnessWorkerObservation::Owned(ready.clone()), |turn| {
+                HarnessWorkerObservation::Working {
+                    worker: ready,
+                    operation_id: turn.operation_id,
+                    sequence: turn.sequence,
+                }
+            }))
+    }
+
     /// Reads the exact retained lease for scheduling ownership-aware recovery.
     /// Absence or expiry does not establish readiness or grant ownership.
     pub fn worker_lease(
@@ -1121,6 +1242,17 @@ impl HarnessSupervisor {
             let Some(worker) = workers.remove(&agent_id) else {
                 continue;
             };
+            report.stopped_workers.push(HarnessStoppedWorker {
+                agent_id,
+                project_id: worker.project_id,
+                provider_id: worker.provider_id.clone(),
+                session_id: worker.session_id.clone(),
+                owner_token: worker.token,
+                reason: match outcome {
+                    WorkerTerminal::Closed => HarnessWorkerStopReason::Closed,
+                    WorkerTerminal::Failed(class) => HarnessWorkerStopReason::Failed(class),
+                },
+            });
             match outcome {
                 WorkerTerminal::Closed => {
                     report.workers_closed = report.workers_closed.saturating_add(1);
@@ -2281,6 +2413,14 @@ fn merge_pump_report(
     target.interactive_requests_failed_closed = target
         .interactive_requests_failed_closed
         .saturating_add(source.interactive_requests_failed_closed);
+    target.stopped_workers_truncated |= source.stopped_workers_truncated;
+    for worker in source.stopped_workers {
+        if target.stopped_workers.len() < limit {
+            target.stopped_workers.push(worker);
+        } else {
+            target.stopped_workers_truncated = true;
+        }
+    }
     target.workers_closed = target.workers_closed.saturating_add(source.workers_closed);
     target.workers_failed = target.workers_failed.saturating_add(source.workers_failed);
     target.pending_values = source.pending_values;
@@ -2358,4 +2498,48 @@ fn lease_deadline(now: u64, duration: Duration) -> Result<u64, HarnessError> {
         .map_err(|_| HarnessError::new(HarnessErrorClass::InvalidInput))?;
     now.checked_add(millis)
         .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))
+}
+
+#[cfg(test)]
+mod stopped_worker_report_tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn merged_stop_evidence_is_bounded_and_reports_omitted_workers() {
+        let stopped = HarnessStoppedWorker {
+            agent_id: AgentId::from_bytes([1; 32]),
+            project_id: Some(ProjectId::from_bytes([2; 32])),
+            provider_id: ProviderId::new("provider").expect("provider"),
+            session_id: ProviderSessionId::new("session").expect("session"),
+            owner_token: HarnessOwnerToken::from_bytes([3; 32]).expect("owner"),
+            reason: HarnessWorkerStopReason::Closed,
+        };
+        let mut aggregate = HarnessEventPumpReport::default();
+        merge_pump_report(
+            &mut aggregate,
+            HarnessEventPumpReport {
+                workers_closed: 1,
+                stopped_workers: vec![stopped.clone()],
+                ..HarnessEventPumpReport::default()
+            },
+            1,
+        );
+        assert_eq!(aggregate.stopped_workers, vec![stopped.clone()]);
+        assert!(!aggregate.stopped_workers_truncated);
+        let mut next = stopped.clone();
+        next.owner_token = HarnessOwnerToken::from_bytes([4; 32]).expect("replacement owner");
+        merge_pump_report(
+            &mut aggregate,
+            HarnessEventPumpReport {
+                workers_closed: 1,
+                stopped_workers: vec![next],
+                ..HarnessEventPumpReport::default()
+            },
+            1,
+        );
+        assert_eq!(aggregate.workers_closed, 2);
+        assert_eq!(aggregate.stopped_workers, vec![stopped]);
+        assert!(aggregate.stopped_workers_truncated);
+    }
 }

@@ -40,6 +40,9 @@ struct FakeWorker {
     trace: Arc<Mutex<Vec<&'static str>>>,
     requests: Arc<Mutex<Vec<ProjectCommandRequest>>>,
     reject: Arc<AtomicBool>,
+    deadline: Arc<Mutex<Option<Instant>>>,
+    due_done: Arc<(Mutex<bool>, Condvar)>,
+    stop_observer: Arc<Mutex<Option<Arc<dyn hq_projects::ProjectRuntimeStopObserver>>>>,
 }
 
 impl ControlProjects for FakeWorker {
@@ -67,6 +70,55 @@ impl ControlProjects for FakeWorker {
             operation_id: request.operation_id,
             stage: ProjectCommandStage::Accepted,
         })
+    }
+}
+
+impl hq_projects::ScheduleProjectRecovery for FakeWorker {
+    fn observe_runtime_stops(
+        &self,
+        observer: Option<Arc<dyn hq_projects::ProjectRuntimeStopObserver>>,
+    ) -> Result<(), ApplicationError> {
+        *self.stop_observer.lock().expect("observer") = observer;
+        Ok(())
+    }
+
+    fn runtime_stopped(
+        &self,
+        _stopped: &hq_application::ProjectRuntimeStopped,
+    ) -> Result<(), ApplicationError> {
+        self.trace.lock().expect("trace").push("stopped");
+        *self.deadline.lock().expect("deadline") = Some(Instant::now() + Duration::from_millis(10));
+        Ok(())
+    }
+
+    fn recovery_schedule(&self) -> Result<hq_projects::ProjectRecoverySchedule, ApplicationError> {
+        Ok(hq_projects::ProjectRecoverySchedule {
+            now_millis: 0,
+            next_due_millis: self.deadline.lock().expect("deadline").map(|deadline| {
+                u64::try_from(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis(),
+                )
+                .expect("bounded test deadline")
+            }),
+        })
+    }
+    fn repair_due(&self, _limit: usize) -> Result<Vec<ProjectCommandOutcome>, ApplicationError> {
+        self.trace.lock().expect("trace").push("due");
+        *self.deadline.lock().expect("deadline") = None;
+        *self.due_done.0.lock().expect("due completion") = true;
+        self.due_done.1.notify_all();
+        Ok(Vec::new())
+    }
+}
+
+impl hq_application::RetryProjectRuntime for FakeWorker {
+    fn retry_project_runtime(
+        &self,
+        _request: hq_application::ProjectRecoveryRetryRequest,
+    ) -> Result<hq_application::ProjectRecoveryRetryOutcome, ApplicationError> {
+        Ok(hq_application::ProjectRecoveryRetryOutcome::Scheduled)
     }
 }
 
@@ -548,4 +600,88 @@ fn failed_background_reconciliation_retries_from_durable_state_on_the_next_wake(
 
     component.stop_intake().expect("intake closes");
     assert_eq!(component.drain(), Ok(ComponentDrain::Complete));
+}
+
+#[test]
+fn retained_deadline_runs_targeted_recovery_without_an_external_wake() {
+    let worker = FakeWorker::default();
+    *worker.deadline.lock().expect("deadline") = Some(Instant::now() + Duration::from_millis(50));
+    let mut component = ProjectNodeComponent::new(
+        ProjectNodeConfig {
+            recovery_limit: NonZeroUsize::new(16).expect("limit"),
+            recovery_time: Timestamp::from_unix_millis(0),
+        },
+        worker.clone(),
+        FakeResources,
+        BlockingInputs::default(),
+    );
+    component.start(CancellationToken::new()).expect("start");
+    let completed = worker.due_done.0.lock().expect("completion");
+    let waited = worker
+        .due_done
+        .1
+        .wait_timeout_while(completed, Duration::from_secs(2), |done| !*done)
+        .expect("timer wait");
+    assert!(
+        *waited.0,
+        "the retained deadline must wake without another event"
+    );
+    drop(waited);
+    let trace = worker.trace.lock().expect("trace").clone();
+    assert_eq!(
+        trace.iter().filter(|entry| **entry == "repair").count(),
+        1,
+        "timer must not repeat startup scans"
+    );
+    assert_eq!(trace.iter().filter(|entry| **entry == "due").count(), 1);
+    component.stop_intake().expect("stop");
+    component.drain().expect("drain");
+}
+
+#[test]
+fn stopped_worker_notification_reaches_targeted_recovery_and_its_deadline() {
+    let worker = FakeWorker::default();
+    let mut component = ProjectNodeComponent::new(
+        ProjectNodeConfig {
+            recovery_limit: NonZeroUsize::new(1).expect("limit"),
+            recovery_time: Timestamp::from_unix_millis(0),
+        },
+        worker.clone(),
+        FakeResources,
+        BlockingInputs::default(),
+    );
+    component.start(CancellationToken::new()).expect("start");
+    let observer = worker
+        .stop_observer
+        .lock()
+        .expect("observer")
+        .clone()
+        .expect("installed before startup");
+    observer.stopped(hq_application::ProjectRuntimeStopped {
+        project_id: ProjectId::from_bytes([1; 32]),
+        agent_id: hq_domain::AgentId::from_bytes([2; 32]),
+        provider: hq_domain::ProviderId::new("provider").expect("provider"),
+        session: hq_domain::ProviderSessionId::new("saved").expect("session"),
+        generation: hq_application::RuntimeGenerationId::from_bytes([3; 32]).expect("generation"),
+        owner: hq_application::RuntimeWorkerOwner::from_bytes([4; 32]).expect("owner"),
+        reason: hq_application::RuntimeFailureReason::TransportClosed,
+    });
+    let completed = worker.due_done.0.lock().expect("completion");
+    let waited = worker
+        .due_done
+        .1
+        .wait_timeout_while(completed, Duration::from_secs(2), |done| !*done)
+        .expect("stop notification wait");
+    assert!(
+        *waited.0,
+        "stop notification must schedule targeted recovery"
+    );
+    drop(waited);
+    let trace = worker.trace.lock().expect("trace").clone();
+    assert_eq!(trace.iter().filter(|entry| **entry == "repair").count(), 1);
+    assert_eq!(trace.iter().filter(|entry| **entry == "stopped").count(), 1);
+    assert_eq!(trace.iter().filter(|entry| **entry == "due").count(), 1);
+    component.stop_intake().expect("stop");
+    component.drain().expect("drain");
+    assert!(worker.stop_observer.lock().expect("observer").is_none());
 }

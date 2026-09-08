@@ -436,6 +436,23 @@ impl ServerSession {
                 .map_err(|_| invalid_request_error())
                 .and_then(|request| application.control_project(request))
                 .map(|outcome| ResponseResult::ProjectCommand(project_command_to_v1(&outcome))),
+            Request::ProjectRecovery(request) => application
+                .query_project_recovery(crate::conversion::project_recovery_query_from_v1(request))
+                .map(|view| {
+                    ResponseResult::ProjectRecovery(Box::new(
+                        crate::conversion::project_recovery_view_to_v1(&view),
+                    ))
+                }),
+            Request::RetryProjectRuntime(request) => {
+                crate::conversion::project_recovery_retry_from_v1(*request)
+                    .map_err(|_| invalid_request_error())
+                    .and_then(|request| application.retry_project_runtime(request))
+                    .map(|outcome| {
+                        ResponseResult::ProjectRecoveryRetry(
+                            crate::conversion::project_recovery_retry_to_v1(&outcome),
+                        )
+                    })
+            }
             Request::RetireAgent(request) => application
                 .retire_agent(agent_retirement_from_v1(*request))
                 .map(|outcome| ResponseResult::AgentRetirement(agent_retirement_to_v1(&outcome))),

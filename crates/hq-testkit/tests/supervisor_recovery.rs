@@ -162,11 +162,19 @@ fn foreign_lease_deadline_is_exact_and_stale_worker_cannot_report_readiness() {
         })
     );
     assert!(state.snapshot().ready_sessions.is_empty());
+    assert_eq!(
+        runtime.observe_worker(agent).expect("no local worker"),
+        hq_harness::HarnessWorkerObservation::Stopped
+    );
     clock.0.store(100, Ordering::SeqCst);
     let ready = runtime
         .ensure_resumed(request())
         .expect("expired lease can be acquired");
     assert_ne!(ready.owner_token, foreign);
+    assert_eq!(
+        runtime.observe_worker(agent).expect("owned worker"),
+        hq_harness::HarnessWorkerObservation::Owned(ready.clone())
+    );
     let lease = runtime.worker_lease(agent).expect("lease").expect("owned");
     state
         .apply(HarnessStateMutation::ClaimLease {
@@ -177,6 +185,10 @@ fn foreign_lease_deadline_is_exact_and_stale_worker_cannot_report_readiness() {
         })
         .expect("new owner after expiry");
     clock.0.store(lease.expires_at_millis, Ordering::SeqCst);
+    assert!(
+        matches!(runtime.observe_worker(agent).expect("lost ownership"),
+        hq_harness::HarnessWorkerObservation::LeaseLost(Some(retained)) if retained.owner_token == foreign)
+    );
     assert_eq!(
         runtime
             .ensure_resumed(request())
@@ -605,6 +617,10 @@ fn recovery_interrupts_a_running_turn_left_by_the_previous_owner() {
         ))
         .expect("first owner starts");
     assert_eq!(first.poll_events().expect("turn starts").events_polled, 1);
+    assert!(matches!(
+        first.observe_worker(agent).expect("old running turn"),
+        hq_harness::HarnessWorkerObservation::Working { .. }
+    ));
     drop(first);
 
     let restarted = supervisor(dependencies(
@@ -621,6 +637,12 @@ fn recovery_interrupts_a_running_turn_left_by_the_previous_owner() {
             HarnessSessionRequest::Resume { session_id },
         ))
         .expect("new owner resumes");
+    assert!(matches!(
+        restarted
+            .observe_worker(agent)
+            .expect("old turn interrupted"),
+        hq_harness::HarnessWorkerObservation::Owned(_)
+    ));
 
     let activities = persistence.activities.lock().expect("activities lock");
     assert_eq!(activities.len(), 2);
@@ -665,12 +687,30 @@ fn provider_poll_failure_is_redacted_and_releases_exact_worker_ownership() {
         Arc::new(TestClock::new(10)),
         Arc::new(TestTokens::default()),
     ));
-    runtime
-        .launch(launch(agent, provider_id, HarnessSessionRequest::Start))
-        .expect("worker starts");
+    let project_id = ProjectId::from_bytes([45; 32]);
+    let mut request = launch(agent, provider_id.clone(), HarnessSessionRequest::Start);
+    request.project_id = Some(project_id);
+    runtime.launch(request).expect("worker starts");
+    let owner = runtime
+        .worker_lease(agent)
+        .expect("lease")
+        .expect("owned")
+        .owner_token;
     assert_eq!(runtime.poll_events().expect("turn starts").events_polled, 1);
-    let report = runtime.poll_events().expect("failure is contained");
+    let report = runtime.drain_ready_events().expect("failure is contained");
     assert_eq!(report.workers_failed, 1);
+    assert_eq!(
+        report.stopped_workers,
+        vec![hq_harness::HarnessStoppedWorker {
+            agent_id: agent,
+            project_id: Some(project_id),
+            provider_id,
+            session_id: ProviderSessionId::new("failed-session").expect("session"),
+            owner_token: owner,
+            reason: hq_harness::HarnessWorkerStopReason::Failed(HarnessErrorClass::TransportClosed),
+        }]
+    );
+    assert!(!report.stopped_workers_truncated);
     assert_eq!(report.live_workers, 0);
     assert_eq!(report.failures, [HarnessErrorClass::TransportClosed]);
     assert!(!format!("{report:?}").contains("provider diagnostic"));
@@ -2141,4 +2181,53 @@ impl HarnessSession for TestSession {
         self.state.force_stops.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+}
+
+#[test]
+fn working_observation_uses_typed_turn_evidence_and_clears_after_completion() {
+    let agent = AgentId::from_bytes([81; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider");
+    let provider = Arc::new(ProviderState::default());
+    let running = agent_turn(1, ActivityStatus::Running, "not a status label");
+    provider.queue([
+        Ok(HarnessEventPoll::Event(HarnessEvent::Activity(
+            running.clone(),
+        ))),
+        Ok(HarnessEventPoll::Event(HarnessEvent::Activity(agent_turn(
+            2,
+            ActivityStatus::Succeeded,
+            "still says working",
+        )))),
+    ]);
+    let runtime = supervisor(dependencies(
+        registry(
+            provider_id.clone(),
+            ProviderSessionId::new("working-session").expect("session"),
+            provider,
+        ),
+        Arc::new(MemoryState::default()),
+        Arc::new(MemoryPersistence::available()),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    ));
+    runtime
+        .launch(launch(agent, provider_id, HarnessSessionRequest::Start))
+        .expect("start");
+    assert!(matches!(
+        runtime.observe_worker(agent).expect("idle"),
+        hq_harness::HarnessWorkerObservation::Owned(_)
+    ));
+    runtime.poll_events().expect("running turn");
+    assert!(
+        matches!(runtime.observe_worker(agent).expect("working"), hq_harness::HarnessWorkerObservation::Working { operation_id, sequence, .. }
+        if operation_id == running.operation_id && sequence == running.sequence)
+    );
+    runtime.poll_events().expect("completed turn");
+    assert!(matches!(
+        runtime
+            .observe_worker(agent)
+            .expect("idle after completion"),
+        hq_harness::HarnessWorkerObservation::Owned(_)
+    ));
+    runtime.shutdown().expect("shutdown");
 }

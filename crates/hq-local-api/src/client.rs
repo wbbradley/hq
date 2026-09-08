@@ -1383,6 +1383,8 @@ impl ReconnectingClient {
                     Ok(transition)
                 }
                 ResponseResult::Lifecycle(_)
+                | ResponseResult::ProjectRecoveryRetry(_)
+                | ResponseResult::ProjectRecovery(_)
                 | ResponseResult::ProviderCatalog(_)
                 | ResponseResult::InstallationConfiguration(_)
                 | ResponseResult::ConversationPage(_)
