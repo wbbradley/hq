@@ -2,31 +2,6 @@
 
 ## Next Up
 
-### Capability-aware cancellation of agent work
-
-Problem: The independent cancellation control now reaches the conversation model, but installed stop-and-continue behavior still needs qualification. Offer cancellation only for recipients with the capability; human recipients and unsupported harnesses must not offer or accept it.
-
-Existing foundation: `docs/agent-cancellation.md` records the neutral target, daemon job registry, independently owned local API/TUI control workers, immutable request replay, and canonical terminal-state presentation. `HarnessSupervisor::cancel_owned` bypasses the ordinary worker lock; temporary submission backpressure retains saved input for authoritative acceptance lookup. Qualify the remaining behavior through these paths.
-
-Scope and dependencies:
-
-- Follow the completed control-path and ACP assessment in `docs/agent-cancellation.md`: implement neutral cancellation now, defer arbitrary ACP integration, and preserve the safe-submission registry gate.
-- Extend the installed provider fixture in `crates/hq-node/tests/unix_tui_terminal.rs` to hold generation/tool execution until the actual interrupt arrives. Exercise Ctrl-G through the installed TUI/local API, verify exact provider thread/turn identity, persist and display authoritative interruption, then successfully send another message.
-- Qualify blocked provider RPC handling and sibling responsiveness through the actual control path. Preserve the existing independent executor, server-session, responder-cleanup, and supervisor gate guarantees.
-- Exercise natural completion races, duplicate/stale requests, uncertain acknowledgements, and cancellation while awaiting approval through the installed path. Preserve the clear distinction between requesting a stop and observing canonical terminal status, exact immutable retries, and draft/reading position.
-- Verify that a future message sent while cancellation is pending survives temporary backpressure, retains its exact input identity, and proceeds afterward. Accepted work must be looked up rather than resubmitted, including across restart; project retries still require canonical eligibility.
-
-Invariants: Scope cancellation to the authorized recipient/session/operation, never display prose. Unsupported recipients cannot invoke it. Preserve accepted-work recovery guarantees and sibling conversation responsiveness.
-
-Completion: A deterministic integration test holds a turn/tool open and proves cancellation reaches the adapter before that work is released. Authoritative terminal state reaches the TUI, and the conversation can continue afterward. Cover natural completion races, duplicate/stale requests, uncertain outcomes, and cancellation while awaiting approval. Implementation must preserve the recovery guarantees identified in the completed ACP assessment.
-
-Research anchors:
-
-- [ACP v1 cancellation](https://agentclientprotocol.com/protocol/v1/prompt-turn#cancellation): session-scoped cancellation completes through the original prompt result and may permit final updates; assess the mismatch with HQ's operation-targeted contract and pending permission handling.
-- [ACP initialization](https://agentclientprotocol.com/protocol/v1/initialization): examine baseline methods and negotiated optional capabilities.
-- [Official ACP Rust SDK](https://agentclientprotocol.com/libraries/rust): ACP integration need not require TypeScript.
-- `crates/hq-harness/src/registry.rs` requires provider submission idempotency or authoritative submission lookup. Determine whether the selected ACP version can satisfy this; session loading alone does not prove exact submission acceptance.
-
 ### Conversation details as focused navigation
 
 Problem: The runtime strip advertises D while the composer has focus, and runtime details replace the transcript without becoming a navigation destination; the collapsed composer still advertises Tab to compose underneath details.
