@@ -75,7 +75,19 @@ func TestClientRejectsMalformedAndOversizedFrames(t *testing.T) {
 	}
 }
 
+func TestCompletedResponseSurvivesImmediateStreamClosure(t *testing.T) {
+	for range 100 {
+		// Exercise the response/closure ordering through the real pipe reader.
+		assertUnknownNotificationDoesNotStopTransport(t)
+	}
+}
+
 func TestUnknownNotificationDoesNotStopTransport(t *testing.T) {
+	assertUnknownNotificationDoesNotStopTransport(t)
+}
+
+func assertUnknownNotificationDoesNotStopTransport(t *testing.T) {
+	t.Helper()
 	serverInput, clientOutput := io.Pipe()
 	clientInput, serverOutput := io.Pipe()
 	client := NewClient(context.Background(), clientInput, clientOutput, nil, nil)

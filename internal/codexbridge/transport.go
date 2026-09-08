@@ -90,6 +90,8 @@ func (c *Client) Call(ctx context.Context, method string, params, destination an
 		c.finish(fmt.Errorf("write %s request: %w", method, err))
 		return err
 	}
+	// finish delivers terminal errors through response too. Selecting done
+	// separately could discard a response already received before EOF.
 	select {
 	case reply := <-response:
 		if reply.err != nil {
@@ -105,9 +107,6 @@ func (c *Client) Call(ctx context.Context, method string, params, destination an
 	case <-ctx.Done():
 		c.removePending(id)
 		return ctx.Err()
-	case <-c.done:
-		c.removePending(id)
-		return c.Err()
 	}
 }
 

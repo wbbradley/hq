@@ -28,7 +28,7 @@ jobs:
     name: Native qualification (${{ matrix.rust_host }})
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.targets) }}

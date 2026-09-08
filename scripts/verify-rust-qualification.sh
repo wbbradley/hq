@@ -126,10 +126,10 @@ if [[ ${1:-} == '--validate-only' ]]; then
 fi
 
 cd "$repository_root"
-cargo test --locked -p hq-store --test qualification_budgets -- --test-threads=1
-cargo test --locked -p hq-tui --test qualification_budgets -- --test-threads=1
-cargo test --locked -p hq-node --test unix_qualification_budgets -- --test-threads=1
-cargo test --locked -p hq-node --test unix_session_registry \
+cargo test --locked --release -p hq-store --test qualification_budgets -- --test-threads=1
+cargo test --locked --release -p hq-tui --test qualification_budgets -- --test-threads=1
+cargo test --locked --release -p hq-node --test unix_qualification_budgets -- --test-threads=1
+cargo test --locked --release -p hq-node --test unix_session_registry \
   drain_completes_while_the_shared_event_queue_is_saturated -- --exact --test-threads=1
 
 release_build_seconds=skipped

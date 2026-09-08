@@ -1557,13 +1557,37 @@ fn installed_progress_flood_keeps_new_clients_responsive_and_restartable() {
         "replaceable progress escaped canonical coalescing"
     );
 
-    let diagnostics =
-        std::fs::read_to_string(state_root.join("diagnostics").join("boundaries.jsonl"))
-            .expect("default diagnostics read");
-    let records = diagnostics
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .collect::<Vec<_>>();
+    // Canonical completion can be visible before the drain's diagnostic record
+    // is appended. Wait for that evidence before asserting its totals.
+    let diagnostic_deadline = Instant::now() + Duration::from_secs(5);
+    let records = loop {
+        let diagnostics =
+            std::fs::read_to_string(state_root.join("diagnostics").join("boundaries.jsonl"))
+                .expect("default diagnostics read");
+        let records = diagnostics
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .collect::<Vec<_>>();
+        let accounted = records
+            .iter()
+            .map(|record| match record["kind"].as_str() {
+                Some("harness_ready_drain") => record["events_polled"].as_u64().unwrap_or(0),
+                Some("codex_transport_coalesced") => {
+                    record["coalesced_values"].as_u64().unwrap_or(0)
+                }
+                _ => 0,
+            })
+            .sum::<u64>();
+        if accounted >= 2_000 {
+            break records;
+        }
+        assert!(
+            Instant::now() < diagnostic_deadline,
+            "diagnostics accounted for {accounted} flood events in {} bytes",
+            diagnostics.len()
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
     let drains = records
         .iter()
         .filter(|record| record["kind"] == "harness_ready_drain")
