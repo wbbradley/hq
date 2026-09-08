@@ -2312,25 +2312,28 @@ fn run_in_pty_with_trace(
             && !managed_action_sent
             && Instant::now() >= next_state_probe_at
         {
-            // A fast reconnect can leave the connection label unchanged, so
-            // differential rendering need not emit its text a second time.
-            resize_phase ^= 1;
-            set_pty_dimensions(&pair.slave, 30, 79 + u16::from(resize_phase));
+            // The connection label can remain unchanged across a fast restart.
+            // Synchronize with the new subscription's typed readiness evidence.
+            let trace =
+                std::fs::read_to_string(state_root.join("diagnostics").join("boundaries.jsonl"))
+                    .expect("connection diagnostics read");
+            let reconnected = trace
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .any(|record| {
+                    record["kind"] == "tui_connection_observed"
+                        && record["subscription_generation"]
+                            .as_u64()
+                            .is_some_and(|generation| generation > 1)
+                        && record["tui_connection_state"] == "ready"
+                });
+            if reconnected {
+                master.write_all(b"n").expect("New launcher key writes");
+                master.flush().expect("New launcher key flushes");
+                managed_action_sent = true;
+                completion_offset = Some(bytes.len());
+            }
             next_state_probe_at = Instant::now() + Duration::from_millis(150);
-        }
-        if matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
-            && content_sent
-            && !managed_action_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Connected".len())
-                    .any(|window| window == b"Connected")
-            })
-        {
-            master.write_all(b"n").expect("New launcher key writes");
-            master.flush().expect("New launcher key flushes");
-            managed_action_sent = true;
-            completion_offset = Some(bytes.len());
         }
         if matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
             && managed_action_sent
