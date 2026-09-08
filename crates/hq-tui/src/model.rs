@@ -3374,6 +3374,13 @@ impl UiListSelections {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct LoadingDraftEdits {
+    target: UiMailboxDraftTarget,
+    inputs: Vec<UiInput>,
+    bytes: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingProject {
     id: EffectId,
     action: UiProjectAction,
@@ -3502,6 +3509,7 @@ pub struct UiModel {
     technical_scroll: u16,
     mailbox_modal: Option<UiMailboxModal>,
     mailbox_draft: Option<UiMailboxDraftPane>,
+    loading_draft_edits: Option<LoadingDraftEdits>,
     conversation_cursors: BTreeMap<UiConversationId, usize>,
     agent_modal: Option<UiAgentModal>,
     interactions: VecDeque<UiInteraction>,
@@ -3595,6 +3603,7 @@ impl UiModel {
             technical_scroll: 0,
             mailbox_modal: None,
             mailbox_draft: None,
+            loading_draft_edits: None,
             conversation_cursors: BTreeMap::new(),
             agent_modal: None,
             interactions: VecDeque::new(),
@@ -4834,6 +4843,13 @@ impl UiModel {
         self.form.cursors.remove(&UiFormField::Message);
         self.focus = UiFocus::Draft;
         self.mailbox_modal = None;
+        if self
+            .loading_draft_edits
+            .as_ref()
+            .is_some_and(|edits| edits.target != target)
+        {
+            self.loading_draft_edits = None;
+        }
         self.mailbox_draft = Some(UiMailboxDraftPane::Loading {
             target: target.clone(),
         });
@@ -6254,7 +6270,7 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
             conversation_failed(&mut model, effect_id, failure, &mut effects);
         }
         UiEvent::DraftLoaded { effect_id, draft } => {
-            draft_loaded(&mut model, effect_id, draft, &mut effects);
+            draft_loaded(&mut model, effect_id, draft, &mut effects)?;
         }
         UiEvent::DraftSaved { effect_id, draft } => {
             draft_saved(&mut model, effect_id, &draft, &mut effects)?;
@@ -9399,6 +9415,33 @@ fn apply_draft_input(
             model.open_draft(target, effects)?;
             Ok(true)
         }
+        Some(UiMailboxDraftPane::Loading { target }) if is_draft_text_input(&input) => {
+            let bytes = match &input {
+                UiInput::Character(value) => value.len_utf8(),
+                UiInput::Paste(value) => value.len(),
+                _ => 1,
+            };
+            let pending = model
+                .loading_draft_edits
+                .get_or_insert_with(|| LoadingDraftEdits {
+                    target: target.clone(),
+                    inputs: Vec::new(),
+                    bytes: 0,
+                });
+            if pending.target == target
+                && pending.bytes.saturating_add(bytes) <= MAX_DRAFT_BYTES
+                && pending.inputs.len() < MAX_DRAFT_BYTES
+            {
+                pending.bytes += bytes;
+                pending.inputs.push(input);
+            } else {
+                model.form.errors.insert(
+                    UiFormField::Message,
+                    "Wait for the draft to finish loading before typing more".to_owned(),
+                );
+            }
+            Ok(true)
+        }
         Some(UiMailboxDraftPane::Loading { .. }) | None => Ok(false),
         Some(UiMailboxDraftPane::Editing {
             draft,
@@ -9406,7 +9449,21 @@ fn apply_draft_input(
             submitting,
             closing,
         }) => match input {
-            UiInput::Character(_)
+            input if is_draft_text_input(&input) && !submitting && !closing => {
+                apply_draft_text_input(model, &input, draft, dirty, effects)
+            }
+            UiInput::Activate if !submitting && !closing => {
+                submit_draft(model, draft, dirty, effects)
+            }
+            _ => Ok(false),
+        },
+    }
+}
+
+fn is_draft_text_input(input: &UiInput) -> bool {
+    matches!(
+        input,
+        UiInput::Character(_)
             | UiInput::Paste(_)
             | UiInput::InsertNewline
             | UiInput::Backspace
@@ -9423,16 +9480,7 @@ fn apply_draft_input(
             | UiInput::PreviousItem
             | UiInput::DeleteToLineEnd
             | UiInput::DeleteToLineStart
-                if !submitting && !closing =>
-            {
-                apply_draft_text_input(model, &input, draft, dirty, effects)
-            }
-            UiInput::Activate if !submitting && !closing => {
-                submit_draft(model, draft, dirty, effects)
-            }
-            _ => Ok(false),
-        },
-    }
+    )
 }
 
 fn submit_draft(
@@ -9507,6 +9555,7 @@ fn apply_draft_text_input(
 
 fn finish_draft_close(model: &mut UiModel) {
     model.mailbox_draft = None;
+    model.loading_draft_edits = None;
     model.focus = UiFocus::Conversation;
     model.follow_conversation_tail();
 }
@@ -12195,7 +12244,8 @@ fn select_project_conversation(model: &mut UiModel, project_id: [u8; 32], thread
             )
             .then(|| row.id.clone())
         })
-    }) {
+    }) && model.active_conversation_row() != Some(row_id.as_str())
+    {
         model.install_inbox_conversation_route(row_id);
         model.focus = UiFocus::Conversation;
     }
@@ -12772,6 +12822,7 @@ fn open_conversation_composer(
             model.last_failure = None;
         }
         model.mailbox_draft = None;
+        model.loading_draft_edits = None;
         model.autosave_timer = None;
     }
     if model.pending_mailbox.is_none() {
@@ -12967,22 +13018,26 @@ fn draft_loaded(
     effect_id: EffectId,
     draft: UiMailboxDraft,
     effects: &mut Vec<UiEffect>,
-) {
+) -> Result<(), UiError> {
     if model.pending_mailbox
         != Some(PendingMailbox {
             id: effect_id,
             kind: PendingMailboxKind::OpenDraft,
         })
     {
-        return;
+        return Ok(());
     }
     let target_matches = matches!(
         &model.mailbox_draft,
         Some(UiMailboxDraftPane::Loading { target }) if *target == draft.target
     );
     if !target_matches {
-        return;
+        return Ok(());
     }
+    let edits = model
+        .loading_draft_edits
+        .take()
+        .filter(|edits| edits.target == draft.target);
     model.pending_mailbox = None;
     install_project_setup(model, &draft);
     let cursor = match &draft.target {
@@ -13002,7 +13057,13 @@ fn draft_loaded(
         model.form.cursors.insert(UiFormField::Message, cursor);
     }
     model.last_failure = None;
+    if let Some(edits) = edits {
+        for input in edits.inputs {
+            apply_draft_input(model, input, effects)?;
+        }
+    }
     effects.push(UiEffect::RequestRedraw);
+    Ok(())
 }
 
 fn draft_saved(
@@ -13163,6 +13224,7 @@ fn mailbox_command_committed(
     model.pending_mailbox = None;
     model.mailbox_modal = None;
     model.mailbox_draft = None;
+    model.loading_draft_edits = None;
     model.autosave_timer = None;
     model.last_failure = None;
     if let (Some(draft), Some(message_id)) = (committed_draft.as_ref(), message_id) {
@@ -13858,7 +13920,11 @@ fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Re
                 .as_ref()
                 .and_then(|assignment| assignment.thread_id)
             {
-                model.new_workflow = None;
+                // The canonical assignment may arrive before its exact command receipt.
+                // Retain the guided continuation until that pending command is handled.
+                if model.pending_project.is_none() {
+                    model.new_workflow = None;
+                }
                 model.new_modal = None;
                 select_project_conversation(model, project.project_id, thread_id);
                 model.request_conversation_observation(effects);
@@ -14554,6 +14620,69 @@ fn synchronize_runtime_recovery(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
+    #[test]
+    fn edits_during_draft_loading_survive_approval_focus_and_stale_responses() {
+        use super::UiMailboxDraft;
+        let mut model = model();
+        let mut effects = Vec::new();
+        model
+            .open_draft(UiMailboxDraftTarget::SelfNote, &mut effects)
+            .expect("open draft");
+        let first = model.pending_mailbox.as_ref().expect("pending").id;
+        for input in [
+            UiInput::Paste("unsent approval drafx".to_owned()),
+            UiInput::Backspace,
+            UiInput::Character('t'),
+        ] {
+            super::apply_draft_input(&mut model, input, &mut effects).expect("buffer edit");
+        }
+        model.focus = UiFocus::Approval;
+        super::draft_loaded(
+            &mut model,
+            first,
+            UiMailboxDraft {
+                draft_id: [90; 32],
+                target: UiMailboxDraftTarget::SelfNote,
+                content: String::new(),
+                version: 0,
+            },
+            &mut effects,
+        )
+        .expect("draft response");
+        assert!(
+            matches!(&model.mailbox_draft, Some(UiMailboxDraftPane::Editing { draft, dirty: true, .. }) if draft.content == "unsent approval draft")
+        );
+        assert_eq!(model.focus, UiFocus::Approval);
+
+        super::finish_draft_close(&mut model);
+        model
+            .open_draft(
+                UiMailboxDraftTarget::Project {
+                    project_id: [91; 32],
+                    thread_id: None,
+                },
+                &mut effects,
+            )
+            .expect("different draft");
+        super::apply_draft_input(&mut model, UiInput::Character('x'), &mut effects)
+            .expect("buffer new target");
+        super::draft_loaded(
+            &mut model,
+            first,
+            UiMailboxDraft {
+                draft_id: [90; 32],
+                target: UiMailboxDraftTarget::SelfNote,
+                content: "stale".to_owned(),
+                version: 1,
+            },
+            &mut effects,
+        )
+        .expect("draft response");
+        assert!(matches!(
+            model.mailbox_draft,
+            Some(UiMailboxDraftPane::Loading { .. })
+        ));
+    }
 
     use super::{
         ConfigurationFreshness, EffectId, TextEdit, UiAdjacentView, UiAgent, UiAgentLifecycle,

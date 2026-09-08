@@ -992,6 +992,7 @@ fn guided_project_failure_does_not_rearm_the_submission() {
         UiEffect::ObserveConversation { row_id: Some(row_id), .. } if row_id == &conversation_row
     )));
     let (effect_id, action) = project_effect(&submitting.effects);
+    assert_activation_snapshot_before_receipt(submitting.model.clone(), effect_id, action.clone());
     for outcome in [
         UiProjectOutcome::Rejected {
             category: "conflict".to_owned(),
@@ -1067,6 +1068,94 @@ fn guided_project_failure_does_not_rearm_the_submission() {
             .effects
             .iter()
             .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+}
+
+fn assert_activation_snapshot_before_receipt(
+    mut model: UiModel,
+    effect_id: hq_tui::EffectId,
+    action: UiProjectAction,
+) {
+    if model.focus() != UiFocus::Draft {
+        model = update(model, UiEvent::Input(UiInput::NextFocus))
+            .expect("compose before assignment notification")
+            .model;
+    }
+    let mut snapshot = model.snapshot().expect("snapshot").clone();
+    snapshot.revision += 1;
+    snapshot.projects[0].assignment = Some(UiProjectAssignment {
+        assignment_id: [8; 32],
+        agent_id: [7; 32],
+        provider: "codex".to_owned(),
+        session: Some("session-7".to_owned()),
+        phase: "runnable".to_owned(),
+        thread_id: Some([33; 32]),
+        launch_directory: Some("/work/release".to_owned()),
+        blocked: None,
+        cardinality_conflicted: false,
+        runnable: true,
+    });
+    let refresh = update(
+        model,
+        UiEvent::Invalidated {
+            revision: snapshot.revision,
+        },
+    )
+    .expect("refresh");
+    let id = snapshot_effect(&refresh.effects);
+    model = update(
+        refresh.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: id,
+            snapshot,
+        },
+    )
+    .expect("assignment visible before receipt")
+    .model;
+    assert_eq!(
+        model.focus(),
+        UiFocus::Draft,
+        "assignment notification must not steal composer focus"
+    );
+    let route = model.active_route().clone();
+    assert_eq!(model.focus(), UiFocus::Draft);
+    let completed = update(
+        model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id,
+            result: UiProjectResult {
+                action,
+                command_id: [30; 32],
+                operation_id: [31; 32],
+                project_id: [5; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::Completed {
+                    project_head: Some([24; 32]),
+                },
+            },
+        },
+    )
+    .expect("late activation receipt");
+    let id = snapshot_effect(&completed.effects);
+    let snapshot = completed.model.snapshot().expect("snapshot").clone();
+    let completed = update(
+        completed.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: id,
+            snapshot,
+        },
+    )
+    .expect("receipt refresh");
+    assert_eq!(
+        completed.model.active_route(),
+        &route,
+        "receipt must not replace the already observed conversation"
+    );
+    assert_eq!(
+        completed.model.focus(),
+        UiFocus::Draft,
+        "receipt must not steal composer focus"
     );
 }
 
