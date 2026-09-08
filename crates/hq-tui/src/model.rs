@@ -14422,7 +14422,14 @@ fn guided_project_completed(
             show_completion_notice(model, UiCompletionNotice::ProjectCreated, effects)?;
             // The subscribed view can precede this receipt. Consume its exact project now;
             // another copy of the same authoritative revision may never be published.
-            apply_guided_snapshot(model, effects)?;
+            if model.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .projects
+                    .iter()
+                    .any(|project| project.project_id == result.project_id)
+            }) {
+                apply_guided_snapshot(model, effects)?;
+            }
             Ok(true)
         }
         (
