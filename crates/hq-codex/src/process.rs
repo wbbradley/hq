@@ -258,6 +258,8 @@ impl ChildState {
             use rustix::process::{Pid, Signal, kill_process_group};
             match kill_process_group(Pid::from_child(&self.child), Signal::KILL) {
                 Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                #[cfg(target_os = "macos")]
+                Err(rustix::io::Errno::PERM) if group_has_only_zombies(self.child.id()) => {}
                 Err(_) => return Err(HarnessError::new(HarnessErrorClass::CleanupFailed)),
             }
         }
@@ -275,6 +277,46 @@ impl ChildState {
         self.group_terminated = true;
         Ok(())
     }
+}
+
+// Darwin's killpg1 skips zombies and reports EPERM when none remain signalable.
+// Keep the leader unreaped while checking; its PID still pins this group.
+// A denied signal to a live member must remain a cleanup failure.
+#[cfg(target_os = "macos")]
+fn group_has_only_zombies(group: u32) -> bool {
+    let Ok(output) = Command::new("/bin/ps")
+        .args(["-axo", "pgid=,stat="])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
+        && std::str::from_utf8(&output.stdout)
+            .is_ok_and(|table| group_table_has_only_zombies(table, group))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn group_table_has_only_zombies(table: &str, group: u32) -> bool {
+    let mut found = false;
+    for line in table.lines() {
+        let mut columns = line.split_whitespace();
+        let Some(id) = columns.next().and_then(|value| value.parse::<u32>().ok()) else {
+            return false;
+        };
+        let Some(status) = columns.next() else {
+            return false;
+        };
+        if columns.next().is_some() {
+            return false;
+        }
+        if id == group {
+            found = true;
+            if !status.starts_with('Z') {
+                return false;
+            }
+        }
+    }
+    found
 }
 
 impl CodexProcessControl for ChildControl {
@@ -321,6 +363,17 @@ mod tests {
     use super::{CodexLaunch, CodexProcessStarter, CodexWaitOutcome, ExecCodexProcessStarter};
 
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn zombie_group_evidence_rejects_live_missing_and_malformed_members() {
+        use super::group_table_has_only_zombies;
+        assert!(group_table_has_only_zombies("12 Z\n12 Z+\n99 S\n", 12));
+        assert!(!group_table_has_only_zombies("12 Z\n12 S\n", 12));
+        assert!(!group_table_has_only_zombies("99 Z\n", 12));
+        assert!(!group_table_has_only_zombies("12 Z\ninvalid\n", 12));
+        assert!(!group_table_has_only_zombies("12\n", 12));
+        assert!(!group_table_has_only_zombies("12 Z extra\n", 12));
+    }
 
     #[test]
     fn executable_receives_only_the_copied_environment_and_exact_arguments()

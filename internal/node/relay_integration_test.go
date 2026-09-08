@@ -161,7 +161,6 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 		setupStatus, statusErr = sender.NetworkStatus(ctx)
 		return statusErr == nil && setupStatus.Queued == 0 && relay.eventCount() >= 3
 	}, "mailbox capabilities were not exchanged")
-	setupAccepted, setupRelayEvents := setupStatus.RelayAccepted, relay.eventCount()
 
 	senderSubscription, err := sender.Subscribe(ctx, domain.TopicMessages)
 	if err != nil {
@@ -183,26 +182,40 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 		Body: "local RPC through retained Nostr", Context: repository, CreatedAt: time.Now().UTC(),
 	}
 	var createErr error
-	waitUntil(t, 15*time.Second, func() bool {
-		_ = sender.Synchronize(ctx)
-		createErr = sender.Create(ctx, message)
-		if createErr != nil {
-			t.Logf("waiting for mailbox capability: %v", createErr)
+	defer func() {
+		if t.Failed() && createErr != nil {
+			t.Logf("last mailbox capability error: %v", createErr)
 		}
+	}()
+	// A wake cancels the active relay session. Allow each replacement session
+	// to finish its authentication and retained replay before waking again.
+	nextSync := time.Now()
+	waitUntil(t, 15*time.Second, func() bool {
+		if time.Now().After(nextSync) {
+			_ = receiver.Synchronize(ctx)
+			_ = sender.Synchronize(ctx)
+			nextSync = time.Now().Add(time.Second)
+		}
+		createErr = sender.Create(ctx, message)
 		return createErr == nil
 	}, "sender did not consume the receiver-issued mailbox capability")
 	assertMessageInvalidation(t, senderSubscription.Changes(), "sender local commit")
-	status, err := sender.NetworkStatus(ctx)
-	if err != nil || status.Queued != 1 || status.RelayAccepted != setupAccepted || relay.eventCount() != setupRelayEvents {
-		t.Fatalf("durable pre-publish state = %#v, relay events=%d, err=%v", status, relay.eventCount(), err)
-	}
-	if err := sender.Synchronize(ctx); err != nil {
-		t.Fatal(err)
+	// Capability grants can still arrive during synchronization. Assert this
+	// message's durable outbox identity, rather than unrelated global counts.
+	wrapperID, state := messageOutboxState(t, senderPath, messageID)
+	if state != "queued" || wrapperID != "" {
+		t.Fatalf("durable pre-publish message state = %q, wrapper=%q", state, wrapperID)
 	}
 	waitUntil(t, 15*time.Second, func() bool {
-		status, statusErr := sender.NetworkStatus(ctx)
-		return statusErr == nil && status.Queued == 0 && status.RelayAccepted == setupAccepted+1 && relay.eventCount() == setupRelayEvents+1
-	}, "sender outbox was not published exactly once")
+		if time.Now().After(nextSync) {
+			if err := sender.Synchronize(ctx); err != nil {
+				return false
+			}
+			nextSync = time.Now().Add(time.Second)
+		}
+		wrapperID, state = messageOutboxState(t, senderPath, messageID)
+		return state == "relay-accepted" && relay.hasEvent(wrapperID)
+	}, "sender message outbox was not published")
 
 	if err := receiver.Synchronize(ctx); err != nil {
 		t.Fatal(err)
@@ -217,8 +230,8 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 	if got.Body != message.Body || got.SenderInstallationID != senderIdentity.InstallationID {
 		t.Fatalf("receiver message = %#v, %v", got, getErr)
 	}
-	if relay.eventCount() != setupRelayEvents+1 {
-		t.Fatalf("relay event count = %d", relay.eventCount())
+	if !relay.hasEvent(wrapperID) {
+		t.Fatalf("relay lost message wrapper %s", wrapperID)
 	}
 
 	sender.Close()
@@ -285,6 +298,31 @@ func waitUntil(t *testing.T, timeout time.Duration, ready func() bool, failure s
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func messageOutboxState(t *testing.T, databasePath, messageID string) (string, string) {
+	t.Helper()
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+	if _, err := database.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+		t.Fatal(err)
+	}
+	var wrapperID, state string
+	if err := database.QueryRow(`SELECT coalesce(o.gift_wrap_event_id, ''), o.state FROM outbox o JOIN messages m ON m.event_id=o.event_id WHERE m.id=?`, messageID).Scan(&wrapperID, &state); err != nil {
+		t.Fatal(err)
+	}
+	return wrapperID, state
+}
+
+func (r *retainedRelay) hasEvent(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, present := r.events[id]
+	return present
 }
 
 func assertPersistedMessageCounts(t *testing.T, databasePath, messageID string, messages, outbox, wrappers int) {
