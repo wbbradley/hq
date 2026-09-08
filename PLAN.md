@@ -2,12 +2,6 @@
 
 ## Next Up
 
-### Agent cancellation control-path and ACP assessment
-
-Extracted prerequisite for capability-aware cancellation: document the current HQ interrupt path and serialization risks, assess ACP v1 negotiation, cancellation, permissions, persistence, recovery and stable identities, and evaluate the official Rust SDK. Produce docs/agent-cancellation.md with an explicit adoption recommendation and a bounded integration design. Preserve the remaining end-to-end cancellation implementation and its acceptance tests in the next entry.
-
-Completion: Verify claims against current source and primary protocol documentation, distinguish request acknowledgement from terminal state, and identify concrete capability, authorization, dispatch, identity and recovery requirements for implementation.
-
 ### Capability-aware cancellation of agent work
 
 Problem: The conversation view cannot stop a running agent turn. Offer cancellation only for recipients with the capability; human recipients and unsupported harnesses must not offer or accept it.
@@ -16,7 +10,7 @@ Existing foundation: `crates/hq-harness/src/contract.rs` defines `HarnessCapabil
 
 Scope and dependencies:
 
-- First document the existing control path and assess ACP (Agent Client Protocol) in a focused design note. Compare version/capability negotiation, prompt lifecycle, cancellation, permissions, persistence/resumption, submission acceptance/recovery, and operation/event identity. Evaluate the official Rust SDK and distinguish stable guarantees from preview features. Recommend ACP support now or later, explaining gaps and a bounded adapter design. Implementing arbitrary ACP integrations is not required by this task.
+- Follow the completed control-path and ACP assessment in `docs/agent-cancellation.md`: implement neutral cancellation now, defer arbitrary ACP integration, and preserve the safe-submission registry gate.
 - Expose typed recipient capabilities and an exact active cancellation target through application ports, the local API, node composition, TUI client, and model. Derive availability from authoritative capabilities and current operation state; revalidate authorization and exact scope in the daemon.
 - Add a discoverable conversation/composer action with clear request/result states. Cancellation is a control operation, distinct from ordinary message content, question-thread cancellation, and rejecting a pending approval.
 - Trace dispatch and lock ownership through `crates/hq-node/src/tui_client.rs`, `crates/hq-local-api/src/server.rs`, `crates/hq-node/src/harness_component.rs`, and the supervisor. Ensure cancellation reaches the adapter while generation or a tool is running. The supervisor currently holds its worker mutex during cancellation RPC; prevent long work, blocked submission/response handling, or other sessions from indefinitely serializing the control path.
@@ -24,7 +18,7 @@ Scope and dependencies:
 
 Invariants: Scope cancellation to the authorized recipient/session/operation, never display prose. Unsupported recipients cannot invoke it. Preserve accepted-work recovery guarantees and sibling conversation responsiveness.
 
-Completion: A deterministic integration test holds a turn/tool open and proves cancellation reaches the adapter before that work is released. Authoritative terminal state reaches the TUI, and the conversation can continue afterward. Cover natural completion races, duplicate/stale requests, uncertain outcomes, and cancellation while awaiting approval. The ACP assessment records an adoption recommendation and concrete gaps without weakening HQ's recovery guarantees.
+Completion: A deterministic integration test holds a turn/tool open and proves cancellation reaches the adapter before that work is released. Authoritative terminal state reaches the TUI, and the conversation can continue afterward. Cover natural completion races, duplicate/stale requests, uncertain outcomes, and cancellation while awaiting approval. Implementation must preserve the recovery guarantees identified in the completed ACP assessment.
 
 Research anchors:
 

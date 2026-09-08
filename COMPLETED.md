@@ -13970,3 +13970,16 @@ message; the same conversation resumes and delivers once with truthful status. C
 before startup, process loss, permanent/transient resume failure, concurrent sends, close/reassignment
 races, stale queued work, retry exhaustion/restart and lost acceptance responses. Update
 `docs/projects.md` and `docs/harness-supervisor-v1.md` to describe targeted retries and observations.
+
+## Agent cancellation control-path and ACP assessment
+
+Implemented docs/agent-cancellation.md with verified current lock and dispatch boundaries, capability and exact-operation requirements, acknowledgement-versus-terminal semantics, and an ACP v1/Rust SDK assessment. Recommendation: implement HQ cancellation now and defer arbitrary ACP admission until safe submission recovery is demonstrated. Workspace tests, strict workspace clippy and formatting passed. End-to-end cancellation remains queued.
+
+Original task:
+
+### Agent cancellation control-path and ACP assessment
+
+Extracted prerequisite for capability-aware cancellation: document the current HQ interrupt path and serialization risks, assess ACP v1 negotiation, cancellation, permissions, persistence, recovery and stable identities, and evaluate the official Rust SDK. Produce docs/agent-cancellation.md with an explicit adoption recommendation and a bounded integration design. Preserve the remaining end-to-end cancellation implementation and its acceptance tests in the next entry.
+
+Completion: Verify claims against current source and primary protocol documentation, distinguish request acknowledgement from terminal state, and identify concrete capability, authorization, dispatch, identity and recovery requirements for implementation.
+
