@@ -14031,3 +14031,31 @@ Research anchors:
 - [Official ACP Rust SDK](https://agentclientprotocol.com/libraries/rust): ACP integration need not require TypeScript.
 - `crates/hq-harness/src/registry.rs` requires provider submission idempotency or authoritative submission lookup. Determine whether the selected ACP version can satisfy this; session loading alone does not prove exact submission acceptance.
 
+
+### Conversation details as focused navigation
+
+Implementation summary: Runtime Details is now a typed child of the exact conversation,
+with a Details breadcrumb, its own scrolling offset and footer, and no composer beneath it.
+D and R hints are shown only when conversation input can act on them. D remains ordinary
+composer input. Details owns its input so Tab, compose shortcuts and transcript navigation
+cannot modify the hidden reading surface; Esc returns with the draft and scroll position
+preserved. Stable row aliases preserve Details, while removal or a changed conversation target
+closes stale recovery information. Exact runtime retry remains available in Details.
+
+Validation: The TUI suite, targeted identity/navigation regressions, node TUI executor and
+terminal-shell suites, formatting, and strict workspace linting passed.
+
+Original task:
+
+### Conversation details as focused navigation
+
+Problem: The runtime strip advertises D while the composer has focus, and runtime details replace the transcript without becoming a navigation destination; the collapsed composer still advertises Tab to compose underneath details.
+
+Scope: In `crates/hq-tui/src/model.rs`, replace the loose `runtime_details` visibility flag with an appropriate typed navigation destination scoped to the selected conversation, integrating with `UiRoute`/`UiNavigation`. In `render.rs`, update `runtime_header_lines`, recovery details rendering, breadcrumbs, footer help, and collapsed-composer rendering.
+
+- Show the D shortcut only when it can act on the focused conversation. Preserve D as ordinary draft input while composing; the current input dispatcher already gates runtime actions on conversation focus.
+- Details should show a breadcrumb such as `HQ / Inbox / alice / Details`, with equivalent project paths. Esc returns to the same conversation and reading position. Do not advertise or enter the composer from the details destination; hide its collapsed prompt there.
+- Preserve the exact conversation/runtime identity, recovery evidence and retry behavior, draft content, and transcript tail/anchor state. Clear stale details when the target conversation disappears or changes.
+
+Completion: Model and rendering tests cover conversation versus composer focus, D typed into a draft, details breadcrumbs and back navigation, absence of composer hints in details, narrow layouts, and target changes. No daemon changes are required.
+

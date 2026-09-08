@@ -2,18 +2,6 @@
 
 ## Next Up
 
-### Conversation details as focused navigation
-
-Problem: The runtime strip advertises D while the composer has focus, and runtime details replace the transcript without becoming a navigation destination; the collapsed composer still advertises Tab to compose underneath details.
-
-Scope: In `crates/hq-tui/src/model.rs`, replace the loose `runtime_details` visibility flag with an appropriate typed navigation destination scoped to the selected conversation, integrating with `UiRoute`/`UiNavigation`. In `render.rs`, update `runtime_header_lines`, recovery details rendering, breadcrumbs, footer help, and collapsed-composer rendering.
-
-- Show the D shortcut only when it can act on the focused conversation. Preserve D as ordinary draft input while composing; the current input dispatcher already gates runtime actions on conversation focus.
-- Details should show a breadcrumb such as `HQ / Inbox / alice / Details`, with equivalent project paths. Esc returns to the same conversation and reading position. Do not advertise or enter the composer from the details destination; hide its collapsed prompt there.
-- Preserve the exact conversation/runtime identity, recovery evidence and retry behavior, draft content, and transcript tail/anchor state. Clear stale details when the target conversation disappears or changes.
-
-Completion: Model and rendering tests cover conversation versus composer focus, D typed into a draft, details breadcrumbs and back navigation, absence of composer hints in details, narrow layouts, and target changes. No daemon changes are required.
-
 ### Exit agent-specific setup back to the Inbox
 
 Problem: Enter on an unassigned Inbox agent opens Choose project, but Esc exposes the generic New… launcher even though the user never entered that launcher.
