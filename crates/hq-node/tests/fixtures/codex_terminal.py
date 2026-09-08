@@ -3,11 +3,26 @@ import json
 import os
 import sys
 import time
+import queue
+import threading
 
 thread_id = "hq-test-thread"
 counter_path = os.path.join(os.path.dirname(__file__), "turn-number")
 turn_number = int(open(counter_path).read()) if os.path.exists(counter_path) else 0
-for line in sys.stdin:
+interrupt_fixture = os.path.exists(os.path.join(os.path.dirname(__file__), "wait-for-interrupt"))
+lines = sys.stdin
+if interrupt_fixture:
+    wire_lines = queue.Queue()
+
+    def read_wire():
+        for incoming in sys.stdin:
+            wire_lines.put(incoming)
+        wire_lines.put(None)
+
+    threading.Thread(target=read_wire, daemon=True).start()
+    lines = iter(wire_lines.get, None)
+
+for line in lines:
     with open(os.path.join(os.path.dirname(__file__), "calls.log"), "a") as log:
         log.write(line)
     message = json.loads(line)
@@ -51,7 +66,7 @@ for line in sys.stdin:
             approval_id = 900 + turn_number
             approval = {"id": approval_id, "method": "item/commandExecution/requestApproval", "params": {"threadId": thread_id, "turnId": turn_id, "itemId": f"command-{turn_number}", "command": "cargo test", "cwd": os.getcwd(), "reason": "Run the test command?"}}
             print(json.dumps(approval), flush=True)
-            for answer_line in sys.stdin:
+            for answer_line in lines:
                 with open(os.path.join(os.path.dirname(__file__), "calls.log"), "a") as log:
                     log.write(answer_line)
                 answer = json.loads(answer_line)
@@ -65,7 +80,7 @@ for line in sys.stdin:
         if turn_number == 1 and os.path.exists(os.path.join(os.path.dirname(__file__), "wait-for-interrupt")):
             with open(os.path.join(os.path.dirname(__file__), "interrupt-waiting"), "w") as marker:
                 marker.write("waiting")
-            for control_line in sys.stdin:
+            for control_line in lines:
                 with open(os.path.join(os.path.dirname(__file__), "calls.log"), "a") as log:
                     log.write(control_line)
                 control = json.loads(control_line)
@@ -77,6 +92,19 @@ for line in sys.stdin:
                     with open(os.path.join(os.path.dirname(__file__), "interrupt-received"), "w") as marker:
                         marker.write(turn_id)
                     print(json.dumps({"id": control["id"], "result": {}}), flush=True)
+                    hold_terminal = os.path.join(os.path.dirname(__file__), "hold-interrupted-terminal")
+                    release_terminal = os.path.join(os.path.dirname(__file__), "release-interrupted-terminal")
+                    while os.path.exists(hold_terminal) and not os.path.exists(release_terminal):
+                        try:
+                            pending_line = wire_lines.get(timeout=0.02)
+                        except queue.Empty:
+                            continue
+                        assert pending_line is not None, "provider closed before terminal release"
+                        with open(os.path.join(os.path.dirname(__file__), "calls.log"), "a") as log:
+                            log.write(pending_line)
+                        pending = json.loads(pending_line)
+                        assert pending.get("method") == "thread/read", "new work reached provider before old terminal"
+                        print(json.dumps({"id": pending["id"], "result": {"thread": {"id": thread_id, "turns": [turn]}}}), flush=True)
                     print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "interrupted", "items": []}}}), flush=True)
                     break
             continue

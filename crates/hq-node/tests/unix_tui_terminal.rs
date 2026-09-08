@@ -956,16 +956,21 @@ fn installed_guided_work_resumes_exact_conversation_after_node_restart() {
 
 #[test]
 fn installed_agent_stop_interrupts_held_work_and_continues_with_the_preserved_draft() {
-    assert_installed_agent_cancellation(false);
+    assert_installed_agent_cancellation(false, false);
 }
 
 #[test]
 fn installed_agent_stop_cancels_pending_approval_and_preserves_the_next_message() {
-    assert_installed_agent_cancellation(true);
+    assert_installed_agent_cancellation(true, false);
+}
+
+#[test]
+fn installed_agent_stop_retains_a_message_sent_before_terminal_confirmation() {
+    assert_installed_agent_cancellation(false, true);
 }
 
 #[allow(clippy::too_many_lines)]
-fn assert_installed_agent_cancellation(approval: bool) {
+fn assert_installed_agent_cancellation(approval: bool, queued: bool) {
     use hq_local_api::{
         ClientEvent,
         protocol::v1::{
@@ -982,6 +987,10 @@ fn assert_installed_agent_cancellation(approval: bool) {
     std::fs::create_dir(&provider_bin).expect("provider directory");
     install_fake_codex(&provider_bin, approval);
     std::fs::write(provider_bin.join("wait-for-interrupt"), b"enabled").expect("interrupt gate");
+    if queued {
+        std::fs::write(provider_bin.join("hold-interrupted-terminal"), b"enabled")
+            .expect("terminal confirmation gate");
+    }
     let search_path = format!(
         "{}:{}",
         provider_bin.display(),
@@ -1089,11 +1098,18 @@ fn assert_installed_agent_cancellation(approval: bool) {
         true,
         PtyInteraction::StopAgentAndContinue {
             approval,
+            queued,
             provider_bin: &provider_bin,
         },
     );
     assert!(run.status.success(), "stop/continue: {:?}", run.bytes);
     assert_eq!(run.before, run.after);
+    if queued {
+        assert!(
+            provider_bin.join("release-interrupted-terminal").exists(),
+            "the next message must be saved before terminal confirmation is released"
+        );
+    }
     assert!(provider_bin.join("interrupt-received").exists());
     assert!(mailbox_contains(&state_root, "finished-turn-2"));
     query.tracked_operation = Some(target.operation_id);
@@ -1675,6 +1691,7 @@ struct PtyRun {
 enum PtyInteraction<'content> {
     StopAgentAndContinue {
         approval: bool,
+        queued: bool,
         provider_bin: &'content Path,
     },
     ReadPagedHistory {
@@ -1849,7 +1866,12 @@ fn run_in_pty_with_trace(
         let alternate_screen_entered = bytes
             .windows(ENTER_ALTERNATE_SCREEN.len())
             .any(|window| window == ENTER_ALTERNATE_SCREEN);
-        if let PtyInteraction::StopAgentAndContinue { approval, .. } = interaction {
+        if let PtyInteraction::StopAgentAndContinue {
+            approval,
+            queued,
+            provider_bin,
+        } = interaction
+        {
             let rendered = text_without_csi_sequences(&bytes[completion_offset.unwrap_or(0)..]);
             match oversized_phase {
                 0 if rendered.contains("cancellation-agent") && rendered.contains("Connected") => {
@@ -1867,7 +1889,36 @@ fn run_in_pty_with_trace(
                     oversized_phase = 2;
                     completion_offset = Some(bytes.len());
                 }
-                2 if rendered.contains("Agent stopped")
+                2 if queued
+                    && rendered.contains("Stopping agent")
+                    && rendered.contains("Continue after stopping") =>
+                {
+                    master
+                        .write_all(b"\r")
+                        .expect("save the next input while stopping");
+                    oversized_phase = 5;
+                    completion_offset = Some(bytes.len());
+                }
+                5 if Instant::now() >= next_state_probe_at => {
+                    let project = project_json(state_root, "cancellation-project");
+                    if project["inputs"].as_array().map(Vec::len) == Some(2) {
+                        assert_eq!(
+                            project["dispatches"].as_array().map(Vec::len),
+                            Some(1),
+                            "future input must wait until the old turn is terminal"
+                        );
+                        std::fs::write(
+                            provider_bin.join("release-interrupted-terminal"),
+                            b"release",
+                        )
+                        .expect("release only after canonical future input is saved");
+                        oversized_phase = 3;
+                        completion_offset = Some(bytes.len());
+                    }
+                    next_state_probe_at = Instant::now() + Duration::from_millis(150);
+                }
+                2 if !queued
+                    && rendered.contains("Agent stopped")
                     && rendered.contains("Continue after stopping") =>
                 {
                     master.write_all(b"\r").expect("send preserved draft");
@@ -3125,6 +3176,10 @@ fn run_in_pty_with_trace(
         let history_stalled = match interaction {
             PtyInteraction::ReadPagedHistory { .. } => {
                 history_progress_at.elapsed() >= PROCESS_INACTIVITY_WATCHDOG.saturating_mul(4)
+            }
+            PtyInteraction::StopAgentAndContinue { queued: true, .. } if oversized_phase == 3 => {
+                // The saved delivery uses the daemon's bounded retry after backpressure.
+                history_progress_at.elapsed() >= PROCESS_INACTIVITY_WATCHDOG.saturating_mul(2)
             }
             PtyInteraction::StopAgentAndContinue { .. } => {
                 history_progress_at.elapsed() >= PROCESS_INACTIVITY_WATCHDOG
