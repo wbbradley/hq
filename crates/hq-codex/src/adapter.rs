@@ -209,6 +209,7 @@ struct CodexSession {
     deferred_error: Option<HarnessErrorClass>,
     pending_submission_operation: Option<OperationId>,
     active_turn: Option<String>,
+    pending_interrupt: Option<(OperationId, HarnessCancellationOutcome)>,
     operations: BTreeMap<String, OperationId>,
     submissions: BTreeMap<MessageId, SubmissionRecord>,
     events: VecDeque<HarnessEvent>,
@@ -285,6 +286,7 @@ impl CodexSession {
             deferred_error: None,
             pending_submission_operation: None,
             active_turn: None,
+            pending_interrupt: None,
             operations: BTreeMap::new(),
             submissions: BTreeMap::new(),
             events: VecDeque::new(),
@@ -448,6 +450,7 @@ impl CodexSession {
                 self.active_turn = Some(turn_id.clone());
             } else if method == "turn/completed" && self.active_turn.as_deref() == Some(&turn_id) {
                 self.active_turn = None;
+                self.pending_interrupt = None;
             }
         }
         let events =
@@ -916,6 +919,11 @@ impl HarnessSession for CodexSession {
                 HarnessErrorClass::SubmissionIdentityConflict,
             ));
         }
+        if self.pending_interrupt.is_some() {
+            return Ok(HarnessSubmissionOutcome::Rejected(
+                HarnessErrorClass::Backpressure,
+            ));
+        }
         let record = SubmissionRecord {
             digest: submission.digest,
             operation_id: submission.operation_id,
@@ -985,17 +993,22 @@ impl HarnessSession for CodexSession {
         &mut self,
         operation_id: OperationId,
     ) -> Result<HarnessCancellationOutcome, HarnessError> {
+        if let Some((pending, outcome)) = self.pending_interrupt
+            && pending == operation_id
+        {
+            return Ok(outcome);
+        }
         let cancelled_request = self.cancel_pending_for_operation(operation_id)?;
         let Some(turn_id) = self.active_turn.clone() else {
             return Ok(if cancelled_request {
-                HarnessCancellationOutcome::Cancelled
+                HarnessCancellationOutcome::Requested
             } else {
                 HarnessCancellationOutcome::AlreadyFinished
             });
         };
         if self.operations.get(&turn_id).copied() != Some(operation_id) {
             return Ok(if cancelled_request {
-                HarnessCancellationOutcome::Cancelled
+                HarnessCancellationOutcome::Requested
             } else {
                 HarnessCancellationOutcome::AlreadyFinished
             });
@@ -1010,13 +1023,22 @@ impl HarnessSession for CodexSession {
         );
         match result {
             Ok(_) => {
-                self.active_turn = None;
-                Ok(HarnessCancellationOutcome::Cancelled)
+                if self.active_turn.as_deref() == Some(turn_id.as_str()) {
+                    self.pending_interrupt =
+                        Some((operation_id, HarnessCancellationOutcome::Requested));
+                }
+                Ok(HarnessCancellationOutcome::Requested)
             }
             Err(RpcFailure::Rejected) => Ok(HarnessCancellationOutcome::Rejected(
                 HarnessErrorClass::Unavailable,
             )),
-            Err(RpcFailure::Uncertain(class)) => Ok(HarnessCancellationOutcome::Uncertain(class)),
+            Err(RpcFailure::Uncertain(class)) => {
+                let outcome = HarnessCancellationOutcome::Uncertain(class);
+                if self.active_turn.as_deref() == Some(turn_id.as_str()) {
+                    self.pending_interrupt = Some((operation_id, outcome));
+                }
+                Ok(outcome)
+            }
             Err(error) => Err(error.harness()),
         }
     }

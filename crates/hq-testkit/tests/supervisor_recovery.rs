@@ -1268,7 +1268,7 @@ fn assert_cancellation_intake(supervisor: &HarnessSupervisor, agent_id: AgentId)
         supervisor
             .cancel(agent_id, operation_id)
             .expect("live operation cancellation routes through the owner"),
-        HarnessCancellationOutcome::Cancelled
+        HarnessCancellationOutcome::Requested
     );
     supervisor
         .stop_intake()
@@ -2141,7 +2141,7 @@ impl HarnessSession for TestSession {
         &mut self,
         _operation_id: OperationId,
     ) -> Result<HarnessCancellationOutcome, HarnessError> {
-        Ok(HarnessCancellationOutcome::Cancelled)
+        Ok(HarnessCancellationOutcome::Requested)
     }
 
     fn next_event(&mut self) -> Result<HarnessEventPoll, HarnessError> {

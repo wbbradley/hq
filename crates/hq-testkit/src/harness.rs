@@ -499,7 +499,7 @@ fn interactive_request(
             .session
             .cancel_operation(second.operation_id)
             .map_err(|_| failure(scenario, "interactive cancellation failed"))?
-            == HarnessCancellationOutcome::Cancelled,
+            == HarnessCancellationOutcome::Requested,
         "interactive cancellation was not explicit",
     )?;
     let cancelled_answer = HarnessInteractiveAnswer {
@@ -1104,7 +1104,7 @@ impl HarnessSession for ScriptedSession {
             HarnessConformanceObservation::OperationCancelled(operation_id),
         )?;
         self.pending_requests.clear();
-        Ok(HarnessCancellationOutcome::Cancelled)
+        Ok(HarnessCancellationOutcome::Requested)
     }
 
     fn next_event(&mut self) -> Result<HarnessEventPoll, HarnessError> {

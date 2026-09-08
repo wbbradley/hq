@@ -157,6 +157,7 @@ mod adapter {
         thread_id: String,
         resume_ack: Option<String>,
         lose_turn_response: bool,
+        complete_interrupt: bool,
         history_accepts: bool,
         emit_events: bool,
         emit_after_read: bool,
@@ -174,6 +175,7 @@ mod adapter {
                 thread_id: "thr-test".to_owned(),
                 resume_ack: None,
                 lose_turn_response: false,
+                complete_interrupt: false,
                 history_accepts: false,
                 emit_events: false,
                 emit_after_read: false,
@@ -392,6 +394,122 @@ mod adapter {
             .create_instance(instance_request())?
             .open_session(HarnessSessionRequest::Start)?;
         assert_eq!(opened.session_id.as_str(), "thr-test");
+        opened.session.force_stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn interrupt_completion_allows_new_work_and_rejects_the_old_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let starter = Arc::new(FakeStarter::new([ServerSpec {
+            complete_interrupt: true,
+            ..ServerSpec::default()
+        }]));
+        let factory = factory(Arc::clone(&starter), Arc::new(RecordingSink::default()))?;
+        let mut opened = factory
+            .create_instance(instance_request())?
+            .open_session(HarnessSessionRequest::Start)?;
+        let input = submission()?;
+        let operation_id = input.operation_id;
+        opened.session.submit(input)?;
+        assert!(matches!(
+            next_ready_event(&mut *opened.session)?,
+            HarnessEventPoll::Event(HarnessEvent::Activity(HarnessActivity {
+                status: ActivityStatus::Running,
+                ..
+            }))
+        ));
+        assert_eq!(
+            opened.session.cancel_operation(operation_id)?,
+            HarnessCancellationOutcome::Requested
+        );
+        let terminal = next_ready_event(&mut *opened.session)?;
+        assert!(
+            matches!(
+                terminal,
+                HarnessEventPoll::Event(HarnessEvent::Activity(HarnessActivity {
+                    operation_id: actual, status: ActivityStatus::Interrupted, ..
+                })) if actual == operation_id
+            ),
+            "{terminal:?}"
+        );
+        assert_eq!(
+            opened.session.cancel_operation(operation_id)?,
+            HarnessCancellationOutcome::AlreadyFinished
+        );
+        let next = HarnessSubmission {
+            submission_id: MessageId::from_bytes([7; 32]),
+            digest: CommandDigest::from_bytes([8; 32]),
+            operation_id: OperationId::from_bytes([9; 32]),
+            body: ContentText::new("next input")?,
+        };
+        assert_eq!(
+            opened.session.submit(next)?,
+            HarnessSubmissionOutcome::Accepted
+        );
+        assert_eq!(
+            opened.session.cancel_operation(operation_id)?,
+            HarnessCancellationOutcome::AlreadyFinished
+        );
+        let observed = starter
+            .observed
+            .lock()
+            .map_err(|_| "observations poisoned")?;
+        assert_eq!(count_method(&observed, "turn/interrupt"), 1);
+        assert_eq!(count_method(&observed, "turn/start"), 2);
+        drop(observed);
+        opened.session.force_stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn interrupt_acknowledgement_keeps_the_exact_turn_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let starter = Arc::new(FakeStarter::new([ServerSpec::default()]));
+        let factory = factory(Arc::clone(&starter), Arc::new(RecordingSink::default()))?;
+        let mut opened = factory
+            .create_instance(instance_request())?
+            .open_session(HarnessSessionRequest::Start)?;
+        let input = submission()?;
+        let operation_id = input.operation_id;
+        assert_eq!(
+            opened.session.submit(input)?,
+            HarnessSubmissionOutcome::Accepted
+        );
+        assert_eq!(
+            opened.session.cancel_operation(operation_id)?,
+            HarnessCancellationOutcome::Requested
+        );
+        assert_eq!(
+            opened.session.cancel_operation(operation_id)?,
+            HarnessCancellationOutcome::Requested,
+            "an acknowledged interrupt is still pending until a terminal event"
+        );
+        let next = HarnessSubmission {
+            submission_id: MessageId::from_bytes([7; 32]),
+            digest: CommandDigest::from_bytes([8; 32]),
+            operation_id: OperationId::from_bytes([9; 32]),
+            body: ContentText::new("next input")?,
+        };
+        assert_eq!(
+            opened.session.submit(next)?,
+            HarnessSubmissionOutcome::Rejected(HarnessErrorClass::Backpressure)
+        );
+        let observed = starter
+            .observed
+            .lock()
+            .map_err(|_| "observations poisoned")?;
+        assert_eq!(count_method(&observed, "turn/interrupt"), 1);
+        assert_eq!(count_method(&observed, "turn/start"), 1);
+        assert_eq!(count_method(&observed, "turn/steer"), 0);
+        assert!(observed.iter().any(|request| {
+            request.get("method").and_then(Value::as_str) == Some("turn/interrupt")
+                && request.get("params")
+                    == Some(&json!({
+                        "threadId": "thr-test", "turnId": "turn-test"
+                    }))
+        }));
+        drop(observed);
         opened.session.force_stop()?;
         Ok(())
     }
@@ -1517,6 +1635,19 @@ mod adapter {
                 }
                 Some("turn/interrupt" | "turn/steer") => {
                     write_result(&mut output, &message, &json!({"turnId":"turn-test"}));
+                    if spec.complete_interrupt
+                        && message.get("method").and_then(Value::as_str) == Some("turn/interrupt")
+                    {
+                        write_frame(
+                            &mut output,
+                            &json!({
+                                "method": "turn/completed",
+                                "params": {"threadId": spec.thread_id, "turn": {
+                                    "id": "turn-test", "status": "interrupted"
+                                }}
+                            }),
+                        );
+                    }
                 }
                 _ => {}
             }

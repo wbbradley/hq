@@ -86,8 +86,11 @@ secret-bearing input MUST NOT cross or be persisted at this neutral boundary; su
 
 ## Cancellation and shutdown
 
-Cancellation targets one exact HQ operation and reports `Cancelled`, `AlreadyFinished`, definite
-`Rejected`, or `Uncertain`. Cancellation is not evidence that an uncertain submission was absent.
+Cancellation targets one exact HQ operation and reports `Requested`, `AlreadyFinished`, definite
+`Rejected`, or `Uncertain`. `Requested` acknowledges the interrupt request; only terminal
+provider activity proves that work has stopped. Keep the exact active target while an interrupt
+is unresolved and apply backpressure to new submissions. Cancellation is not evidence that an
+uncertain submission was absent.
 
 Shutdown is explicit and ordered:
 

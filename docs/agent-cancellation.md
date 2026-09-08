@@ -36,12 +36,15 @@ ordinary generation. Nevertheless, the required guarantee includes blocked
 submission/RPC handling and sibling sessions; test those independently rather
 than treating one successful interrupt as proof of concurrency.
 
-The current HarnessCancellationOutcome::Cancelled documentation means the request
-was accepted, not that a terminal event was persisted. Codex also clears
-active_turn immediately after the interrupt response. The implementation should
-name acknowledgement explicitly (for example Requested), retain operation
-correlation until a terminal provider event, and derive finished/cancelled UI state
-from authoritative operation evidence. Late output before completion remains valid.
+The assessment found that HarnessCancellationOutcome::Cancelled meant request
+acceptance and that Codex cleared active_turn immediately after the interrupt
+response. The adapter now calls this outcome Requested and retains the active turn
+until terminal provider evidence. Duplicate requests retain their original outcome,
+and submissions receive Backpressure while interruption is unresolved. The remaining
+application integration must retain future inputs in the durable queue during that
+interval rather than treating backpressure as permanent rejection. Finished/cancelled
+UI state must come from authoritative operation evidence. Late output before
+completion remains valid.
 
 ## Control contract
 

@@ -184,8 +184,8 @@ pub enum HarnessSubmissionLookup {
 /// Explicit result of requesting provider-operation cancellation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HarnessCancellationOutcome {
-    /// Cancellation was accepted for an active operation.
-    Cancelled,
+    /// Cancellation was accepted; terminal completion must still be observed.
+    Requested,
     /// The operation was already terminal before cancellation.
     AlreadyFinished,
     /// The provider definitely rejected cancellation.
