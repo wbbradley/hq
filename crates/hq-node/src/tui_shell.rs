@@ -112,7 +112,10 @@ where
 }
 
 fn next_crossterm_event() -> Result<Option<TuiTerminalEvent>, TuiTerminalError> {
-    if !event::poll(Duration::ZERO)
+    // Crossterm's level-triggered tty backend avoids losing a keyboard edge
+    // when a resize is returned first. Its parser requires a nonzero budget,
+    // even when checking bytes already buffered by an earlier read.
+    if !event::poll(Duration::from_millis(1))
         .map_err(|error| terminal_io_error(TuiTerminalPhase::Poll, &error))?
     {
         return Ok(None);
