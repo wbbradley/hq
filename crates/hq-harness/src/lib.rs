@@ -5,16 +5,17 @@ mod contract;
 mod environment;
 mod registry;
 mod supervisor;
+mod supervisor_controls;
 
 pub use buffer::{HarnessBufferPush, HarnessBufferedEvent, HarnessEventBuffer, HarnessSnapshotKey};
 pub use contract::{
     HarnessActivity, HarnessCancellationOutcome, HarnessCapabilities, HarnessCapability,
     HarnessDrainOutcome, HarnessError, HarnessErrorClass, HarnessEvent, HarnessEventNotifier,
     HarnessEventPoll, HarnessFactory, HarnessInstance, HarnessInstanceRequest,
-    HarnessInteractiveAnswer, HarnessInteractiveRequest, HarnessInteractiveResponse, HarnessOutput,
-    HarnessOutputKind, HarnessRequestChoice, HarnessRequestId, HarnessRequestKind, HarnessSession,
-    HarnessSessionRequest, HarnessSubmission, HarnessSubmissionLookup, HarnessSubmissionOutcome,
-    OpenedHarnessSession,
+    HarnessInteractiveAnswer, HarnessInteractiveRequest, HarnessInteractiveResponse,
+    HarnessOperationControl, HarnessOutput, HarnessOutputKind, HarnessRequestChoice,
+    HarnessRequestId, HarnessRequestKind, HarnessSession, HarnessSessionRequest, HarnessSubmission,
+    HarnessSubmissionLookup, HarnessSubmissionOutcome, OpenedHarnessSession,
 };
 pub use environment::{
     HarnessEnvironment, MAX_HARNESS_ENVIRONMENT_BYTES, MAX_HARNESS_ENVIRONMENT_ENTRIES,

@@ -457,8 +457,27 @@ impl fmt::Debug for OpenedHarnessSession {
     }
 }
 
+/// Independently addressable control for one exact live session.
+///
+/// Implementations must remain usable while the mutable session owner waits on provider I/O.
+/// Request acknowledgement does not replace authoritative terminal operation evidence.
+pub trait HarnessOperationControl: Send + Sync {
+    /// Requests cancellation of the exact HQ operation, never a replacement active operation.
+    fn cancel_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<HarnessCancellationOutcome, HarnessError>;
+}
+
 /// Sole mutable owner of one ready provider session.
 pub trait HarnessSession: Send {
+    /// Returns independently addressable operation control when this session supports it.
+    ///
+    /// Managed cancellation requires this handle as well as the provider capability declaration.
+    fn operation_control(&self) -> Option<Arc<dyn HarnessOperationControl>> {
+        None
+    }
+
     /// Registers the supervisor's event notifier and immediately wakes it for already-ready input.
     fn register_event_notifier(
         &mut self,

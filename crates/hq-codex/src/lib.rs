@@ -2,9 +2,11 @@
 
 mod adapter;
 mod normalize;
+mod operation_control;
 mod process;
 mod protocol;
 mod transport;
+mod transport_control;
 
 pub use adapter::{CodexFactory, CodexFactoryConfig};
 pub use process::{
@@ -21,3 +23,6 @@ pub const CODEX_PROVIDER_ID: &str = "codex";
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod transport_control_tests;

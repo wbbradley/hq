@@ -11,6 +11,10 @@ use std::{
 use hq_harness::{HarnessError, HarnessErrorClass, HarnessEventNotifier};
 use serde::Serialize;
 
+use crate::transport_control::{
+    ControlReaderGuard, ControlResponses, FrameWriter, TransportControl,
+};
+
 #[cfg(test)]
 use crate::DiscardCodexDiagnostics;
 use crate::{CodexOperationalDiagnosticSink, protocol::WireMessage};
@@ -44,7 +48,8 @@ impl TransportFailure {
 }
 
 pub(crate) struct JsonlTransport {
-    input: Option<Box<dyn Write + Send>>,
+    input: Arc<FrameWriter>,
+    controls: Arc<ControlResponses>,
     incoming: Receiver<TransportRead>,
     reader: Option<JoinHandle<()>>,
     notifier: Arc<Mutex<Option<HarnessEventNotifier>>>,
@@ -70,12 +75,24 @@ impl JsonlTransport {
         let (sender, incoming) = mpsc::sync_channel(capacity);
         let notifier = Arc::new(Mutex::new(None));
         let reader_notifier = Arc::clone(&notifier);
+        let controls = Arc::new(ControlResponses::default());
+        let reader_controls = Arc::clone(&controls);
         let reader = thread::Builder::new()
             .name("hq-codex-jsonl".to_owned())
-            .spawn(move || read_frames(output, &sender, &reader_notifier, diagnostics.as_ref()))
+            .spawn(move || {
+                let guard = ControlReaderGuard(reader_controls);
+                read_frames(
+                    output,
+                    &sender,
+                    &reader_notifier,
+                    diagnostics.as_ref(),
+                    &guard.0,
+                );
+            })
             .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?;
         Ok(Self {
-            input: None,
+            input: Arc::new(FrameWriter::default()),
+            controls,
             incoming,
             reader: Some(reader),
             notifier,
@@ -94,25 +111,16 @@ impl JsonlTransport {
         notifier.notify()
     }
 
-    pub(crate) fn bind_input(&mut self, input: Box<dyn Write + Send>) {
-        self.input = Some(input);
+    pub(crate) fn bind_input(&mut self, input: Box<dyn Write + Send>) -> Result<(), HarnessError> {
+        self.input.bind(input)
     }
 
     pub(crate) fn write<T: Serialize>(&mut self, value: &T) -> Result<(), HarnessError> {
-        let mut encoded = serde_json::to_vec(value)
-            .map_err(|_| HarnessError::new(HarnessErrorClass::InvalidInput))?;
-        if encoded.is_empty() || encoded.len() > MAX_CODEX_FRAME_BYTES {
-            return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
-        }
-        encoded.push(b'\n');
-        let input = self
-            .input
-            .as_mut()
-            .ok_or_else(|| HarnessError::new(HarnessErrorClass::IntakeClosed))?;
-        input
-            .write_all(&encoded)
-            .and_then(|()| input.flush())
-            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))
+        self.input.write(value)
+    }
+
+    pub(crate) fn control(&self) -> TransportControl {
+        TransportControl::new(Arc::clone(&self.input), Arc::clone(&self.controls))
     }
 
     pub(crate) fn receive(&self, wait: Duration) -> TransportRead {
@@ -132,7 +140,8 @@ impl JsonlTransport {
     }
 
     pub(crate) fn close_input(&mut self) {
-        self.input.take();
+        self.input.close();
+        self.controls.close();
     }
 
     pub(crate) fn join_reader(&mut self) -> Result<(), HarnessError> {
@@ -149,6 +158,7 @@ fn read_frames(
     sender: &SyncSender<TransportRead>,
     notifier: &Mutex<Option<HarnessEventNotifier>>,
     diagnostics: &dyn CodexOperationalDiagnosticSink,
+    controls: &ControlResponses,
 ) {
     let mut pending = Vec::new();
     let mut chunk = [0_u8; 8 * 1024];
@@ -189,6 +199,9 @@ fn read_frames(
                 pending.clear();
                 match parsed {
                     Ok(message) if valid_envelope(&message) => {
+                        let Some(message) = controls.route(message) else {
+                            continue;
+                        };
                         coalesced = coalesced
                             .saturating_add(usize::from(push_coalesced(&mut ready, message)));
                     }

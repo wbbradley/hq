@@ -158,6 +158,8 @@ mod adapter {
         resume_ack: Option<String>,
         lose_turn_response: bool,
         complete_interrupt: bool,
+        lose_interrupt_response: bool,
+        read_waiting: Option<std::sync::mpsc::SyncSender<()>>,
         history_accepts: bool,
         emit_events: bool,
         emit_after_read: bool,
@@ -176,6 +178,8 @@ mod adapter {
                 resume_ack: None,
                 lose_turn_response: false,
                 complete_interrupt: false,
+                lose_interrupt_response: false,
+                read_waiting: None,
                 history_accepts: false,
                 emit_events: false,
                 emit_after_read: false,
@@ -395,6 +399,215 @@ mod adapter {
             .open_session(HarnessSessionRequest::Start)?;
         assert_eq!(opened.session_id.as_str(), "thr-test");
         opened.session.force_stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn uncertain_interrupt_can_retry_only_the_original_operation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let starter = Arc::new(FakeStarter::new([ServerSpec {
+            lose_interrupt_response: true,
+            ..ServerSpec::default()
+        }]));
+        let factory = factory(Arc::clone(&starter), Arc::new(RecordingSink::default()))?;
+        let mut opened = factory
+            .create_instance(instance_request())?
+            .open_session(HarnessSessionRequest::Start)?;
+        let input = submission()?;
+        let operation = input.operation_id;
+        opened.session.submit(input)?;
+        let control = opened
+            .session
+            .operation_control()
+            .ok_or("control missing")?;
+        assert!(matches!(
+            control.cancel_operation(operation)?,
+            HarnessCancellationOutcome::Uncertain(_)
+        ));
+        assert_eq!(
+            control.cancel_operation(OperationId::from_bytes([99; 32]))?,
+            HarnessCancellationOutcome::AlreadyFinished
+        );
+        assert_eq!(
+            control.cancel_operation(operation)?,
+            HarnessCancellationOutcome::Requested
+        );
+        let observed = starter
+            .observed
+            .lock()
+            .map_err(|_| "observations poisoned")?;
+        assert_eq!(count_method(&observed, "turn/interrupt"), 2);
+        assert!(
+            observed
+                .iter()
+                .filter(|request| request["method"] == "turn/interrupt")
+                .all(|request| request["params"]
+                    == json!({"threadId":"thr-test","turnId":"turn-test"}))
+        );
+        drop(observed);
+        opened.session.force_stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn independent_cancellation_removes_queued_questions_from_the_same_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut frame = question_frame(50, false);
+        frame["params"]["threadId"] = json!("thr-test");
+        let mut second = frame["params"]["questions"][0].clone();
+        second["id"] = json!("other");
+        frame["params"]["questions"]
+            .as_array_mut()
+            .ok_or("questions missing")?
+            .push(second);
+        let starter = Arc::new(FakeStarter::new([ServerSpec {
+            post_open: vec![frame],
+            ..ServerSpec::default()
+        }]));
+        let factory = factory(starter, Arc::new(RecordingSink::default()))?;
+        let mut opened = factory
+            .create_instance(instance_request())?
+            .open_session(HarnessSessionRequest::Start)?;
+        let HarnessEventPoll::Event(HarnessEvent::InteractiveRequest(request)) =
+            next_ready_event(&mut *opened.session)?
+        else {
+            return Err("question missing".into());
+        };
+        let control = opened
+            .session
+            .operation_control()
+            .ok_or("control missing")?;
+        assert_eq!(
+            control.cancel_operation(request.operation_id)?,
+            HarnessCancellationOutcome::Requested
+        );
+        assert_eq!(opened.session.next_event()?, HarnessEventPoll::Pending);
+        opened.session.force_stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn independent_cancellation_answers_pending_approval_and_blocks_late_acceptance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let starter = Arc::new(FakeStarter::new([ServerSpec {
+            post_open: vec![
+                json!({"id": 70, "method": "item/commandExecution/requestApproval",
+                "params": {"threadId":"thr-test", "turnId":"turn-open", "itemId":"command",
+                    "command":"echo hi", "cwd":"/tmp", "reason":"test"}}),
+            ],
+            ..ServerSpec::default()
+        }]));
+        let factory = factory(Arc::clone(&starter), Arc::new(RecordingSink::default()))?;
+        let mut opened = factory
+            .create_instance(instance_request())?
+            .open_session(HarnessSessionRequest::Start)?;
+        let HarnessEventPoll::Event(HarnessEvent::InteractiveRequest(request)) =
+            next_ready_event(&mut *opened.session)?
+        else {
+            return Err("approval missing".into());
+        };
+        let control = opened
+            .session
+            .operation_control()
+            .ok_or("control missing")?;
+        assert_eq!(
+            control.cancel_operation(request.operation_id)?,
+            HarnessCancellationOutcome::Requested
+        );
+        let observed = starter
+            .observed
+            .lock()
+            .map_err(|_| "observations poisoned")?;
+        assert_eq!(
+            response_result(&observed, 70),
+            Some(&json!({"decision": "cancel"}))
+        );
+        drop(observed);
+        assert!(
+            opened
+                .session
+                .answer_interactive(HarnessInteractiveAnswer {
+                    request_id: request.request_id,
+                    response: HarnessInteractiveResponse::Choice(ShortText::new("accept")?),
+                })
+                .is_err()
+        );
+        opened.session.force_stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn independent_interrupt_releases_a_provider_rpc_held_by_the_session_owner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (waiting, received) = std::sync::mpsc::sync_channel(1);
+        let starter = Arc::new(FakeStarter::new([ServerSpec {
+            read_waiting: Some(waiting),
+            history_accepts: true,
+            ..ServerSpec::default()
+        }]));
+        let factory = factory(Arc::clone(&starter), Arc::new(RecordingSink::default()))?;
+        let mut opened = factory
+            .create_instance(instance_request())?
+            .open_session(HarnessSessionRequest::Start)?;
+        let control = opened
+            .session
+            .operation_control()
+            .ok_or("missing cancellation control")?;
+        let input = submission()?;
+        let operation_id = input.operation_id;
+        opened.session.submit(input.clone())?;
+        let lookup = thread::spawn(move || {
+            let result = opened.session.lookup_submission(&input);
+            (opened, result)
+        });
+        received.recv_timeout(Duration::from_secs(1))?;
+        assert_eq!(
+            control.cancel_operation(operation_id)?,
+            HarnessCancellationOutcome::Requested
+        );
+        let (mut opened, result) = lookup.join().map_err(|_| "lookup panicked")?;
+        assert_eq!(result?, HarnessSubmissionLookup::Accepted);
+        opened.session.force_stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn independent_control_targets_the_live_operation_without_mutable_session_access()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let starter = Arc::new(FakeStarter::new([ServerSpec::default()]));
+        let factory = factory(Arc::clone(&starter), Arc::new(RecordingSink::default()))?;
+        let mut opened = factory
+            .create_instance(instance_request())?
+            .open_session(HarnessSessionRequest::Start)?;
+        let control = opened
+            .session
+            .operation_control()
+            .ok_or("missing cancellation control")?;
+        let input = submission()?;
+        let operation_id = input.operation_id;
+        opened.session.submit(input)?;
+        assert_eq!(
+            control.cancel_operation(operation_id)?,
+            HarnessCancellationOutcome::Requested
+        );
+        assert_eq!(
+            opened.session.cancel_operation(operation_id)?,
+            HarnessCancellationOutcome::Requested
+        );
+        let observed = starter
+            .observed
+            .lock()
+            .map_err(|_| "observations poisoned")?;
+        assert_eq!(count_method(&observed, "turn/interrupt"), 1);
+        drop(observed);
+        opened.session.force_stop()?;
+        assert!(matches!(
+            control.cancel_operation(operation_id),
+            Err(HarnessError {
+                class: HarnessErrorClass::IntakeClosed,
+                ..
+            })
+        ));
         Ok(())
     }
 
@@ -878,7 +1091,7 @@ mod adapter {
             let _ = io::copy(&mut errors, &mut io::sink());
         });
         let mut transport = JsonlTransport::start(output, 64)?;
-        transport.bind_input(input);
+        transport.bind_input(input)?;
         let _: Value = installed_call(
             &mut transport,
             1,
@@ -1517,6 +1730,7 @@ mod adapter {
         let mut reader = BufReader::new(input);
         let mut line = String::new();
         let mut client_id = String::new();
+        let mut deferred_read = None;
         loop {
             line.clear();
             let Ok(count) = reader.read_line(&mut line) else {
@@ -1621,11 +1835,13 @@ mod adapter {
                     } else {
                         json!([])
                     };
-                    write_result(
-                        &mut output,
-                        &message,
-                        &json!({"thread":{"id":spec.thread_id,"turns":turns}}),
-                    );
+                    let result = json!({"thread":{"id":spec.thread_id,"turns":turns}});
+                    if let Some(waiting) = spec.read_waiting.take() {
+                        deferred_read = Some((message.clone(), result));
+                        let _ = waiting.send(());
+                    } else {
+                        write_result(&mut output, &message, &result);
+                    }
                     if spec.emit_after_read {
                         write_frame(
                             &mut output,
@@ -1634,7 +1850,16 @@ mod adapter {
                     }
                 }
                 Some("turn/interrupt" | "turn/steer") => {
+                    if spec.lose_interrupt_response
+                        && message.get("method").and_then(Value::as_str) == Some("turn/interrupt")
+                    {
+                        spec.lose_interrupt_response = false;
+                        continue;
+                    }
                     write_result(&mut output, &message, &json!({"turnId":"turn-test"}));
+                    if let Some((request, result)) = deferred_read.take() {
+                        write_result(&mut output, &request, &result);
+                    }
                     if spec.complete_interrupt
                         && message.get("method").and_then(Value::as_str) == Some("turn/interrupt")
                     {

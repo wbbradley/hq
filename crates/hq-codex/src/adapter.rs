@@ -35,8 +35,8 @@ use crate::{
     protocol::{
         ClientError, ClientErrorBody, ClientInfo, ClientNotification, ClientRequest, ClientResult,
         InitializeCapabilities, InitializeParams, TextInput, Thread, ThreadReadParams,
-        ThreadResponse, ThreadResumeParams, ThreadStartParams, TurnInterruptParams, TurnResponse,
-        TurnStartParams, TurnSteerParams, TurnSteerResponse, WireMessage,
+        ThreadResponse, ThreadResumeParams, ThreadStartParams, TurnResponse, TurnStartParams,
+        TurnSteerParams, TurnSteerResponse, WireMessage,
     },
     transport::{JsonlTransport, TransportRead},
 };
@@ -130,7 +130,7 @@ impl HarnessFactory for CodexFactory {
             self.config.frame_capacity,
             Arc::clone(&operational_diagnostics),
         )?;
-        transport.bind_input(pipes.input);
+        transport.bind_input(pipes.input)?;
         let stderr = spawn_stderr_drain(pipes.errors, Arc::clone(&self.config.diagnostics))?;
         Ok(Box::new(CodexInstance {
             launch,
@@ -209,7 +209,7 @@ struct CodexSession {
     deferred_error: Option<HarnessErrorClass>,
     pending_submission_operation: Option<OperationId>,
     active_turn: Option<String>,
-    pending_interrupt: Option<(OperationId, HarnessCancellationOutcome)>,
+    operation_control: Arc<crate::operation_control::CodexOperationControl>,
     operations: BTreeMap<String, OperationId>,
     submissions: BTreeMap<MessageId, SubmissionRecord>,
     events: VecDeque<HarnessEvent>,
@@ -244,7 +244,6 @@ enum PendingKind {
 }
 
 struct PendingGroup {
-    wire_id: Value,
     method: String,
     operation_id: OperationId,
     expected: usize,
@@ -270,6 +269,10 @@ impl RpcFailure {
 
 impl CodexSession {
     fn from_instance(instance: CodexInstance) -> Self {
+        let operation_control = Arc::new(crate::operation_control::CodexOperationControl::new(
+            instance.transport.control(),
+            instance.call_timeout,
+        ));
         Self {
             launch: instance.launch,
             transport: instance.transport,
@@ -286,7 +289,7 @@ impl CodexSession {
             deferred_error: None,
             pending_submission_operation: None,
             active_turn: None,
-            pending_interrupt: None,
+            operation_control,
             operations: BTreeMap::new(),
             submissions: BTreeMap::new(),
             events: VecDeque::new(),
@@ -450,9 +453,15 @@ impl CodexSession {
                 self.active_turn = Some(turn_id.clone());
             } else if method == "turn/completed" && self.active_turn.as_deref() == Some(&turn_id) {
                 self.active_turn = None;
-                self.pending_interrupt = None;
+                if let Some(operation) = self.operations.get(&turn_id).copied() {
+                    if let Err(error) = self.cancel_pending_for_operation(operation) {
+                        self.deferred_error = Some(error.class);
+                    }
+                    self.operation_control.finish(operation);
+                }
             }
         }
+        self.synchronize_operation_control();
         let events =
             self.normalizer
                 .notification(method, params, &self.thread_id, &self.operations);
@@ -494,6 +503,7 @@ impl CodexSession {
                 .or_insert_with(|| provider_operation_id(&thread_id, &turn_id));
             self.active_turn.get_or_insert_with(|| turn_id.clone());
         }
+        self.synchronize_operation_control();
         let Some(operation_id) = self.operations.get(&turn_id).copied() else {
             self.fail_closed(id, method, &params)?;
             self.deferred_error = Some(HarnessErrorClass::InvalidInput);
@@ -525,6 +535,18 @@ impl CodexSession {
             self.fail_closed(id, method, &params)?;
             return Ok(());
         }
+        if !self.operation_control.register_permission(
+            group.clone(),
+            operation_id,
+            id,
+            fail_closed_result(method, &params),
+        )? {
+            for request in requests {
+                self.pending_requests.remove(&request.request_id);
+                self.cancelled_requests.insert(request.request_id);
+            }
+            return Ok(());
+        }
         for request in &requests {
             self.operational_diagnostics.interaction_received(
                 *request.operation_id.as_bytes(),
@@ -534,7 +556,6 @@ impl CodexSession {
         self.request_groups.insert(
             group,
             PendingGroup {
-                wire_id: id,
                 method: method.to_owned(),
                 operation_id,
                 expected: requests.len(),
@@ -776,6 +797,27 @@ impl CodexSession {
         }])
     }
 
+    fn pop_live_event(&mut self) -> Option<HarnessEvent> {
+        while let Some(event) = self.events.pop_front() {
+            if matches!(&event, HarnessEvent::InteractiveRequest(request)
+                if self.cancelled_requests.contains(&request.request_id))
+            {
+                continue;
+            }
+            return Some(event);
+        }
+        None
+    }
+
+    fn synchronize_operation_control(&self) {
+        if let Some(turn) = &self.active_turn
+            && let Some(operation) = self.operations.get(turn)
+        {
+            self.operation_control
+                .activate(&self.thread_id, turn, *operation);
+        }
+    }
+
     fn fail_closed(&mut self, id: Value, method: &str, params: &Value) -> Result<(), HarnessError> {
         let result = fail_closed_result(method, params);
         self.transport.write(&ClientResult { id, result })
@@ -821,6 +863,7 @@ impl CodexSession {
                 .any(|item| item.kind == "userMessage" && item.client_id == client_id)
             {
                 self.operations.insert(turn.id, record.operation_id);
+                self.synchronize_operation_control();
                 return Ok(HarnessSubmissionLookup::Accepted);
             }
         }
@@ -838,8 +881,8 @@ impl CodexSession {
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         for group_key in &groups {
-            if let Some(group) = self.request_groups.remove(group_key) {
-                self.fail_closed(group.wire_id, &group.method, &group.original)?;
+            if self.request_groups.remove(group_key).is_some() {
+                self.operation_control.cancel_permission(group_key)?;
             }
             let ids = self
                 .pending_requests
@@ -860,10 +903,11 @@ impl CodexSession {
             return Ok(());
         }
         self.intake_open = false;
+        self.operation_control.close();
         let groups = self.request_groups.keys().cloned().collect::<Vec<_>>();
         for key in groups {
-            if let Some(group) = self.request_groups.remove(&key) {
-                self.fail_closed(group.wire_id, &group.method, &group.original)?;
+            if self.request_groups.remove(&key).is_some() {
+                self.operation_control.cancel_permission(&key)?;
             }
         }
         self.pending_requests.clear();
@@ -898,6 +942,10 @@ impl CodexSession {
 }
 
 impl HarnessSession for CodexSession {
+    fn operation_control(&self) -> Option<Arc<dyn hq_harness::HarnessOperationControl>> {
+        Some(self.operation_control.clone())
+    }
+
     fn register_event_notifier(
         &mut self,
         notifier: hq_harness::HarnessEventNotifier,
@@ -919,11 +967,16 @@ impl HarnessSession for CodexSession {
                 HarnessErrorClass::SubmissionIdentityConflict,
             ));
         }
-        if self.pending_interrupt.is_some() {
-            return Ok(HarnessSubmissionOutcome::Rejected(
-                HarnessErrorClass::Backpressure,
-            ));
-        }
+        let _admission = match self
+            .operation_control
+            .admit_submission(submission.operation_id)
+        {
+            Ok(admission) => admission,
+            Err(error) if error.class == HarnessErrorClass::Backpressure => {
+                return Ok(HarnessSubmissionOutcome::Rejected(error.class));
+            }
+            Err(error) => return Err(error),
+        };
         let record = SubmissionRecord {
             digest: submission.digest,
             operation_id: submission.operation_id,
@@ -967,6 +1020,7 @@ impl HarnessSession for CodexSession {
             self.start_submission(submission.operation_id, &body, client_id)
         };
         self.pending_submission_operation = None;
+        self.synchronize_operation_control();
         result
     }
 
@@ -993,64 +1047,31 @@ impl HarnessSession for CodexSession {
         &mut self,
         operation_id: OperationId,
     ) -> Result<HarnessCancellationOutcome, HarnessError> {
-        if let Some((pending, outcome)) = self.pending_interrupt
-            && pending == operation_id
-        {
-            return Ok(outcome);
-        }
         let cancelled_request = self.cancel_pending_for_operation(operation_id)?;
-        let Some(turn_id) = self.active_turn.clone() else {
-            return Ok(if cancelled_request {
+        let outcome = hq_harness::HarnessOperationControl::cancel_operation(
+            self.operation_control.as_ref(),
+            operation_id,
+        )?;
+        Ok(
+            if cancelled_request && outcome == HarnessCancellationOutcome::AlreadyFinished {
                 HarnessCancellationOutcome::Requested
             } else {
-                HarnessCancellationOutcome::AlreadyFinished
-            });
-        };
-        if self.operations.get(&turn_id).copied() != Some(operation_id) {
-            return Ok(if cancelled_request {
-                HarnessCancellationOutcome::Requested
-            } else {
-                HarnessCancellationOutcome::AlreadyFinished
-            });
-        }
-        let thread_id = self.thread_id.clone();
-        let result: Result<Value, RpcFailure> = self.rpc(
-            "turn/interrupt",
-            TurnInterruptParams {
-                thread_id: &thread_id,
-                turn_id: &turn_id,
+                outcome
             },
-        );
-        match result {
-            Ok(_) => {
-                if self.active_turn.as_deref() == Some(turn_id.as_str()) {
-                    self.pending_interrupt =
-                        Some((operation_id, HarnessCancellationOutcome::Requested));
-                }
-                Ok(HarnessCancellationOutcome::Requested)
-            }
-            Err(RpcFailure::Rejected) => Ok(HarnessCancellationOutcome::Rejected(
-                HarnessErrorClass::Unavailable,
-            )),
-            Err(RpcFailure::Uncertain(class)) => {
-                let outcome = HarnessCancellationOutcome::Uncertain(class);
-                if self.active_turn.as_deref() == Some(turn_id.as_str()) {
-                    self.pending_interrupt = Some((operation_id, outcome));
-                }
-                Ok(outcome)
-            }
-            Err(error) => Err(error.harness()),
-        }
+        )
     }
 
     fn next_event(&mut self) -> Result<HarnessEventPoll, HarnessError> {
+        if let Some(operation) = self.operation_control.pending()? {
+            self.cancel_pending_for_operation(operation)?;
+        }
         if let Some(error) = self.deferred_error.take() {
             return Err(HarnessError::new(error));
         }
         if self.compatibility_failed {
             return Err(HarnessError::new(HarnessErrorClass::CompatibilityMismatch));
         }
-        if let Some(event) = self.events.pop_front() {
+        if let Some(event) = self.pop_live_event() {
             return Ok(HarnessEventPoll::Event(event));
         }
         loop {
@@ -1080,13 +1101,16 @@ impl HarnessSession for CodexSession {
             if self.compatibility_failed {
                 return Err(HarnessError::new(HarnessErrorClass::CompatibilityMismatch));
             }
-            if let Some(event) = self.events.pop_front() {
+            if let Some(event) = self.pop_live_event() {
                 return Ok(HarnessEventPoll::Event(event));
             }
         }
     }
 
     fn answer_interactive(&mut self, answer: HarnessInteractiveAnswer) -> Result<(), HarnessError> {
+        if let Some(operation) = self.operation_control.pending()? {
+            self.cancel_pending_for_operation(operation)?;
+        }
         if !self.intake_open {
             return Err(HarnessError::new(HarnessErrorClass::IntakeClosed));
         }
@@ -1114,14 +1138,12 @@ impl HarnessSession for CodexSession {
             let result = match completed_group_result(&group) {
                 Ok(result) => result,
                 Err(error) => {
-                    self.fail_closed(group.wire_id, &group.method, &group.original)?;
+                    self.operation_control.cancel_permission(&pending.group)?;
                     return Err(error);
                 }
             };
-            self.transport.write(&ClientResult {
-                id: group.wire_id,
-                result,
-            })?;
+            self.operation_control
+                .answer_permission(&pending.group, &result)?;
         }
         Ok(())
     }
@@ -1131,10 +1153,11 @@ impl HarnessSession for CodexSession {
             return Ok(());
         }
         self.intake_open = false;
+        self.operation_control.close();
         let groups = self.request_groups.keys().cloned().collect::<Vec<_>>();
         for key in groups {
-            if let Some(group) = self.request_groups.remove(&key) {
-                self.fail_closed(group.wire_id, &group.method, &group.original)?;
+            if self.request_groups.remove(&key).is_some() {
+                self.operation_control.cancel_permission(&key)?;
             }
         }
         self.pending_requests.clear();

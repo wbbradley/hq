@@ -13,9 +13,9 @@ does not itself establish the durable acceptance evidence HQ requires.
 
 | Layer | Current evidence | Required change |
 | --- | --- | --- |
-| Harness contract | `hq-harness/src/contract.rs` defines OperationCancellation, cancel_operation, and explicit outcomes. | Keep recipient capabilities and operation-targeted control independent of Codex. |
+| Harness contract | `hq-harness/src/contract.rs` defines OperationCancellation, explicit outcomes, and a shared HarnessOperationControl handle independent of the mutable session. | Expose only declared capabilities backed by a live independent handle. |
 | Registry | `hq-harness/src/registry.rs` rejects providers lacking StableSubmissionIdempotency or SubmissionLookup. | Preserve this admission requirement for future adapters. |
-| Supervisor | `HarnessSupervisor::cancel` renews ownership and invokes the live session while holding the workers map mutex. | Validate capability and exact live target; avoid shared locks spanning blocking provider work. |
+| Supervisor | `cancellable_worker` and `cancel_owned` use a separately locked handle registry, exact worker descriptors and live lease checks. | Route application cancellation through this path rather than the synchronous cancel convenience method. |
 | Codex | `hq-codex/src/adapter.rs` maps an HQ operation to threadId/turnId and sends turn/interrupt. | Preserve exact targeting and distinguish accepted interruption from observed completion. |
 | Application/node | Project runtime observation already has assignment, session, generation, owner and running-operation evidence. | Add a typed authorized control port, separate from project workflow progression and message submission. |
 | Local API | `hq-local-api/src/server.rs` handles requests synchronously; `hq-node/src/session_registry.rs` calls receive during dispatch. | Keep control dispatch responsive even when another command is waiting. A separate socket alone does not prove this. |
@@ -23,12 +23,17 @@ does not itself establish the durable acceptance evidence HQ requires.
 
 Paths in this table are relative to `crates/`.
 
-There are multiple serialization boundaries. `HarnessNodeComponent::with_supervisor`
-holds its supervisor mutex during the callback. The supervisor then holds its
-workers mutex while calling session methods. Codex's synchronous `rpc` waits for
-a matching response while dispatching inbound events; it is not merely a write.
-Moving the API operation to a thread without changing these lock lifetimes would
-leave cancellation blocked and could stall sibling conversations.
+The provider control path now bypasses the mutable session and supervisor workers
+mutex. `HarnessNodeComponent::with_supervisor` clones its Arc before invoking the
+callback. Codex's sole transport reader routes control responses by a separate
+request-ID namespace to bounded waiters; ordinary RPC responses and notifications
+still belong to the mutable session. Frame writes are serialized to prevent
+interleaving. No second reader is introduced.
+
+Application dispatch and the TUI command worker remain serialization boundaries.
+They must expose independent, bounded control admission before this feature can
+be considered end-to-end. Ordinary session methods also still use the supervisor
+workers mutex; cancellation must use cancel_owned rather than acquire that lock.
 
 Generation continues remotely after turn submission, so not every running turn
 holds a Rust lock. This explains why the existing adapter can already interrupt
@@ -39,8 +44,9 @@ than treating one successful interrupt as proof of concurrency.
 The assessment found that HarnessCancellationOutcome::Cancelled meant request
 acceptance and that Codex cleared active_turn immediately after the interrupt
 response. The adapter now calls this outcome Requested and retains the active turn
-until terminal provider evidence. Duplicate requests retain their original outcome,
-and submissions receive Backpressure while interruption is unresolved. The remaining
+until terminal provider evidence. Acknowledged duplicates retain their outcome;
+uncertain requests can retry only the same exact live operation. Submissions receive
+Backpressure while interruption is unresolved. The remaining
 application integration must retain future inputs in the durable queue during that
 interval rather than treating backpressure as permanent rejection. Finished/cancelled
 UI state must come from authoritative operation evidence. Late output before
@@ -66,12 +72,17 @@ when supported, report Stopping after acknowledgement, and continue observing un
 terminal state. It must preserve the draft and conversation reading position.
 The keyboard action must work while composing without stealing ordinary text.
 
-Provider I/O should have independently addressable control delivery with bounded
-waiting, and no global supervisor/map guard held across RPC. Per-worker ownership
-alone is insufficient if that same worker is blocked awaiting submission. Choose
-a session actor with multiplexed outstanding requests or a separate neutral control
-handle; the chosen design must maintain one reader/demultiplexer and exact response
-correlation. Never create competing readers on the provider stream.
+The implementation uses the separate neutral control handle described above.
+A test withholds an ordinary provider response until an independent interrupt
+arrives, proving that control delivery does not require the mutable session owner
+to return. Another test holds the supervisor worker registry during submission
+and releases it only through exact-owner cancellation.
+
+Control state arbitrates submission admission and cancellation: an old cancellation
+cannot cross admission of a different input and accidentally stop its replacement.
+Permission replies are claimed under the same state lock and written in that order.
+Cancellation resolves pending permissions without requiring session polling, rejects
+late approval answers, and suppresses queued questions already cancelled.
 
 Cancellation of a turn is separate from declining an approval. Resolve pending
 interactive requests belonging to that exact operation and ensure stale UI answers

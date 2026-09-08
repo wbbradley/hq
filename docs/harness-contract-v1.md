@@ -92,6 +92,13 @@ provider activity proves that work has stopped. Keep the exact active target whi
 is unresolved and apply backpressure to new submissions. Cancellation is not evidence that an
 uncertain submission was absent.
 
+Managed UI cancellation requires both OperationCancellation in the provider's declared
+capabilities and a live `HarnessOperationControl` returned by `operation_control`.
+That shared handle must be usable while the mutable session owner waits on provider I/O.
+The supervisor's `cancellable_worker` returns its exact descriptor; `cancel_owned`
+checks that descriptor and its live lease before dispatching without the worker-map lock.
+A synchronous-only session is not advertised as supporting this managed control path.
+
 Shutdown is explicit and ordered:
 
 1. `stop_intake` idempotently rejects future submissions and interactive answers.

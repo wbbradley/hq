@@ -335,13 +335,14 @@ impl HarnessNodeComponent {
                 ApplicationErrorCode::AdapterUnavailable,
             ));
         }
-        self.inner
+        let supervisor = self
+            .inner
             .supervisor
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?
-            .as_ref()
-            .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))
-            .and_then(|supervisor| operation(supervisor).map_err(map_harness_error))
+            .clone()
+            .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?;
+        operation(&supervisor).map_err(map_harness_error)
     }
 
     fn wake_event_task(&self) {

@@ -662,6 +662,7 @@ pub struct HarnessSupervisor {
     config: HarnessSupervisorConfig,
     dependencies: HarnessSupervisorDependencies,
     workers: Mutex<BTreeMap<AgentId, HarnessWorker>>,
+    controls: crate::supervisor_controls::WorkerControls,
     persistence: Mutex<()>,
     worker_lock_wait_high_ns: AtomicU64,
     persistence_lock_wait_high_ns: AtomicU64,
@@ -691,6 +692,7 @@ impl HarnessSupervisor {
             config,
             dependencies,
             workers: Mutex::new(BTreeMap::new()),
+            controls: crate::supervisor_controls::WorkerControls::default(),
             persistence: Mutex::new(()),
             worker_lock_wait_high_ns: AtomicU64::new(0),
             persistence_lock_wait_high_ns: AtomicU64::new(0),
@@ -1074,8 +1076,85 @@ impl HarnessSupervisor {
                 requests: VecDeque::with_capacity(self.config.event_capacity.get()),
             },
         );
+        if let Some(worker) = workers.get(&request.agent_id) {
+            self.register_worker_control(request.agent_id, worker)?;
+        }
         self.dependencies.events.notify()?;
         Ok(ready)
+    }
+
+    fn register_worker_control(
+        &self,
+        agent: AgentId,
+        worker: &HarnessWorker,
+    ) -> Result<(), HarnessError> {
+        if !self
+            .dependencies
+            .registry
+            .capabilities(&worker.provider_id)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .supported
+                    .contains(&crate::HarnessCapability::OperationCancellation)
+            })
+        {
+            return Ok(());
+        }
+        if let Some(control) = worker.session.operation_control() {
+            self.controls
+                .insert(crate::supervisor_controls::RegisteredControl {
+                    worker: HarnessReadyWorker {
+                        agent_id: agent,
+                        project_id: worker.project_id,
+                        provider_id: worker.provider_id.clone(),
+                        session_id: worker.session_id.clone(),
+                        owner_token: worker.token,
+                    },
+                    control,
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Observes cancellation capability without waiting for a mutable worker or its provider I/O.
+    pub fn cancellable_worker(
+        &self,
+        agent: AgentId,
+    ) -> Result<Option<HarnessReadyWorker>, HarnessError> {
+        let Some(control) = self.controls.get(agent)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .control_is_owned(&control.worker)?
+            .then_some(control.worker))
+    }
+
+    fn control_is_owned(&self, worker: &HarnessReadyWorker) -> Result<bool, HarnessError> {
+        Ok(self
+            .dependencies
+            .state
+            .worker_lease(worker.agent_id)?
+            .is_some_and(|lease| {
+                lease.owner_token == worker.owner_token
+                    && lease.expires_at_millis > self.dependencies.clock.now_millis()
+            }))
+    }
+
+    /// Requests cancellation through the exact observed owner without locking mutable workers.
+    pub fn cancel_owned(
+        &self,
+        expected: &HarnessReadyWorker,
+        operation: OperationId,
+    ) -> Result<HarnessCancellationOutcome, HarnessError> {
+        self.ensure_accepting()?;
+        let control = self
+            .controls
+            .get(expected.agent_id)?
+            .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unsupported))?;
+        if control.worker != *expected || !self.control_is_owned(expected)? {
+            return Err(HarnessError::new(HarnessErrorClass::OwnershipConflict));
+        }
+        control.control.cancel_operation(operation)
     }
 
     /// Exactly resumes one worker and immediately repairs its durable pending work.
@@ -1242,6 +1321,7 @@ impl HarnessSupervisor {
             let Some(worker) = workers.remove(&agent_id) else {
                 continue;
             };
+            self.controls.remove(agent_id);
             report.stopped_workers.push(HarnessStoppedWorker {
                 agent_id,
                 project_id: worker.project_id,
@@ -1545,6 +1625,7 @@ impl HarnessSupervisor {
             .lock_workers()?
             .remove(&agent_id)
             .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
+        self.controls.remove(agent_id);
         Ok(stop_worker(
             &self.config,
             &self.dependencies,
@@ -1558,6 +1639,7 @@ impl HarnessSupervisor {
         let intake_failure = self.stop_intake().err();
         let _persistence = self.lock_persistence()?;
         let workers = std::mem::take(&mut *self.lock_workers()?);
+        self.controls.clear();
         let mut report = HarnessSupervisorReport::default();
         if let Some(error) = intake_failure {
             report.failures.push(error.class);

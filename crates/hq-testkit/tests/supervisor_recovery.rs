@@ -2014,6 +2014,8 @@ impl HarnessTokenSource for TestTokens {
 
 #[derive(Default)]
 struct ProviderState {
+    operation_control: Option<Arc<dyn hq_harness::HarnessOperationControl>>,
+    on_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     on_open: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     accepted: Mutex<BTreeMap<MessageId, CommandDigest>>,
     lost_once: AtomicBool,
@@ -2081,6 +2083,10 @@ struct TestSession {
 }
 
 impl HarnessSession for TestSession {
+    fn operation_control(&self) -> Option<Arc<dyn hq_harness::HarnessOperationControl>> {
+        self.state.operation_control.clone()
+    }
+
     fn register_event_notifier(
         &mut self,
         notifier: HarnessEventNotifier,
@@ -2097,6 +2103,9 @@ impl HarnessSession for TestSession {
         submission: HarnessSubmission,
     ) -> Result<HarnessSubmissionOutcome, HarnessError> {
         self.state.submission_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(on_submit) = self.state.on_submit.lock().expect("submit hook").take() {
+            on_submit();
+        }
         let mut accepted = self.state.accepted.lock().expect("provider locks");
         if accepted
             .get(&submission.submission_id)
@@ -2230,4 +2239,96 @@ fn working_observation_uses_typed_turn_evidence_and_clears_after_completion() {
         hq_harness::HarnessWorkerObservation::Owned(_)
     ));
     runtime.shutdown().expect("shutdown");
+}
+
+struct ReleaseOnCancellation {
+    release: std::sync::mpsc::SyncSender<()>,
+    operation: OperationId,
+}
+
+impl hq_harness::HarnessOperationControl for ReleaseOnCancellation {
+    fn cancel_operation(
+        &self,
+        operation: OperationId,
+    ) -> Result<HarnessCancellationOutcome, HarnessError> {
+        if operation != self.operation {
+            return Ok(HarnessCancellationOutcome::AlreadyFinished);
+        }
+        let _ = self.release.try_send(());
+        Ok(HarnessCancellationOutcome::Requested)
+    }
+}
+
+#[test]
+fn exact_owner_cancellation_bypasses_the_busy_worker_registry() {
+    let agent = AgentId::from_bytes([1; 32]);
+    let provider = ProviderId::new("fake").expect("provider");
+    let session = ProviderSessionId::new("session").expect("session");
+    let input = delivery(agent, &provider, &session);
+    let operation = input.submission.operation_id;
+    let (release, released) = std::sync::mpsc::sync_channel(1);
+    let (waiting, started) = std::sync::mpsc::sync_channel(1);
+    let provider_state = Arc::new(ProviderState {
+        operation_control: Some(Arc::new(ReleaseOnCancellation { release, operation })),
+        on_submit: Mutex::new(Some(Box::new(move || {
+            waiting.send(()).expect("waiting signal");
+            released
+                .recv_timeout(Duration::from_secs(2))
+                .expect("independent cancel releases submission");
+        }))),
+        ..ProviderState::default()
+    });
+    let clock = Arc::new(TestClock::new(10));
+    let runtime = Arc::new(supervisor(dependencies(
+        registry(provider.clone(), session, provider_state),
+        Arc::new(MemoryState::default()),
+        Arc::new(MemoryPersistence::available()),
+        Arc::clone(&clock),
+        Arc::new(TestTokens::default()),
+    )));
+    runtime
+        .launch(launch(agent, provider, HarnessSessionRequest::Start))
+        .expect("launch");
+    let target = runtime
+        .cancellable_worker(agent)
+        .expect("control observation")
+        .expect("supported control");
+    let busy = Arc::clone(&runtime);
+    let submission = std::thread::spawn(move || busy.deliver(input));
+    started
+        .recv_timeout(Duration::from_secs(1))
+        .expect("submission is blocked");
+    assert_eq!(
+        runtime.cancellable_worker(agent).expect("responsive query"),
+        Some(target.clone())
+    );
+    let mut stale = target.clone();
+    stale.owner_token = HarnessOwnerToken::from_bytes([99; 32]).expect("owner");
+    assert!(runtime.cancel_owned(&stale, operation).is_err());
+    assert_eq!(
+        runtime
+            .cancel_owned(&target, operation)
+            .expect("independent cancellation"),
+        HarnessCancellationOutcome::Requested
+    );
+    submission
+        .join()
+        .expect("submission thread")
+        .expect("submission resumes");
+    clock.0.store(2_000, Ordering::SeqCst);
+    assert!(
+        runtime
+            .cancellable_worker(agent)
+            .expect("expired capability")
+            .is_none()
+    );
+    assert!(runtime.cancel_owned(&target, operation).is_err());
+    runtime.stop(agent).expect("stop");
+    assert!(
+        runtime
+            .cancellable_worker(agent)
+            .expect("no stopped control")
+            .is_none()
+    );
+    assert!(runtime.cancel_owned(&target, operation).is_err());
 }
