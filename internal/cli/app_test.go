@@ -993,12 +993,17 @@ func TestAskReceivesLiveNodeReplyThroughSubscription(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	readiness := syncer.NodeLauncher{
-		Start:        func(syncer.RuntimePaths) error { return nil },
-		ReadyTimeout: 30 * time.Second,
-	}
-	if err := readiness.Ensure(ctx, database); err != nil {
-		t.Fatal(err)
+	// The node is already starting. A launcher would briefly acquire the
+	// ownership lock and can make that node abort before it becomes ready.
+	for {
+		if _, err := syncer.DaemonStatus(database); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("in-process node did not become ready", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	replier, err := hqclient.Open(ctx, database)
 	if err != nil {
