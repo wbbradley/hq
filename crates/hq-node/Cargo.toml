@@ -42,6 +42,7 @@ nix.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 nix = { workspace = true, features = ["signal", "term"] }
+rustix = { workspace = true, features = ["termios"] }
 
 [[bin]]
 name = "hq"

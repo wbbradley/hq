@@ -780,6 +780,7 @@ dependencies = [
  "hq-tui",
  "nix",
  "ratatui",
+ "rustix",
  "scrypt",
  "serde",
  "serde-saphyr",

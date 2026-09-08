@@ -37,6 +37,25 @@ const PROCESS_INACTIVITY_WATCHDOG: Duration = Duration::from_secs(30);
 static PSEUDOTERMINAL_SCENARIO: Mutex<()> = Mutex::new(());
 
 #[test]
+fn resizing_preserves_queued_terminal_input() {
+    use nix::sys::termios::{SetArg, cfmakeraw, tcsetattr};
+    let pair = openpty(None, None).expect("pseudoterminal opens");
+    let mut modes = tcgetattr(&pair.slave).expect("terminal modes");
+    cfmakeraw(&mut modes);
+    tcsetattr(&pair.slave, SetArg::TCSANOW, &modes).expect("raw input");
+    fcntl(&pair.slave, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).expect("nonblocking slave");
+    let mut master = File::from(pair.master);
+    master.write_all(b"queued\r\x03").expect("queued keys");
+    set_pty_dimensions(&pair.slave, 30, 99);
+    let mut slave = File::from(pair.slave);
+    let mut actual = [0_u8; 8];
+    slave
+        .read_exact(&mut actual)
+        .expect("resize preserves queued keys");
+    assert_eq!(&actual, b"queued\r\x03");
+}
+
+#[test]
 fn installed_tui_without_an_identity_fails_fast_before_terminal_activation() {
     let _scenario = serial_scenario();
     let directory = TestDirectory::new();
@@ -2345,7 +2364,7 @@ fn run_in_pty_with_trace(
                 .windows(b"0/16384".len())
                 .any(|window| window == b"0/16384")
         {
-            write_pty_bytes(&mut master, format!("{content}\r").as_bytes());
+            write_pty_bytes(&mut master, &mut bytes, format!("{content}\r").as_bytes());
             master.flush().expect("self-note text flushes");
             content_sent = true;
         }
@@ -2358,6 +2377,7 @@ fn run_in_pty_with_trace(
         {
             write_pty_bytes(
                 &mut master,
+                &mut bytes,
                 format!("\x1b[200~{content}\x1b[201~\r").as_bytes(),
             );
             master.flush().expect("bracketed self-note paste flushes");
@@ -2504,13 +2524,18 @@ fn run_in_pty_with_trace(
                     .any(|window| window == first.as_bytes())
             })
         {
+            let output_offset = bytes.len();
             for row in 0..40 {
-                write_pty_bytes(&mut master, if row % 2 == 0 { b"j" } else { b"\x1b[B" });
+                write_pty_bytes(
+                    &mut master,
+                    &mut bytes,
+                    if row % 2 == 0 { b"j" } else { b"\x1b[B" },
+                );
             }
             master.flush().expect("row-down keys flush");
             managed_action_sent = true;
             oversized_phase = 4;
-            completion_offset = Some(bytes.len());
+            completion_offset = Some(output_offset);
         }
         if let PtyInteraction::ScrollOversizedConversation { middle, .. } = interaction
             && oversized_phase == 4
@@ -2520,13 +2545,14 @@ fn run_in_pty_with_trace(
                     .any(|window| window == middle.as_bytes())
             })
         {
+            let output_offset = bytes.len();
             for _ in 0..88 {
-                write_pty_bytes(&mut master, b"\x1b[B");
+                write_pty_bytes(&mut master, &mut bytes, b"\x1b[B");
             }
             master.flush().expect("remaining row-down keys flush");
             managed_provider_sent = true;
             oversized_phase = 5;
-            completion_offset = Some(bytes.len());
+            completion_offset = Some(output_offset);
         }
         if let PtyInteraction::ScrollOversizedConversation { last, .. } = interaction
             && oversized_phase == 5
@@ -3404,14 +3430,23 @@ fn navigation_keys(from_rank: usize, to_rank: usize) -> Vec<u8> {
     }
 }
 
-fn write_pty_bytes(master: &mut File, mut bytes: &[u8]) {
+fn write_pty_bytes(master: &mut File, output: &mut Vec<u8>, mut bytes: &[u8]) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !bytes.is_empty() {
         match master.write(bytes) {
             Ok(0) => panic!("pseudoterminal stopped accepting input"),
             Ok(written) => bytes = &bytes[written..],
             Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(1));
+                // The child may be blocked rendering while its input queue is
+                // full. Preserve its output while allowing both sides to progress.
+                let mut buffer = [0_u8; 8192];
+                match master.read(&mut buffer) {
+                    Ok(count) => output.extend_from_slice(&buffer[..count]),
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("pseudoterminal output failed during input: {error}"),
+                }
             }
             Err(error) => panic!("pseudoterminal input failed: {error}"),
         }
@@ -3691,14 +3726,18 @@ fn stdio_clone(descriptor: &OwnedFd) -> Stdio {
 }
 
 fn set_pty_dimensions(descriptor: &OwnedFd, rows: u16, columns: u16) {
-    let status = Command::new("stty")
-        .args(["rows", &rows.to_string(), "cols", &columns.to_string()])
-        .stdin(stdio_clone(descriptor))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("stty runs");
-    assert!(status.success(), "stty could not resize the pseudoterminal");
+    // Set only the window size; stty may reapply termios with TCSAFLUSH on
+    // macOS, discarding keys written immediately before a resize.
+    rustix::termios::tcsetwinsize(
+        descriptor,
+        rustix::termios::Winsize {
+            ws_row: rows,
+            ws_col: columns,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        },
+    )
+    .expect("pseudoterminal resizes without changing its input modes");
 }
 
 fn initialize_identity(state_root: &Path) {
