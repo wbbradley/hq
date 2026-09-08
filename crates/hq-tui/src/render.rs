@@ -3619,8 +3619,12 @@ fn render_compact_draft(
             UiMailboxDraftPane::Loading { .. } => Line::from("Loading draft…"),
         };
         let mut spans = vec![Span::styled(
-            "Message  ",
-            theme.style(UiThemeRole::TextMuted),
+            if model.current_command_approval().is_some() {
+                "Tab to review approval · "
+            } else {
+                "Tab to compose · "
+            },
+            theme.style(UiThemeRole::Accent),
         )];
         spans.extend(preview.spans);
         frame.render_widget(

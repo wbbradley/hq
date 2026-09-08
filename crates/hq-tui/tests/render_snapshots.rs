@@ -3500,6 +3500,7 @@ fn persistent_composer_grows_collapses_and_keeps_the_caret_visible_at_its_height
         width: 64,
         height: 24,
     });
+    assert!(render_text(&reading).contains("Tab to compose"));
     let reading_height = render_observation(&reading).height;
     let composing = update(reading, UiEvent::Input(UiInput::NextFocus))
         .expect("compose")
