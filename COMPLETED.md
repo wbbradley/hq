@@ -14086,3 +14086,33 @@ Scope: Update agent-entry setup in `crates/hq-tui/src/model.rs`, especially `pre
 
 Completion: Tests demonstrate Inbox → unassigned agent → Choose project → Esc returns directly to the same Inbox selection; normal New… navigation still works, abandoned agent context does not leak, and delayed results do not resurrect cancelled setup.
 
+
+### Word-aware composer wrapping
+
+Implementation summary: Composer layout measures whole words at grapheme boundaries and moves
+words that fit a fresh row before they would split. Soft-row separator whitespace is hidden;
+explicit newlines, hard indentation, and all draft bytes remain intact. Hidden whitespace maps
+the caret to the next visible cell, or a cursor space at a hard break/end. Overlong tokens keep
+making progress, and extremely narrow layouts use a visible placeholder for an oversized
+grapheme. The same layout continues to drive painting, cursor visibility, composer height,
+and transcript geometry. Final review also fixed approval resolution stealing focus from Details.
+
+Validation: Table and caret regressions cover repeated spaces, tabs, hard/empty lines, long tokens,
+combining and wide characters, joined emoji, hidden whitespace, and widths zero/one. The complete
+workspace suite passed, including all 25 installed terminal tests. Final focused TUI and node
+executor/shell tests, formatting, and strict workspace linting also passed.
+
+Original task:
+
+### Word-aware composer wrapping
+
+Problem: `draft_editor_layout`/`push_draft_span` in `crates/hq-tui/src/render.rs` wrap one grapheme at a time, splitting words at the right edge and displaying wrap-boundary spaces as indentation.
+
+Scope: Make composer layout wrap whole words when they fit on a fresh display line. Hide separator whitespace at the beginning of a soft-wrapped continuation. Preserve explicit newlines and intentional indentation on hard lines. Words longer than the available width must still make progress by wrapping at grapheme boundaries.
+
+- Keep draft bytes unchanged: soft wrapping and hidden whitespace are display-only. Sending, persistence, copy/edit operations, and markdown source must retain exact spaces and newlines.
+- Preserve source-offset-to-display-position mapping, including a visible and predictable caret when it falls on hidden whitespace, at a wrap boundary, or at end of input.
+- Use the same layout for painting, cursor visibility, composer height calculation, and transcript geometry. Preserve the reading anchor/tail behavior as the editor grows or the terminal resizes.
+- Cover multiple separator spaces, tabs, empty lines, hard-line indentation, long tokens, combining characters, wide characters, joined emoji, and very narrow widths. Consider shared wrapping utilities from `message_markdown.rs` only where source-position semantics can be preserved.
+
+Completion: Focused layout and render tests show words moving intact to the next row, no separator indentation on soft continuations, exact unchanged draft content, visible carets across wrap boundaries, and consistent composer/transcript geometry.
