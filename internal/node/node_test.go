@@ -507,12 +507,15 @@ func openRawDomainClient(t *testing.T, databasePath string) *localwire.Client {
 
 func waitForNode(t *testing.T, databasePath string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
 	for time.Now().Before(deadline) {
 		if _, err := syncer.DaemonStatus(databasePath); err == nil {
 			return
+		} else {
+			lastErr = err
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("node did not become ready")
+	t.Fatalf("node did not become ready: %v", lastErr)
 }

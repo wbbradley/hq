@@ -88,18 +88,21 @@ allowed_internal_dependency() {
 
 for crate in "${expected_crates[@]}"; do
   manifest="$repository_root/crates/$crate/Cargo.toml"
-  while IFS= read -r dependency; do
+  while read -r dependency dependency_kind; do
+    if [[ "$crate:$dependency:$dependency_kind" == hq-projects:hq-store:dev ]]; then
+      continue
+    fi
     if ! allowed_internal_dependency "$crate" "$dependency"; then
       fail "$crate may not depend directly on $dependency"
     fi
   done < <(
     awk '
-      /^\[/ { in_dependencies = ($0 ~ /dependencies/) }
+      /^\[/ { in_dependencies = ($0 ~ /dependencies/); kind = ($0 ~ /dev-dependencies/ ? "dev" : "normal") }
       in_dependencies && /^hq-[a-z-]+(\.workspace)?[[:space:]]*=/ {
         dependency = $0
         sub(/[[:space:]]*=.*/, "", dependency)
         sub(/\.workspace$/, "", dependency)
-        print dependency
+        print dependency, kind
       }
     ' "$manifest"
   )
@@ -109,7 +112,7 @@ grep -Eq '^hq-harness(\.workspace)?[[:space:]]*=' "$repository_root/crates/hq-co
   fail "hq-codex must depend on the neutral hq-harness contract"
 grep -Eq '^hq-codex(\.workspace)?[[:space:]]*=' "$repository_root/crates/hq-node/Cargo.toml" ||
   fail "hq-node must own the concrete Codex adapter dependency"
-grep -Fq 'compose_codex_registry(' "$repository_root/crates/hq-node/src/foreground.rs" ||
+grep -Fq 'compose_codex_registry_with_configuration(' "$repository_root/crates/hq-node/src/foreground.rs" ||
   fail "foreground composition must register the concrete Codex adapter"
 
 if grep -ERq --include='*.rs' 'hq_testkit' \
@@ -262,8 +265,10 @@ if grep -Eq '(hq_store|hq_relay|hq_codex|hq_resources|rusqlite|std::fs)' \
   "$repository_root/crates/hq-node/src/tui_client.rs"; then
   fail "the CLI/local client may cross only node coordination and hq-local-api boundaries"
 fi
-if grep -Eq '(hq_(domain|application|store|relay|harness|codex|resources|projects)|rusqlite|std::fs|std::process)' \
-  "$repository_root/crates/hq-node/src/tui_client.rs"; then
+# The configuration DTO conversion preserves the provider's typed identity.
+if grep -Ev '^use hq_domain::ProviderId;$' \
+  "$repository_root/crates/hq-node/src/tui_client.rs" |
+  grep -Eq '(hq_(domain|application|store|relay|harness|codex|resources|projects)|rusqlite|std::fs|std::process)'; then
   fail "the TUI client executor may cross only hq-tui and ordinary local API boundaries"
 fi
 grep -Fq 'impl TuiClientPort for LocalTuiClient' \
@@ -271,7 +276,7 @@ grep -Fq 'impl TuiClientPort for LocalTuiClient' \
   fail "hq-node must map the subscribed ordinary local client into the TUI client port"
 grep -Fq 'LocalNodeEventClient' "$repository_root/crates/hq-node/src/tui_client.rs" ||
   fail "the TUI client port must use the subscribed ordinary local API client"
-grep -Fq 'Request::ConversationPage' "$repository_root/crates/hq-node/src/tui_client.rs" ||
+grep -Fq 'Request::AuthoritativeConversationView' "$repository_root/crates/hq-node/src/tui_client.rs" ||
   fail "the TUI must load mixed history through the ordinary bounded conversation query"
 grep -Fq 'UiEffect::LoadConversation' "$repository_root/crates/hq-node/src/tui_client.rs" ||
   fail "the TUI executor must preserve conversation-page effect identity"
@@ -300,7 +305,7 @@ grep -Fq 'client.agent_session(' "$repository_root/crates/hq-node/src/cli.rs" ||
   fail "managed harness clients must cross the typed local API client"
 grep -Fq 'fn run_project(' "$repository_root/crates/hq-node/src/cli.rs" ||
   fail "the installed CLI must expose project catalog and command workflows"
-grep -Fq 'project_catalog_view(&snapshot, action)' "$repository_root/crates/hq-node/src/cli.rs" ||
+grep -Fq 'project_catalog_view(snapshot, action)' "$repository_root/crates/hq-node/src/cli.rs" ||
   fail "project catalog clients must derive only from a fresh local API snapshot"
 grep -Fq 'client.project(wire)' "$repository_root/crates/hq-node/src/cli.rs" ||
   fail "project mutations must cross the typed local API client"

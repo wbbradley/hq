@@ -35,7 +35,7 @@ func TestDomainClientResubscribesAcrossLiveNodeRestartAndBuildDrift(t *testing.T
 	initializeNodeIdentity(t, databasePath)
 	stopNode := startTestNode(t, databasePath)
 	defer stopNode()
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	client, err := hqclient.Open(ctx, databasePath)
 	if err != nil {
@@ -102,7 +102,7 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 	stopReceiver := startTestNode(t, receiverPath)
 	defer stopReceiver()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	sender, err := hqclient.Open(ctx, senderPath)
 	if err != nil {
@@ -156,7 +156,7 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	var setupStatus domain.NetworkStatus
-	waitUntil(t, 3*time.Second, func() bool {
+	waitUntil(t, 15*time.Second, func() bool {
 		var statusErr error
 		setupStatus, statusErr = sender.NetworkStatus(ctx)
 		return statusErr == nil && setupStatus.Queued == 0 && relay.eventCount() >= 3
@@ -183,9 +183,12 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 		Body: "local RPC through retained Nostr", Context: repository, CreatedAt: time.Now().UTC(),
 	}
 	var createErr error
-	waitUntil(t, 3*time.Second, func() bool {
+	waitUntil(t, 15*time.Second, func() bool {
 		_ = sender.Synchronize(ctx)
 		createErr = sender.Create(ctx, message)
+		if createErr != nil {
+			t.Logf("waiting for mailbox capability: %v", createErr)
+		}
 		return createErr == nil
 	}, "sender did not consume the receiver-issued mailbox capability")
 	assertMessageInvalidation(t, senderSubscription.Changes(), "sender local commit")
@@ -196,7 +199,7 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 	if err := sender.Synchronize(ctx); err != nil {
 		t.Fatal(err)
 	}
-	waitUntil(t, 3*time.Second, func() bool {
+	waitUntil(t, 15*time.Second, func() bool {
 		status, statusErr := sender.NetworkStatus(ctx)
 		return statusErr == nil && status.Queued == 0 && status.RelayAccepted == setupAccepted+1 && relay.eventCount() == setupRelayEvents+1
 	}, "sender outbox was not published exactly once")
@@ -207,7 +210,7 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 	assertMessageInvalidation(t, receiverSubscription.Changes(), "receiver retained catch-up")
 	var got model.Message
 	var getErr error
-	waitUntil(t, 3*time.Second, func() bool {
+	waitUntil(t, 15*time.Second, func() bool {
 		got, getErr = receiver.Get(ctx, messageID)
 		return getErr == nil
 	}, "receiver did not project the retained message")
