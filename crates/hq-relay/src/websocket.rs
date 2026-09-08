@@ -661,12 +661,23 @@ mod tests {
     }
 
     fn receive_ready(connection: &mut dyn RelayConnection, timeout: Duration) -> RelayReceive {
-        let mut descriptor = [PollFd::new(
-            connection.readiness(),
-            PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
-        )];
-        let timeout = PollTimeout::try_from(timeout).expect("timeout fits poll");
-        assert_eq!(poll(&mut descriptor, timeout).expect("readiness waits"), 1);
-        connection.receive().expect("ready frame receives")
+        let deadline = Instant::now() + timeout;
+        loop {
+            let received = connection.receive().expect("ready frame receives");
+            if received != RelayReceive::Pending {
+                return received;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "application frame did not arrive");
+            let mut descriptor = [PollFd::new(
+                connection.readiness(),
+                PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+            )];
+            // Control frames can yield Pending, and tungstenite may already
+            // have buffered the following application frame without fd readiness.
+            let timeout = PollTimeout::try_from(remaining.min(Duration::from_millis(10)))
+                .expect("timeout fits poll");
+            poll(&mut descriptor, timeout).expect("readiness waits");
+        }
     }
 }
