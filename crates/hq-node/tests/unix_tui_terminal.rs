@@ -956,21 +956,34 @@ fn installed_guided_work_resumes_exact_conversation_after_node_restart() {
 
 #[test]
 fn installed_agent_stop_interrupts_held_work_and_continues_with_the_preserved_draft() {
-    assert_installed_agent_cancellation(false, false);
+    assert_installed_agent_cancellation(AgentStopScenario::Active);
 }
 
 #[test]
 fn installed_agent_stop_cancels_pending_approval_and_preserves_the_next_message() {
-    assert_installed_agent_cancellation(true, false);
+    assert_installed_agent_cancellation(AgentStopScenario::Approval);
 }
 
 #[test]
 fn installed_agent_stop_retains_a_message_sent_before_terminal_confirmation() {
-    assert_installed_agent_cancellation(false, true);
+    assert_installed_agent_cancellation(AgentStopScenario::QueuedInput);
+}
+
+#[test]
+fn installed_agent_stop_retries_uncertainty_through_a_blocked_rpc_and_natural_completion() {
+    assert_installed_agent_cancellation(AgentStopScenario::Uncertain);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentStopScenario {
+    Active,
+    Approval,
+    QueuedInput,
+    Uncertain,
 }
 
 #[allow(clippy::too_many_lines)]
-fn assert_installed_agent_cancellation(approval: bool, queued: bool) {
+fn assert_installed_agent_cancellation(scenario: AgentStopScenario) {
     use hq_local_api::{
         ClientEvent,
         protocol::v1::{
@@ -978,6 +991,9 @@ fn assert_installed_agent_cancellation(approval: bool, queued: bool) {
             SnapshotItem,
         },
     };
+    let approval = scenario == AgentStopScenario::Approval;
+    let queued = scenario == AgentStopScenario::QueuedInput;
+    let uncertain = scenario == AgentStopScenario::Uncertain;
     let _scenario = serial_scenario();
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -990,6 +1006,10 @@ fn assert_installed_agent_cancellation(approval: bool, queued: bool) {
     if queued {
         std::fs::write(provider_bin.join("hold-interrupted-terminal"), b"enabled")
             .expect("terminal confirmation gate");
+    }
+    if uncertain {
+        std::fs::write(provider_bin.join("lose-interrupt-ack"), b"enabled")
+            .expect("uncertain cancellation fixture");
     }
     let search_path = format!(
         "{}:{}",
@@ -1078,6 +1098,9 @@ fn assert_installed_agent_cancellation(approval: bool, queued: bool) {
         );
         thread::sleep(Duration::from_millis(10));
     };
+    if scenario == AgentStopScenario::Active {
+        assert_stale_agent_stop_replays(&mut client, &target);
+    }
     assert!(
         !provider_bin.join("interrupt-received").exists(),
         "no fixture or caller may release the turn before Ctrl-G"
@@ -1097,8 +1120,7 @@ fn assert_installed_agent_cancellation(approval: bool, queued: bool) {
         &state_root,
         true,
         PtyInteraction::StopAgentAndContinue {
-            approval,
-            queued,
+            scenario,
             provider_bin: &provider_bin,
         },
     );
@@ -1123,7 +1145,14 @@ fn assert_installed_agent_cancellation(approval: bool, queued: bool) {
     };
     let tracked = view.tracked.expect("terminal operation persisted");
     assert_eq!(tracked.operation_id, target.operation_id);
-    assert_eq!(tracked.status, ActivityStatusDto::Interrupted);
+    assert_eq!(
+        tracked.status,
+        if uncertain {
+            ActivityStatusDto::Succeeded
+        } else {
+            ActivityStatusDto::Interrupted
+        }
+    );
     assert!(tracked.sequence > target.sequence);
     let calls: Vec<serde_json::Value> = std::fs::read_to_string(provider_bin.join("calls.log"))
         .expect("provider log")
@@ -1134,9 +1163,15 @@ fn assert_installed_agent_cancellation(approval: bool, queued: bool) {
         .iter()
         .filter(|call| call["method"] == "turn/interrupt")
         .collect();
-    assert_eq!(interrupts.len(), 1);
-    assert_eq!(interrupts[0]["params"]["threadId"], "hq-test-thread");
-    assert_eq!(interrupts[0]["params"]["turnId"], "hq-test-turn-1");
+    assert_eq!(interrupts.len(), if uncertain { 2 } else { 1 });
+    for interrupt in interrupts {
+        assert_eq!(interrupt["params"]["threadId"], "hq-test-thread");
+        assert_eq!(interrupt["params"]["turnId"], "hq-test-turn-1");
+    }
+    if uncertain {
+        assert!(provider_bin.join("lookup-held").exists());
+        assert!(provider_bin.join("lookup-released-by-interrupt").exists());
+    }
     if approval {
         let answers: Vec<_> = calls
             .iter()
@@ -1158,6 +1193,63 @@ fn assert_installed_agent_cancellation(approval: bool, queued: bool) {
         starts[1]["params"]["input"][0]["text"],
         "Continue after stopping"
     );
+}
+
+fn assert_stale_agent_stop_replays(
+    client: &mut hq_node::LocalNodeClient,
+    target: &hq_local_api::protocol::v1::AgentOperationTargetDto,
+) {
+    use hq_local_api::{
+        ClientEvent,
+        protocol::v1::{
+            AgentCancellationRequestDto, AgentCancellationStateDto, Id32, ResponseResult,
+            RuntimeFailureReasonDto,
+        },
+    };
+    let mut old_generation = target.clone();
+    old_generation.generation = Id32::new([81; 32]);
+    let request = AgentCancellationRequestDto {
+        request_id: Id32::new([82; 32]),
+        target: old_generation,
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let ClientEvent::Response {
+            result: ResponseResult::AgentCancellationState(state),
+            ..
+        } = client
+            .cancel_agent_operation(request.clone())
+            .expect("stale stop request")
+        else {
+            panic!("typed cancellation state");
+        };
+        if state != AgentCancellationStateDto::Queued {
+            assert_eq!(
+                state,
+                AgentCancellationStateDto::Rejected {
+                    reason: RuntimeFailureReasonDto::GenerationChanged
+                }
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "stale request settles");
+        thread::sleep(Duration::from_millis(10));
+    }
+    for _ in 0..2 {
+        assert!(matches!(
+            client
+                .cancel_agent_operation(request.clone())
+                .expect("exact stale replay"),
+            ClientEvent::Response {
+                result: ResponseResult::AgentCancellationState(
+                    AgentCancellationStateDto::Rejected {
+                        reason: RuntimeFailureReasonDto::GenerationChanged
+                    }
+                ),
+                ..
+            }
+        ));
+    }
 }
 
 fn cancellation_client(state_root: &Path) -> hq_node::LocalNodeClient {
@@ -1690,8 +1782,7 @@ struct PtyRun {
 #[derive(Clone, Copy, Debug)]
 enum PtyInteraction<'content> {
     StopAgentAndContinue {
-        approval: bool,
-        queued: bool,
+        scenario: AgentStopScenario,
         provider_bin: &'content Path,
     },
     ReadPagedHistory {
@@ -1867,11 +1958,13 @@ fn run_in_pty_with_trace(
             .windows(ENTER_ALTERNATE_SCREEN.len())
             .any(|window| window == ENTER_ALTERNATE_SCREEN);
         if let PtyInteraction::StopAgentAndContinue {
-            approval,
-            queued,
+            scenario,
             provider_bin,
         } = interaction
         {
+            let approval = scenario == AgentStopScenario::Approval;
+            let queued = scenario == AgentStopScenario::QueuedInput;
+            let uncertain = scenario == AgentStopScenario::Uncertain;
             let rendered = text_without_csi_sequences(&bytes[completion_offset.unwrap_or(0)..]);
             match oversized_phase {
                 0 if rendered.contains("cancellation-agent") && rendered.contains("Connected") => {
@@ -1889,8 +1982,8 @@ fn run_in_pty_with_trace(
                     oversized_phase = 2;
                     completion_offset = Some(bytes.len());
                 }
-                2 if queued
-                    && rendered.contains("Stopping agent")
+                2 if ((queued && rendered.contains("Stopping agent"))
+                    || (uncertain && rendered.contains("retry stop")))
                     && rendered.contains("Continue after stopping") =>
                 {
                     master
@@ -1907,17 +2000,29 @@ fn run_in_pty_with_trace(
                             Some(1),
                             "future input must wait until the old turn is terminal"
                         );
-                        std::fs::write(
-                            provider_bin.join("release-interrupted-terminal"),
-                            b"release",
-                        )
-                        .expect("release only after canonical future input is saved");
-                        oversized_phase = 3;
+                        if uncertain {
+                            oversized_phase = 6;
+                        } else {
+                            std::fs::write(
+                                provider_bin.join("release-interrupted-terminal"),
+                                b"release",
+                            )
+                            .expect("release only after canonical future input is saved");
+                            oversized_phase = 3;
+                        }
                         completion_offset = Some(bytes.len());
                     }
                     next_state_probe_at = Instant::now() + Duration::from_millis(150);
                 }
+                6 if provider_bin.join("lookup-held").exists() => {
+                    master
+                        .write_all(b"\x07")
+                        .expect("retry exact stop through held RPC");
+                    oversized_phase = 3;
+                    completion_offset = Some(bytes.len());
+                }
                 2 if !queued
+                    && !uncertain
                     && rendered.contains("Agent stopped")
                     && rendered.contains("Continue after stopping") =>
                 {
@@ -1933,7 +2038,8 @@ fn run_in_pty_with_trace(
                 _ => {}
             }
             master.flush().expect("control flow flush");
-            if oversized_phase > 0 && oversized_phase < 4 && Instant::now() >= next_state_probe_at {
+            if oversized_phase > 0 && oversized_phase != 4 && Instant::now() >= next_state_probe_at
+            {
                 resize_phase ^= 1;
                 set_pty_dimensions(&pair.slave, 30, 99 + u16::from(resize_phase));
                 kill(
@@ -3177,10 +3283,17 @@ fn run_in_pty_with_trace(
             PtyInteraction::ReadPagedHistory { .. } => {
                 history_progress_at.elapsed() >= PROCESS_INACTIVITY_WATCHDOG.saturating_mul(4)
             }
-            PtyInteraction::StopAgentAndContinue { queued: true, .. } if oversized_phase == 3 => {
+            PtyInteraction::StopAgentAndContinue {
+                scenario: AgentStopScenario::QueuedInput,
+                ..
+            } if oversized_phase == 3 => {
                 // The saved delivery uses the daemon's bounded retry after backpressure.
                 history_progress_at.elapsed() >= PROCESS_INACTIVITY_WATCHDOG.saturating_mul(2)
             }
+            PtyInteraction::StopAgentAndContinue {
+                scenario: AgentStopScenario::Uncertain,
+                ..
+            } => history_progress_at.elapsed() >= PROCESS_INACTIVITY_WATCHDOG.saturating_mul(2),
             PtyInteraction::StopAgentAndContinue { .. } => {
                 history_progress_at.elapsed() >= PROCESS_INACTIVITY_WATCHDOG
             }

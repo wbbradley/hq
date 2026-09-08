@@ -196,16 +196,39 @@ before admitting another prompt to a session that has a pending cancellation.
 This is a recommendation to defer arbitrary ACP support, not to weaken HQ's harness
 contract or make cancellation depend on an ACP implementation.
 
-## Evidence required for implementation completion
+## Qualification
 
-Use a deterministic provider fixture that gates generation/tool execution and
-another that gates an RPC response. Issue cancellation through the real local
-API/TUI control path and prove the provider receives it before either gate is
-released. Check sibling status and control responsiveness during those waits.
+`crates/hq-node/tests/unix_tui_terminal.rs` exercises the installed daemon,
+local API, independent TUI control worker, and a subprocess provider fixture:
 
-Assert exact target and authorization rejection, unsupported and human recipients,
-natural completion races, duplicate/stale requests, uncertain acknowledgements,
-pending approvals, late events, authoritative terminal persistence, and successful
-conversation continuation. Verify that stopping one operation neither resubmits
-accepted work nor stops the next operation. A mock that returns Cancelled immediately
-does not demonstrate these properties.
+- `installed_agent_stop_interrupts_held_work_and_continues_with_the_preserved_draft`
+  holds a running turn until Ctrl-G reaches its exact provider thread/turn. It also
+  rejects and replays an old-generation request without sending an interrupt.
+- `installed_agent_stop_cancels_pending_approval_and_preserves_the_next_message`
+  opens a second TUI while an approval is pending, verifies the alert, then checks
+  exactly one cancelled approval response and the interrupted terminal status.
+- `installed_agent_stop_retains_a_message_sent_before_terminal_confirmation`
+  holds terminal confirmation after the interrupt acknowledgement. A second message
+  must be durably saved with no second accepted dispatch before the fixture releases
+  confirmation. The normal delivery retry then starts that exact message once.
+- `installed_agent_stop_retries_uncertainty_through_a_blocked_rpc_and_natural_completion`
+  drops the first interrupt acknowledgement and holds the subsequent ordinary
+  provider lookup. Retrying Ctrl-G must reach the provider before it releases that
+  lookup. Natural completion racing the retry remains Succeeded, and the next message
+  is delivered once. Both interrupt attempts retain the original provider target.
+
+Each scenario checks persisted terminal evidence with a fresh local client and
+successful conversation continuation. The fixture logs exact submission identities;
+separate supervisor recovery tests verify acceptance lookup across restart. Saved
+input encountering temporary backpressure follows the daemon's existing bounded
+retry schedule, which can delay continuation by about 30 seconds.
+
+Adapter, application, local API, supervisor, and pure model tests additionally cover
+unsupported/human recipients, exact authorization and scope, stale ownership,
+immutable retries, bounded job admission, late lifecycle/history events, and retained
+draft and reading position. Session-registry and executor gate tests verify sibling
+responsiveness and owned-worker cleanup.
+
+Startup retains pending approval observations received before either initial view is
+ready. A known cancelled interaction reports InteractiveAlreadyAnswered so supervisor
+cleanup can publish terminal state; an unknown request remains invalid.

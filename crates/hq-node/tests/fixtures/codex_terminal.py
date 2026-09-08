@@ -80,17 +80,31 @@ for line in lines:
         if turn_number == 1 and os.path.exists(os.path.join(os.path.dirname(__file__), "wait-for-interrupt")):
             with open(os.path.join(os.path.dirname(__file__), "interrupt-waiting"), "w") as marker:
                 marker.write("waiting")
+            interrupt_count = 0
+            held_read = None
+            uncertain_fixture = os.path.exists(os.path.join(os.path.dirname(__file__), "lose-interrupt-ack"))
             for control_line in lines:
                 with open(os.path.join(os.path.dirname(__file__), "calls.log"), "a") as log:
                     log.write(control_line)
                 control = json.loads(control_line)
                 if control.get("method") == "thread/read":
-                    print(json.dumps({"id": control["id"], "result": {"thread": {"id": thread_id, "turns": [turn]}}}), flush=True)
+                    if uncertain_fixture:
+                        assert held_read is None, "one ordinary lookup held"
+                        held_read = control["id"]
+                        with open(os.path.join(os.path.dirname(__file__), "lookup-held"), "w") as marker:
+                            marker.write("waiting for interrupt retry")
+                    else:
+                        print(json.dumps({"id": control["id"], "result": {"thread": {"id": thread_id, "turns": [turn]}}}), flush=True)
                 elif control.get("method") == "turn/interrupt":
                     assert control["params"]["threadId"] == thread_id
                     assert control["params"]["turnId"] == turn_id
                     with open(os.path.join(os.path.dirname(__file__), "interrupt-received"), "w") as marker:
                         marker.write(turn_id)
+                    interrupt_count += 1
+                    if uncertain_fixture and interrupt_count == 1:
+                        continue  # Lose the acknowledgement, keeping the original turn live.
+                    if uncertain_fixture:
+                        assert held_read is not None, "retry must reach provider through an unfinished lookup"
                     print(json.dumps({"id": control["id"], "result": {}}), flush=True)
                     hold_terminal = os.path.join(os.path.dirname(__file__), "hold-interrupted-terminal")
                     release_terminal = os.path.join(os.path.dirname(__file__), "release-interrupted-terminal")
@@ -105,7 +119,12 @@ for line in lines:
                         pending = json.loads(pending_line)
                         assert pending.get("method") == "thread/read", "new work reached provider before old terminal"
                         print(json.dumps({"id": pending["id"], "result": {"thread": {"id": thread_id, "turns": [turn]}}}), flush=True)
-                    print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "interrupted", "items": []}}}), flush=True)
+                    terminal = {"id": turn_id, "status": "completed" if uncertain_fixture else "interrupted", "items": []}
+                    print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": terminal}}), flush=True)
+                    if held_read is not None:
+                        print(json.dumps({"id": held_read, "result": {"thread": {"id": thread_id, "turns": [terminal]}}}), flush=True)
+                        with open(os.path.join(os.path.dirname(__file__), "lookup-released-by-interrupt"), "w") as marker:
+                            marker.write("released")
                     break
             continue
         completion_gate = os.path.join(os.path.dirname(__file__), f"completion-gate-{turn_number}")
