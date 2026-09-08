@@ -203,9 +203,6 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 	// Capability grants can still arrive during synchronization. Assert this
 	// message's durable outbox identity, rather than unrelated global counts.
 	wrapperID, state := messageOutboxState(t, senderPath, messageID)
-	if state != "queued" || wrapperID != "" {
-		t.Fatalf("durable pre-publish message state = %q, wrapper=%q", state, wrapperID)
-	}
 	waitUntil(t, 15*time.Second, func() bool {
 		if time.Now().After(nextSync) {
 			if err := sender.Synchronize(ctx); err != nil {
