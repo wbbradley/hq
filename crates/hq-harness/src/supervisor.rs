@@ -2100,7 +2100,11 @@ fn reconcile_delivery(
             worker.token,
             HarnessDeliveryState::Accepted,
         ),
-        HarnessSubmissionOutcome::Uncertain(_) => Ok(()),
+        // The durable attempt is already uncertain. Temporary refusal (for example while an
+        // earlier turn is stopping) must retain the input, not terminally reject it. Re-enter
+        // through authoritative lookup before another attempt, including after a restart.
+        HarnessSubmissionOutcome::Uncertain(_)
+        | HarnessSubmissionOutcome::Rejected(HarnessErrorClass::Backpressure) => Ok(()),
         HarnessSubmissionOutcome::Rejected(class) => {
             set_delivery_state(
                 dependencies,

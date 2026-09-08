@@ -35,6 +35,91 @@ use hq_harness::{
 };
 
 #[test]
+fn temporary_submission_backpressure_preserves_exact_input_until_recovery_accepts_it() {
+    for project in [false, true] {
+        let agent = AgentId::from_bytes([1; 32]);
+        let provider_id = ProviderId::new("scripted").expect("provider");
+        let session_id = ProviderSessionId::new("durable-session").expect("session");
+        let provider = Arc::new(ProviderState::default());
+        provider.backpressure.store(true, Ordering::SeqCst);
+        let state = Arc::new(MemoryState::default());
+        let dependencies = dependencies(
+            registry(provider_id.clone(), session_id.clone(), provider.clone()),
+            state.clone(),
+            Arc::new(MemoryPersistence::available()),
+            Arc::new(TestClock::new(10)),
+            Arc::new(TestTokens::default()),
+        );
+        let runtime = supervisor(dependencies.clone());
+        runtime
+            .launch(launch(
+                agent,
+                provider_id.clone(),
+                HarnessSessionRequest::Start,
+            ))
+            .expect("start");
+        let mut input = delivery(agent, &provider_id, &session_id);
+        if !project {
+            input.project = None;
+        }
+        runtime
+            .deliver(input.clone())
+            .expect("temporary refusal retains input");
+        assert_eq!(
+            state.delivery_state(agent),
+            Some(HarnessDeliveryState::Uncertain)
+        );
+        if project {
+            runtime
+                .deliver(input.clone())
+                .expect("eligible project retry waits for admission");
+        } else {
+            runtime.wake().expect("still waiting for admission");
+        }
+        assert_eq!(
+            state.delivery_state(agent),
+            Some(HarnessDeliveryState::Uncertain)
+        );
+        assert!(provider.accepted.lock().expect("accepted").is_empty());
+        runtime.stop(agent).expect("stop old worker");
+        provider.backpressure.store(false, Ordering::SeqCst);
+        let recovered = supervisor(dependencies);
+        recovered
+            .recover(launch(
+                agent,
+                provider_id,
+                HarnessSessionRequest::Resume { session_id },
+            ))
+            .expect("recover retained input");
+        if project {
+            // Project delivery is retried only when the workflow reauthorizes this exact input.
+            recovered
+                .deliver(input.clone())
+                .expect("reauthorized project input");
+            recovered
+                .deliver(input.clone())
+                .expect("project acceptance lookup");
+        } else {
+            recovered.wake().expect("reconcile acceptance");
+        }
+        let retained = recovered
+            .delivery(agent, input.submission.submission_id)
+            .expect("delivery read")
+            .expect("retained delivery");
+        assert_eq!(retained.submission, input.submission);
+        assert_eq!(retained.project, input.project);
+        assert_eq!(retained.state, HarnessDeliveryState::Accepted);
+        assert_eq!(
+            provider.submission_calls.load(Ordering::SeqCst),
+            3,
+            "accepted work must be looked up, not resubmitted"
+        );
+        assert_eq!(provider.accepted.lock().expect("accepted").len(), 1);
+        recovered.shutdown().expect("shutdown");
+    }
+}
+
+#[test]
 fn direct_session_recovery_still_reconciles_acceptance_without_resubmission() {
     let agent = AgentId::from_bytes([1; 32]);
     let provider_id = ProviderId::new("scripted").expect("provider");
@@ -2014,6 +2099,7 @@ impl HarnessTokenSource for TestTokens {
 
 #[derive(Default)]
 struct ProviderState {
+    backpressure: AtomicBool,
     operation_control: Option<Arc<dyn hq_harness::HarnessOperationControl>>,
     on_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     on_open: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -2103,6 +2189,11 @@ impl HarnessSession for TestSession {
         submission: HarnessSubmission,
     ) -> Result<HarnessSubmissionOutcome, HarnessError> {
         self.state.submission_calls.fetch_add(1, Ordering::SeqCst);
+        if self.state.backpressure.load(Ordering::SeqCst) {
+            return Ok(HarnessSubmissionOutcome::Rejected(
+                HarnessErrorClass::Backpressure,
+            ));
+        }
         if let Some(on_submit) = self.state.on_submit.lock().expect("submit hook").take() {
             on_submit();
         }
