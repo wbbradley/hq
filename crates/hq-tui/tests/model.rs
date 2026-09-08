@@ -2471,6 +2471,73 @@ fn short_historical_window_can_scroll_toward_newer_history() {
 }
 
 #[test]
+fn fully_loaded_thread_does_not_show_older_loading_when_reanchoring() {
+    let mut page = canonical_history_page(1, None, &[1, 2]);
+    page.next_cursor = None;
+    let preview = materialized_transition(snapshot(1, &["thread-a"]), page);
+    let opened = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let measured = observe_conversation_viewport(opened.model, &[("fact-1", 4), ("fact-2", 4)], 5);
+    let mut model = measured.model;
+    for input in [
+        UiInput::MoveCursorHome,
+        UiInput::NextItem,
+        UiInput::PreviousItem,
+        UiInput::NextItem,
+        UiInput::MoveCursorHome,
+    ] {
+        let transition =
+            update(model, UiEvent::Input(input)).expect("scroll within loaded history");
+        assert!(
+            !transition.model.conversation_older_loading(),
+            "a changed reading anchor is not evidence of an older page"
+        );
+        model = transition.model;
+    }
+    // A subscription refresh must still protect this reading location when new content arrives.
+    let position = model.conversation_viewport_position().cloned();
+    let reload = update(model, UiEvent::Input(UiInput::LoadMore)).expect("explicit window read");
+    assert!(!reload.model.conversation_older_loading());
+    assert_eq!(
+        reload.model.conversation_viewport_position(),
+        position.as_ref()
+    );
+}
+
+#[test]
+fn reaching_the_known_start_clears_older_loading_before_the_next_anchor_response() {
+    let preview = materialized_transition(
+        snapshot(1, &["thread-a"]),
+        canonical_history_page(1, None, &[1, 2]),
+    );
+    let opened = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let measured = observe_conversation_viewport(opened.model, &[("fact-1", 4), ("fact-2", 4)], 5);
+    let home = update(measured.model, UiEvent::Input(UiInput::MoveCursorHome)).expect("older");
+    assert!(home.model.conversation_older_loading());
+    let mut oldest = canonical_history_page(1, Some(1), &[0, 1, 2]);
+    oldest.next_cursor = None;
+    let loaded = update(
+        home.model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: snapshot(1, &["thread-a"]),
+                conversation: Some(oldest),
+            },
+        },
+    )
+    .expect("known beginning");
+    let measured = observe_conversation_viewport(
+        loaded.model,
+        &[("fact-0", 4), ("fact-1", 4), ("fact-2", 4)],
+        5,
+    );
+    let top = update(measured.model, UiEvent::Input(UiInput::MoveCursorHome)).expect("top");
+    assert!(
+        !top.model.conversation_older_loading(),
+        "the source has already proved there is no older page"
+    );
+}
+
+#[test]
 fn anchored_subscription_failure_preserves_reading_and_offers_explicit_retry() {
     let preview = materialized_transition(
         snapshot(1, &["thread-a"]),

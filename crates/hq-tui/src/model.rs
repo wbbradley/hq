@@ -4501,6 +4501,14 @@ impl UiModel {
 
     /// Returns whether an older page is loading for the selected conversation.
     pub fn conversation_older_loading(&self) -> bool {
+        // Anchor changes also refresh already-loaded history. Only the source's older-page
+        // continuation proves that such a refresh can be loading older messages.
+        if !self.conversation.as_ref().is_some_and(|conversation| {
+            self.selected_row.as_ref() == Some(&conversation.row_id)
+                && conversation.next_cursor.is_some()
+        }) {
+            return false;
+        }
         self.pending_conversation.as_ref().is_some_and(|pending| {
             (pending.cursor.is_some() || pending.anchor.is_some())
                 && self.selected_row.as_ref() == Some(&pending.row_id)
