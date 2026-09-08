@@ -14059,3 +14059,30 @@ Scope: In `crates/hq-tui/src/model.rs`, replace the loose `runtime_details` visi
 
 Completion: Model and rendering tests cover conversation versus composer focus, D typed into a draft, details breadcrumbs and back navigation, absence of composer hints in details, narrow layouts, and target changes. No daemon changes are required.
 
+
+### Exit agent-specific setup back to the Inbox
+
+Implementation summary: Added typed setup provenance carrying the original Inbox agent and
+row identity. Esc from its Choose project screen closes the whole flow and restores that Inbox
+selection. Generic New entry resets provenance and keeps its existing Back behavior. Abandoned
+workflow state cannot be revived by a later catalog observation or bias a subsequent agent choice.
+Submitted project operations retain their existing cancellation restrictions.
+
+Validation: The complete TUI suite, node TUI executor and terminal-shell tests, formatting, and
+strict workspace linting passed. The extended unbound-agent regression checks direct exit,
+selection retention, delayed snapshot handling, normal New back navigation, and preference cleanup.
+
+Original task:
+
+### Exit agent-specific setup back to the Inbox
+
+Problem: Enter on an unassigned Inbox agent opens Choose project, but Esc exposes the generic New… launcher even though the user never entered that launcher.
+
+Scope: Update agent-entry setup in `crates/hq-tui/src/model.rs`, especially `preferred_new_agent`, `UiNewWorkflow`, `apply_new_modal_input`, and navigation provenance. Extend `entering_an_unbound_inbox_agent_joins_project_setup_with_that_agent_selected` in `tests/model.rs`.
+
+- Carry a typed entry origin and selected agent through the setup flow. For setup entered from an Inbox agent, Esc from Choose project exits the whole flow to the Inbox with that same agent selected.
+- Treat the bound-agent setup as one user-facing flow rather than revealing a generic launcher on cancellation. Preserve ordinary back navigation for flows actually entered through New…, and preserve existing rules for work already submitted.
+- Clear abandoned setup state so a later generic New… flow does not inherit the old agent. Ignore late asynchronous results from the cancelled flow rather than reopening it.
+
+Completion: Tests demonstrate Inbox → unassigned agent → Choose project → Esc returns directly to the same Inbox selection; normal New… navigation still works, abandoned agent context does not leak, and delayed results do not resurrect cancelled setup.
+
