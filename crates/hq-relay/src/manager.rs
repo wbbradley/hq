@@ -141,6 +141,18 @@ struct Worker {
     stopping: Arc<AtomicBool>,
     wakes: WorkerWake,
     join: JoinHandle<Result<(), RelayPortError>>,
+    completed: Arc<AtomicBool>,
+}
+
+struct WorkerCompletion {
+    completed: Arc<AtomicBool>,
+    wake: SyncSender<()>,
+}
+impl Drop for WorkerCompletion {
+    fn drop(&mut self) {
+        self.completed.store(true, Ordering::Release);
+        let _ = self.wake.try_send(());
+    }
 }
 
 fn supervise(
@@ -220,7 +232,8 @@ fn reconcile(
                 .get(url)
                 .is_none_or(|policy| policy != &worker.policy);
             let recovery_changed = worker.recovers_staging != (staging_owner.as_ref() == Some(url));
-            (changed || recovery_changed || worker.join.is_finished()).then_some(url.clone())
+            (changed || recovery_changed || worker.completed.load(Ordering::Acquire))
+                .then_some(url.clone())
         })
         .collect::<Vec<_>>();
     for url in remove {
@@ -257,19 +270,22 @@ fn spawn_worker(
     let mut thread_config = config.clone();
     thread_config.session.recover_staging = recovers_staging;
     let thread_dependencies = dependencies.clone();
-    let manager_wakes = manager_wakes.clone();
+    let completed = Arc::new(AtomicBool::new(false));
+    let completion = WorkerCompletion {
+        completed: Arc::clone(&completed),
+        wake: manager_wakes.clone(),
+    };
     let join = thread::Builder::new()
         .name("hq-relay-session".to_owned())
         .spawn(move || {
-            let outcome = run_worker(
+            let _completion = completion;
+            run_worker(
                 thread_policy,
                 &thread_config,
                 &thread_dependencies,
                 &thread_stopping,
                 wake_waiter,
-            );
-            let _ = manager_wakes.try_send(());
-            outcome
+            )
         })
         .map_err(|_| RelayPortError::Unavailable)?;
     Ok(Worker {
@@ -278,6 +294,7 @@ fn spawn_worker(
         stopping,
         wakes,
         join,
+        completed,
     })
 }
 
@@ -380,4 +397,36 @@ fn policy_query(limit: usize) -> RelayStateQuery {
 
 fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod completion_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_wake_is_actionable_before_the_worker_thread_returns() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let (wake, notified) = std::sync::mpsc::sync_channel(1);
+        let (release, gate) = std::sync::mpsc::channel();
+        let guard = WorkerCompletion {
+            completed: Arc::clone(&completed),
+            wake,
+        };
+        let worker = thread::spawn(move || {
+            drop(guard);
+            gate.recv_timeout(Duration::from_secs(3))
+                .expect("release worker");
+        });
+        notified
+            .recv_timeout(Duration::from_secs(3))
+            .expect("terminal wake");
+        assert!(completed.load(Ordering::Acquire));
+        assert!(
+            !worker.is_finished(),
+            "wake may arrive before JoinHandle completion"
+        );
+        release.send(()).expect("release");
+        worker.join().expect("join");
+    }
 }
