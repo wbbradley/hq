@@ -7170,7 +7170,7 @@ fn interactions_observed(
 }
 
 fn reconcile_command_approval_focus(model: &mut UiModel, prior_restore: Option<UiCommandApproval>) {
-    if model.interaction_modal.is_some() {
+    if model.interaction_modal.is_some() || model.runtime_details_visible() {
         return;
     }
     let prior_presented = prior_restore.is_some_and(|state| state.presented);
@@ -15098,6 +15098,30 @@ mod tests {
         assert!(!model.runtime_details_visible());
         assert!(model.runtime_recovery.is_none());
         assert_eq!(model.runtime_target, Some(([5; 32], [20; 32])));
+    }
+
+    #[test]
+    fn resolving_an_approval_cannot_move_details_focus_into_the_hidden_composer() {
+        let mut model = runtime_details_model();
+        let mut approval = interaction(1, false, &[("Allow", "accept")]);
+        approval.kind = UiInteractionKind::CommandApproval;
+        approval.target = UiInteractionTarget::Conversation {
+            row_id: model
+                .active_conversation_row()
+                .expect("conversation")
+                .to_owned(),
+        };
+        let mut effects = Vec::new();
+        super::interactions_observed(&mut model, vec![approval], &mut effects);
+        model.present_command_approval();
+        super::apply_input(&mut model, &UiInput::Character('D'), &mut effects).expect("details");
+        assert!(model.runtime_details_visible());
+        let draft = model.mailbox_draft.clone();
+        super::interactions_observed(&mut model, Vec::new(), &mut effects);
+        assert_eq!(model.focus, UiFocus::Conversation);
+        super::apply_input(&mut model, &UiInput::Character('x'), &mut effects)
+            .expect("details owns typing");
+        assert_eq!(model.mailbox_draft, draft);
     }
 
     #[test]
