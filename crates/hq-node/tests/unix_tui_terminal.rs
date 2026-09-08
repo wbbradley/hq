@@ -1934,7 +1934,7 @@ fn run_in_pty_with_trace(
         ws_ypixel: 0,
     };
     let pair = openpty(Some(&dimensions), None).expect("pseudoterminal opens");
-    let before = tcgetattr(&pair.slave).expect("initial terminal modes");
+    let before = terminal_settings(tcgetattr(&pair.slave).expect("initial terminal modes"));
     let stdin = stdio_clone(&pair.slave);
     let stdout = stdio_clone(&pair.slave);
     let stderr = stdio_clone(&pair.slave);
@@ -2306,6 +2306,17 @@ fn run_in_pty_with_trace(
             );
             content_sent = true;
             completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
+            && content_sent
+            && !managed_action_sent
+            && Instant::now() >= next_state_probe_at
+        {
+            // A fast reconnect can leave the connection label unchanged, so
+            // differential rendering need not emit its text a second time.
+            resize_phase ^= 1;
+            set_pty_dimensions(&pair.slave, 30, 79 + u16::from(resize_phase));
+            next_state_probe_at = Instant::now() + Duration::from_millis(150);
         }
         if matches!(interaction, PtyInteraction::CompleteFreshSetupAndReconnect)
             && content_sent
@@ -3412,7 +3423,7 @@ fn run_in_pty_with_trace(
             Err(error) => panic!("final pseudoterminal read failed: {error}"),
         }
     }
-    let after = tcgetattr(&pair.slave).expect("restored terminal modes");
+    let after = terminal_settings(tcgetattr(&pair.slave).expect("restored terminal modes"));
     PtyRun {
         status,
         bytes,
@@ -3420,6 +3431,39 @@ fn run_in_pty_with_trace(
         after,
         resize_redrawn: resize_phase >= 2,
     }
+}
+
+fn terminal_settings(modes: Termios) -> Termios {
+    #[cfg(target_os = "macos")]
+    {
+        let mut raw = nix::libc::termios::from(modes);
+        // PENDIN is kernel-maintained input retyping state, not a restored
+        // terminal setting. Preserve comparisons of every other flag and speed.
+        raw.c_lflag &= !nix::sys::termios::LocalFlags::PENDIN.bits();
+        Termios::from(raw)
+    }
+    #[cfg(not(target_os = "macos"))]
+    modes
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn terminal_settings_ignore_only_pending_input_state() {
+    use nix::sys::termios::LocalFlags;
+    let pair = openpty(None, None).expect("pseudoterminal opens");
+    let original = tcgetattr(&pair.slave).expect("terminal modes");
+    let mut pending = nix::libc::termios::from(original.clone());
+    pending.c_lflag ^= LocalFlags::PENDIN.bits();
+    assert_eq!(
+        terminal_settings(original.clone()),
+        terminal_settings(Termios::from(pending))
+    );
+    let mut changed = nix::libc::termios::from(original.clone());
+    changed.c_lflag ^= LocalFlags::ECHO.bits();
+    assert_ne!(
+        terminal_settings(original),
+        terminal_settings(Termios::from(changed))
+    );
 }
 
 fn navigation_keys(from_rank: usize, to_rank: usize) -> Vec<u8> {
