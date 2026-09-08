@@ -1150,7 +1150,9 @@ impl HarnessSession for CodexSession {
         }
         let Some(pending) = self.pending_requests.remove(&answer.request_id) else {
             return Err(HarnessError::new(
-                if self.answered_requests.contains(&answer.request_id) {
+                if self.answered_requests.contains(&answer.request_id)
+                    || self.cancelled_requests.contains(&answer.request_id)
+                {
                     HarnessErrorClass::InteractiveAlreadyAnswered
                 } else {
                     HarnessErrorClass::InvalidInput

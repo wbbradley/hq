@@ -1077,6 +1077,7 @@ pub struct LocalNodeEventClient {
     interrupt: UnixClientInterrupt,
     wake: UnixClientWake,
     observation_deadline: Duration,
+    activation_events: VecDeque<ClientEvent>,
 }
 
 #[derive(Clone, Copy)]
@@ -1291,6 +1292,7 @@ impl LocalNodeEventClient {
             interrupt,
             wake,
             observation_deadline,
+            activation_events: VecDeque::new(),
         })
     }
 
@@ -1301,6 +1303,9 @@ impl LocalNodeEventClient {
 
     /// Drives subscribed work until an event, connection-state change, or workflow deadline.
     pub fn next_observation(&mut self) -> Result<Option<ClientEvent>, LocalNodeClientError> {
+        if let Some(event) = self.activation_events.pop_front() {
+            return Ok(Some(event));
+        }
         self.runner
             .poll_event_or_state_change(self.observation_deadline)
             .map_err(LocalNodeClientError::Execution)
@@ -1321,7 +1326,11 @@ impl LocalNodeEventClient {
         &mut self,
     ) -> Result<AuthoritativeSnapshotDto, LocalNodeClientError> {
         loop {
-            if let Some(event) = self.next_observation()? {
+            if let Some(event) = self
+                .runner
+                .poll_event_or_state_change(self.observation_deadline)
+                .map_err(LocalNodeClientError::Execution)?
+            {
                 match event {
                     ClientEvent::Snapshot(snapshot) => return Ok(snapshot),
                     ClientEvent::AuthoritativeConversationView(view) => return Ok(view.snapshot),
@@ -1333,12 +1342,12 @@ impl LocalNodeEventClient {
                     ClientEvent::Error { .. } => {
                         return Err(LocalNodeClientError::Client);
                     }
-                    ClientEvent::Mutation(_)
+                    event @ (ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
                     | ClientEvent::AgentSession { .. }
                     | ClientEvent::Response { .. }
-                    | ClientEvent::RequestLost(_) => {}
+                    | ClientEvent::RequestLost(_)) => self.activation_events.push_back(event),
                 }
             }
         }

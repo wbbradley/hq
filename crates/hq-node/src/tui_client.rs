@@ -378,6 +378,7 @@ pub struct LocalTuiObserver {
     observed_connection: Option<ClientConnectionState>,
     presentation: SharedTuiPresentation,
     initial_view: Option<UiMaterializedConversationView>,
+    initial_events: VecDeque<ClientEvent>,
     selection: Arc<Mutex<PendingConversationSelection>>,
     control: LocalTuiObservationControl,
     prior_mailbox_rows: Vec<String>,
@@ -972,6 +973,7 @@ impl LocalTuiObserver {
             observed_connection: None,
             presentation,
             initial_view,
+            initial_events: VecDeque::new(),
             selection: Arc::clone(&selection),
             control: LocalTuiObservationControl { selection, wake },
             prior_mailbox_rows,
@@ -1291,11 +1293,13 @@ pub(crate) fn compose_tui_clients(
         initial.inbox_rows,
         initial.desired_row,
     );
+    observer.initial_events = initial.events;
     observer.activity_ranks = inbox_activity_ranks(subscription_base);
     Ok((client, observer))
 }
 
 struct InitialTuiView {
+    events: VecDeque<ClientEvent>,
     view: UiMaterializedConversationView,
     inbox_rows: Vec<String>,
     desired_row: Option<String>,
@@ -1329,6 +1333,7 @@ fn activate_initial_tui_view(
         .iter()
         .find(|row| row.kind == UiRowKind::Conversation)
         .map(|row| row.id.clone());
+    let mut events = VecDeque::new();
     let view = if let Some(row_id) = desired_row.clone() {
         let selection = conversation_selection(presentation, &row_id)?;
         event_client
@@ -1395,14 +1400,14 @@ fn activate_initial_tui_view(
                     });
                 }
                 Some(
-                    ClientEvent::Mutation(_)
+                    event @ (ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
                     | ClientEvent::AgentSession { .. }
                     | ClientEvent::Response { .. }
-                    | ClientEvent::RequestLost(_),
-                )
-                | None => {}
+                    | ClientEvent::RequestLost(_)),
+                ) => events.push_back(event),
+                None => {}
             }
         }
     } else {
@@ -1412,6 +1417,7 @@ fn activate_initial_tui_view(
         }
     };
     Ok(InitialTuiView {
+        events,
         view,
         inbox_rows,
         desired_row,
@@ -2471,7 +2477,10 @@ impl TuiObservationPort for LocalTuiObserver {
                 cause: None,
             }];
         }
-        let result = self.client.next_observation();
+        let result = match self.initial_events.pop_front() {
+            Some(event) => Ok(Some(event)),
+            None => self.client.next_observation(),
+        };
         let state = self.client.connection_state();
         let reconnect_cause = self.client.take_reconnect_cause().map(ui_reconnect_cause);
         let mut observations = Vec::new();

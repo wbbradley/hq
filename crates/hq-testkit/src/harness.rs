@@ -513,7 +513,7 @@ fn interactive_request(
         .ok_or_else(|| failure(scenario, "cancelled request accepted a late answer"))?;
     ensure(
         scenario,
-        error.class == HarnessErrorClass::InvalidInput,
+        error.class == HarnessErrorClass::InteractiveAlreadyAnswered,
         "late cancelled answer returned the wrong class",
     )
 }
@@ -1103,7 +1103,8 @@ impl HarnessSession for ScriptedSession {
             &self.state,
             HarnessConformanceObservation::OperationCancelled(operation_id),
         )?;
-        self.pending_requests.clear();
+        self.answered_requests
+            .extend(std::mem::take(&mut self.pending_requests));
         Ok(HarnessCancellationOutcome::Requested)
     }
 

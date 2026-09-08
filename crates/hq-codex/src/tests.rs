@@ -529,15 +529,24 @@ mod adapter {
             Some(&json!({"decision": "cancel"}))
         );
         drop(observed);
-        assert!(
-            opened
-                .session
-                .answer_interactive(HarnessInteractiveAnswer {
-                    request_id: request.request_id,
-                    response: HarnessInteractiveResponse::Choice(ShortText::new("accept")?),
-                })
-                .is_err()
-        );
+        for response in [
+            HarnessInteractiveResponse::Choice(ShortText::new("accept")?),
+            HarnessInteractiveResponse::Cancelled,
+        ] {
+            assert!(
+                matches!(
+                    opened.session.answer_interactive(HarnessInteractiveAnswer {
+                        request_id: request.request_id,
+                        response,
+                    }),
+                    Err(HarnessError {
+                        class: HarnessErrorClass::InteractiveAlreadyAnswered,
+                        ..
+                    })
+                ),
+                "supervisor cleanup must recognize an already cancelled approval"
+            );
+        }
         opened.session.force_stop()?;
         Ok(())
     }

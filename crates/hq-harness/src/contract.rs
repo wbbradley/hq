@@ -62,7 +62,7 @@ pub enum HarnessErrorClass {
     SessionNotFound,
     /// A stable submission identity was reused for changed input.
     SubmissionIdentityConflict,
-    /// One structured interactive request was answered more than once.
+    /// The exact structured request was already resolved, including by cancellation.
     InteractiveAlreadyAnswered,
     /// A secret-bearing request cannot cross or persist at the neutral boundary.
     SecretInputRejected,

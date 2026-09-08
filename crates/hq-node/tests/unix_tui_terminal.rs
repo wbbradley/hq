@@ -955,6 +955,274 @@ fn installed_guided_work_resumes_exact_conversation_after_node_restart() {
 }
 
 #[test]
+fn installed_agent_stop_interrupts_held_work_and_continues_with_the_preserved_draft() {
+    assert_installed_agent_cancellation(false);
+}
+
+#[test]
+fn installed_agent_stop_cancels_pending_approval_and_preserves_the_next_message() {
+    assert_installed_agent_cancellation(true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn assert_installed_agent_cancellation(approval: bool) {
+    use hq_local_api::{
+        ClientEvent,
+        protocol::v1::{
+            ActivityStatusDto, AgentOperationQueryDto, ConversationKeyDto, ResponseResult,
+            SnapshotItem,
+        },
+    };
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let worktree = directory.path().join("cancellation-worktree");
+    let provider_bin = directory.path().join("provider-bin");
+    std::fs::create_dir(&worktree).expect("working tree");
+    std::fs::create_dir(&provider_bin).expect("provider directory");
+    install_fake_codex(&provider_bin, approval);
+    std::fs::write(provider_bin.join("wait-for-interrupt"), b"enabled").expect("interrupt gate");
+    let search_path = format!(
+        "{}:{}",
+        provider_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    initialize_identity(&state_root);
+    let _daemon = start_foreground_daemon(&state_root, &search_path, &provider_bin.join("codex"));
+    assert!(
+        hq_output(&state_root, &["human", "create"])
+            .status
+            .success()
+    );
+    // Keep one real subscribed responder alive across the two TUI processes. Leaving the
+    // setup TUI must not itself dismiss the pending approval under test.
+    let observer = approval.then(|| CancellationObserver::start(&state_root));
+    let seeded = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::CreateGuidedProjectWork {
+            name: "cancellation-project",
+            path: worktree.to_str().expect("path"),
+            agent: "cancellation-agent",
+            content: "Keep working until I stop you",
+            search_path: &search_path,
+            approval: false,
+            completion_gate: None,
+        },
+    );
+    assert!(seeded.status.success(), "setup: {:?}", seeded.bytes);
+    wait_for_path(
+        &provider_bin.join("interrupt-waiting"),
+        Duration::from_secs(5),
+    );
+    let mut client = cancellation_client(&state_root);
+    let snapshot = client.snapshot().expect("authoritative snapshot");
+    let (project, home, account_id) = snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SnapshotItem::Project {
+                project_id,
+                home,
+                account_id,
+                name,
+                ..
+            } if name == "cancellation-project" => Some((*project_id, *home, *account_id)),
+            _ => None,
+        })
+        .expect("project authority");
+    let thread = snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SnapshotItem::ProjectAssignment {
+                project_id,
+                thread_id: Some(thread),
+                runnable: true,
+                ..
+            } if *project_id == project => Some(*thread),
+            _ => None,
+        })
+        .expect("current project conversation");
+    let mut query = AgentOperationQueryDto {
+        account_id,
+        home,
+        conversation: ConversationKeyDto::ProjectThread { project, thread },
+        tracked_operation: None,
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let target = loop {
+        let result = client
+            .agent_operation(query.clone())
+            .expect("current control");
+        if let ClientEvent::Response {
+            result: ResponseResult::AgentOperation(view),
+            ..
+        } = result
+            && let Some(target) = view.target
+        {
+            break target;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "running control did not become available"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        !provider_bin.join("interrupt-received").exists(),
+        "no fixture or caller may release the turn before Ctrl-G"
+    );
+    if let Some(observer) = &observer {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while observer.pending.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+            assert!(
+                Instant::now() < deadline,
+                "approval must remain pending; calls: {}",
+                std::fs::read_to_string(provider_bin.join("calls.log")).expect("calls")
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let run = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::StopAgentAndContinue {
+            approval,
+            provider_bin: &provider_bin,
+        },
+    );
+    assert!(run.status.success(), "stop/continue: {:?}", run.bytes);
+    assert_eq!(run.before, run.after);
+    assert!(provider_bin.join("interrupt-received").exists());
+    assert!(mailbox_contains(&state_root, "finished-turn-2"));
+    query.tracked_operation = Some(target.operation_id);
+    let mut fresh = cancellation_client(&state_root);
+    let ClientEvent::Response {
+        result: ResponseResult::AgentOperation(view),
+        ..
+    } = fresh.agent_operation(query).expect("persisted result")
+    else {
+        panic!("canonical operation view");
+    };
+    let tracked = view.tracked.expect("terminal operation persisted");
+    assert_eq!(tracked.operation_id, target.operation_id);
+    assert_eq!(tracked.status, ActivityStatusDto::Interrupted);
+    assert!(tracked.sequence > target.sequence);
+    let calls: Vec<serde_json::Value> = std::fs::read_to_string(provider_bin.join("calls.log"))
+        .expect("provider log")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("wire call"))
+        .collect();
+    let interrupts: Vec<_> = calls
+        .iter()
+        .filter(|call| call["method"] == "turn/interrupt")
+        .collect();
+    assert_eq!(interrupts.len(), 1);
+    assert_eq!(interrupts[0]["params"]["threadId"], "hq-test-thread");
+    assert_eq!(interrupts[0]["params"]["turnId"], "hq-test-turn-1");
+    if approval {
+        let answers: Vec<_> = calls
+            .iter()
+            .filter(|call| call["id"] == 901 && call.get("result").is_some())
+            .collect();
+        assert_eq!(answers.len(), 1, "approval must be resolved exactly once");
+        assert_eq!(answers[0]["result"]["decision"], "cancel");
+    }
+    let starts: Vec<_> = calls
+        .iter()
+        .filter(|call| call["method"] == "turn/start")
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert_ne!(
+        starts[0]["params"]["clientUserMessageId"],
+        starts[1]["params"]["clientUserMessageId"]
+    );
+    assert_eq!(
+        starts[1]["params"]["input"][0]["text"],
+        "Continue after stopping"
+    );
+}
+
+fn cancellation_client(state_root: &Path) -> hq_node::LocalNodeClient {
+    hq_node::LocalNodeClient::connect(cancellation_client_config(state_root))
+        .expect("independent local client")
+}
+
+fn cancellation_client_config(state_root: &Path) -> hq_node::LocalNodeClientConfig {
+    use std::num::NonZeroUsize;
+    hq_node::LocalNodeClientConfig {
+        state: hq_node::StatePaths::new(state_root.to_path_buf()).expect("state"),
+        build: hq_local_api::protocol::v1::BuildMetadata::new(
+            "hq-test",
+            "0.1.0",
+            Some("cancellation"),
+        )
+        .expect("build"),
+        initial_view: hq_local_api::InitialView::OnDemand,
+        io_timeout: Duration::from_secs(2),
+        command_deadline: Duration::from_secs(5),
+        max_connection_attempts: NonZeroUsize::new(8).expect("attempts"),
+        readiness_timeout: Duration::from_secs(5),
+        readiness_retry_interval: Duration::from_millis(10),
+        reconnect_initial: Duration::from_millis(10),
+        reconnect_maximum: Duration::from_millis(40),
+        completed_identity_capacity: NonZeroUsize::new(16).expect("history"),
+    }
+}
+
+struct CancellationObserver {
+    pending: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    interrupt: hq_node::UnixClientInterrupt,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl CancellationObserver {
+    fn start(state_root: &Path) -> Self {
+        let mut client =
+            hq_node::LocalNodeEventClient::connect(cancellation_client_config(state_root))
+                .expect("subscribed responder");
+        client.activate_subscription().expect("responder active");
+        let interrupt = client.interrupt_handle();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let pending = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_pending = pending.clone();
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let result = client.next_observation();
+                if !worker_stop.load(std::sync::atomic::Ordering::SeqCst)
+                    && let Some(hq_local_api::ClientEvent::Response {
+                        result:
+                            hq_local_api::protocol::v1::ResponseResult::PendingInteractions(rows),
+                        ..
+                    }) = result.expect("keeper responder observation remains live")
+                {
+                    worker_pending.store(rows.len(), std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+        Self {
+            pending,
+            stop,
+            interrupt,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for CancellationObserver {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.interrupt.interrupt();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[test]
 fn installed_history_pages_keep_old_reading_when_the_agent_finishes() {
     let _scenario = serial_scenario();
     let directory = TestDirectory::new();
@@ -1405,6 +1673,10 @@ struct PtyRun {
 
 #[derive(Clone, Copy, Debug)]
 enum PtyInteraction<'content> {
+    StopAgentAndContinue {
+        approval: bool,
+        provider_bin: &'content Path,
+    },
     ReadPagedHistory {
         completion_gate: &'content Path,
     },
@@ -1577,6 +1849,50 @@ fn run_in_pty_with_trace(
         let alternate_screen_entered = bytes
             .windows(ENTER_ALTERNATE_SCREEN.len())
             .any(|window| window == ENTER_ALTERNATE_SCREEN);
+        if let PtyInteraction::StopAgentAndContinue { approval, .. } = interaction {
+            let rendered = text_without_csi_sequences(&bytes[completion_offset.unwrap_or(0)..]);
+            match oversized_phase {
+                0 if rendered.contains("cancellation-agent") && rendered.contains("Connected") => {
+                    master.write_all(b"\r").expect("enter conversation");
+                    oversized_phase = 1;
+                    completion_offset = Some(bytes.len());
+                }
+                1 if rendered.contains("Ctrl-G stop agent")
+                    && rendered.contains("0/16384")
+                    && (!approval || rendered.contains("Approval needed")) =>
+                {
+                    master
+                        .write_all(b"Continue after stopping\x07")
+                        .expect("draft then Ctrl-G");
+                    oversized_phase = 2;
+                    completion_offset = Some(bytes.len());
+                }
+                2 if rendered.contains("Agent stopped")
+                    && rendered.contains("Continue after stopping") =>
+                {
+                    master.write_all(b"\r").expect("send preserved draft");
+                    oversized_phase = 3;
+                    completion_offset = Some(bytes.len());
+                }
+                3 if rendered.contains("finished-turn-2") => {
+                    master.write_all(&[0x03]).expect("quit after continuation");
+                    oversized_phase = 4;
+                    exit_sent = true;
+                }
+                _ => {}
+            }
+            master.flush().expect("control flow flush");
+            if oversized_phase > 0 && oversized_phase < 4 && Instant::now() >= next_state_probe_at {
+                resize_phase ^= 1;
+                set_pty_dimensions(&pair.slave, 30, 99 + u16::from(resize_phase));
+                kill(
+                    Pid::from_raw(i32::try_from(child.id()).expect("TUI PID")),
+                    Signal::SIGWINCH,
+                )
+                .expect("full status repaint");
+                next_state_probe_at = Instant::now() + Duration::from_millis(150);
+            }
+        }
         if let PtyInteraction::ReadPagedHistory { completion_gate } = interaction {
             let rendered = text_without_csi_sequences(&bytes[completion_offset.unwrap_or(0)..]);
             match oversized_phase {
@@ -1674,7 +1990,8 @@ fn run_in_pty_with_trace(
                 PtyInteraction::SubmitSelfNote(_) | PtyInteraction::SubmitPastedSelfNote { .. } => {
                     vec![b"N"]
                 }
-                PtyInteraction::ReadPagedHistory { .. }
+                PtyInteraction::StopAgentAndContinue { .. }
+                | PtyInteraction::ReadPagedHistory { .. }
                 | PtyInteraction::ResizeWhileIdle { .. }
                 | PtyInteraction::VisitEveryView
                 | PtyInteraction::NavigateInboxConversation { .. }
@@ -2805,14 +3122,24 @@ fn run_in_pty_with_trace(
             history_phase_observed = oversized_phase;
             history_progress_at = Instant::now();
         }
-        let history_stalled = matches!(interaction, PtyInteraction::ReadPagedHistory { .. })
-            && history_progress_at.elapsed() >= PROCESS_INACTIVITY_WATCHDOG.saturating_mul(4);
+        let history_stalled = match interaction {
+            PtyInteraction::ReadPagedHistory { .. } => {
+                history_progress_at.elapsed() >= PROCESS_INACTIVITY_WATCHDOG.saturating_mul(4)
+            }
+            PtyInteraction::StopAgentAndContinue { .. } => {
+                history_progress_at.elapsed() >= PROCESS_INACTIVITY_WATCHDOG
+            }
+            _ => false,
+        };
         if Instant::now().duration_since(last_output_at) >= PROCESS_INACTIVITY_WATCHDOG
             || history_stalled
         {
             let _ = child.kill();
             let _ = child.wait();
             let provider_calls = match interaction {
+                PtyInteraction::StopAgentAndContinue { provider_bin, .. } => Some(
+                    std::fs::read_to_string(provider_bin.join("calls.log")).unwrap_or_default(),
+                ),
                 PtyInteraction::CreateGuidedProjectWork { search_path, .. } => search_path
                     .split(':')
                     .next()
@@ -3156,89 +3483,8 @@ fn install_fake_codex(directory: &Path, request_approval: bool) {
             .expect("approval marker writes");
     }
     let executable = directory.join("codex");
-    std::fs::write(
-        &executable,
-        r#"#!/usr/bin/python3
-import json
-import os
-import sys
-import time
-
-thread_id = "hq-test-thread"
-counter_path = os.path.join(os.path.dirname(__file__), "turn-number")
-turn_number = int(open(counter_path).read()) if os.path.exists(counter_path) else 0
-for line in sys.stdin:
-    with open(os.path.join(os.path.dirname(__file__), "calls.log"), "a") as log:
-        log.write(line)
-    message = json.loads(line)
-    method = message.get("method")
-    request_id = message.get("id")
-    if request_id is None:
-        continue
-    if method == "initialize":
-        result = {}
-    elif method == "thread/start":
-        result = {"thread": {"id": thread_id, "turns": []}}
-    elif method == "thread/resume":
-        thread_id = message.get("params", {}).get("threadId", thread_id)
-        result = {"thread": {"id": thread_id, "turns": []}}
-    elif method == "turn/start":
-        turn_number += 1
-        with open(counter_path, "w") as counter:
-            counter.write(str(turn_number))
-        turn_id = f"hq-test-turn-{turn_number}"
-        turn = {"id": turn_id, "status": "inProgress", "items": []}
-        print(json.dumps({"method": "turn/started", "params": {"threadId": thread_id, "turn": turn}}), flush=True)
-        print(json.dumps({"id": request_id, "result": {"turn": turn}}), flush=True)
-        if os.path.exists(os.path.join(os.path.dirname(__file__), "progress-flood")):
-            with open(os.path.join(os.path.dirname(__file__), "flood-started"), "w") as marker:
-                marker.write("started")
-            for sequence in range(2000):
-                if sequence % 100 == 0:
-                    with open(os.path.join(os.path.dirname(__file__), "flood-position"), "w") as marker:
-                        marker.write(str(sequence))
-                progress = {"method": "item/commandExecution/outputDelta", "params": {"threadId": thread_id, "turnId": turn_id, "itemId": f"command-{turn_number}", "delta": f"progress-{sequence}"}}
-                print(json.dumps(progress), flush=True)
-                if sequence % 200 == 199:
-                    time.sleep(0.1)
-            with open(os.path.join(os.path.dirname(__file__), "flood-finished"), "w") as marker:
-                marker.write("finished")
-        if os.path.exists(os.path.join(os.path.dirname(__file__), "request-approval")):
-            approval_id = 900 + turn_number
-            approval = {"id": approval_id, "method": "item/commandExecution/requestApproval", "params": {"threadId": thread_id, "turnId": turn_id, "itemId": f"command-{turn_number}", "command": "cargo test", "cwd": os.getcwd(), "reason": "Run the test command?"}}
-            print(json.dumps(approval), flush=True)
-            for answer_line in sys.stdin:
-                with open(os.path.join(os.path.dirname(__file__), "calls.log"), "a") as log:
-                    log.write(answer_line)
-                answer = json.loads(answer_line)
-                if answer.get("id") == approval_id:
-                    break
-        if os.path.exists(os.path.join(os.path.dirname(__file__), "history-pages")):
-            for index in range(120):
-                label = "HISTORY_START" if index == 0 else "HISTORY_END" if index == 119 else f"history-entry-{index:03}"
-                item = {"type": "commandExecution", "id": f"history-{index}", "status": "completed", "command": f"echo {label}", "aggregatedOutput": label, "exitCode": 0}
-                print(json.dumps({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": item}}), flush=True)
-        completion_gate = os.path.join(os.path.dirname(__file__), f"completion-gate-{turn_number}")
-        if os.path.exists(completion_gate):
-            with open(completion_gate, "rb", buffering=0) as gate:
-                gate.read(1)
-        else:
-            time.sleep(0.25)
-        item = {"type": "agentMessage", "id": f"answer-{turn_number}", "text": f"finished-turn-{turn_number}", "phase": "final_answer"}
-        print(json.dumps({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": item}}), flush=True)
-        completed = {"id": turn_id, "status": "completed", "items": [item]}
-        print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": completed}}), flush=True)
-        continue
-    elif method == "thread/read":
-        result = {"thread": {"id": thread_id, "turns": []}}
-    elif method in ("turn/interrupt", "turn/steer"):
-        result = {"turnId": "hq-test-turn"}
-    else:
-        continue
-    print(json.dumps({"id": request_id, "result": result}), flush=True)
-"#,
-    )
-    .expect("fake Codex executable writes");
+    std::fs::write(&executable, include_str!("fixtures/codex_terminal.py"))
+        .expect("fake Codex executable writes");
     let mut permissions = std::fs::metadata(&executable)
         .expect("fake Codex metadata")
         .permissions();
