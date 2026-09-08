@@ -14420,6 +14420,9 @@ fn guided_project_completed(
             });
             model.last_failure = None;
             show_completion_notice(model, UiCompletionNotice::ProjectCreated, effects)?;
+            // The subscribed view can precede this receipt. Consume its exact project now;
+            // another copy of the same authoritative revision may never be published.
+            apply_guided_snapshot(model, effects)?;
             Ok(true)
         }
         (

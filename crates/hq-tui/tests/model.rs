@@ -351,6 +351,11 @@ fn guided_project_work_can_create_its_missing_project_and_continue() {
     )
     .expect("healthy preview continues creation");
     let (create_id, create_action) = project_effect(&creating.effects);
+    assert_project_snapshot_precedes_creation_receipt(
+        creating.model.clone(),
+        create_id,
+        create_action.clone(),
+    );
     let completed = update(
         creating.model,
         UiEvent::ProjectCommandCompleted {
@@ -386,6 +391,48 @@ fn guided_project_work_can_create_its_missing_project_and_continue() {
             ..
         }) if project.project_id == [5; 32]
     ));
+}
+
+fn assert_project_snapshot_precedes_creation_receipt(
+    model: UiModel,
+    effect_id: hq_tui::EffectId,
+    action: UiProjectAction,
+) {
+    let observed = update(
+        model,
+        UiEvent::MaterializedViewObserved {
+            view: UiMaterializedConversationView {
+                snapshot: projects_snapshot(
+                    2,
+                    vec![project(5, "new-project", "/work/new-project")],
+                ),
+                conversation: None,
+            },
+        },
+    )
+    .expect("new project observed before its command receipt");
+    let completed = update(
+        observed.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id,
+            result: UiProjectResult {
+                action,
+                command_id: [22; 32],
+                operation_id: [23; 32],
+                project_id: [5; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::Completed {
+                    project_head: Some([24; 32]),
+                },
+            },
+        },
+    )
+    .expect("receipt uses retained authoritative project");
+    assert!(
+        matches!(completed.model.new_modal(), Some(UiNewModal::ChooseAgent { project, .. }) if project.project_id == [5; 32]),
+        "setup must continue without waiting for a duplicate subscription revision"
+    );
 }
 
 #[test]
